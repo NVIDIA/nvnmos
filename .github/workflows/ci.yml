@@ -1,0 +1,51 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        config: [Release]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Conan
+        run: pip install conan~=2.2 && conan profile detect
+      - name: Install dependencies
+        run: |
+          conan install src \
+            -g CMakeToolchain \
+            --settings:all build_type=${{ matrix.config }} \
+            --build=missing \
+            --output-folder=src/conan
+      - name: Generate nvnmos (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
+            src
+      - name: Generate nvnmos (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
+            -DCMAKE_CONFIGURATION_TYPES=${{ matrix.config }} \
+            src
+      - name: Build nvnmos (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake --build build --parallel
+      - name: Build nvnmos (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake --build build --config=${{ matrix.config }} --parallel
