@@ -1,0 +1,35 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        config: [Release]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Conan
+        run: pip install conan && conan profile detect
+      - name: Install dependencies
+        run: |
+          conan install src \
+            -g CMakeToolchain \
+            --settings:all build_type=${{ matrix.config }} \
+            --build=missing \
+            --output-folder=src/conan
+      - name: Build nvnmos
+        run: |
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
+            src
