@@ -27,12 +27,25 @@ jobs:
             --settings:all build_type=${{ matrix.config }} \
             --build=missing \
             --output-folder=src/conan
-      - name: Generate nvnmos
+      - name: Generate nvnmos (Linux)
+        if: runner.os == 'Linux'
         run: |
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
             -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
             src
-      - name: Build nvnmos
+      - name: Generate nvnmos (Windows)
+        if: runner.os == 'Windows'
         run: |
-          cmake --build build --parallel --config ${{ matrix.config }}
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
+            -DCMAKE_CONFIGURATION_TYPES=${{ matrix.config }} \
+            src
+      - name: Build nvnmos (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake --build build --parallel
+      - name: Build nvnmos (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake --build build --config=${{ matrix.config }} --parallel
