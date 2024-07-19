@@ -196,7 +196,7 @@ Use the following CMake command to configure the build.
 
 ```sh
 cmake -B build \
-  -DCMAKE_TOOLCHAIN_FILE=src/conan/conan_toolchain.cmake \
+  -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
   -DCMAKE_BUILD_TYPE=<Release-or-Debug> \
   src
 ```
