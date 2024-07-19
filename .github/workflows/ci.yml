@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Conan
-        run: pip install conan && conan profile detect
+        run: pip install conan~=2.2 && conan profile detect
       - name: Install dependencies
         run: |
           conan install src \
@@ -27,9 +27,12 @@ jobs:
             --settings:all build_type=${{ matrix.config }} \
             --build=missing \
             --output-folder=src/conan
-      - name: Build nvnmos
+      - name: Generate nvnmos
         run: |
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
             -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
             src
+      - name: Build nvnmos
+        run: |
+          cmake --build build --parallel --config ${{ matrix.config }}
