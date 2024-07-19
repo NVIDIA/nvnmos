@@ -236,7 +236,7 @@ Use the following CMake command to configure the build.
 ```PowerShell
 cmake -B build `
   -G "Visual Studio 17 2022" `
-  -DCMAKE_TOOLCHAIN_FILE=src/conan/conan_toolchain.cmake `
+  -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake `
   -DCMAKE_CONFIGURATION_TYPES="Debug;Release" `
   src
 ```
