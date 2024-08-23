@@ -214,6 +214,41 @@ namespace nvnmos
         web::json::insert(settings, std::make_pair(nmos::fields::host_name, host_name));
         web::json::insert(settings, std::make_pair(nmos::fields::domain, domain));
 
+        if (0 != config.label)
+        {
+            web::json::insert(settings, std::make_pair(nvnmos::fields::node_label, utility::s2us(config.label)));
+            web::json::insert(settings, std::make_pair(nvnmos::fields::device_label, utility::s2us(config.label)));
+        }
+        else if (0 != config.asset_tags)
+        {
+            const auto& asset = *config.asset_tags;
+            const auto asset_label = boost::algorithm::join(
+                std::initializer_list<const char*>{ asset.manufacturer, asset.product, asset.instance_id } | boost::adaptors::transformed([](const char* s)
+                {
+                    return utility::s2us(s);
+                }), L" "
+            );
+            web::json::insert(settings, std::make_pair(nvnmos::fields::node_label, asset_label));
+            web::json::insert(settings, std::make_pair(nvnmos::fields::device_label, asset_label));
+        }
+
+        if (0 != config.description)
+        {
+            web::json::insert(settings, std::make_pair(nvnmos::fields::node_description, utility::s2us(config.description)));
+            web::json::insert(settings, std::make_pair(nvnmos::fields::device_description, utility::s2us(config.description)));
+        }
+        else if (0 != config.asset_tags)
+        {
+            const auto& asset = *config.asset_tags;
+            const auto asset_description = boost::algorithm::join(boost::make_iterator_range_n(asset.functions, asset.num_functions)
+                | boost::adaptors::transformed([&](const char* function)
+            {
+                return utility::s2us(function);
+            }), L", ");
+            web::json::insert(settings, std::make_pair(nvnmos::fields::node_description, asset_description));
+            web::json::insert(settings, std::make_pair(nvnmos::fields::device_description, asset_description));
+        }
+
         if (0 != config.host_addresses && 0 != config.num_host_addresses)
         {
             const auto host_addresses = boost::copy_range<std::vector<utility::string_t>>(boost::make_iterator_range_n(config.host_addresses, config.num_host_addresses)

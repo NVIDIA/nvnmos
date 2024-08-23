@@ -186,6 +186,13 @@ typedef struct _NvNmosNodeConfig
         May be zero in which case default ports are used for each API. */
     unsigned int http_port;
 
+    /** Holds the label of the node and device. May be null in which case
+        the #asset_tags are used to generate the label. */
+    const char* label;
+    /** Holds the description of the node and device. May be null in which
+        case the #asset_tags are used to generate the description. */
+    const char* description;
+
     /** Holds BCP-002-02 Asset Distinguishing Information. May be null. */
     NvNmosAssetConfig* asset_tags;
 

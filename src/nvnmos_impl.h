@@ -48,11 +48,18 @@ namespace nvnmos
     // custom settings fields
     namespace fields
     {
+        const web::json::field_as_string_or node_label{ U("node_label"), U("") };
+        const web::json::field_as_string_or node_description{ U("node_description"), U("") };
         const web::json::field_as_value_or node_tags{ U("node_tags"), web::json::value::object() };
+
+        const web::json::field_as_string_or device_label{ U("device_label"), U("") };
+        const web::json::field_as_string_or device_description{ U("device_description"), U("") };
         const web::json::field_as_value_or device_tags{ U("device_tags"), web::json::value::object() };
+
         const web::json::field_as_value senders{ U("senders") }; // object with ids as keys
         const web::json::field_as_value receivers{ U("receivers") }; // object with ids as keys
         const web::json::field_as_string sdp{ U("sdp") };
+
         const web::json::field_as_value clocks{ U("clocks") }; // object with clock names as keys
     }
 

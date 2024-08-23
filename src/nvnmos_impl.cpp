@@ -154,6 +154,8 @@ namespace nvnmos
         {
             const auto clocks = value_of({ nmos::make_internal_clock(clock) });
             auto node = nmos::make_node(node_id, clocks, {}, settings);
+            node.data[nmos::fields::label] = value::string(nvnmos::fields::node_label(settings));
+            node.data[nmos::fields::description] = value::string(nvnmos::fields::node_description(settings));
             node.data[nmos::fields::tags] = nvnmos::fields::node_tags(settings);
             if (!nmos::insert_resource(node_resources, std::move(node)).second) throw node_implementation_exception();
         }
@@ -161,6 +163,8 @@ namespace nvnmos
         // device
         {
             auto device = nmos::make_device(device_id, node_id, {}, {}, settings);
+            device.data[nmos::fields::label] = value::string(nvnmos::fields::device_label(settings));
+            device.data[nmos::fields::description] = value::string(nvnmos::fields::device_description(settings));
             device.data[nmos::fields::tags] = nvnmos::fields::device_tags(settings);
             if (!nmos::insert_resource(node_resources, std::move(device)).second) throw node_implementation_exception();
         }
