@@ -41,6 +41,7 @@
 #include "nmos/clock_ref_type.h"
 #include "nmos/colorspace.h"
 #include "nmos/connection_resources.h"
+#include "nmos/format.h"
 #include "nmos/group_hint.h"
 #include "nmos/interlace_mode.h"
 #include "nmos/media_type.h"
@@ -51,9 +52,11 @@
 #include "nmos/node_server.h"
 #include "nmos/sdp_utils.h"
 #include "nmos/slog.h"
+#include "nmos/st2110_21_sender_type.h"
 #include "nmos/system_resources.h"
 #include "nmos/transfer_characteristic.h"
 #include "nmos/transport.h"
+#include "nmos/video_jxsv.h"
 #include "sdp/sdp.h"
 
 namespace nvnmos
@@ -69,7 +72,7 @@ namespace nvnmos
         // supported formats
         enum class format
         {
-            // video/raw
+            // video/raw or video/jxsv
             video,
             // audio/L24 or audio/L16
             audio,
@@ -198,7 +201,10 @@ namespace nvnmos
 
         // for now, only manage a single clock
         const auto clock = nmos::clock_names::clk0;
-        const auto format = impl::get_format(nmos::get_media_type(sdp_params));
+
+        const auto media_type = nmos::get_media_type(sdp_params);
+        const auto format = impl::get_format(media_type);
+
         const auto interface_names = boost::copy_range<std::vector<utility::string_t>>(
             transport_params.as_array() | boost::adaptors::transformed([&](const value& transport_param)
         {
@@ -218,16 +224,36 @@ namespace nvnmos
 
         if (impl::format::video == format)
         {
-            const auto video = nmos::get_video_raw_parameters(sdp_params);
+            if (nmos::media_types::video_raw == media_type)
+            {
+                const auto video = nmos::get_video_raw_parameters(sdp_params);
 
-            source = nmos::make_video_source(source_id, device_id, clock, video.exactframerate, settings);
-            flow = nmos::make_raw_video_flow(
-                flow_id, source_id, device_id,
-                video.exactframerate,
-                video.width, video.height, video.interlace ? nmos::interlace_modes::interlaced_tff : nmos::interlace_modes::progressive,
-                nmos::colorspace{ video.colorimetry.name }, nmos::transfer_characteristic{ video.tcs.name }, video.sampling, video.depth,
-                settings
-            );
+                source = nmos::make_video_source(source_id, device_id, clock, video.exactframerate, settings);
+                flow = nmos::make_raw_video_flow(
+                    flow_id, source_id, device_id,
+                    video.exactframerate,
+                    video.width, video.height, video.interlace ? nmos::interlace_modes::interlaced_tff : nmos::interlace_modes::progressive,
+                    nmos::colorspace{ video.colorimetry.name }, nmos::transfer_characteristic{ video.tcs.name }, video.sampling, video.depth,
+                    settings
+                );
+            }
+            else if (nmos::media_types::video_jxsv == media_type)
+            {
+                const auto video = nmos::get_video_jxsv_parameters(sdp_params);
+
+                source = nmos::make_video_source(source_id, device_id, clock, video.exactframerate, settings);
+                // nmos::make_video_jxsv_flow currently takes bits_per_pixel not bit_rate
+                flow = nmos::make_video_jxsv_flow(
+                    flow_id, source_id, device_id,
+                    video.exactframerate,
+                    video.width, video.height, video.interlace ? nmos::interlace_modes::interlaced_tff : nmos::interlace_modes::progressive,
+                    nmos::colorspace{ video.colorimetry.name }, nmos::transfer_characteristic{ video.tcs.name }, video.sampling, video.depth,
+                    nmos::profile{ video.profile.name }, nmos::level{ video.level.name }, nmos::sublevel{ video.sublevel.name }, 0,
+                    settings
+                );
+                flow.data[nmos::fields::bit_rate] = value(video.bit_rate);
+            }
+
         }
         else if (impl::format::audio == format)
         {
@@ -272,6 +298,29 @@ namespace nvnmos
 
         const auto manifest_href = nmos::experimental::make_manifest_api_manifest(sender_id, settings);
         auto sender = nmos::make_sender(sender_id, flow_id, nmos::transports::rtp, device_id, manifest_href.to_string(), interface_names, settings);
+        if (impl::format::video == format)
+        {
+            if (nmos::media_types::video_jxsv == media_type)
+            {
+                const auto video = nmos::get_video_jxsv_parameters(sdp_params);
+
+                // additional attributes required by BCP-006-01
+                // see https://specs.amwa.tv/bcp-006-01/releases/v1.0.0/docs/NMOS_With_JPEG_XS.html#senders
+                if (0 != video.bit_rate)
+                {
+                    sender.data[nmos::fields::bit_rate] = value(video.bit_rate);
+                }
+                const auto packet_transmission_mode = nmos::parse_packet_transmission_mode(video.packetmode, video.transmode);
+                if (nmos::packet_transmission_modes::codestream != packet_transmission_mode)
+                {
+                    sender.data[nmos::fields::packet_transmission_mode] = value(packet_transmission_mode.name);
+                }
+                if (!video.tp.empty())
+                {
+                    sender.data[nmos::fields::st2110_21_sender_type] = value(video.tp.name);
+                }
+            }
+        }
 
         auto connection_sender = nmos::make_connection_rtp_sender(sender_id, transport_params.size() > 1);
         // add some constraints; these should be completed fully!
@@ -343,7 +392,10 @@ namespace nvnmos
         const auto node_id = impl::make_id(seed_id, nmos::types::node);
         const auto device_id = impl::make_id(seed_id, nmos::types::device);
         const auto receiver_id = impl::make_id(seed_id, nmos::types::receiver, internal_id);
-        const auto format = impl::get_format(nmos::get_media_type(sdp_params));
+
+        const auto media_type = nmos::get_media_type(sdp_params);
+        const auto format = impl::get_format(media_type);
+
         const auto interface_names = boost::copy_range<std::vector<utility::string_t>>(
             transport_params.as_array() | boost::adaptors::transformed([&](const value& transport_param)
         {
@@ -362,22 +414,45 @@ namespace nvnmos
 
         if (impl::format::video == format)
         {
-            const auto video = nmos::get_video_raw_parameters(sdp_params);
+            receiver = nmos::make_receiver(receiver_id, device_id, nmos::transports::rtp, interface_names, nmos::formats::video, { media_type }, settings);
 
-            receiver = nmos::make_video_receiver(receiver_id, device_id, nmos::transports::rtp, interface_names, settings);
             // add a constraint set; these should be completed fully!
-            const auto interlace_modes = video.interlace
-                ? std::vector<utility::string_t>{ nmos::interlace_modes::interlaced_bff.name, nmos::interlace_modes::interlaced_tff.name, nmos::interlace_modes::interlaced_psf.name }
-                : std::vector<utility::string_t>{ nmos::interlace_modes::progressive.name };
-            receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
-                value_of({
-                    { nmos::caps::format::grain_rate, nmos::make_caps_rational_constraint({ video.exactframerate }) },
-                    { nmos::caps::format::frame_width, nmos::make_caps_integer_constraint({ video.width }) },
-                    { nmos::caps::format::frame_height, nmos::make_caps_integer_constraint({ video.height }) },
-                    { nmos::caps::format::interlace_mode, nmos::make_caps_string_constraint(interlace_modes) },
-                    { nmos::caps::format::color_sampling, nmos::make_caps_string_constraint({ video.sampling.name }) }
-                })
-            });
+            if (nmos::media_types::video_raw == media_type)
+            {
+                const auto video = nmos::get_video_raw_parameters(sdp_params);
+
+                const auto interlace_modes = video.interlace
+                    ? std::vector<utility::string_t>{ nmos::interlace_modes::interlaced_bff.name, nmos::interlace_modes::interlaced_tff.name, nmos::interlace_modes::interlaced_psf.name }
+                    : std::vector<utility::string_t>{ nmos::interlace_modes::progressive.name };
+                receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
+                    value_of({
+                        { nmos::caps::format::grain_rate, nmos::make_caps_rational_constraint({ video.exactframerate }) },
+                        { nmos::caps::format::frame_width, nmos::make_caps_integer_constraint({ video.width }) },
+                        { nmos::caps::format::frame_height, nmos::make_caps_integer_constraint({ video.height }) },
+                        { nmos::caps::format::interlace_mode, nmos::make_caps_string_constraint(interlace_modes) },
+                        { nmos::caps::format::color_sampling, nmos::make_caps_string_constraint({ video.sampling.name }) }
+                    })
+                });
+            }
+            else if (nmos::media_types::video_jxsv == media_type)
+            {
+                const auto video = nmos::get_video_jxsv_parameters(sdp_params);
+
+                // some of the parameter constraints recommended by BCP-006-01
+                // could also include common video ones (grain_rate, frame_width, frame_height, etc.)
+                // see https://specs.amwa.tv/bcp-006-01/releases/v1.0.0/docs/NMOS_With_JPEG_XS.html#receivers
+                const auto packet_transmission_mode = nmos::parse_packet_transmission_mode(video.packetmode, video.transmode);
+                receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
+                    value_of({
+                        // hm, could enumerate lower profiles, levels or sublevels?
+                        { nmos::caps::format::profile, nmos::make_caps_string_constraint({ video.profile.name }) },
+                        { nmos::caps::format::level, nmos::make_caps_string_constraint({ video.level.name }) },
+                        { nmos::caps::format::sublevel, nmos::make_caps_string_constraint({ video.sublevel.name }) },
+                        { nmos::caps::transport::bit_rate, nmos::make_caps_integer_constraint({}, nmos::no_minimum<int64_t>(), (int64_t)video.bit_rate) },
+                        { nmos::caps::transport::packet_transmission_mode, nmos::make_caps_string_constraint({ packet_transmission_mode.name }) }
+                    })
+                });
+            }
             receiver.data[nmos::fields::version] = receiver.data[nmos::fields::caps][nmos::fields::version] = value(nmos::make_version());
         }
         else if (impl::format::audio == format)
@@ -646,9 +721,25 @@ namespace nvnmos
     // Connection API callback to parse "transport_file" during a PATCH /staged request
     nmos::transport_file_parser make_node_implementation_transport_file_parser()
     {
-        // this uses the default transport file parser explicitly
+        // this uses a custom transport file parser to handle video/jxsv in addition to the core media types
+        // otherwise, it could simply return &nmos::parse_rtp_transport_file
         // (if this callback is specified, an 'empty' std::function is not allowed)
-        return &nmos::parse_rtp_transport_file;
+        return [](const nmos::resource& receiver, const nmos::resource& connection_receiver, const utility::string_t& transport_file_type, const utility::string_t& transport_file_data, slog::base_gate& gate)
+        {
+            const auto validate_sdp_parameters = [](const web::json::value& receiver, const nmos::sdp_parameters& sdp_params)
+            {
+                if (nmos::media_types::video_jxsv == nmos::get_media_type(sdp_params))
+                {
+                    nmos::validate_video_jxsv_sdp_parameters(receiver, sdp_params);
+                }
+                else
+                {
+                    // validate core media types, i.e., "video/raw", "audio/L", "video/smpte291" and "video/SMPTE2022-6"
+                    nmos::validate_sdp_parameters(receiver, sdp_params);
+                }
+            };
+            return nmos::details::parse_rtp_transport_file(validate_sdp_parameters, receiver, connection_receiver, transport_file_type, transport_file_data, gate);
+        };
     }
 
     // Connection API callback to perform application-specific validation of the merged /staged endpoint during a PATCH /staged request
@@ -1157,6 +1248,7 @@ namespace nvnmos
         format get_format(const nmos::media_type& media_type)
         {
             if (nmos::media_types::video_raw == media_type) return format::video;
+            if (nmos::media_types::video_jxsv == media_type) return format::video;
             if (nmos::media_types::audio_L(24) == media_type) return format::audio;
             if (nmos::media_types::audio_L(16) == media_type) return format::audio;
             if (nmos::media_types::video_smpte291 == media_type) return format::data;
