@@ -225,6 +225,16 @@ typedef struct _NvNmosNodeConfig
     const char **log_categories;
     /** Holds the number of #log_categories. May be zero. */
     unsigned int num_log_categories;
+
+    /** Holds the IP address or host name of a fixed IS-04 Registration API
+        to use; this disables DNS-SD. May be null. */
+    const char* registration_address;
+    /** Holds the port number for a fixed IS-04 Registration API, e.g.
+        80. May be zero in which case port 80 is used for HTTP. */
+    unsigned int registration_port;
+    /** Holds the version number of a fixed IS-04 Registration API. May
+        be null in which case "v1.3" is used by default. */
+    const char* registration_version;
 } NvNmosNodeConfig;
 
 /**

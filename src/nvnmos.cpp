@@ -31,6 +31,7 @@
 #include "cpprest/host_utils.h"
 #include "nmos/asset.h"
 #include "nmos/log_gate.h"
+#include "nmos/mdns.h"
 #include "nmos/model.h"
 #include "nmos/node_server.h"
 #include "nmos/process_utils.h"
@@ -311,6 +312,20 @@ namespace nvnmos
                 return utility::s2us(category);
             }));
             web::json::insert(settings, std::make_pair(nmos::fields::logging_categories, std::move(categories)));
+        }
+
+        if (0 != config.registration_address)
+        {
+            web::json::insert(settings, std::make_pair(nmos::fields::registry_address, utility::s2us(config.registration_address)));
+            // disable DNS-SD discovery
+            web::json::insert(settings, std::make_pair(nmos::fields::highest_pri, nmos::service_priorities::no_priority));
+            // disable DNS-SD advertisement
+            web::json::insert(settings, std::make_pair(nmos::fields::pri, nmos::service_priorities::no_priority));
+        }
+        web::json::insert(settings, std::make_pair(nmos::fields::registration_port, 0 != config.registration_port ? config.registration_port : 80));
+        if (0 != config.registration_version)
+        {
+            web::json::insert(settings, std::make_pair(nmos::fields::registry_version, utility::s2us(config.registration_version)));
         }
 
         nmos::insert_node_default_settings(settings);
