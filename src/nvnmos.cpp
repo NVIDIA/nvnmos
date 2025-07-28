@@ -202,6 +202,17 @@ namespace nvnmos
 
     static const nmos::id seed_namespace_id = U("18daddcf-a234-4f59-808a-dbf6a42e17bb");
 
+    inline std::pair<utility::string_t, utility::string_t> make_host_name_domain(const char* host_name_, const char* domain_)
+    {
+        // if the host name is not specified, start with the bare (system) host name
+        const auto host_name = 0 != host_name_ && 0 != *host_name_ ? utility::s2us(host_name_) : web::hosts::experimental::host_name();
+        const auto dot = host_name.find(U('.'));
+        // if the domain is not specified, get it from the specified fully-qualified host name or use the default (system) domain
+        const auto domain = 0 != domain_ ? utility::s2us(domain_) : utility::string_t::npos != dot ? host_name.substr(dot + 1) : nmos::get_domain({});
+        // if the host name is not fully-qualified, append the domain
+        return std::make_pair(utility::string_t::npos != dot ? host_name : host_name + U('.') + domain, domain);
+    }
+
     nmos::settings server::make_settings(const NvNmosNodeConfig& config)
     {
         using web::json::value_from_elements;
@@ -209,11 +220,9 @@ namespace nvnmos
 
         nmos::settings settings;
 
-        const auto host_name = 0 != config.host_name ? utility::s2us(config.host_name) : nmos::get_host_name({});
-        const auto dot = host_name.find(U('.'));
-        const auto domain = utility::string_t::npos != dot ? host_name.substr(dot + 1) : nmos::get_domain({});
-        web::json::insert(settings, std::make_pair(nmos::fields::host_name, host_name));
-        web::json::insert(settings, std::make_pair(nmos::fields::domain, domain));
+        const auto host_name_domain = make_host_name_domain(config.host_name, 0 != config.network_services ? config.network_services->domain : 0);
+        web::json::insert(settings, std::make_pair(nmos::fields::host_name, host_name_domain.first));
+        web::json::insert(settings, std::make_pair(nmos::fields::domain, host_name_domain.second));
 
         if (0 != config.label)
         {
@@ -314,18 +323,32 @@ namespace nvnmos
             web::json::insert(settings, std::make_pair(nmos::fields::logging_categories, std::move(categories)));
         }
 
-        if (0 != config.registration_address)
+        if (0 != config.network_services)
         {
-            web::json::insert(settings, std::make_pair(nmos::fields::registry_address, utility::s2us(config.registration_address)));
-            // disable DNS-SD discovery
-            web::json::insert(settings, std::make_pair(nmos::fields::highest_pri, nmos::service_priorities::no_priority));
-            // disable DNS-SD advertisement
-            web::json::insert(settings, std::make_pair(nmos::fields::pri, nmos::service_priorities::no_priority));
-        }
-        web::json::insert(settings, std::make_pair(nmos::fields::registration_port, 0 != config.registration_port ? config.registration_port : 80));
-        if (0 != config.registration_version)
-        {
-            web::json::insert(settings, std::make_pair(nmos::fields::registry_version, utility::s2us(config.registration_version)));
+            const auto& services = *config.network_services;
+            if (0 != services.registration_address)
+            {
+                web::json::insert(settings, std::make_pair(nmos::fields::registry_address, utility::s2us(services.registration_address)));
+                // disable DNS-SD discovery
+                web::json::insert(settings, std::make_pair(nmos::fields::highest_pri, nmos::service_priorities::no_priority));
+                // disable DNS-SD advertisement
+                web::json::insert(settings, std::make_pair(nmos::fields::pri, nmos::service_priorities::no_priority));
+            }
+            web::json::insert(settings, std::make_pair(nmos::fields::registration_port, 0 != services.registration_port ? services.registration_port : 80));
+            if (0 != services.registration_version)
+            {
+                web::json::insert(settings, std::make_pair(nmos::fields::registry_version, utility::s2us(services.registration_version)));
+            }
+
+            if (0 != services.system_address)
+            {
+                web::json::insert(settings, std::make_pair(nmos::fields::system_address, utility::s2us(services.system_address)));
+            }
+            web::json::insert(settings, std::make_pair(nmos::fields::system_port, 0 != services.system_port ? services.system_port : 80));
+            if (0 != services.system_version)
+            {
+                web::json::insert(settings, std::make_pair(nmos::fields::system_version, utility::s2us(services.system_version)));
+            }
         }
 
         nmos::insert_node_default_settings(settings);

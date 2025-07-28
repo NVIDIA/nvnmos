@@ -164,6 +164,7 @@ typedef void (* nmos_logging_callback)(
 typedef struct _NvNmosAssetConfig NvNmosAssetConfig;
 typedef struct _NvNmosReceiverConfig NvNmosReceiverConfig;
 typedef struct _NvNmosSenderConfig NvNmosSenderConfig;
+typedef struct _NvNmosNetworkServicesConfig NvNmosNetworkServicesConfig;
 
 /**
  * Defines configuration settings used to create an @ref NvNmosNodeServer.
@@ -226,15 +227,9 @@ typedef struct _NvNmosNodeConfig
     /** Holds the number of #log_categories. May be zero. */
     unsigned int num_log_categories;
 
-    /** Holds the IP address or host name of a fixed IS-04 Registration API
-        to use; this disables DNS-SD. May be null. */
-    const char* registration_address;
-    /** Holds the port number for a fixed IS-04 Registration API, e.g.
-        80. May be zero in which case port 80 is used for HTTP. */
-    unsigned int registration_port;
-    /** Holds the version number of a fixed IS-04 Registration API. May
-        be null in which case "v1.3" is used by default. */
-    const char* registration_version;
+    /** Holds configuration settings for network services to use. May be
+        null in which case DNS-SD is used based on the #host_name. */
+    NvNmosNetworkServicesConfig* network_services;
 } NvNmosNodeConfig;
 
 /**
@@ -295,6 +290,37 @@ typedef struct _NvNmosSenderConfig
         the source port from which the stream is transmitted. */
     const char *sdp;
 } NvNmosSenderConfig;
+
+/**
+ * Defines configuration settings for network services to use in an
+ * @ref NvNmosNodeServer. The structure should be zero initialized.
+ */
+typedef struct _NvNmosNetworkServicesConfig
+{
+    /** Holds the domain for DNS-SD. May be null in which case a domain is
+        determined automatically. Use "local" to force multicast DNS-SD. */
+    const char* domain;
+
+    /** Holds the IP address or host name of a fixed IS-04 Registration
+        API to use. May be null in which case DNS-SD is used. */
+    const char* registration_address;
+    /** Holds the port number for a fixed IS-04 Registration API, e.g.
+        80. May be zero in which case port 80 is used for HTTP. */
+    unsigned int registration_port;
+    /** Holds the version number of a fixed IS-04 Registration API. May
+        be null in which case "v1.3" is used by default. */
+    const char* registration_version;
+
+    /** Holds the IP address or host name of a fixed IS-09 System API
+        to use. May be null in which case a System API is not used. */
+    const char* system_address;
+    /** Holds the port number for a fixed IS-09 System API, e.g. 80.
+        May be zero in which case port 80 is used for HTTP. */
+    unsigned int system_port;
+    /** Holds the version number of a fixed IS-09 System API. May be
+        null in which case "v1.0" is used by default. */
+    const char* system_version;
+} NvNmosNetworkServicesConfig;
 
 /**
  * Holds the implementation details of a running NvNmos server.
