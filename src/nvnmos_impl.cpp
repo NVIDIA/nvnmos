@@ -26,6 +26,7 @@
 #include "nvnmos_impl.h"
 
 #include <boost/algorithm/string/case_conv.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio/ip/address_v4.hpp>
 #include <boost/range/adaptor/filtered.hpp>
 #include <boost/range/adaptor/transformed.hpp>
@@ -105,6 +106,11 @@ namespace nvnmos
 
         // get the optional session information
         utility::string_t get_session_description_session_info(const web::json::value& session_description);
+
+        // get the format bit rate from the custom attribute if present or calculate an approximate value
+        uint64_t get_format_bit_rate(const nmos::sdp_parameters& sdp_params);
+        // get the transport bit rate from the custom attribute if present or calculate an approximate value
+        uint64_t get_transport_bit_rate(const nmos::sdp_parameters& sdp_params);
 
         // find interface with the specified address
         std::vector<web::hosts::experimental::host_interface>::const_iterator find_interface(const std::vector<web::hosts::experimental::host_interface>& interfaces, const utility::string_t& address);
@@ -240,6 +246,7 @@ namespace nvnmos
             else if (nmos::media_types::video_jxsv == media_type)
             {
                 const auto video = nmos::get_video_jxsv_parameters(sdp_params);
+                const auto format_bit_rate = impl::get_format_bit_rate(sdp_params);
 
                 source = nmos::make_video_source(source_id, device_id, clock, video.exactframerate, settings);
                 // nmos::make_video_jxsv_flow currently takes bits_per_pixel not bit_rate
@@ -251,9 +258,8 @@ namespace nvnmos
                     nmos::profile{ video.profile.name }, nmos::level{ video.level.name }, nmos::sublevel{ video.sublevel.name }, 0,
                     settings
                 );
-                flow.data[nmos::fields::bit_rate] = value(video.bit_rate);
+                flow.data[nmos::fields::bit_rate] = value(format_bit_rate);
             }
-
         }
         else if (impl::format::audio == format)
         {
@@ -306,9 +312,11 @@ namespace nvnmos
 
                 // additional attributes required by BCP-006-01
                 // see https://specs.amwa.tv/bcp-006-01/releases/v1.0.0/docs/NMOS_With_JPEG_XS.html#senders
-                if (0 != video.bit_rate)
+
+                const auto transport_bit_rate = impl::get_transport_bit_rate(sdp_params);
+                if (0 != transport_bit_rate)
                 {
-                    sender.data[nmos::fields::bit_rate] = value(video.bit_rate);
+                    sender.data[nmos::fields::bit_rate] = value(transport_bit_rate);
                 }
                 const auto packet_transmission_mode = nmos::parse_packet_transmission_mode(video.packetmode, video.transmode);
                 if (nmos::packet_transmission_modes::codestream != packet_transmission_mode)
@@ -441,14 +449,17 @@ namespace nvnmos
                 // some of the parameter constraints recommended by BCP-006-01
                 // could also include common video ones (grain_rate, frame_width, frame_height, etc.)
                 // see https://specs.amwa.tv/bcp-006-01/releases/v1.0.0/docs/NMOS_With_JPEG_XS.html#receivers
+                const auto format_bit_rate = impl::get_format_bit_rate(sdp_params);
+                const auto transport_bit_rate = impl::get_transport_bit_rate(sdp_params);
                 const auto packet_transmission_mode = nmos::parse_packet_transmission_mode(video.packetmode, video.transmode);
                 receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
                     value_of({
                         // hm, could enumerate lower profiles, levels or sublevels?
-                        { nmos::caps::format::profile, nmos::make_caps_string_constraint({ video.profile.name }) },
-                        { nmos::caps::format::level, nmos::make_caps_string_constraint({ video.level.name }) },
-                        { nmos::caps::format::sublevel, nmos::make_caps_string_constraint({ video.sublevel.name }) },
-                        { nmos::caps::transport::bit_rate, nmos::make_caps_integer_constraint({}, nmos::no_minimum<int64_t>(), (int64_t)video.bit_rate) },
+                        { !video.profile.empty() ? nmos::caps::format::profile.key : U(""), nmos::make_caps_string_constraint({ video.profile.name }) },
+                        { !video.level.empty() ? nmos::caps::format::level.key : U(""), nmos::make_caps_string_constraint({ video.level.name }) },
+                        { !video.sublevel.empty() ? nmos::caps::format::sublevel.key : U(""), nmos::make_caps_string_constraint({ video.sublevel.name }) },
+                        { 0 != format_bit_rate ? nmos::caps::format::bit_rate.key : U(""), nmos::make_caps_integer_constraint({}, nmos::no_minimum<int64_t>(), (int64_t)format_bit_rate) },
+                        { 0 != transport_bit_rate ? nmos::caps::transport::bit_rate.key : U(""), nmos::make_caps_integer_constraint({}, nmos::no_minimum<int64_t>(), (int64_t)transport_bit_rate) },
                         { nmos::caps::transport::packet_transmission_mode, nmos::make_caps_string_constraint({ packet_transmission_mode.name }) }
                     })
                 });
@@ -807,6 +818,12 @@ namespace nvnmos
                 const auto parsed_sdp = sdp::parse_session_description(utility::us2s(sdp_data));
 
                 auto sdp_params = nmos::get_session_description_sdp_parameters(parsed_sdp);
+
+                // remove custom nvnmos parameters
+                sdp_params.fmtp.erase(std::remove_if(sdp_params.fmtp.begin(), sdp_params.fmtp.end(), [](const nmos::sdp_parameters::fmtp_t::value_type& param)
+                {
+                    return boost::algorithm::starts_with(param.first, U("x-nvnmos-"));
+                }), sdp_params.fmtp.end());
 
                 // update ts-refclk based on current clock
                 {
@@ -1242,6 +1259,37 @@ namespace nvnmos
         utility::string_t get_session_description_session_info(const web::json::value& session_description)
         {
             return sdp::fields::information(session_description);
+        }
+
+        // approximate IP/UDP/RTP overhead
+        const auto transport_bit_rate_factor = 1.05;
+
+        // get the format bit rate from the custom attribute if present or calculate an approximate value
+        uint64_t get_format_bit_rate(const nmos::sdp_parameters& sdp_params)
+        {
+            // use custom format bit rate parameter if present
+            const auto format_bit_rate = nmos::details::find_fmtp(sdp_params.fmtp, nvnmos::fields::format_bit_rate);
+            if (sdp_params.fmtp.end() != format_bit_rate) return utility::istringstreamed<uint64_t>(format_bit_rate->second);
+            // otherwise, calculate an approximate value based on custom transport bit rate parameter or bandwidth line
+            const auto transport_bit_rate = nmos::details::find_fmtp(sdp_params.fmtp, nvnmos::fields::transport_bit_rate);
+            if (sdp_params.fmtp.end() != transport_bit_rate) return uint64_t(utility::istringstreamed<uint64_t>(transport_bit_rate->second) / impl::transport_bit_rate_factor);
+            if (sdp::bandwidth_types::application_specific == sdp_params.bandwidth.bandwidth_type) return uint64_t(sdp_params.bandwidth.bandwidth / impl::transport_bit_rate_factor);
+            return 0;
+        }
+
+        // get the transport bit rate from the custom attribute if present or calculate an approximate value
+        uint64_t get_transport_bit_rate(const nmos::sdp_parameters& sdp_params)
+        {
+            // use custom transport bit rate parameter if present
+            const auto transport_bit_rate = nmos::details::find_fmtp(sdp_params.fmtp, nvnmos::fields::transport_bit_rate);
+            if (sdp_params.fmtp.end() != transport_bit_rate) return utility::istringstreamed<uint64_t>(transport_bit_rate->second);
+            // otherwise, calculate an approximate value based on custom format bit rate parameter if present
+            const auto format_bit_rate = nmos::details::find_fmtp(sdp_params.fmtp, nvnmos::fields::format_bit_rate);
+            // round to nearest Megabit/second per examples in VSF TR-08:2022
+            if (sdp_params.fmtp.end() != format_bit_rate) return uint64_t(utility::istringstreamed<uint64_t>(format_bit_rate->second) * impl::transport_bit_rate_factor / 1e3 + 0.5) * 1000;
+            // or fall back to bandwidth line
+            if (sdp::bandwidth_types::application_specific == sdp_params.bandwidth.bandwidth_type) return sdp_params.bandwidth.bandwidth;
+            return 0;
         }
 
         // identify supported format from media type

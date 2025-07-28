@@ -75,6 +75,13 @@ namespace nvnmos
         const utility::string_t source_port{ U("x-nvnmos-src-port") };
     }
 
+    // custom SDP format-specific parameters
+    namespace fields
+    {
+        const web::json::field<uint64_t> transport_bit_rate{ U("x-nvnmos-transport-bit-rate") }; // transport bit rate including IP/UDP/RTP overhead
+        const web::json::field<uint64_t> format_bit_rate{ U("x-nvnmos-format-bit-rate") }; // format bit rate excluding IP/UDP/RTP overhead
+    }
+
     struct node_implementation_exception {};
 
     // This constructs and inserts a node resource and a device resource into the model, based on the model settings.
