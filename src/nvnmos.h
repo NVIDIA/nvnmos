@@ -297,28 +297,34 @@ typedef struct _NvNmosSenderConfig
  */
 typedef struct _NvNmosNetworkServicesConfig
 {
-    /** Holds the domain for DNS-SD. May be null in which case a domain is
+    /** Holds the DNS domain. May be null in which case a domain is
         determined automatically. Use "local" to force multicast DNS-SD. */
     const char* domain;
 
     /** Holds the IP address or host name of a fixed IS-04 Registration
-        API to use. May be null in which case DNS-SD is used. */
+        API to use; in this case DNS-SD is disabled. May be null in which
+        case DNS-SD is used as required by IS-04. */
     const char* registration_address;
-    /** Holds the port number for a fixed IS-04 Registration API, e.g.
-        80. May be zero in which case port 80 is used for HTTP. */
+    /** Holds the port number for the fixed IS-04 Registration API, if
+        #registration_address is specified. May be zero in which case port
+        80 is used for HTTP. */
     unsigned int registration_port;
-    /** Holds the version number of a fixed IS-04 Registration API. May
-        be null in which case "v1.3" is used by default. */
+    /** Holds the version number of the fixed IS-04 Registration API, if
+        #registration_address is specified. May be null in which case
+        "v1.3" is used by default. */
     const char* registration_version;
 
     /** Holds the IP address or host name of a fixed IS-09 System API
-        to use. May be null in which case a System API is not used. */
+        to use, if #registration_address is also specified. May be null
+        in which case a System API is not used; not recommended. */
     const char* system_address;
-    /** Holds the port number for a fixed IS-09 System API, e.g. 80.
-        May be zero in which case port 80 is used for HTTP. */
+    /** Holds the port number for the fixed IS-09 System API, if
+        #system_address is specified. May be zero in which case port 80
+        is used for HTTP. */
     unsigned int system_port;
-    /** Holds the version number of a fixed IS-09 System API. May be
-        null in which case "v1.0" is used by default. */
+    /** Holds the version number of the fixed IS-09 System API, if
+        #system_address is specified. May be null in which case "v1.0" is
+        used by default. */
     const char* system_version;
 } NvNmosNetworkServicesConfig;
 
