@@ -38,7 +38,8 @@ The NvNmos library supports the following specifications, using the [Sony nmos-c
 - [AMWA BCP-002-01 Natural Grouping of NMOS Resources](https://specs.amwa.tv/bcp-002-01/) v1.0
 - [AMWA BCP-002-02 NMOS Asset Distinguishing Information](https://specs.amwa.tv/bcp-002-02/) v1.0
 - [AMWA BCP-004-01 NMOS Receiver Capabilities](https://specs.amwa.tv/bcp-004-01/) v1.0
-- Session Description Protocol conforming to SMPTE ST 2110-20 and -30
+- [AMWA BCP-006-01 NMOS With JPEG XS](https://specs.amwa.tv/bcp-006-01/) v1.0
+- Session Description Protocol conforming to SMPTE ST 2110-20, -22, -30, -40, and ST 2022-7
 
 ## Supported Platforms
 
