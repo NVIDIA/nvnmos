@@ -49,7 +49,8 @@
  * - <a href="https://specs.amwa.tv/bcp-002-01/">AMWA BCP-002-01 Natural Grouping of NMOS Resources</a> v1.0
  * - <a href="https://specs.amwa.tv/bcp-002-02/">AMWA BCP-002-02 NMOS Asset Distinguishing Information</a> v1.0
  * - <a href="https://specs.amwa.tv/bcp-004-01/">AMWA BCP-004-01 NMOS Receiver Capabilities</a> v1.0
- * - Session Description Protocol conforming to SMPTE ST 2110-20 and -30
+ * - <a href="https://specs.amwa.tv/bcp-006-01/">AMWA BCP-006-01 NMOS With JPEG XS</a> v1.0
+ * - Session Description Protocol conforming to SMPTE ST 2110-20, -22, -30, -40, and ST 2022-7
  *
  * @ingroup NvNmosApi
  * @{

@@ -69,10 +69,18 @@ namespace nvnmos
         // for senders and receivers
         const utility::string_t internal_id{ U("x-nvnmos-id") };
         const utility::string_t group_hint{ U("x-nvnmos-group-hint") };
+        const utility::string_t caps{ U("x-nvnmos-caps") };
         // for receivers
         const utility::string_t interface_ip{ U("x-nvnmos-iface-ip") };
         // for senders
         const utility::string_t source_port{ U("x-nvnmos-src-port") };
+    }
+
+    // custom SDP format-specific parameters
+    namespace fields
+    {
+        const web::json::field<uint64_t> transport_bit_rate{ U("x-nvnmos-transport-bit-rate") }; // transport bit rate including IP/UDP/RTP overhead
+        const web::json::field<uint64_t> format_bit_rate{ U("x-nvnmos-format-bit-rate") }; // format bit rate excluding IP/UDP/RTP overhead
     }
 
     struct node_implementation_exception {};

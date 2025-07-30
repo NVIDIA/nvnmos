@@ -22,17 +22,38 @@
 #include "nvnmos.h"
 
 // example video format
+#ifdef VIDEO_JXSV
+// ST 2110-22 JPEG XS
+#ifndef VIDEO_DESCRIPTION
+#define VIDEO_DESCRIPTION "JPEG XS, YCbCr-4:2:2, 10 bit, 1280 x 720, progressive, 59.94 Hz"
+#endif
+#ifndef VIDEO_ENCODING_PARAMETERS
+#define VIDEO_ENCODING_PARAMETERS "jxsv/90000"
+#endif
+#ifndef VIDEO_BANDWIDTH
+#define VIDEO_BANDWIDTH "b=AS:116000\r\n" // transport bit rate (kb/s), approx. 1280 * 720 * 60000/1001 * 2 * 1.05 / 1e3
+#endif
+#ifndef VIDEO_FORMAT_SPECIFIC_PARAMETERS
+#define VIDEO_FORMAT_SPECIFIC_PARAMETERS "packetmode=0; profile=High444.12; level=1k-1; sublevel=Sublev3bpp; sampling=YCbCr-4:2:2; width=1280; height=720; exactframerate=60000/1001; depth=10; colorimetry=BT709; TCS=SDR; RANGE=FULL; SSN=ST2110-22:2019; TP=2110TPN"
+#endif
+#else
+// ST 2110-20
 #ifndef VIDEO_DESCRIPTION
 #define VIDEO_DESCRIPTION "YCbCr-4:2:2, 10 bit, 1920 x 1080, progressive, 50 Hz"
 #endif
 #ifndef VIDEO_ENCODING_PARAMETERS
 #define VIDEO_ENCODING_PARAMETERS "raw/90000"
 #endif
+#ifndef VIDEO_BANDWIDTH
+#define VIDEO_BANDWIDTH ""
+#endif
 #ifndef VIDEO_FORMAT_SPECIFIC_PARAMETERS
 #define VIDEO_FORMAT_SPECIFIC_PARAMETERS "sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=50; depth=10; TCS=SDR; colorimetry=BT709; PM=2110GPM; SSN=ST2110-20:2017; TP=2110TPN; "
 #endif
+#endif
 
 // example audio format
+// ST 2110-30
 #ifndef AUDIO_DESCRIPTION
 #define AUDIO_DESCRIPTION "2 ch, 48 kHz, 24 bit"
 #endif
@@ -67,10 +88,11 @@ static bool handle_rtp_connection_activated(
 }
 
 // construct example SDP for video sender or receiver
-static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* id, const char* interface_ip, const char* label, const char* group_hint, bool ptp)
+static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* id, const char* interface_ip, const char* label, const char* group_hint)
 {
     const char* description = VIDEO_DESCRIPTION;
     const char* encoding = VIDEO_ENCODING_PARAMETERS;
+    const char* bandwidth = VIDEO_BANDWIDTH;
     const char* format_specific_parameters = VIDEO_FORMAT_SPECIFIC_PARAMETERS;
 
     const char* multicast_ip = "233.252.0.0"; // MCAST-TEST-NET
@@ -78,7 +100,7 @@ static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
     int destination_port = 5020;
     int source_port = 5004;
     int payload_type = 96; // conventional
-    const char* ts_refclk = ptp
+    const char* ts_refclk = CLK_PTP
         ? "a=ts-refclk:ptp=IEEE1588-2008:AC-DE-48-23-45-67-01-9F:42\r\n"
           "a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n" // use both to include all parameters required for NMOS
         : "a=ts-refclk:localmac=CA-FE-01-CA-FE-02\r\n";
@@ -96,6 +118,7 @@ static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
         "a=x-nvnmos-group-hint:%s\r\n" // optional
         "m=video %d RTP/AVP %d\r\n"
         "c=IN IP4 %s/64\r\n"
+        "%s"
         "a=source-filter: incl IN IP4 %s %s\r\n" // omit for any-source multicast for receiver
         "a=x-nvnmos-iface-ip:%s\r\n"
         "a=x-nvnmos-src-port:%d\r\n" // not applicable for receiver
@@ -113,6 +136,7 @@ static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
         destination_port,
         payload_type,
         multicast_ip,
+        bandwidth,
         multicast_ip,
         sender ? interface_ip : source_ip,
         interface_ip,
@@ -128,7 +152,7 @@ static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
 }
 
 // construct example SDP for audio sender or receiver
-static bool init_audio_sdp(char* sdp, size_t sdp_size, bool sender, const char* id, const char* interface_ip, const char* label, const char* group_hint, bool ptp)
+static bool init_audio_sdp(char* sdp, size_t sdp_size, bool sender, const char* id, const char* interface_ip, const char* label, const char* group_hint)
 {
     const char* description = AUDIO_DESCRIPTION;
     const char* encoding = AUDIO_ENCODING_PARAMETERS;
@@ -140,7 +164,7 @@ static bool init_audio_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
     int source_port = 5004;
     int payload_type = 97; // conventional
     const char* ptime = "a=ptime:1\r\n";
-    const char* ts_refclk = ptp
+    const char* ts_refclk = CLK_PTP
         ? "a=ts-refclk:ptp=IEEE1588-2008:AC-DE-48-23-45-67-01-9F:42\r\n"
           "a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n" // use both to include all parameters required for NMOS
         : "a=ts-refclk:localmac=CA-FE-01-CA-FE-02\r\n";
@@ -236,15 +260,14 @@ int main(int argc, char *argv[])
     // receivers and senders representing the GStreamer sources and sinks
 
     const char* interface_ip = argv[3];
-    bool ptp = CLK_PTP;
 
     char source_sdp[2][2048] = { 0 };
-    if (!init_video_sdp(source_sdp[0], sizeof source_sdp[0], false, "source-0", interface_ip, "NvNmos Video Receiver", "rx-0:video", ptp)) return 1;
-    if (!init_audio_sdp(source_sdp[1], sizeof source_sdp[1], false, "source-1", interface_ip, "NvNmos Audio Receiver", "rx-0:audio", ptp)) return 1;
+    if (!init_video_sdp(source_sdp[0], sizeof source_sdp[0], false, "source-0", interface_ip, "NvNmos Video Receiver", "rx-0:video")) return 1;
+    if (!init_audio_sdp(source_sdp[1], sizeof source_sdp[1], false, "source-1", interface_ip, "NvNmos Audio Receiver", "rx-0:audio")) return 1;
 
     char sink_sdp[2][2048] = { 0 };
-    if (!init_video_sdp(sink_sdp[0], sizeof sink_sdp[0], true, "sink-0", interface_ip, "NvNmos Video Sender", "tx-0:video", ptp)) return 1;
-    if (!init_audio_sdp(sink_sdp[1], sizeof sink_sdp[1], true, "sink-1", interface_ip, "NvNmos Audio Sender", "tx-0:audio", ptp)) return 1;
+    if (!init_video_sdp(sink_sdp[0], sizeof sink_sdp[0], true, "sink-0", interface_ip, "NvNmos Video Sender", "tx-0:video")) return 1;
+    if (!init_audio_sdp(sink_sdp[1], sizeof sink_sdp[1], true, "sink-1", interface_ip, "NvNmos Audio Sender", "tx-0:audio")) return 1;
 
     NvNmosReceiverConfig source_config[2] = { 0 };
 
