@@ -69,6 +69,7 @@ namespace nvnmos
         // for senders and receivers
         const utility::string_t internal_id{ U("x-nvnmos-id") };
         const utility::string_t group_hint{ U("x-nvnmos-group-hint") };
+        const utility::string_t caps{ U("x-nvnmos-caps") };
         // for receivers
         const utility::string_t interface_ip{ U("x-nvnmos-iface-ip") };
         // for senders

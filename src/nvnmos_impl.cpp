@@ -107,6 +107,9 @@ namespace nvnmos
         // get the optional session information
         utility::string_t get_session_description_session_info(const web::json::value& session_description);
 
+        // get the optional capabilities from the custom attribute
+        bool has_session_description_caps(const web::json::value& session_description);
+
         // get the format bit rate from the custom attribute if present or calculate an approximate value
         uint64_t get_format_bit_rate(const nmos::sdp_parameters& sdp_params);
         // get the transport bit rate from the custom attribute if present or calculate an approximate value
@@ -403,6 +406,7 @@ namespace nvnmos
 
         const auto media_type = nmos::get_media_type(sdp_params);
         const auto format = impl::get_format(media_type);
+        const auto want_caps = !impl::has_session_description_caps(sdp);
 
         const auto interface_names = boost::copy_range<std::vector<utility::string_t>>(
             transport_params.as_array() | boost::adaptors::transformed([&](const value& transport_param)
@@ -424,79 +428,85 @@ namespace nvnmos
         {
             receiver = nmos::make_receiver(receiver_id, device_id, nmos::transports::rtp, interface_names, nmos::formats::video, { media_type }, settings);
 
-            // add a constraint set; these should be completed fully!
-            if (nmos::media_types::video_raw == media_type)
+            if (want_caps)
             {
-                const auto video = nmos::get_video_raw_parameters(sdp_params);
+                if (nmos::media_types::video_raw == media_type)
+                {
+                    const auto video = nmos::get_video_raw_parameters(sdp_params);
 
-                const auto interlace_modes = video.interlace
-                    ? std::vector<utility::string_t>{ nmos::interlace_modes::interlaced_bff.name, nmos::interlace_modes::interlaced_tff.name, nmos::interlace_modes::interlaced_psf.name }
-                    : std::vector<utility::string_t>{ nmos::interlace_modes::progressive.name };
-                receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
-                    value_of({
-                        { nmos::caps::format::grain_rate, nmos::make_caps_rational_constraint({ video.exactframerate }) },
-                        { nmos::caps::format::frame_width, nmos::make_caps_integer_constraint({ video.width }) },
-                        { nmos::caps::format::frame_height, nmos::make_caps_integer_constraint({ video.height }) },
-                        { nmos::caps::format::interlace_mode, nmos::make_caps_string_constraint(interlace_modes) },
-                        { nmos::caps::format::color_sampling, nmos::make_caps_string_constraint({ video.sampling.name }) }
-                    })
-                });
-            }
-            else if (nmos::media_types::video_jxsv == media_type)
-            {
-                const auto video = nmos::get_video_jxsv_parameters(sdp_params);
+                    const auto interlace_modes = video.interlace
+                        ? std::vector<utility::string_t>{ nmos::interlace_modes::interlaced_bff.name, nmos::interlace_modes::interlaced_tff.name, nmos::interlace_modes::interlaced_psf.name }
+                        : std::vector<utility::string_t>{ nmos::interlace_modes::progressive.name };
+                    receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
+                        value_of({
+                            { nmos::caps::format::grain_rate, nmos::make_caps_rational_constraint({ video.exactframerate }) },
+                            { nmos::caps::format::frame_width, nmos::make_caps_integer_constraint({ video.width }) },
+                            { nmos::caps::format::frame_height, nmos::make_caps_integer_constraint({ video.height }) },
+                            { nmos::caps::format::interlace_mode, nmos::make_caps_string_constraint(interlace_modes) },
+                            { nmos::caps::format::color_sampling, nmos::make_caps_string_constraint({ video.sampling.name }) }
+                        })
+                    });
+                }
+                else if (nmos::media_types::video_jxsv == media_type)
+                {
+                    const auto video = nmos::get_video_jxsv_parameters(sdp_params);
 
-                // some of the parameter constraints recommended by BCP-006-01
-                // could also include common video ones (grain_rate, frame_width, frame_height, etc.)
-                // see https://specs.amwa.tv/bcp-006-01/releases/v1.0.0/docs/NMOS_With_JPEG_XS.html#receivers
-                const auto format_bit_rate = impl::get_format_bit_rate(sdp_params);
-                const auto transport_bit_rate = impl::get_transport_bit_rate(sdp_params);
-                const auto packet_transmission_mode = nmos::parse_packet_transmission_mode(video.packetmode, video.transmode);
-                receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
-                    value_of({
-                        // hm, could enumerate lower profiles, levels or sublevels?
-                        { !video.profile.empty() ? nmos::caps::format::profile.key : U(""), nmos::make_caps_string_constraint({ video.profile.name }) },
-                        { !video.level.empty() ? nmos::caps::format::level.key : U(""), nmos::make_caps_string_constraint({ video.level.name }) },
-                        { !video.sublevel.empty() ? nmos::caps::format::sublevel.key : U(""), nmos::make_caps_string_constraint({ video.sublevel.name }) },
-                        { 0 != format_bit_rate ? nmos::caps::format::bit_rate.key : U(""), nmos::make_caps_integer_constraint({}, nmos::no_minimum<int64_t>(), (int64_t)format_bit_rate) },
-                        { 0 != transport_bit_rate ? nmos::caps::transport::bit_rate.key : U(""), nmos::make_caps_integer_constraint({}, nmos::no_minimum<int64_t>(), (int64_t)transport_bit_rate) },
-                        { nmos::caps::transport::packet_transmission_mode, nmos::make_caps_string_constraint({ packet_transmission_mode.name }) }
-                    })
-                });
+                    // some of the parameter constraints recommended by BCP-006-01
+                    // could also include common video ones (grain_rate, frame_width, frame_height, etc.)
+                    // see https://specs.amwa.tv/bcp-006-01/releases/v1.0.0/docs/NMOS_With_JPEG_XS.html#receivers
+                    const auto format_bit_rate = impl::get_format_bit_rate(sdp_params);
+                    const auto transport_bit_rate = impl::get_transport_bit_rate(sdp_params);
+                    const auto packet_transmission_mode = nmos::parse_packet_transmission_mode(video.packetmode, video.transmode);
+                    receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
+                        value_of({
+                            // hm, could enumerate lower profiles, levels or sublevels?
+                            { !video.profile.empty() ? nmos::caps::format::profile.key : U(""), nmos::make_caps_string_constraint({ video.profile.name }) },
+                            { !video.level.empty() ? nmos::caps::format::level.key : U(""), nmos::make_caps_string_constraint({ video.level.name }) },
+                            { !video.sublevel.empty() ? nmos::caps::format::sublevel.key : U(""), nmos::make_caps_string_constraint({ video.sublevel.name }) },
+                            { 0 != format_bit_rate ? nmos::caps::format::bit_rate.key : U(""), nmos::make_caps_integer_constraint({}, nmos::no_minimum<int64_t>(), (int64_t)format_bit_rate) },
+                            { 0 != transport_bit_rate ? nmos::caps::transport::bit_rate.key : U(""), nmos::make_caps_integer_constraint({}, nmos::no_minimum<int64_t>(), (int64_t)transport_bit_rate) },
+                            { nmos::caps::transport::packet_transmission_mode, nmos::make_caps_string_constraint({ packet_transmission_mode.name }) }
+                        })
+                    });
+                }
+                receiver.data[nmos::fields::version] = receiver.data[nmos::fields::caps][nmos::fields::version] = value(nmos::make_version());
             }
-            receiver.data[nmos::fields::version] = receiver.data[nmos::fields::caps][nmos::fields::version] = value(nmos::make_version());
         }
         else if (impl::format::audio == format)
         {
             const auto audio = nmos::get_audio_L_parameters(sdp_params);
 
             receiver = nmos::make_audio_receiver(receiver_id, device_id, nmos::transports::rtp, interface_names, audio.bit_depth, settings);
-            // add a constraint set; these should be completed fully!
-            receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
-                value_of({
-                    { nmos::caps::format::channel_count, nmos::make_caps_integer_constraint({ audio.channel_count }) },
-                    { nmos::caps::format::sample_rate, nmos::make_caps_rational_constraint({ audio.sample_rate }) },
-                    { nmos::caps::format::sample_depth, nmos::make_caps_integer_constraint({ audio.bit_depth }) },
-                    { 0 != sdp_params.packet_time ? nmos::caps::transport::packet_time.key : U(""), nmos::make_caps_number_constraint({ sdp_params.packet_time }) },
-                    { 0 != sdp_params.max_packet_time ? nmos::caps::transport::max_packet_time.key : U(""), nmos::make_caps_number_constraint({ sdp_params.max_packet_time }) }
-                })
-            });
-            receiver.data[nmos::fields::version] = receiver.data[nmos::fields::caps][nmos::fields::version] = value(nmos::make_version());
+            if (want_caps)
+            {
+                receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
+                    value_of({
+                        { nmos::caps::format::channel_count, nmos::make_caps_integer_constraint({ audio.channel_count }) },
+                        { nmos::caps::format::sample_rate, nmos::make_caps_rational_constraint({ audio.sample_rate }) },
+                        { nmos::caps::format::sample_depth, nmos::make_caps_integer_constraint({ audio.bit_depth }) },
+                        { 0 != sdp_params.packet_time ? nmos::caps::transport::packet_time.key : U(""), nmos::make_caps_number_constraint({ sdp_params.packet_time }) },
+                        { 0 != sdp_params.max_packet_time ? nmos::caps::transport::max_packet_time.key : U(""), nmos::make_caps_number_constraint({ sdp_params.max_packet_time }) }
+                    })
+                });
+                receiver.data[nmos::fields::version] = receiver.data[nmos::fields::caps][nmos::fields::version] = value(nmos::make_version());
+            }
         }
         else if (impl::format::data == format)
         {
             const auto data = nmos::get_video_smpte291_parameters(sdp_params);
 
             receiver = nmos::make_sdianc_data_receiver(receiver_id, device_id, nmos::transports::rtp, interface_names, settings);
-            // add a constraint set; these should be completed fully!
-            if (data.exactframerate)
+            if (want_caps)
             {
-                receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
-                    value_of({
-                        { nmos::caps::format::grain_rate, nmos::make_caps_rational_constraint({ data.exactframerate }) }
-                    })
-                });
-                receiver.data[nmos::fields::version] = receiver.data[nmos::fields::caps][nmos::fields::version] = value(nmos::make_version());
+                if (data.exactframerate)
+                {
+                    receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
+                        value_of({
+                            { nmos::caps::format::grain_rate, nmos::make_caps_rational_constraint({ data.exactframerate }) }
+                        })
+                    });
+                    receiver.data[nmos::fields::version] = receiver.data[nmos::fields::caps][nmos::fields::version] = value(nmos::make_version());
+                }
             }
         }
         else if (impl::format::mux == format)
@@ -504,7 +514,10 @@ namespace nvnmos
             const auto mux = nmos::get_video_SMPTE2022_6_parameters(sdp_params);
 
             receiver = nmos::make_mux_receiver(receiver_id, device_id, nmos::transports::rtp, interface_names, settings);
-            // hmm, add a constraint set, e.g. taking account of sdp_params.framerate
+            if (want_caps)
+            {
+                // hmm, add a constraint set, e.g. taking account of sdp_params.framerate
+            }
         }
 
         auto connection_receiver = nmos::make_connection_rtp_receiver(receiver_id, transport_params.size() > 1);
@@ -1259,6 +1272,28 @@ namespace nvnmos
         utility::string_t get_session_description_session_info(const web::json::value& session_description)
         {
             return sdp::fields::information(session_description);
+        }
+
+        // get the optional capabilities from the custom attribute
+        // a=x-nvnmos-caps:<format> <format specific parameter constraints>
+        // where <format> is the RTP payload type and <format specific parameter constraints>
+        // is zero or more parameters to be constrained, overriding the "a=fmtp:" line
+        // for now, just using this to indicate whether constraint sets are wanted at all
+        bool has_session_description_caps(const web::json::value& session_description)
+        {
+            using web::json::value;
+
+            const auto& media_descriptions = sdp::fields::media_descriptions(session_description);
+            // hm, for simplicity, read caps only from the first media description
+            if (0 == media_descriptions.size()) return false;
+            const auto& media_description = media_descriptions.at(0);
+            const auto& media_attributes = sdp::fields::attributes(media_description);
+            {
+                const auto& ma = media_attributes.as_array();
+
+                auto caps = sdp::find_name(ma, nvnmos::attributes::caps);
+                return ma.end() != caps;
+            }
         }
 
         // approximate IP/UDP/RTP overhead
