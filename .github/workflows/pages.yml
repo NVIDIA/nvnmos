@@ -14,7 +14,7 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Install Doxygen
       run: sudo apt update && sudo apt install -y doxygen graphviz
@@ -23,7 +23,7 @@ jobs:
       run: cd src && doxygen ../Doxyfile && mv html ../public
 
     - name: Upload Documentation Artifact
-      uses: actions/upload-pages-artifact@v3
+      uses: actions/upload-pages-artifact@v4
       with:
         path: public
 

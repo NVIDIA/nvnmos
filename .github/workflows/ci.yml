@@ -20,7 +20,7 @@ jobs:
         config: [Release]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install Conan
         run: pip install conan~=2.2 && conan profile detect
       - name: Install dependencies
@@ -56,7 +56,7 @@ jobs:
   license-check:
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - run: mkdir LICENSES && cp LICENSE LICENSES/Apache-2.0.txt
     - name: REUSE Compliance Check
-      uses: fsfe/reuse-action@v3
+      uses: fsfe/reuse-action@v6

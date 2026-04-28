@@ -24,7 +24,7 @@ jobs:
         config: [Release]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install Conan
         run: pip install conan~=2.2 && conan profile detect
       - name: Install dependencies without lockfile
@@ -53,7 +53,7 @@ jobs:
           diff -u conan-canary/conan.lock conan-canary/conan-canary.lock | head -n 200 || true
       - name: Upload canary artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: conan-canary-${{ matrix.os }}
           path: conan-canary/
