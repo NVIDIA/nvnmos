@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG BASE_IMAGE=ubuntu:22.04
+ARG BASE_IMAGE=ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PACKAGE_SUFFIX
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
@@ -49,7 +49,6 @@ RUN conan install . \
     --build=missing \
     --output-folder=conan \
     --lockfile=${USE_CONAN_LOCK:+conan.lock} \
-    --lockfile-partial \
     --lockfile-out=conan.lock
 
 RUN cmake -B build \
@@ -82,6 +81,6 @@ ENV PACKAGE_NAME=nvnmos${PACKAGE_SUFFIX:--${_BASE_IMAGE//:/-}}
 COPY --from=builder \
     /src/${PACKAGE_NAME}.tar.gz \
     /entrypoint.sh \
-    .
+    ./
 
 ENTRYPOINT ["/entrypoint.sh"]
