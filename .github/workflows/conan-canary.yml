@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Weekly unlocked Conan resolve + build (no src/conan.lock input), uploads a
-# candidate lockfile and metadata for comparison with the committed lock.
+# Weekly-scheduled or manually-triggered unlocked Conan install and build
+# Disables use of src/conan.lock by specifying --lockfile=""
+# Uploads the candidate lockfile and metadata for comparison
 
 name: Canary build
 
@@ -36,6 +37,7 @@ jobs:
             --settings:all build_type=${{ matrix.config }} \
             --build=missing \
             --output-folder=src/conan \
+            --lockfile="" \
             --lockfile-out=conan-canary/conan-canary.lock
       - name: Record canary metadata
         if: always()
