@@ -1,5 +1,5 @@
 <!--
- SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  SPDX-License-Identifier: Apache-2.0
 
  Licensed under the Apache License, Version 2.0 (the "License");
@@ -46,7 +46,7 @@ The NvNmos library supports the following specifications, using the [Sony nmos-c
 The library is intended to be portable to different environments.
 The following operating systems and compilers have been tested.
 
-* Ubuntu 22.04 with GCC 11
+* Ubuntu 24.04 with GCC 13
 * Windows 10 with Visual Studio 2022
 
 ## Usage
@@ -68,7 +68,7 @@ The package can then be copied directly to the host system.
 
 ```sh
 docker create --name nvnmos-test nvnmos
-docker cp nvnmos-test:/nvnmos-ubuntu-22.04.tar.gz .
+docker cp nvnmos-test:/nvnmos-ubuntu-24.04.tar.gz .
 docker rm nvnmos-test
 ```
 
@@ -84,102 +84,151 @@ The following build arguments are available.
 
 | Argument | Explanation |
 | --- | --- |
-| BASE_IMAGE | Controls the base container image and therefore the compatibility of the created package. Default is `ubuntu:22.04`. | 
-| PACKAGE_SUFFIX | Controls the package filename, which will be _nvnmos\<suffix\>.tar.gz_. Default is based on the base image, e.g. `-ubuntu-22.04`. |
+| BASE_IMAGE | Controls the base container image and therefore the compatibility of the created package. Default is `ubuntu:24.04`. | 
+| PACKAGE_SUFFIX | Controls the package filename, which will be _nvnmos\<suffix\>.tar.gz_. Default is based on the base image, e.g. `-ubuntu-24.04`. |
 | USE_CONAN_LOCK | Controls whether the _conan.lock_ file is used to ensure reproducible dependencies, even when new versions are available. Default is `1` (on). |
 
 If this isn't sufficient for your purposes, read on for manual build instructions.
 
 ## Pre-Build Requirements
 
-### Python Package Installer
+### Python
 
 Having Python 3 isn't an absolute requirement but it makes the subsequent steps to install the dependencies easier.
 
 **Linux**
 
-Use the system package manager to install Python 3 and the [Package Installer for Python (pip)](https://pypi.org/project/pip/).
+Use the system package manager to install Python 3 and the `venv` module (on Debian and Ubuntu the package is `python3-venv`). A system-wide `python3-pip` install is optional if you follow the recommended virtual environment below: the virtual environment gets its own `pip`, which avoids touching the distribution's managed environment (PEP 668).
 
 > 💬 **Note:**
 > The `-y` option allows `apt install` to run non-interactively.
 
 ```sh
-sudo apt install -y python3-pip
-
-pip3 install --upgrade pip
+sudo apt install -y python3 python3-venv
 ```
 
 **Windows**
 
-Download the Python 3 installer and run it manually or use the following PowerShell script.
+Download the Python 3 installer from [python.org](https://www.python.org/downloads/windows/) and run it manually, or use the following PowerShell commands.
+Python 3.14.4 (64-bit Windows, latest stable release at the time) has been tested.
 
 > 💬 **Note:**
 > The `` ` `` is the PowerShell line continuation character.
 
 ```PowerShell
 Invoke-WebRequest `
-  https://www.python.org/ftp/python/3.10.9/python-3.10.9-amd64.exe `
-  -OutFile python-3.10.9-amd64.exe
+  https://www.python.org/ftp/python/3.14.4/python-3.14.4-amd64.exe `
+  -OutFile python-3.14.4-amd64.exe
 
-./python-3.10.9-amd64.exe /quiet PrependPath=1 Include_tcltk=0 Include_test=0
-
-pip3 install --upgrade pip
+./python-3.14.4-amd64.exe /quiet PrependPath=1 Include_tcltk=0 Include_test=0
 ```
+
+Confirm this Python is available on the `PATH`. Try closing and reopening the terminal if not.
+
+```PowerShell
+python --version
+```
+
+### Python Virtual Environment
+
+For manual builds, a **virtual environment** in the repository root (for example, `.venv`) is recommended. It isolates the Python environment used for Conan and other `pip`-installed build tools from the system interpreter, pins compatible tool versions on `PATH`, and on Linux avoids PEP 668 "externally managed" errors when using the system Python.
+
+**Linux**
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+```
+
+**Windows**
+
+From PowerShell, use the following commands.
+
+```PowerShell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+# If PowerShell reports that "running scripts is disabled on this system"
+# you can adjust the execution policy as follows and try again.
+# Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+python -m pip install --upgrade pip
+```
+
+Or use Command Prompt instead.
+
+```bat
+python -m venv .venv
+.\.venv\Scripts\activate.bat
+python -m pip install --upgrade pip
+```
+
+To exit the virtual environment later, run `deactivate` (same on Linux and Windows).
 
 ### CMake
 
-The project requires CMake 3.17 or higher. (The system-provided CMake 3.10 on the Jetson is not sufficient.)
+The project requires CMake 3.17 or higher; dependencies may require a higher version.
 
 There are x86_64 and arm64 packages for CMake 3.30.0 on the [Python Package Index (PyPI)](https://pypi.org/) which have been tested.
 
 **Linux**
 
 ```sh
-pip3 install cmake~=3.17
+pip install cmake~=3.17
 ```
-
-> 💬 **Note:**
-> Using `sudo` would overwrite an existing CMake package in _/usr/local/bin_.
-> Avoiding this is recommended; without `sudo` the installer puts binaries in a per-user directory, _/home/\<userid\>/.local/bin_.
-> On the Jetson, this isn't in the user's `PATH` by default.
-> To add it for the current session, use the following command.
-> Replace `<userid>` with the necessary value.
->
-> ```sh
-> export PATH=/home/<userid>/.local/bin:${PATH}
-> ```
 
 **Windows**
 
-```sh
-pip3 install cmake~=3.17
+```PowerShell
+pip install cmake~=3.17
 ```
 
 ### Conan
 
 Using [Conan](https://conan.io/) simplifies fetching, building, and installing the required C++ dependencies from [Conan Center](https://conan.io/center/).
 
-The project requires Conan 2.2 or higher. Conan 2.5.0 has been tested.
+The project requires Conan 2.2 or higher; dependencies may require a higher version.
+Conan 2.28.0 (latest release at the time) has been tested.
 
 **Linux**
 
 ```sh
-pip3 install conan~=2.2 --upgrade
+pip install conan~=2.2 --upgrade
 conan profile detect
 ```
 
-> 💬 **Note:**
-> As per the CMake instructions, on the Jetson a warning is reported that the per-user install directory _/home/\<userid\>/.local/bin_ is not on the `PATH` if it hasn't yet been added.
+The detected profile is displayed, along with some `WARN` messages.
+For example, the following profile has been tested.
 
-> On some platforms with Python 2 and Python 3 both installed this may need to be `pip3 install --upgrade conan~=2.2`
-
-> Conan 2.2 or higher is required; dependencies may require a higher version; version 2.5.0 (latest release at the time) has been tested
+```ini
+[settings]
+arch=x86_64
+build_type=Release
+compiler=gcc
+compiler.cppstd=gnu17
+compiler.libcxx=libstdc++11
+compiler.version=13
+os=Linux
+```
 
 **Windows**
 
-```sh
-pip3 install conan~=2.2 --upgrade
+```PowerShell
+pip install conan~=2.2 --upgrade
 conan profile detect
+```
+
+The detected profile is displayed, along with some `WARN` messages.
+For example, the following profile has been tested.
+
+```ini
+[settings]
+arch=x86_64
+build_type=Release
+compiler=msvc
+compiler.cppstd=14
+compiler.runtime=dynamic
+compiler.version=193
+os=Windows
 ```
 
 ## Building the NvNmos Library
@@ -196,19 +245,22 @@ To install the dependencies using Conan, use the following command.
 
 > 💬 **Note:**
 > Replace `<Release-or-Debug>` with the necessary value.
+> Passing `--lockfile=src/conan.lock` pins dependency versions per _src/conan.lock_, matching the default _Dockerfile_ and GitHub Actions behaviour.
 
 ```sh
 conan install src \
   -g CMakeToolchain \
   --settings:all build_type=<Release-or-Debug> \
   --build=missing \
-  --output-folder=src/conan
+  --output-folder=src/conan \
+  --lockfile=src/conan.lock
 ```
 
 Use the following CMake command to configure the build.
 
 > 💬 **Note:**
 > Replace `<Release-or-Debug>` with the necessary value.
+> The `CMAKE_TOOLCHAIN_FILE` path is resolved relative to the top-level _src_ directory passed as the last argument.
 
 ```sh
 cmake -B build \
@@ -227,7 +279,7 @@ cmake --build build --parallel
 
 Prepare a _build_ directory adjacent to the _src_ directory.
 
-```sh
+```PowerShell
 mkdir build
 ```
 
@@ -236,13 +288,15 @@ To install the dependencies using Conan, use the following command.
 > 💬 **Note:**
 > The `` ` `` is the PowerShell line continuation character. In the Windows command prompt, use `^` instead.
 > Replace `<Release-or-Debug>` with the necessary value.
+> Passing `--lockfile=src/conan.lock` pins dependency versions per _src/conan.lock_, matching the default _Dockerfile_ and GitHub Actions behaviour.
 
 ```PowerShell
 conan install src `
   -g CMakeToolchain `
   --settings:all build_type=<Release-or-Debug> `
   --build=missing `
-  --output-folder=src/conan
+  --output-folder=src/conan `
+  --lockfile=src/conan.lock
 ```
 
 Repeat the command for both `Debug` and `Release` if required.
@@ -252,7 +306,7 @@ Use the following CMake command to configure the build.
 ```PowerShell
 cmake -B build `
   -G "Visual Studio 17 2022" `
-  -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake `
+  -DCMAKE_TOOLCHAIN_FILE="conan/conan_toolchain.cmake" `
   -DCMAKE_CONFIGURATION_TYPES="Debug;Release" `
   src
 ```
@@ -268,7 +322,7 @@ cmake --build build --config <Release-or-Debug> --parallel
 
 ## Run-Time Requirements
 
-*Linux*
+**Linux**
 
 Install and run the Avahi Daemon.
 
@@ -283,7 +337,7 @@ apt install -y dbus avahi-daemon
 > 💬 **Note:**
 > Since Ubuntu 24.04, an init script is not provided for the Avahi daemon; run `avahi-daemon --daemonize` instead.
 
-*Windows*
+**Windows**
 
 Install and start the Bonjour Service.
 

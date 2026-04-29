@@ -1,11 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (C) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Build
+# Weekly unlocked Conan resolve + build (no src/conan.lock input), uploads a
+# candidate lockfile and metadata for comparison with the committed lock.
+
+name: Canary build
 
 on:
-  push:
-  pull_request:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
 
 defaults:
   run:
@@ -16,21 +20,43 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025]
+        os: [ubuntu-latest, windows-latest]
         config: [Release]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - name: Install Conan
         run: pip install conan~=2.2 && conan profile detect
-      - name: Install dependencies
+      - name: Install dependencies without lockfile
+        id: conan_install
         run: |
+          mkdir -p conan-canary
           conan install src \
             -g CMakeToolchain \
             --settings:all build_type=${{ matrix.config }} \
             --build=missing \
             --output-folder=src/conan \
-            --lockfile=src/conan.lock
+            --lockfile-out=conan-canary/conan-canary.lock
+      - name: Record canary metadata
+        if: always()
+        run: |
+          mkdir -p conan-canary
+          cp src/conan.lock conan-canary/conan.lock
+          {
+            echo "workflow=${{ github.workflow }}"
+            echo "ref=${{ github.ref }}"
+            echo "sha=${{ github.sha }}"
+            echo "runner_os=${{ runner.os }}"
+            echo "conan_install_outcome=${{ steps.conan_install.outcome }}"
+          } >> conan-canary/summary.txt
+          cat conan-canary/summary.txt
+          diff -u conan-canary/conan.lock conan-canary/conan-canary.lock | head -n 200 || true
+      - name: Upload canary artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conan-canary-${{ matrix.os }}
+          path: conan-canary/
       - name: Generate nvnmos (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -53,10 +79,3 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cmake --build build --config=${{ matrix.config }} --parallel
-  license-check:
-    runs-on: ubuntu-24.04
-    steps:
-    - uses: actions/checkout@v6
-    - run: mkdir LICENSES && cp LICENSE LICENSES/Apache-2.0.txt
-    - name: REUSE Compliance Check
-      uses: fsfe/reuse-action@v6
