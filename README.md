@@ -109,7 +109,7 @@ sudo apt install -y python3 python3-venv
 
 **Windows**
 
-Download the Python 3 installer from [python.org](https://www.python.org/downloads/windows/) and run it manually, or use the following PowerShell script.
+Download the Python 3 installer from [python.org](https://www.python.org/downloads/windows/) and run it manually, or use the following PowerShell commands.
 Python 3.14.4 (64-bit Windows, latest stable release at the time) has been tested.
 
 > 💬 **Note:**
@@ -123,7 +123,11 @@ Invoke-WebRequest `
 ./python-3.14.4-amd64.exe /quiet PrependPath=1 Include_tcltk=0 Include_test=0
 ```
 
-Close and reopen the terminal (or log off and on) so `PATH` picks up the new Python install, then use a virtual environment as below.
+Confirm this Python is available on the `PATH`. Try closing and reopening the terminal if not.
+
+```PowerShell
+python --version
+```
 
 ### Python Virtual Environment
 
@@ -139,20 +143,23 @@ pip install --upgrade pip
 
 **Windows**
 
-From PowerShell, use the following command.
+From PowerShell, use the following commands.
 
-```sh
+```PowerShell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install --upgrade pip
+# If PowerShell reports that "running scripts is disabled on this system"
+# you can adjust the execution policy as follows and try again.
+# Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+python -m pip install --upgrade pip
 ```
 
 Or use Command Prompt instead.
 
-```sh
+```bat
 python -m venv .venv
 .\.venv\Scripts\activate.bat
-pip install --upgrade pip
+python -m pip install --upgrade pip
 ```
 
 To exit the virtual environment later, run `deactivate` (same on Linux and Windows).
@@ -171,7 +178,7 @@ pip install cmake~=3.17
 
 **Windows**
 
-```sh
+```PowerShell
 pip install cmake~=3.17
 ```
 
@@ -189,11 +196,39 @@ pip install conan~=2.2 --upgrade
 conan profile detect
 ```
 
+The detected profile is displayed, along with some `WARN` messages.
+For example, the following profile has been tested.
+
+```ini
+[settings]
+arch=x86_64
+build_type=Release
+compiler=gcc
+compiler.cppstd=gnu17
+compiler.libcxx=libstdc++11
+compiler.version=13
+os=Linux
+```
+
 **Windows**
 
-```sh
+```PowerShell
 pip install conan~=2.2 --upgrade
 conan profile detect
+```
+
+The detected profile is displayed, along with some `WARN` messages.
+For example, the following profile has been tested.
+
+```ini
+[settings]
+arch=x86_64
+build_type=Release
+compiler=msvc
+compiler.cppstd=14
+compiler.runtime=dynamic
+compiler.version=193
+os=Windows
 ```
 
 ## Building the NvNmos Library
@@ -244,7 +279,7 @@ cmake --build build --parallel
 
 Prepare a _build_ directory adjacent to the _src_ directory.
 
-```sh
+```PowerShell
 mkdir build
 ```
 
@@ -271,7 +306,7 @@ Use the following CMake command to configure the build.
 ```PowerShell
 cmake -B build `
   -G "Visual Studio 17 2022" `
-  -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake `
+  -DCMAKE_TOOLCHAIN_FILE="conan/conan_toolchain.cmake" `
   -DCMAKE_CONFIGURATION_TYPES="Debug;Release" `
   src
 ```
