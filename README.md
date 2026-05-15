@@ -246,10 +246,10 @@ To install the dependencies using Conan, use the following command.
 > 💬 **Note:**
 > Replace `<Release-or-Debug>` with the necessary value.
 > Passing `--lockfile=src/conan.lock` pins dependency versions per _src/conan.lock_, matching the default _Dockerfile_ and GitHub Actions behaviour.
+> Do not pass `-g CMakeToolchain` or `-g CMakeDeps`; `src/conanfile.py` already generates them, and Conan fails if they are duplicated (for example when copying older command lines).
 
 ```sh
 conan install src \
-  -g CMakeToolchain \
   --settings:all build_type=<Release-or-Debug> \
   --build=missing \
   --output-folder=src/conan \
@@ -289,10 +289,10 @@ To install the dependencies using Conan, use the following command.
 > The `` ` `` is the PowerShell line continuation character. In the Windows command prompt, use `^` instead.
 > Replace `<Release-or-Debug>` with the necessary value.
 > Passing `--lockfile=src/conan.lock` pins dependency versions per _src/conan.lock_, matching the default _Dockerfile_ and GitHub Actions behaviour.
+> Do not pass `-g CMakeToolchain` or `-g CMakeDeps`; `src/conanfile.py` already generates them, and Conan fails if they are duplicated (for example when copying older command lines).
 
 ```PowerShell
 conan install src `
-  -g CMakeToolchain `
   --settings:all build_type=<Release-or-Debug> `
   --build=missing `
   --output-folder=src/conan `

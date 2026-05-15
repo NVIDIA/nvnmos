@@ -14,11 +14,16 @@
 # limitations under the License.
 
 from conan import ConanFile
+from conan.tools.cmake import CMakeDeps, CMakeToolchain
 
 
 class NvNmosRecipe(ConanFile):
     settings = "os", "arch", "compiler", "build_type"
-    generators = "CMakeDeps"
 
     def requirements(self):
         self.requires("nmos-cpp/cci.20240223")
+
+    def generate(self):
+        tc = CMakeToolchain(self)
+        tc.generate()
+        CMakeDeps(self).generate()

@@ -33,7 +33,6 @@ jobs:
         run: |
           mkdir -p conan-canary
           conan install src \
-            -g CMakeToolchain \
             --settings:all build_type=${{ matrix.config }} \
             --build=missing \
             --output-folder=src/conan \
