@@ -16,9 +16,17 @@
 from conan import ConanFile
 from conan.tools.cmake import CMakeDeps, CMakeToolchain
 
+required_conan_version = ">=2.2"
 
-class NvNmosRecipe(ConanFile):
+
+class NvNmosConan(ConanFile):
     name = "nvnmos"
+    description = "NVIDIA NMOS (Networked Media Open Specifications) Library"
+    license = "Apache-2.0"
+    url = "https://github.com/NVIDIA/nvnmos"
+    homepage = "https://nvidia.github.io/nvnmos/"
+    topics = ("amwa", "nmos", "is-04", "is-05", "broadcasting", "network", "media")
+
     settings = "os", "arch", "compiler", "build_type"
     options = {
         "nmos_cpp_from_source": [True, False],
