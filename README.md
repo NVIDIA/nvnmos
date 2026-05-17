@@ -246,10 +246,10 @@ To install the dependencies using Conan, use the following command.
 > 💬 **Note:**
 > Replace `<Release-or-Debug>` with the necessary value.
 > Passing `--lockfile=src/conan.lock` pins dependency versions per _src/conan.lock_, matching the default _Dockerfile_ and GitHub Actions behaviour.
+> Do not pass `-g CMakeToolchain` or `-g CMakeDeps`; `src/conanfile.py` already generates them, and Conan fails if they are duplicated (for example when copying older command lines).
 
 ```sh
 conan install src \
-  -g CMakeToolchain \
   --settings:all build_type=<Release-or-Debug> \
   --build=missing \
   --output-folder=src/conan \
@@ -289,10 +289,10 @@ To install the dependencies using Conan, use the following command.
 > The `` ` `` is the PowerShell line continuation character. In the Windows command prompt, use `^` instead.
 > Replace `<Release-or-Debug>` with the necessary value.
 > Passing `--lockfile=src/conan.lock` pins dependency versions per _src/conan.lock_, matching the default _Dockerfile_ and GitHub Actions behaviour.
+> Do not pass `-g CMakeToolchain` or `-g CMakeDeps`; `src/conanfile.py` already generates them, and Conan fails if they are duplicated (for example when copying older command lines).
 
 ```PowerShell
 conan install src `
-  -g CMakeToolchain `
   --settings:all build_type=<Release-or-Debug> `
   --build=missing `
   --output-folder=src/conan `
@@ -319,6 +319,41 @@ Build the library and application with the following command or manually using t
 ```sh
 cmake --build build --config <Release-or-Debug> --parallel
 ```
+
+### Local `nmos-cpp` checkout (Conan for dependencies only)
+
+To build against a clone of [nmos-cpp](https://github.com/sony/nmos-cpp) while using Conan to resolve Boost, cpprestsdk, Avahi or mDNSResponder, and other dependencies:
+
+1. Clone it into a directory `nmos-cpp` in the same parent directory as `nvnmos`.
+
+2. Install Conan dependencies with the consumer option `nmos_cpp_from_source=True` and **without** the default lockfile, which is for the packaged `nmos-cpp` graph:
+
+   **Linux**
+
+   ```sh
+   conan install src \
+     --settings:all build_type=<Release-or-Debug> \
+     --build=missing \
+     --output-folder=src/conan \
+     --lockfile="" \
+     -o "&:nmos_cpp_from_source=True"
+   ```
+
+   **Windows**
+
+   ```PowerShell
+   conan install src `
+     --settings:all build_type=<Release-or-Debug> `
+     --build=missing `
+     --output-folder=src/conan `
+     --lockfile="" `
+     -o "&:nmos_cpp_from_source=True"
+   ```
+
+   > 💬 **Note:**
+   > With `--lockfile=""`, versions of dependencies such as Boost and OpenSSL are not pinned. You may choose to create a lockfile for `nmos_cpp_from_source=True` installs (`conan lock create` per profile, then `conan lock merge`), then pass `--lockfile=<path>` on `conan install`.
+
+3. Configure and build as in **Building the NvNmos Library** above, adding `-DUSE_ADD_SUBDIRECTORY=ON` to the `cmake` configure step. (If you followed step 1, you do not need `-DNMOS_CPP_DIRECTORY=<path-to-nmos-cpp/Development>`.)
 
 ## Run-Time Requirements
 

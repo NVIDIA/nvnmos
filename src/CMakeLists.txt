@@ -48,7 +48,14 @@ else()
     set(NMOS_CPP_DIRECTORY "../../nmos-cpp/Development" CACHE STRING "Path to nmos-cpp/Development directory")
 
     message(STATUS "Using add_subdirectory(${NMOS_CPP_DIRECTORY})")
+    if(BUILD_SHARED_LIBS)
+        set(_nvnmos_pic_save "${CMAKE_POSITION_INDEPENDENT_CODE}")
+        set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    endif()
     add_subdirectory(${NMOS_CPP_DIRECTORY} build-nmos-cpp EXCLUDE_FROM_ALL)
+    if(BUILD_SHARED_LIBS)
+        set(CMAKE_POSITION_INDEPENDENT_CODE "${_nvnmos_pic_save}")
+    endif()
 endif()
 
 # nvnmos library

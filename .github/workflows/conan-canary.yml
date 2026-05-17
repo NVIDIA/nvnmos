@@ -4,6 +4,10 @@
 # Weekly-scheduled or manually-triggered unlocked Conan install and build
 # Disables use of src/conan.lock by specifying --lockfile=""
 # Uploads the candidate lockfile and metadata for comparison
+#
+# Jobs:
+# - build: with entire nmos-cpp graph from Conan (like ci.yml but without src/conan.lock)
+# - build-nmos-cpp-from-source: only dependencies from Conan
 
 name: Canary build
 
@@ -33,7 +37,6 @@ jobs:
         run: |
           mkdir -p conan-canary
           conan install src \
-            -g CMakeToolchain \
             --settings:all build_type=${{ matrix.config }} \
             --build=missing \
             --output-folder=src/conan \
@@ -46,6 +49,7 @@ jobs:
           cp src/conan.lock conan-canary/conan.lock
           {
             echo "workflow=${{ github.workflow }}"
+            echo "job=${{ github.job }}"
             echo "ref=${{ github.ref }}"
             echo "sha=${{ github.sha }}"
             echo "runner_os=${{ runner.os }}"
@@ -81,3 +85,74 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cmake --build build --config=${{ matrix.config }} --parallel
+
+  build-nmos-cpp-from-source:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        config: [Release]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Clone nmos-cpp alongside nvnmos
+        run: |
+          parent="$(dirname "${GITHUB_WORKSPACE}")"
+          git clone --depth 1 https://github.com/sony/nmos-cpp.git "${parent}/nmos-cpp"
+      - name: Install Conan
+        run: pip install conan~=2.2 && conan profile detect
+      - name: Install dependencies without lockfile
+        id: conan_install
+        run: |
+          mkdir -p conan-canary-from-source
+          conan install src \
+            --settings:all build_type=${{ matrix.config }} \
+            --build=missing \
+            --output-folder=src/conan \
+            --lockfile="" \
+            -o "&:nmos_cpp_from_source=True" \
+            --lockfile-out=conan-canary-from-source/conan-canary-from-source.lock
+      - name: Record canary metadata
+        if: always()
+        run: |
+          mkdir -p conan-canary-from-source
+          {
+            echo "workflow=${{ github.workflow }}"
+            echo "job=${{ github.job }}"
+            echo "ref=${{ github.ref }}"
+            echo "sha=${{ github.sha }}"
+            echo "runner_os=${{ runner.os }}"
+            echo "conan_install_outcome=${{ steps.conan_install.outcome }}"
+          } >> conan-canary-from-source/summary.txt
+          cat conan-canary-from-source/summary.txt
+      - name: Upload canary artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conan-canary-from-source-${{ matrix.os }}
+          path: conan-canary-from-source/
+      - name: Generate nvnmos (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
+            -DUSE_ADD_SUBDIRECTORY=ON \
+            src
+      - name: Generate nvnmos (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
+            -DCMAKE_CONFIGURATION_TYPES=${{ matrix.config }} \
+            -DUSE_ADD_SUBDIRECTORY=ON \
+            src
+      - name: Build nvnmos (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # default -j$(nproc) causes out of memory on hosted runners (cc1plus killed).
+          cmake --build build --parallel 2
+      - name: Build nvnmos (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake --build build --config=${{ matrix.config }} --parallel 2

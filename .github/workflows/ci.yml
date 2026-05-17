@@ -26,7 +26,6 @@ jobs:
       - name: Install dependencies
         run: |
           conan install src \
-            -g CMakeToolchain \
             --settings:all build_type=${{ matrix.config }} \
             --build=missing \
             --output-folder=src/conan \

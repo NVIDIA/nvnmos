@@ -44,7 +44,6 @@ COPY entrypoint.sh LICENSE README.md Doxyfile /
 RUN chmod +x /entrypoint.sh
 
 RUN conan install . \
-    -g CMakeToolchain \
     --settings:all build_type=Release \
     --build=missing \
     --output-folder=conan \
