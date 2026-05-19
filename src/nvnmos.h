@@ -39,18 +39,20 @@
  * used to update running DeepStream pipelines with new transport parameters,
  * for example.
  *
- * NvNmos currently supports Senders and Receivers for uncompressed Video
- * and Audio, i.e., SMPTE ST 2110-20 and SMPTE ST 2110-30 streams.
+ * NvNmos currently supports Senders and Receivers for video, audio, and ancillary data flows over RTP
+ * (i.e., SMPTE ST 2110-20, -22, -30, and -40 streams) and over the Media eXchange Layer (MXL).
  *
  * The NvNmos library supports the following specifications, using the <a href="https://github.com/sony/nmos-cpp">Sony nmos-cpp</a> implementation:
  * - <a href="https://specs.amwa.tv/is-04/">AMWA IS-04 NMOS Discovery and Registration Specification</a> v1.3
- * - <a href="https://specs.amwa.tv/is-05/">AMWA IS-05 NMOS Device Connection Management Specification</a> v1.1
+ * - <a href="https://specs.amwa.tv/is-05/">AMWA IS-05 NMOS Device Connection Management Specification</a> v1.1 and v1.2-dev (for MXL)
  * - <a href="https://specs.amwa.tv/is-09/">AMWA IS-09 NMOS System Parameters Specification</a> v1.0
  * - <a href="https://specs.amwa.tv/bcp-002-01/">AMWA BCP-002-01 Natural Grouping of NMOS Resources</a> v1.0
  * - <a href="https://specs.amwa.tv/bcp-002-02/">AMWA BCP-002-02 NMOS Asset Distinguishing Information</a> v1.0
  * - <a href="https://specs.amwa.tv/bcp-004-01/">AMWA BCP-004-01 NMOS Receiver Capabilities</a> v1.0
  * - <a href="https://specs.amwa.tv/bcp-006-01/">AMWA BCP-006-01 NMOS With JPEG XS</a> v1.0
+ * - <a href="https://specs.amwa.tv/bcp-007-03/">AMWA BCP-007-03 NMOS With MXL</a> v1.0-dev
  * - Session Description Protocol conforming to SMPTE ST 2110-20, -22, -30, -40, and ST 2022-7
+ * - MXL flow definition JSON as consumed by the <a href="https://github.com/dmf-mxl/mxl">MXL SDK</a>
  *
  * @ingroup NvNmosApi
  * @{
@@ -95,34 +97,66 @@ extern "C"
 typedef struct _NvNmosNodeServer NvNmosNodeServer;
 
 /**
+ * Identifies the transport used by an NvNmos Sender or Receiver. Stored in
+ * @ref NvNmosSenderConfig::transport and @ref NvNmosReceiverConfig::transport,
+ * it corresponds to the base URN of the transport of the NMOS Sender or
+ * Receiver resource.
+ */
+typedef enum _NvNmosTransport
+{
+    /** RTP, as used by SMPTE ST 2110.
+        The associated transport file is a Session Description Protocol
+        (SDP) file. This is the default for a zero-initialised configuration. */
+    NVNMOS_TRANSPORT_RTP = 0,
+    /** The Media eXchange Layer (MXL).
+        The associated transport file is an MXL flow definition (JSON)
+        of the form consumed by the MXL SDK. */
+    NVNMOS_TRANSPORT_MXL = 1
+} NvNmosTransport;
+
+/**
  * Type for a callback from NvNmos library when an IS-05 Connection API
  * activation occurs.
  *
- * @param[in] server A pointer to the server issuing the callback.
- * @param[in] id     The unique identifier for the sender or receiver
- *                   to be activated or deactivated.
- * @param[in] sdp    The updated Session Description Protocol data
- *                   for the sender or receiver, or a null pointer when
- *                   the sender or receiver is being deactivated.
- *                   The new data only updates the transport parameters
- *                   of the sender or receiver, not the media format.
- *                   The 'inactive' media-level attribute is used to
- *                   indicate a disabled leg.
- *                   The 'x-nvnmos-id' session-level attribute specifies
- *                   the unique identifier for the sender or receiver,
- *                   @p id.
- *                   For a receiver, the 'x-nvnmos-iface-ip' media-level
- *                   attribute is used to specify the interface IP
- *                   address on which the stream is received.
- *                   For a sender, the 'x-nvnmos-src-port' media-level
- *                   attribute is used to specify the source port
- *                   from which the stream is transmitted.
+ * @param[in] server         A pointer to the server issuing the callback.
+ * @param[in] id             The unique identifier for the sender or receiver
+ *                           to be activated or deactivated. This is the
+ *                           same id specified in the configuration's
+ *                           'x-nvnmos-id' attribute or property.
+ * @param[in] transport_file The updated transport file data for the
+ *                           sender or receiver, or a null pointer when
+ *                           the sender or receiver is being deactivated.
+ *
+ *                           For an RTP sender or receiver this is an SDP
+ *                           file. The 'inactive' media-level attribute is
+ *                           used to indicate a disabled leg. The
+ *                           'x-nvnmos-id' session-level attribute specifies
+ *                           the unique identifier for the sender or
+ *                           receiver, @p id. For a receiver, the
+ *                           'x-nvnmos-iface-ip' media-level attribute is
+ *                           used to specify the interface IP address on
+ *                           which the stream is received. For a sender,
+ *                           the 'x-nvnmos-src-port' media-level attribute
+ *                           is used to specify the source port from which
+ *                           the stream is transmitted.
+ *
+ *                           For an MXL sender or receiver this is an MXL
+ *                           flow definition (JSON), with the
+ *                           'x-nvnmos-id' property specifying the unique
+ *                           identifier for the sender or receiver, @p id,
+ *                           and the 'mxl_domain_id' and 'mxl_flow_id'
+ *                           IS-05 transport parameters reflected as the
+ *                           'x-nvnmos-mxl-domain-id' key and the JSON
+ *                           document's 'id' field respectively.
+ *                           The application is expected to dispatch on
+ *                           @p id (which it specified) to determine the
+ *                           transport, if needed.
  * @return Whether the activation could be applied.
  */
-typedef bool (* nmos_connection_rtp_activation_callback)(
+typedef bool (* nmos_connection_activation_callback)(
     NvNmosNodeServer *server,
     const char *id,
-    const char *sdp);
+    const char *transport_file);
 
 /**
  * Defines some common severity/logging levels for log messages from
@@ -215,7 +249,7 @@ typedef struct _NvNmosNodeConfig
 
     /** Holds the callback for handling an IS-05 Connection API activation.
         May be null. */
-    nmos_connection_rtp_activation_callback rtp_connection_activated;
+    nmos_connection_activation_callback connection_activated;
 
     /** Holds the callback for handling log messages. May be null. */
     nmos_logging_callback log_callback;
@@ -259,17 +293,44 @@ typedef struct _NvNmosAssetConfig
  */
 typedef struct _NvNmosReceiverConfig
 {
-    /** Holds the Session Description Protocol data used to configure
-        the receiver. Must not be null. The SDP data must be valid
-        as per the relevant IETF RFC and SMPTE standards for the
-        media format and transport.
+    /** Holds the transport used by the receiver. Determines the type
+        of the @ref transport_file. Defaults to ::NVNMOS_TRANSPORT_RTP
+        for a zero-initialised configuration. */
+    NvNmosTransport transport;
+    /** Holds the transport file data used to configure the receiver.
+        Must not be null.
+
+        For ::NVNMOS_TRANSPORT_RTP, this is Session Description Protocol
+        (SDP) data, which must be valid as per the relevant IETF RFC
+        and SMPTE standards for the media format and transport.
         The 'x-nvnmos-id' session-level attribute specifies the unique
         identifier for the receiver.
         The 'x-nvnmos-group-hint' session-level attribute may be used to
         specify a group hint tag for the receiver.
         The 'x-nvnmos-iface-ip' media-level attribute is used to specify
-        the interface IP address on which the stream is received. */
-    const char *sdp;
+        the interface IP address on which the stream is received.
+        The 'x-nvnmos-caps' media-level attribute may be used to indicate
+        that the receiver should be advertised with the format-derived
+        capabilities omitted (i.e. a more permissive receiver).
+        The connection address and source filter are not used by the
+        receiver itself (since the transport parameters are set
+        dynamically by IS-05).
+
+        For ::NVNMOS_TRANSPORT_MXL, this is an MXL flow definition (JSON)
+        of the form consumed by the MXL library, with NvNmos extensions.
+        The 'x-nvnmos-id' top-level property specifies the unique
+        identifier for the receiver.
+        A group hint tag may be specified via the 'tags' property.
+        The 'x-nvnmos-caps' top-level property may be used to indicate
+        that the receiver should be advertised with the format-derived
+        capabilities omitted.
+        The 'x-nvnmos-mxl-domain-id' top-level property (UUID string)
+        is required and specifies the MXL domain for the receiver;
+        the IS-05 transport parameter defaults to 'auto' and is
+        resolved at activation time from this value.
+        The flow definition's 'id' field is not used by the receiver
+        itself (since the MXL flow id is set dynamically by IS-05). */
+    const char *transport_file;
 } NvNmosReceiverConfig;
 
 /**
@@ -278,18 +339,39 @@ typedef struct _NvNmosReceiverConfig
  */
 typedef struct _NvNmosSenderConfig
 {
-    /** Holds the Session Description Protocol data used to configure
-        the sender. Must not be null. The SDP data must be valid
-        as per the relevant IETF RFC and SMPTE standards for the
-        media format and transport.
+    /** Holds the transport used by the sender. Determines the format
+        of @ref transport_file. Defaults to ::NVNMOS_TRANSPORT_RTP for
+        a zero-initialised configuration. */
+    NvNmosTransport transport;
+    /** Holds the transport file data used to configure the sender.
+        Must not be null.
+
+        For ::NVNMOS_TRANSPORT_RTP, this is Session Description Protocol
+        (SDP) data, which must be valid as per the relevant IETF RFC
+        and SMPTE standards for the media format and transport.
         The 'ts-refclk' attributes are used to specify the node clock.
         The 'x-nvnmos-id' session-level attribute specifies the unique
         identifier for the sender.
         The 'x-nvnmos-group-hint' session-level attribute may be used to
         specify a group hint tag for the sender.
         The 'x-nvnmos-src-port' media-level attribute is used to specify
-        the source port from which the stream is transmitted. */
-    const char *sdp;
+        the source port from which the stream is transmitted.
+
+        For ::NVNMOS_TRANSPORT_MXL, this is an MXL flow definition (JSON)
+        of the form consumed by the MXL library, with NvNmos extensions.
+        The 'x-nvnmos-id' top-level property specifies the unique
+        identifier for the sender.
+        A group hint tag may be specified via the 'tags' property.
+        The 'x-nvnmos-mxl-domain-id' top-level property (UUID string)
+        is required and specifies the MXL domain for the sender;
+        the IS-05 transport parameter defaults to 'auto' and is
+        resolved at activation time from this value.
+        The flow definition's 'id' field (UUID string), if present, is
+        used as the MXL flow identity for the sender's IS-05 transport
+        parameter 'mxl_flow_id'; if absent, the NMOS Flow id (derived
+        from @ref NvNmosNodeConfig::seed and the 'x-nvnmos-id') is used
+        in its place. */
+    const char *transport_file;
 } NvNmosSenderConfig;
 
 /**
@@ -437,36 +519,42 @@ bool remove_nmos_sender_from_node_server(
     const char* id);
 
 /**
- * Update the configuration settings of a sender or receiver.
+ * Report that a sender or receiver has been activated or deactivated
+ * out of band.
  *
- * @param[in] server A pointer to the server to be updated.
- * @param[in] id     The unique identifier for the sender or receiver
- *                   to be activated or deactivated.
- * @param[in] sdp    The updated Session Description Protocol data
- *                   for the sender or receiver, or a null pointer when
- *                   the sender or receiver is being deactivated.
- *                   The new data only updates the transport parameters
- *                   of the sender or receiver, not the media format.
- *                   The 'inactive' media-level attribute is used to
- *                   indicate a disabled leg.
- *                   For a sender, the 'ts-refclk' attributes are used
- *                   to specify the node clock.
- *                   The 'x-nvnmos-id' session-level attribute specifies
- *                   the unique identifier for the sender or receiver,
- *                   @p id.
- *                   For a receiver, the 'x-nvnmos-iface-ip' media-level
- *                   attribute is used to specify the interface IP
- *                   address on which the stream is received.
- *                   For a sender, the 'x-nvnmos-src-port' media-level
- *                   attribute is used to specify the source port
- *                   from which the stream is transmitted.
+ * Used when the application's data plane has activated (or deactivated)
+ * a sender or receiver by some means other than an IS-05 Connection API
+ * patch, so that the IS-04 Node API and IS-05 Connection API model can
+ * be updated to reflect the new state. The library does not initiate
+ * any activation on the application's behalf.
+ *
+ * The application's @ref nmos_connection_activation_callback is not
+ * invoked as a result of this call.
+ *
+ * @param[in] server         A pointer to the server to be updated.
+ * @param[in] id             The unique identifier for the sender or
+ *                           receiver whose state has changed. The
+ *                           transport is inferred from the existing
+ *                           sender or receiver with this id.
+ * @param[in] transport_file The new transport file data reflecting the
+ *                           active state of the sender or receiver, or
+ *                           a null pointer when the sender or receiver
+ *                           has been deactivated. The new data only
+ *                           updates the transport parameters of the
+ *                           sender or receiver, not the media format.
+ *                           See
+ *                           @ref NvNmosSenderConfig::transport_file and
+ *                           @ref NvNmosReceiverConfig::transport_file
+ *                           for the recognised format (SDP for RTP,
+ *                           MXL flow definition JSON for MXL) and the
+ *                           supported 'x-nvnmos-' extensions.
  * @return Whether the update has been successfully applied.
  */
 NVNMOS_API
-bool nmos_connection_rtp_activate(
+bool nmos_connection_activate(
     NvNmosNodeServer *server,
     const char *id,
-    const char *sdp);
+    const char *transport_file);
 
 #ifdef __cplusplus
 }

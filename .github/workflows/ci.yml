@@ -21,6 +21,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+
+      # DO NOT MERGE: build against jonathan-r-thorpe/nmos-cpp branch
+      # nmos-mxl-test until https://github.com/sony/nmos-cpp/pull/483
+      # is merged and a Conan Center release is published.
+      - name: Clone nmos-cpp alongside nvnmos
+        run: |
+          parent="$(dirname "${GITHUB_WORKSPACE}")"
+          git clone --depth 1 --branch nmos-mxl-test \
+            https://github.com/jonathan-r-thorpe/nmos-cpp.git \
+            "${parent}/nmos-cpp"
+
       - name: Install Conan
         run: pip install conan~=2.2 && conan profile detect
       - name: Install dependencies
@@ -29,13 +40,15 @@ jobs:
             --settings:all build_type=${{ matrix.config }} \
             --build=missing \
             --output-folder=src/conan \
-            --lockfile=src/conan.lock
+            --lockfile="" \
+            -o "&:nmos_cpp_from_source=True"
       - name: Generate nvnmos (Linux)
         if: runner.os == 'Linux'
         run: |
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
             -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
+            -DUSE_ADD_SUBDIRECTORY=ON \
             src
       - name: Generate nvnmos (Windows)
         if: runner.os == 'Windows'
@@ -43,15 +56,17 @@ jobs:
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.config }} \
+            -DUSE_ADD_SUBDIRECTORY=ON \
             src
       - name: Build nvnmos (Linux)
         if: runner.os == 'Linux'
         run: |
-          cmake --build build --parallel
+          # default -j$(nproc) causes out of memory on hosted runners (cc1plus killed).
+          cmake --build build --parallel 2
       - name: Build nvnmos (Windows)
         if: runner.os == 'Windows'
         run: |
-          cmake --build build --config=${{ matrix.config }} --parallel
+          cmake --build build --config=${{ matrix.config }} --parallel 2
   license-check:
     runs-on: ubuntu-24.04
     steps:

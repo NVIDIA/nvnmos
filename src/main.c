@@ -64,6 +64,50 @@
 #define AUDIO_FORMAT_SPECIFIC_PARAMETERS "channel-order=SMPTE2110.(ST); "
 #endif
 
+// example MXL video flow definition parameters
+// video/v210 (YCbCr-4:2:2, 10 bit, progressive) is hard-coded
+#ifndef MXL_VIDEO_FLOW_ID
+#define MXL_VIDEO_FLOW_ID "5ede7baf-9dcf-4b80-9e44-bc0f615633b4"
+#endif
+#ifndef MXL_VIDEO_DESCRIPTION
+#define MXL_VIDEO_DESCRIPTION "YCbCr-4:2:2, 10 bit, 1920 x 1080, progressive, 59.94 Hz"
+#endif
+#ifndef MXL_VIDEO_GRAIN_RATE_NUM
+#define MXL_VIDEO_GRAIN_RATE_NUM 60000
+#endif
+#ifndef MXL_VIDEO_GRAIN_RATE_DEN
+#define MXL_VIDEO_GRAIN_RATE_DEN 1001
+#endif
+#ifndef MXL_VIDEO_FRAME_WIDTH
+#define MXL_VIDEO_FRAME_WIDTH 1920
+#endif
+#ifndef MXL_VIDEO_FRAME_HEIGHT
+#define MXL_VIDEO_FRAME_HEIGHT 1080
+#endif
+#ifndef MXL_VIDEO_COLORSPACE
+#define MXL_VIDEO_COLORSPACE "BT709"
+#endif
+#ifndef MXL_VIDEO_TRANSFER_CHARACTERISTIC
+#define MXL_VIDEO_TRANSFER_CHARACTERISTIC "SDR"
+#endif
+
+// example MXL audio flow definition parameters
+// audio/float32 at 48 kHz is hard-coded
+#ifndef MXL_AUDIO_FLOW_ID
+#define MXL_AUDIO_FLOW_ID "92029e8a-fb63-46d7-b2f4-abe2f8dbf083"
+#endif
+#ifndef MXL_AUDIO_DESCRIPTION
+#define MXL_AUDIO_DESCRIPTION "2 ch, 48 kHz, 32 bit"
+#endif
+#ifndef MXL_AUDIO_CHANNEL_COUNT
+#define MXL_AUDIO_CHANNEL_COUNT 2
+#endif
+
+// example MXL domain id (UUIDv4); see AMWA BCP-007-03
+#ifndef MXL_DOMAIN_ID
+#define MXL_DOMAIN_ID "212ba127-f746-43c5-87d4-3962ec7ff284"
+#endif
+
 #ifndef CLK_PTP
 #define CLK_PTP true
 #endif
@@ -77,13 +121,13 @@ static void handle_log(
     printf("%s [%d:%s]\n", message, level, categories);
 }
 
-static bool handle_rtp_connection_activated(
+static bool handle_connection_activated(
     NvNmosNodeServer *server,
     const char *id,
-    const char *sdp)
+    const char *transport_file)
 {
-    printf("%s %s\n", id, sdp ? "activated via NMOS" : "deactivated via NMOS");
-    if (server->user_data && sdp) printf("%s\n", sdp);
+    printf("%s %s\n", id, transport_file ? "activated via NMOS" : "deactivated via NMOS");
+    if (server->user_data && transport_file) printf("%s\n", transport_file);
     return true;
 }
 
@@ -215,6 +259,77 @@ static bool init_audio_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
     return 0 < result && (size_t)result < sdp_size;
 }
 
+// construct example MXL flow definition JSON for an uncompressed v210 video sender or receiver
+// see AMWA BCP-007-03 and the MXL library examples
+static bool init_video_flow_def(char* flow_def, size_t flow_def_size, bool sender, const char* id, const char* mxl_domain_id, const char* mxl_flow_id, const char* label, const char* group_hint)
+{
+    int result = snprintf(flow_def,
+        flow_def_size,
+        "{\n"
+        "  \"x-nvnmos-id\": \"%s\",\n"
+        "  \"x-nvnmos-mxl-domain-id\": \"%s\",\n"
+        "  \"id\": \"%s\",\n"
+        "  \"label\": \"%s\",\n"
+        "  \"description\": \"" MXL_VIDEO_DESCRIPTION "\",\n"
+        "  \"tags\": { \"urn:x-nmos:tag:grouphint/v1.0\": [ \"%s\" ] },\n"
+        "  \"format\": \"urn:x-nmos:format:video\",\n"
+        "  \"media_type\": \"video/v210\",\n"
+        "  \"grain_rate\": { \"numerator\": %d, \"denominator\": %d },\n"
+        "  \"frame_width\": %d,\n"
+        "  \"frame_height\": %d,\n"
+        "  \"interlace_mode\": \"progressive\",\n"
+        "  \"colorspace\": \"" MXL_VIDEO_COLORSPACE "\",\n"
+        "  \"transfer_characteristic\": \"" MXL_VIDEO_TRANSFER_CHARACTERISTIC "\",\n"
+        "  \"components\": [\n"
+        "    { \"name\": \"Y\",  \"width\": %d, \"height\": %d, \"bit_depth\": 10 },\n"
+        "    { \"name\": \"Cb\", \"width\": %d, \"height\": %d, \"bit_depth\": 10 },\n"
+        "    { \"name\": \"Cr\", \"width\": %d, \"height\": %d, \"bit_depth\": 10 }\n"
+        "  ]\n"
+        "}\n",
+        id,
+        mxl_domain_id,
+        mxl_flow_id,
+        label,
+        group_hint,
+        MXL_VIDEO_GRAIN_RATE_NUM, MXL_VIDEO_GRAIN_RATE_DEN,
+        MXL_VIDEO_FRAME_WIDTH, MXL_VIDEO_FRAME_HEIGHT,
+        MXL_VIDEO_FRAME_WIDTH, MXL_VIDEO_FRAME_HEIGHT,
+        MXL_VIDEO_FRAME_WIDTH / 2, MXL_VIDEO_FRAME_HEIGHT,
+        MXL_VIDEO_FRAME_WIDTH / 2, MXL_VIDEO_FRAME_HEIGHT
+    );
+
+    return 0 < result && (size_t)result < flow_def_size;
+}
+
+// construct example MXL flow definition JSON for an audio/float32 sender or receiver
+static bool init_audio_flow_def(char* flow_def, size_t flow_def_size, bool sender, const char* id, const char* mxl_domain_id, const char* mxl_flow_id, const char* label, const char* group_hint)
+{
+    int result = snprintf(flow_def,
+        flow_def_size,
+        "{\n"
+        "  \"x-nvnmos-id\": \"%s\",\n"
+        "  \"x-nvnmos-mxl-domain-id\": \"%s\",\n"
+        "  \"id\": \"%s\",\n"
+        "  \"label\": \"%s\",\n"
+        "  \"description\": \"" MXL_AUDIO_DESCRIPTION "\",\n"
+        "  \"tags\": { \"urn:x-nmos:tag:grouphint/v1.0\": [ \"%s\" ] },\n"
+        "  \"format\": \"urn:x-nmos:format:audio\",\n"
+        "  \"media_type\": \"audio/float32\",\n"
+        "  \"sample_rate\": { \"numerator\": 48000, \"denominator\": 1 },\n"
+        "  \"channel_count\": %d,\n"
+        "  \"bit_depth\": 32\n"
+        "}\n",
+        id,
+        mxl_domain_id,
+        mxl_flow_id,
+        label,
+        group_hint,
+        MXL_AUDIO_CHANNEL_COUNT
+    );
+
+    return 0 < result && (size_t)result < flow_def_size;
+}
+
 static bool get_continue(void)
 {
     printf("Continue ([y]/n)?\n");
@@ -269,29 +384,52 @@ int main(int argc, char *argv[])
     if (!init_video_sdp(sink_sdp[0], sizeof sink_sdp[0], true, "sink-0", interface_ip, "NvNmos Video Sender", "tx-0:video")) return 1;
     if (!init_audio_sdp(sink_sdp[1], sizeof sink_sdp[1], true, "sink-1", interface_ip, "NvNmos Audio Sender", "tx-0:audio")) return 1;
 
-    NvNmosReceiverConfig source_config[2] = { 0 };
+    // example MXL domain and per-flow ids (just hard-coded UUIDs for this example)
+    const char* mxl_domain_id = MXL_DOMAIN_ID;
 
-    source_config[0].sdp = source_sdp[0];
-    source_config[1].sdp = source_sdp[1];
+    char source_mxl[2][2048] = { 0 };
+    if (!init_video_flow_def(source_mxl[0], sizeof source_mxl[0], false, "mxl-source-0", mxl_domain_id, MXL_VIDEO_FLOW_ID, "NvNmos MXL Video Receiver", "rx-mxl-0:video")) return 1;
+    if (!init_audio_flow_def(source_mxl[1], sizeof source_mxl[1], false, "mxl-source-1", mxl_domain_id, MXL_AUDIO_FLOW_ID, "NvNmos MXL Audio Receiver", "rx-mxl-0:audio")) return 1;
+
+    char sink_mxl[2][2048] = { 0 };
+    if (!init_video_flow_def(sink_mxl[0], sizeof sink_mxl[0], true, "mxl-sink-0", mxl_domain_id, MXL_VIDEO_FLOW_ID, "NvNmos MXL Video Sender", "tx-mxl-0:video")) return 1;
+    if (!init_audio_flow_def(sink_mxl[1], sizeof sink_mxl[1], true, "mxl-sink-1", mxl_domain_id, MXL_AUDIO_FLOW_ID, "NvNmos MXL Audio Sender", "tx-mxl-0:audio")) return 1;
+
+    NvNmosReceiverConfig source_config[4] = { 0 };
+
+    source_config[0].transport = NVNMOS_TRANSPORT_RTP;
+    source_config[0].transport_file = source_sdp[0];
+    source_config[1].transport = NVNMOS_TRANSPORT_RTP;
+    source_config[1].transport_file = source_sdp[1];
+    source_config[2].transport = NVNMOS_TRANSPORT_MXL;
+    source_config[2].transport_file = source_mxl[0];
+    source_config[3].transport = NVNMOS_TRANSPORT_MXL;
+    source_config[3].transport_file = source_mxl[1];
 
     node_config.receivers = &source_config[0];
-    node_config.num_receivers = 2;
+    node_config.num_receivers = 4;
 
-    NvNmosSenderConfig sink_config[2] = { 0 };
+    NvNmosSenderConfig sink_config[4] = { 0 };
 
-    sink_config[0].sdp = sink_sdp[0];
-    sink_config[1].sdp = sink_sdp[1];
+    sink_config[0].transport = NVNMOS_TRANSPORT_RTP;
+    sink_config[0].transport_file = sink_sdp[0];
+    sink_config[1].transport = NVNMOS_TRANSPORT_RTP;
+    sink_config[1].transport_file = sink_sdp[1];
+    sink_config[2].transport = NVNMOS_TRANSPORT_MXL;
+    sink_config[2].transport_file = sink_mxl[0];
+    sink_config[3].transport = NVNMOS_TRANSPORT_MXL;
+    sink_config[3].transport_file = sink_mxl[1];
 
     node_config.senders = &sink_config[0];
-    node_config.num_senders = 2;
+    node_config.num_senders = 4;
 
-    node_config.rtp_connection_activated = &handle_rtp_connection_activated;
+    node_config.connection_activated = &handle_connection_activated;
 
     node_config.log_callback = &handle_log;
     node_config.log_level = argc > 4 ? atoi(argv[4]) : NVNMOS_LOG_ERROR;
 
     NvNmosNodeServer node_server = { 0 };
-    // as an example, use user_data to make handle_rtp_connection_activated print the SDP data
+    // as an example, use user_data to make handle_connection_activated print the transport file
     node_server.user_data = (void*)1;
 
     printf("Creating NvNmos server...\n");
@@ -300,22 +438,34 @@ int main(int argc, char *argv[])
     printf("Removing some senders and receivers...\n");
     if (!remove_nmos_receiver_from_node_server(&node_server, "source-0")) goto cleanup;
     if (!remove_nmos_sender_from_node_server(&node_server, "sink-1")) goto cleanup;
+    if (!remove_nmos_receiver_from_node_server(&node_server, "mxl-source-0")) goto cleanup;
+    if (!remove_nmos_sender_from_node_server(&node_server, "mxl-sink-1")) goto cleanup;
     if (!get_continue()) goto cleanup;
     printf("Adding back some senders and receivers...\n");
     if (!add_nmos_receiver_to_node_server(&node_server, &source_config[0])) goto cleanup;
     if (!add_nmos_sender_to_node_server(&node_server, &sink_config[1])) goto cleanup;
+    if (!add_nmos_receiver_to_node_server(&node_server, &source_config[2])) goto cleanup;
+    if (!add_nmos_sender_to_node_server(&node_server, &sink_config[3])) goto cleanup;
     if (!get_continue()) goto cleanup;
     printf("Activating senders and receivers...\n");
-    if (!nmos_connection_rtp_activate(&node_server, "source-0", source_config[0].sdp)) goto cleanup;
-    if (!nmos_connection_rtp_activate(&node_server, "source-1", source_config[1].sdp)) goto cleanup;
-    if (!nmos_connection_rtp_activate(&node_server, "sink-0", sink_config[0].sdp)) goto cleanup;
-    if (!nmos_connection_rtp_activate(&node_server, "sink-1", sink_config[1].sdp)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "source-0", source_config[0].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "source-1", source_config[1].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "sink-0", sink_config[0].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "sink-1", sink_config[1].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "mxl-source-0", source_config[2].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "mxl-source-1", source_config[3].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "mxl-sink-0", sink_config[2].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "mxl-sink-1", sink_config[3].transport_file)) goto cleanup;
     if (!get_continue()) goto cleanup;
     printf("Deactivating senders and receivers...\n");
-    if (!nmos_connection_rtp_activate(&node_server, "source-0", 0)) goto cleanup;
-    if (!nmos_connection_rtp_activate(&node_server, "source-1", 0)) goto cleanup;
-    if (!nmos_connection_rtp_activate(&node_server, "sink-0", 0)) goto cleanup;
-    if (!nmos_connection_rtp_activate(&node_server, "sink-1", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "source-0", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "source-1", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "sink-0", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "sink-1", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "mxl-source-0", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "mxl-source-1", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "mxl-sink-0", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, "mxl-sink-1", 0)) goto cleanup;
     if (!get_continue()) goto cleanup;
     printf("Destroying NvNmos server...\n");
     if (!destroy_nmos_node_server(&node_server)) return 1;

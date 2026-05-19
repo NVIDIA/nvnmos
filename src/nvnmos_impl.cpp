@@ -98,7 +98,7 @@ namespace nvnmos
         // with support for the custom SDP attributes in nvnmos::attributes for senders as well as receivers
         web::json::value get_session_description_transport_params(const nmos::type& type, const web::json::value& session_description);
 
-        // get the internal id from the custom attribute
+        // get the (required) internal id from the custom attribute; throws std::invalid_argument if absent or empty
         utility::string_t get_session_description_internal_id(const web::json::value& session_description);
 
         // get the optional group hint from the custom attribute
@@ -150,6 +150,28 @@ namespace nvnmos
     // forward declarations
     nmos::connection_resource_auto_resolver make_node_implementation_auto_resolver();
 
+    namespace impl
+    {
+        // parse an MXL flow definition (JSON) including nvnmos extensions
+        // (x-nvnmos-* top-level properties); propagates web::json::json_exception on parse error
+        web::json::value parse_mxl_flow_def(const std::string& flow_def);
+        // extract the (required) internal id from the x-nvnmos-id top-level property;
+        // throws std::invalid_argument if absent or empty
+        utility::string_t get_mxl_flow_def_internal_id(const web::json::value& flow_def);
+        // extract an optional group hint from the tags property (or empty)
+        utility::string_t get_mxl_flow_def_group_hint(const web::json::value& flow_def);
+        // returns true if the x-nvnmos-caps top-level property is present
+        bool has_mxl_flow_def_caps(const web::json::value& flow_def);
+        // extract the (required) MXL domain id from the x-nvnmos-mxl-domain-id top-level property;
+        // throws std::invalid_argument if absent or empty (the IS-05 transport parameter defaults
+        // to "auto" and is resolved at activation time from this value)
+        utility::string_t get_mxl_flow_def_domain_id(const web::json::value& flow_def);
+        // extract the top-level 'id' property (or empty)
+        utility::string_t get_mxl_flow_def_id(const web::json::value& flow_def);
+        // produce a flow definition JSON string with the active MXL transport parameters spliced in
+        std::string make_mxl_flow_def(web::json::value flow_def, const utility::string_t& mxl_domain_id, const utility::string_t& mxl_flow_id);
+    }
+
     void node_implementation_init_(nmos::resources& node_resources, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
     {
         using web::json::value;
@@ -187,7 +209,7 @@ namespace nvnmos
         settings[nvnmos::fields::receivers] = value::object();
     }
 
-    void node_implementation_add_sender_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& sdp_, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
+    void node_implementation_add_rtp_sender_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& sdp_, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
     {
         using web::json::value;
         using web::json::value_of;
@@ -382,11 +404,11 @@ namespace nvnmos
         // insert into settings
 
         nvnmos::fields::senders(settings)[sender_id] = value_of({
-            { nvnmos::fields::sdp, utility::s2us(sdp_) }
+            { nvnmos::fields::transport_file, utility::s2us(sdp_) }
         });
     }
 
-    void node_implementation_add_receiver_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& sdp_, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
+    void node_implementation_add_rtp_receiver_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& sdp_, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
     {
         using web::json::value;
         using web::json::value_of;
@@ -559,7 +581,261 @@ namespace nvnmos
         // insert into settings
 
         nvnmos::fields::receivers(settings)[receiver_id] = value_of({
-            { nvnmos::fields::sdp, utility::s2us(sdp_) }
+            { nvnmos::fields::transport_file, utility::s2us(sdp_) }
+        });
+    }
+
+    void node_implementation_add_mxl_sender_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& flow_def_, nmos::settings& settings, slog::base_gate& gate)
+    {
+        using web::json::value;
+        using web::json::value_of;
+
+        const auto flow_def = impl::parse_mxl_flow_def(flow_def_);
+        const auto internal_id = impl::get_mxl_flow_def_internal_id(flow_def);
+        const auto group_hint = impl::get_mxl_flow_def_group_hint(flow_def);
+        const auto mxl_domain_id = impl::get_mxl_flow_def_domain_id(flow_def);
+
+        const auto seed_id = nmos::experimental::fields::seed_id(settings);
+        const auto node_id = impl::make_id(seed_id, nmos::types::node);
+        const auto device_id = impl::make_id(seed_id, nmos::types::device);
+        const auto source_id = impl::make_id(seed_id, nmos::types::source, internal_id);
+        const auto flow_id = impl::make_id(seed_id, nmos::types::flow, internal_id);
+        const auto sender_id = impl::make_id(seed_id, nmos::types::sender, internal_id);
+
+        // the NMOS Flow id is always generated (flow_id, above); the MXL flow id is taken from the flow
+        // definition's 'id' property if present, otherwise it falls back to the NMOS Flow id
+        const auto explicit_mxl_flow_id = impl::get_mxl_flow_def_id(flow_def);
+        const auto mxl_flow_id = !explicit_mxl_flow_id.empty() ? explicit_mxl_flow_id : flow_id;
+
+        // for now, only manage a single clock (internal); MXL has no equivalent to RTP ts-refclk,
+        // that will require a new nvnmos extension property
+        const auto clock = nmos::clock_names::clk0;
+
+        const nmos::media_type media_type{ nmos::fields::media_type(flow_def) };
+        const auto format = impl::get_format(media_type);
+
+        nmos::resource source;
+        nmos::resource flow;
+
+        if (impl::format::video == format)
+        {
+            // assuming an MXL flow definition follows IS-04 v1.3 once an MXL SDK schema lands,
+            // the structural properties (grain_rate, frame_width, frame_height, colorspace) are
+            // required; let nmos::fields::* propagate json_exception if absent
+            const auto grain_rate = nmos::parse_rational(nmos::fields::grain_rate(flow_def));
+            const auto frame_width = nmos::fields::frame_width(flow_def);
+            const auto frame_height = nmos::fields::frame_height(flow_def);
+            const auto colorspace = nmos::colorspace{ nmos::fields::colorspace(flow_def) };
+            // interlace_mode and transfer_characteristic have defaults; absent in MXL flow_def
+            // maps to absent in NMOS Flow
+            const auto interlace_mode = nmos::interlace_mode{ nmos::fields::interlace_mode(flow_def) };
+            const auto transfer_characteristic = nmos::transfer_characteristic{ nmos::fields::transfer_characteristic(flow_def) };
+
+            // components is required (carries sampling and bit depth); use nmos-cpp's helper
+            // to classify the sampling and let it throw on unsupported components
+            const auto& components = nmos::fields::components(flow_def);
+            const auto sampling = nmos::details::make_sampling(components);
+            const auto bit_depth = nmos::fields::bit_depth(components.at(0));
+
+            source = nmos::make_video_source(source_id, device_id, clock, grain_rate, settings);
+            flow = nmos::make_coded_video_flow(
+                flow_id, source_id, device_id,
+                grain_rate, frame_width, frame_height, interlace_mode,
+                colorspace, transfer_characteristic, sampling, bit_depth,
+                media_type,
+                settings
+            );
+        }
+        else if (impl::format::audio == format)
+        {
+            // sample_rate, channel_count and bit_depth are required; let the accessors propagate
+            // json_exception if absent
+            const auto sample_rate = nmos::parse_rational(nmos::fields::sample_rate(flow_def));
+            const auto channel_count = nvnmos::fields::channel_count(flow_def);
+            const auto bit_depth = nmos::fields::bit_depth(flow_def);
+
+            const auto channels = boost::copy_range<std::vector<nmos::channel>>(
+                boost::irange(0, channel_count) | boost::adaptors::transformed([&](const int& index)
+            {
+                return nmos::channel{ U(""), nmos::channel_symbols::Undefined(1 + index) };
+            }));
+
+            source = nmos::make_audio_source(source_id, device_id, clock, sample_rate, channels, settings);
+            flow = nmos::make_raw_audio_flow(flow_id, source_id, device_id, sample_rate, bit_depth, settings);
+            flow.data[nmos::fields::media_type] = value::string(media_type.name);
+        }
+        else if (impl::format::data == format)
+        {
+            const auto grain_rate = nmos::parse_rational(nmos::fields::grain_rate(flow_def));
+
+            source = nmos::make_data_source(source_id, device_id, clock, grain_rate, settings);
+            flow = nmos::make_sdianc_data_flow(flow_id, source_id, device_id, {}, settings);
+            flow.data[nmos::fields::grain_rate] = nmos::make_rational(grain_rate);
+        }
+        else
+        {
+            slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Unsupported MXL media type for sender: " << media_type.name;
+            throw node_implementation_exception();
+        }
+
+        // MXL sender: no manifest_href (no /transportfile), no interface_bindings
+        auto sender = nmos::make_sender(sender_id, flow_id, nmos::transports::mxl, device_id, {}, {}, settings);
+
+        auto connection_sender = nmos::make_connection_mxl_sender(sender_id, mxl_domain_id, mxl_flow_id);
+
+        const auto resolve_auto = make_node_implementation_auto_resolver();
+        resolve_auto(sender, connection_sender, connection_sender.data[nmos::fields::endpoint_active][nmos::fields::transport_params]);
+
+        // label and description are required (per IS-04 v1.3); let the accessors propagate
+        // json_exception if absent
+        sender.data[nmos::fields::label] = value::string(nmos::fields::label(flow_def));
+        sender.data[nmos::fields::description] = value::string(nmos::fields::description(flow_def));
+        impl::set_internal_id(sender, internal_id);
+        if (!group_hint.empty()) impl::set_group_hint(sender, group_hint);
+
+        if (!insert_resource(node_resources, std::move(source)).second) throw node_implementation_exception();
+        if (!insert_resource(node_resources, std::move(flow)).second) throw node_implementation_exception();
+        if (!insert_resource(node_resources, std::move(sender)).second) throw node_implementation_exception();
+        if (!insert_resource(connection_resources, std::move(connection_sender)).second) throw node_implementation_exception();
+
+        // update device's deprecated senders array
+
+        nmos::modify_resource(node_resources, device_id, [&](nmos::resource& device)
+        {
+            device.data[nmos::fields::version] = value::string(nmos::make_version());
+            web::json::push_back(nmos::fields::senders(device.data), sender_id);
+        });
+
+        // insert into settings
+
+        nvnmos::fields::senders(settings)[sender_id] = value_of({
+            { nvnmos::fields::transport_file, utility::s2us(flow_def_) }
+        });
+    }
+
+    void node_implementation_add_mxl_receiver_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& flow_def_, nmos::settings& settings, slog::base_gate& gate)
+    {
+        using web::json::value;
+        using web::json::value_of;
+
+        const auto flow_def = impl::parse_mxl_flow_def(flow_def_);
+        const auto internal_id = impl::get_mxl_flow_def_internal_id(flow_def);
+        const auto group_hint = impl::get_mxl_flow_def_group_hint(flow_def);
+        const auto mxl_domain_id = impl::get_mxl_flow_def_domain_id(flow_def);
+        const auto want_caps = !impl::has_mxl_flow_def_caps(flow_def);
+
+        const auto seed_id = nmos::experimental::fields::seed_id(settings);
+        const auto device_id = impl::make_id(seed_id, nmos::types::device);
+        const auto receiver_id = impl::make_id(seed_id, nmos::types::receiver, internal_id);
+
+        const nmos::media_type media_type{ nmos::fields::media_type(flow_def) };
+        const auto format = impl::get_format(media_type);
+
+        nmos::resource receiver;
+
+        if (impl::format::video == format)
+        {
+            receiver = nmos::make_receiver(receiver_id, device_id, nmos::transports::mxl, {}, nmos::formats::video, { media_type }, settings);
+
+            if (want_caps)
+            {
+                // structural properties are required; let nmos::fields::* throw if absent
+                const auto grain_rate = nmos::parse_rational(nmos::fields::grain_rate(flow_def));
+                const auto frame_width = nmos::fields::frame_width(flow_def);
+                const auto frame_height = nmos::fields::frame_height(flow_def);
+                const auto& components = nmos::fields::components(flow_def);
+                const auto sampling = nmos::details::make_sampling(components);
+                const auto interlace_mode_name = nmos::fields::interlace_mode(flow_def);
+                const auto interlace_modes = nmos::interlace_modes::progressive.name == interlace_mode_name
+                    ? std::vector<utility::string_t>{ nmos::interlace_modes::progressive.name }
+                    : std::vector<utility::string_t>{ nmos::interlace_modes::interlaced_bff.name, nmos::interlace_modes::interlaced_tff.name, nmos::interlace_modes::interlaced_psf.name };
+
+                receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
+                    value_of({
+                        { nmos::caps::format::media_type, nmos::make_caps_string_constraint({ media_type.name }) },
+                        { nmos::caps::format::grain_rate, nmos::make_caps_rational_constraint({ grain_rate }) },
+                        { nmos::caps::format::frame_width, nmos::make_caps_integer_constraint({ frame_width }) },
+                        { nmos::caps::format::frame_height, nmos::make_caps_integer_constraint({ frame_height }) },
+                        { !interlace_mode_name.empty() ? nmos::caps::format::interlace_mode.key : U(""), nmos::make_caps_string_constraint(interlace_modes) },
+                        { nmos::caps::format::color_sampling, nmos::make_caps_string_constraint({ sampling.name }) }
+                    })
+                });
+                receiver.data[nmos::fields::version] = receiver.data[nmos::fields::caps][nmos::fields::version] = value(nmos::make_version());
+            }
+        }
+        else if (impl::format::audio == format)
+        {
+            // sample_rate, channel_count and bit_depth are required; let nmos::fields::* throw if absent
+            const auto sample_rate = nmos::parse_rational(nmos::fields::sample_rate(flow_def));
+            const auto channel_count = nvnmos::fields::channel_count(flow_def);
+            const auto bit_depth = nmos::fields::bit_depth(flow_def);
+
+            receiver = nmos::make_receiver(receiver_id, device_id, nmos::transports::mxl, {}, nmos::formats::audio, { media_type }, settings);
+
+            if (want_caps)
+            {
+                receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
+                    value_of({
+                        { nmos::caps::format::media_type, nmos::make_caps_string_constraint({ media_type.name }) },
+                        { nmos::caps::format::channel_count, nmos::make_caps_integer_constraint({ channel_count }) },
+                        { nmos::caps::format::sample_rate, nmos::make_caps_rational_constraint({ sample_rate }) },
+                        { nmos::caps::format::sample_depth, nmos::make_caps_integer_constraint({ bit_depth }) }
+                    })
+                });
+                receiver.data[nmos::fields::version] = receiver.data[nmos::fields::caps][nmos::fields::version] = value(nmos::make_version());
+            }
+        }
+        else if (impl::format::data == format)
+        {
+            receiver = nmos::make_sdianc_data_receiver(receiver_id, device_id, nmos::transports::mxl, {}, settings);
+
+            if (want_caps)
+            {
+                if (flow_def.has_field(nmos::fields::grain_rate))
+                {
+                    const auto grain_rate = nmos::parse_rational(nmos::fields::grain_rate(flow_def));
+                    receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
+                        value_of({
+                            { nmos::caps::format::grain_rate, nmos::make_caps_rational_constraint({ grain_rate }) }
+                        })
+                    });
+                    receiver.data[nmos::fields::version] = receiver.data[nmos::fields::caps][nmos::fields::version] = value(nmos::make_version());
+                }
+            }
+        }
+        else
+        {
+            slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Unsupported MXL media type for receiver: " << media_type.name;
+            throw node_implementation_exception();
+        }
+
+        auto connection_receiver = nmos::make_connection_mxl_receiver(receiver_id, mxl_domain_id);
+
+        const auto resolve_auto = make_node_implementation_auto_resolver();
+        resolve_auto(receiver, connection_receiver, connection_receiver.data[nmos::fields::endpoint_active][nmos::fields::transport_params]);
+
+        // label and description are required (per IS-04 v1.3); let the accessors propagate
+        // json_exception if absent
+        receiver.data[nmos::fields::label] = value::string(nmos::fields::label(flow_def));
+        receiver.data[nmos::fields::description] = value::string(nmos::fields::description(flow_def));
+        impl::set_internal_id(receiver, internal_id);
+        if (!group_hint.empty()) impl::set_group_hint(receiver, group_hint);
+
+        if (!insert_resource(node_resources, std::move(receiver)).second) throw node_implementation_exception();
+        if (!insert_resource(connection_resources, std::move(connection_receiver)).second) throw node_implementation_exception();
+
+        // update device's deprecated receivers array
+
+        nmos::modify_resource(node_resources, device_id, [&](nmos::resource& device)
+        {
+            device.data[nmos::fields::version] = value::string(nmos::make_version());
+            web::json::push_back(nmos::fields::receivers(device.data), receiver_id);
+        });
+
+        // insert into settings
+
+        nvnmos::fields::receivers(settings)[receiver_id] = value_of({
+            { nvnmos::fields::transport_file, utility::s2us(flow_def_) }
         });
     }
 
@@ -653,26 +929,50 @@ namespace nvnmos
         model.notify();
     }
 
-    // This constructs and inserts sources/flows/senders into the model, based on the specified SDP file.
-    void node_implementation_add_sender(nmos::node_model& model, const std::string& sdp, slog::base_gate& gate)
+    // This constructs and inserts sources/flows/senders into the model, based on the specified transport file.
+    void node_implementation_add_sender(nmos::node_model& model, const nmos::transport& transport, const std::string& transport_file, slog::base_gate& gate)
     {
         auto lock = model.write_lock(); // in order to update the resources
 
         const auto host_interfaces = web::hosts::experimental::host_interfaces();
 
-        node_implementation_add_sender_(model.node_resources, model.connection_resources, sdp, host_interfaces, model.settings, gate);
+        if (nmos::transports::rtp == nmos::transport_base(transport))
+        {
+            node_implementation_add_rtp_sender_(model.node_resources, model.connection_resources, transport_file, host_interfaces, model.settings, gate);
+        }
+        else if (nmos::transports::mxl == nmos::transport_base(transport))
+        {
+            node_implementation_add_mxl_sender_(model.node_resources, model.connection_resources, transport_file, model.settings, gate);
+        }
+        else
+        {
+            slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Unsupported transport: " << transport.name;
+            throw node_implementation_exception();
+        }
 
         model.notify();
     }
 
-    // This constructs and inserts a receiver into the model, based on the specified SDP file.
-    void node_implementation_add_receiver(nmos::node_model& model, const std::string& sdp, slog::base_gate& gate)
+    // This constructs and inserts a receiver into the model, based on the specified transport file.
+    void node_implementation_add_receiver(nmos::node_model& model, const nmos::transport& transport, const std::string& transport_file, slog::base_gate& gate)
     {
         auto lock = model.write_lock(); // in order to update the resources
 
         const auto host_interfaces = web::hosts::experimental::host_interfaces();
 
-        node_implementation_add_receiver_(model.node_resources, model.connection_resources, sdp, host_interfaces, model.settings, gate);
+        if (nmos::transports::rtp == nmos::transport_base(transport))
+        {
+            node_implementation_add_rtp_receiver_(model.node_resources, model.connection_resources, transport_file, host_interfaces, model.settings, gate);
+        }
+        else if (nmos::transports::mxl == nmos::transport_base(transport))
+        {
+            node_implementation_add_mxl_receiver_(model.node_resources, model.connection_resources, transport_file, model.settings, gate);
+        }
+        else
+        {
+            slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Unsupported transport: " << transport.name;
+            throw node_implementation_exception();
+        }
 
         model.notify();
     }
@@ -785,7 +1085,9 @@ namespace nvnmos
             // this code relies on the specific constraints added by node_implementation_init
             const auto& constraints = nmos::fields::endpoint_constraints(connection_resource.data);
 
-            const auto is_rtp = nmos::transports::rtp == nmos::transport_base(nmos::transport{ nmos::fields::transport(resource.data) });
+            const auto transport_base = nmos::transport_base(nmos::transport{ nmos::fields::transport(resource.data) });
+            const auto is_rtp = nmos::transports::rtp == transport_base;
+            const auto is_mxl = nmos::transports::mxl == transport_base;
 
             // "In some cases the behaviour is more complex, and may be determined by the vendor."
             // See https://specs.amwa.tv/is-05/releases/v1.0.0/docs/2.2._APIs_-_Server_Side_Implementation.html#use-of-auto
@@ -808,6 +1110,17 @@ namespace nvnmos
                 // lastly, apply the specification defaults for any properties not handled above
                 nmos::resolve_rtp_auto(id_type.second, transport_params);
             }
+            else if (nmos::types::sender == id_type.second && is_mxl)
+            {
+                // BCP-007-03: MXL has a single transport leg per sender
+                nmos::details::resolve_auto(transport_params[0], nmos::fields::mxl_domain_id, [&] { return web::json::front(nmos::fields::constraint_enum(constraints.at(0).at(nmos::fields::mxl_domain_id))); });
+                nmos::details::resolve_auto(transport_params[0], nmos::fields::mxl_flow_id, [&] { return web::json::front(nmos::fields::constraint_enum(constraints.at(0).at(nmos::fields::mxl_flow_id))); });
+            }
+            else if (nmos::types::receiver == id_type.second && is_mxl)
+            {
+                // BCP-007-03: MXL has a single transport leg per receiver, and mxl_flow_id does not use "auto" (UUID or null only)
+                nmos::details::resolve_auto(transport_params[0], nmos::fields::mxl_domain_id, [&] { return web::json::front(nmos::fields::constraint_enum(constraints.at(0).at(nmos::fields::mxl_domain_id))); });
+            }
         };
     }
 
@@ -826,7 +1139,7 @@ namespace nvnmos
 
             if (configs.as_object().end() != config && is_rtp)
             {
-                const auto& sdp_data = nvnmos::fields::sdp(config->second);
+                const auto& sdp_data = nvnmos::fields::transport_file(config->second);
 
                 const auto parsed_sdp = sdp::parse_session_description(utility::us2s(sdp_data));
 
@@ -872,12 +1185,12 @@ namespace nvnmos
     }
 
     // Connection API activation callback to perform application-specific operations to complete activation
-    nmos::connection_activation_handler make_node_implementation_connection_activation_handler(rtp_connection_activation_handler rtp_connection_activated, nmos::settings& settings, slog::base_gate& gate)
+    nmos::connection_activation_handler make_node_implementation_connection_activation_handler(connection_activation_handler connection_activated, nmos::settings& settings, slog::base_gate& gate)
     {
         using web::json::value;
         using web::json::value_from_elements;
 
-        return [&settings, rtp_connection_activated, &gate](const nmos::resource& resource, const nmos::resource& connection_resource)
+        return [&settings, connection_activated, &gate](const nmos::resource& resource, const nmos::resource& connection_resource)
         {
             const std::pair<nmos::id, nmos::type> id_type{ resource.id, resource.type };
             slog::log<slog::severities::info>(gate, SLOG_FLF) << "Activating " << id_type;
@@ -885,18 +1198,24 @@ namespace nvnmos
             auto& configs = nmos::types::sender == resource.type ? nvnmos::fields::senders(settings) : nvnmos::fields::receivers(settings);
             auto config = configs.as_object().find(resource.id);
 
-            const auto is_rtp = nmos::transports::rtp == nmos::transport_base(nmos::transport{ nmos::fields::transport(resource.data) });
+            if (configs.as_object().end() == config) return;
 
-            if (configs.as_object().end() != config && is_rtp)
+            const auto transport_base = nmos::transport_base(nmos::transport{ nmos::fields::transport(resource.data) });
+            const auto is_rtp = nmos::transports::rtp == transport_base;
+            const auto is_mxl = nmos::transports::mxl == transport_base;
+
+            if (!is_rtp && !is_mxl) return;
+
+            const auto internal_id = impl::get_internal_id(resource);
+
+            const auto& endpoint_active = nmos::fields::endpoint_active(connection_resource.data);
+
+            // determine the new state of the sender or receiver
+            const bool active = nmos::fields::master_enable(endpoint_active);
+
+            if (active)
             {
-                const auto internal_id = impl::get_internal_id(resource);
-
-                const auto& endpoint_active = nmos::fields::endpoint_active(connection_resource.data);
-
-                // determine the new state of the sender or receiver
-                const bool active = nmos::fields::master_enable(endpoint_active);
-
-                if (active)
+                if (is_rtp)
                 {
                     // get the active transport file from the sender's /transportfile endpoint or receiver's /active transport_file object
                     auto& transportfile = nmos::types::sender == id_type.second
@@ -908,7 +1227,7 @@ namespace nvnmos
                     // based on the original SDP data used to configure the receiver or sender
                     const auto& transportfile_data = !transportfile_data_or_null.is_null() && !transportfile_data_or_null.as_string().empty()
                         ? transportfile_data_or_null.as_string()
-                        : nvnmos::fields::sdp(config->second);
+                        : nvnmos::fields::transport_file(config->second);
 
                     // activate the sender or receiver with the effective SDP file for the /active transport_params
 
@@ -952,29 +1271,178 @@ namespace nvnmos
                     const auto merged_sdp = impl::make_session_description(id_type.second, internal_id, group_hint, session_info, sdp_params, transport_params);
                     const auto sdp_data = sdp::make_session_description(merged_sdp);
 
-                    rtp_connection_activated(utility::us2s(internal_id), sdp_data);
+                    connection_activated(utility::us2s(internal_id), sdp_data);
                 }
-                else
+                else if (is_mxl)
                 {
-                    // deactivate sender or receiver
+                    // BCP-007-03: MXL transport_params is a single-leg array
+                    const auto& active_leg = nmos::fields::transport_params(endpoint_active).at(0);
+                    const auto& mxl_flow_id_or_null = nmos::fields::mxl_flow_id(active_leg);
 
-                    rtp_connection_activated(utility::us2s(internal_id), {});
+                    // for receivers, mxl_flow_id may be null even when master_enable is true.
+                    // unlike RTP's rtp_enabled=false (where the other transport params may still
+                    // be useful), there's nothing actionable for the application without a
+                    // concrete flow id, so translate this to a deactivation callback.
+                    if (mxl_flow_id_or_null.is_null())
+                    {
+                        connection_activated(utility::us2s(internal_id), {});
+                        return;
+                    }
+
+                    // hmm, we do not have access to the MXL flow definition of the flow here;
+                    // for now, splice the active mxl_domain_id, mxl_flow_id transport parameters
+                    // into the original MXL flow definition JSON
+                    const auto& mxl_domain_id = nmos::fields::mxl_domain_id(active_leg).as_string();
+                    const auto& mxl_flow_id = mxl_flow_id_or_null.as_string();
+
+                    const auto& config_flow_def_data = nvnmos::fields::transport_file(config->second);
+                    auto config_flow_def = web::json::value::parse(config_flow_def_data);
+                    const auto flow_def_data = impl::make_mxl_flow_def(std::move(config_flow_def), mxl_domain_id, mxl_flow_id);
+
+                    connection_activated(utility::us2s(internal_id), flow_def_data);
                 }
+            }
+            else
+            {
+                // deactivate sender or receiver
+                connection_activated(utility::us2s(internal_id), {});
             }
         };
     }
 
-    void node_implementation_activate_rtp_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const utility::string_t& internal_id, const std::string& sdp, nmos::settings& settings, slog::base_gate& gate)
+    void node_implementation_activate_rtp_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const nmos::resource& resource, const std::string& sdp, nmos::settings& settings, slog::base_gate& gate)
     {
         using web::json::value;
         using web::json::value_of;
 
         const auto set_transportfile = make_node_implementation_transportfile_setter(node_resources, settings);
 
-        // find sender or receiver with specified internal id
+        const std::pair<nmos::id, nmos::type> id_type{ resource.id, resource.type };
 
         const auto seed_id = nmos::experimental::fields::seed_id(settings);
         const auto node_id = impl::make_id(seed_id, nmos::types::node);
+
+        if (nmos::types::sender == id_type.second && !sdp.empty())
+        {
+            auto source = impl::find_source_for_sender(node_resources, resource);
+            if (node_resources.end() == source) throw node_implementation_exception();
+            auto& clock_or_null = nmos::fields::clock_name(source->data);
+            if (clock_or_null.is_null()) throw node_implementation_exception();
+            const auto clock = nmos::clock_name(clock_or_null.as_string());
+
+            // hmm, the IS-05 update already calls sdp::parse_session_description(sdp) twice...
+            const auto parsed_sdp = sdp::parse_session_description(sdp);
+            const auto ts_refclks = impl::get_session_description_ts_refclks(parsed_sdp);
+
+            auto& clock_settings = nvnmos::fields::clocks(settings)[clock.name];
+            auto ptp_domain = nmos::fields::ptp_domain_number(clock_settings);
+            impl::update_node_clock(node_resources, node_id, impl::make_node_clock(clock, ts_refclks, ptp_domain));
+
+            clock_settings[nmos::fields::ptp_domain_number] = ptp_domain;
+        }
+
+        const auto activation_time = nmos::tai_now();
+
+        nmos::modify_resource(connection_resources, id_type.first, [&](nmos::resource& connection_resource)
+        {
+            const auto at = value::string(nmos::make_version(activation_time));
+
+            connection_resource.data[nmos::fields::version] = at;
+
+            // Update the IS-05 resource's /active endpoint
+
+            auto& active = connection_resource.data[nmos::fields::endpoint_active];
+
+            active[nmos::types::sender == connection_resource.type ? nmos::fields::receiver_id : nmos::fields::sender_id] = value::null();
+            active[nmos::fields::master_enable] = value::boolean(!sdp.empty());
+            active[nmos::fields::activation] = nmos::make_activation();
+
+            if (!sdp.empty())
+            {
+                if (nmos::types::receiver == connection_resource.type)
+                {
+                    active[nmos::fields::transport_file] = value_of({
+                        { nmos::fields::data, utility::s2us(sdp) },
+                        { nmos::fields::type, nmos::media_types::application_sdp.name }
+                    });
+                }
+
+                active[nmos::fields::transport_params] = impl::get_session_description_transport_params(connection_resource.type, sdp::parse_session_description(sdp));
+            }
+
+            // Update an IS-05 sender's /transportfile endpoint
+
+            if (nmos::types::sender == id_type.second)
+            {
+                set_transportfile(resource, connection_resource, connection_resource.data[nmos::fields::endpoint_transportfile]);
+            }
+        });
+
+        nmos::modify_resource(node_resources, id_type.first, [&](nmos::resource& res)
+        {
+            nmos::set_resource_subscription(res, !sdp.empty(), {}, activation_time);
+        });
+    }
+
+    void node_implementation_activate_mxl_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const nmos::resource& resource, const std::string& flow_def, nmos::settings& settings, slog::base_gate& gate)
+    {
+        using web::json::value;
+        using web::json::value_of;
+
+        const std::pair<nmos::id, nmos::type> id_type{ resource.id, resource.type };
+
+        const auto activation_time = nmos::tai_now();
+
+        // BCP-007-03: MXL connections do not have a transport file in the IS-05 sense;
+        // the supplied flow_def is the application's MXL flow definition for the new active state.
+        // From it, derive the active mxl_domain_id and mxl_flow_id transport parameters.
+        const auto parsed_flow_def = flow_def.empty() ? web::json::value{} : web::json::value::parse(flow_def);
+
+        nmos::modify_resource(connection_resources, id_type.first, [&](nmos::resource& connection_resource)
+        {
+            const auto at = value::string(nmos::make_version(activation_time));
+
+            connection_resource.data[nmos::fields::version] = at;
+
+            auto& active = connection_resource.data[nmos::fields::endpoint_active];
+
+            active[nmos::types::sender == connection_resource.type ? nmos::fields::receiver_id : nmos::fields::sender_id] = value::null();
+            active[nmos::fields::master_enable] = value::boolean(!flow_def.empty());
+            active[nmos::fields::activation] = nmos::make_activation();
+
+            if (!flow_def.empty())
+            {
+                // MXL connections have no transport file in the IS-05 sense; for receivers,
+                // endpoint_active.transport_file is initialised to { data: null, type: null }
+                // at resource creation and stays that way; for senders, there is no /transportfile
+
+                const auto mxl_domain_id = impl::get_mxl_flow_def_domain_id(parsed_flow_def);
+                const auto mxl_flow_id = impl::get_mxl_flow_def_id(parsed_flow_def);
+                // nvnmos always associates an NMOS flow with every sender, and requires receivers
+                // to bind to a concrete MXL flow at activation time; to unbind, the application
+                // should deactivate (pass an empty transport_file) instead
+                if (mxl_flow_id.empty()) throw std::invalid_argument("Missing 'id' property in MXL flow definition for activation");
+
+                active[nmos::fields::transport_params] = value_of({
+                    value_of({
+                        { nmos::fields::mxl_domain_id, mxl_domain_id },
+                        { nmos::fields::mxl_flow_id, mxl_flow_id }
+                    })
+                });
+            }
+        });
+
+        nmos::modify_resource(node_resources, id_type.first, [&](nmos::resource& res)
+        {
+            nmos::set_resource_subscription(res, !flow_def.empty(), {}, activation_time);
+        });
+    }
+
+    void node_implementation_activate_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const utility::string_t& internal_id, const std::string& transport_file, nmos::settings& settings, slog::base_gate& gate)
+    {
+        // find sender or receiver with specified internal id
+
+        const auto seed_id = nmos::experimental::fields::seed_id(settings);
         const auto sender_id = impl::make_id(seed_id, nmos::types::sender, internal_id);
         const auto receiver_id = impl::make_id(seed_id, nmos::types::receiver, internal_id);
 
@@ -984,89 +1452,43 @@ namespace nvnmos
             resource = nmos::find_resource(node_resources, { receiver_id, nmos::types::receiver });
         }
 
-        if (node_resources.end() != resource)
+        if (node_resources.end() == resource)
         {
-            // hmm, consider how to handle this 'internal' activation
-            // * for now, setting /active endpoint directly, cf. nmos::connection_activation_thread
-            // * alternatively, by setting or patching /staged with an immediate or scheduled activation
+            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Could not find sender or receiver with internal id: " << internal_id;
+            return;
+        }
 
-            const std::pair<nmos::id, nmos::type> id_type{ resource->id, resource->type };
-            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Updating " << id_type << " with internal id: " << internal_id;
+        // hmm, consider how to handle this 'internal' activation
+        // * for now, setting /active endpoint directly, cf. nmos::connection_activation_thread
+        // * alternatively, by setting or patching /staged with an immediate or scheduled activation
 
-            if (nmos::types::sender == id_type.second && !sdp.empty())
-            {
-                auto source = impl::find_source_for_sender(node_resources, *resource);
-                if (node_resources.end() == source) throw node_implementation_exception();
-                auto& clock_or_null = nmos::fields::clock_name(source->data);
-                if (clock_or_null.is_null()) throw node_implementation_exception();
-                const auto clock = nmos::clock_name(clock_or_null.as_string());
+        const std::pair<nmos::id, nmos::type> id_type{ resource->id, resource->type };
+        slog::log<slog::severities::info>(gate, SLOG_FLF) << "Updating " << id_type << " with internal id: " << internal_id;
 
-                // hmm, the IS-05 update already calls sdp::parse_session_description(sdp) twice...
-                const auto parsed_sdp = sdp::parse_session_description(sdp);
-                const auto ts_refclks = impl::get_session_description_ts_refclks(parsed_sdp);
+        const auto transport_base = nmos::transport_base(nmos::transport{ nmos::fields::transport(resource->data) });
 
-                auto& clock_settings = nvnmos::fields::clocks(settings)[clock.name];
-                auto ptp_domain = nmos::fields::ptp_domain_number(clock_settings);
-                impl::update_node_clock(node_resources, node_id, impl::make_node_clock(clock, ts_refclks, ptp_domain));
-
-                clock_settings[nmos::fields::ptp_domain_number] = ptp_domain;
-            }
-
-            const auto activation_time = nmos::tai_now();
-
-            nmos::modify_resource(connection_resources, id_type.first, [&](nmos::resource& connection_resource)
-            {
-                const auto at = value::string(nmos::make_version(activation_time));
-
-                connection_resource.data[nmos::fields::version] = at;
-
-                // Update the IS-05 resource's /active endpoint
-
-                auto& active = connection_resource.data[nmos::fields::endpoint_active];
-
-                active[nmos::types::sender == connection_resource.type ? nmos::fields::receiver_id : nmos::fields::sender_id] = value::null();
-                active[nmos::fields::master_enable] = value::boolean(!sdp.empty());
-                active[nmos::fields::activation] = nmos::make_activation();
-
-                if (!sdp.empty())
-                {
-                    if (nmos::types::receiver == connection_resource.type)
-                    {
-                        active[nmos::fields::transport_file] = value_of({
-                            { nmos::fields::data, utility::s2us(sdp) },
-                            { nmos::fields::type, nmos::media_types::application_sdp.name }
-                        });
-                    }
-
-                    active[nmos::fields::transport_params] = impl::get_session_description_transport_params(connection_resource.type, sdp::parse_session_description(sdp));
-                }
-
-                // Update an IS-05 sender's /transportfile endpoint
-
-                if (nmos::types::sender == id_type.second)
-                {
-                    set_transportfile(*resource, connection_resource, connection_resource.data[nmos::fields::endpoint_transportfile]);
-                }
-            });
-
-            nmos::modify_resource(node_resources, id_type.first, [&](nmos::resource& resource)
-            {
-                nmos::set_resource_subscription(resource, !sdp.empty(), {}, activation_time);
-            });
+        if (nmos::transports::rtp == transport_base)
+        {
+            node_implementation_activate_rtp_connection_(node_resources, connection_resources, *resource, transport_file, settings, gate);
+        }
+        else if (nmos::transports::mxl == transport_base)
+        {
+            node_implementation_activate_mxl_connection_(node_resources, connection_resources, *resource, transport_file, settings, gate);
         }
         else
         {
-            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Could not find sender or receiver with internal id: " << internal_id;
+            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Unsupported transport for activate: " << transport_base.name;
         }
     }
 
-    // This updates the transport parameters and transport file for the specified sender or receiver based on the specified SDP file.
-    // For now, the SDP file is not validated against the existing sender or receiver capabilities and constraints.
-    void node_implementation_activate_rtp_connection(nmos::node_model& model, const utility::string_t& internal_id, const std::string& sdp, slog::base_gate& gate)
+    // This updates the transport parameters and transport file for the specified sender or receiver based on the specified transport file.
+    // The transport is inferred from the existing sender or receiver with the specified internal id.
+    // For now, the transport file is not validated against the existing sender or receiver capabilities and constraints.
+    void node_implementation_activate_connection(nmos::node_model& model, const utility::string_t& internal_id, const std::string& transport_file, slog::base_gate& gate)
     {
         auto lock = model.write_lock(); // in order to update the resources
 
-        node_implementation_activate_rtp_connection_(model.node_resources, model.connection_resources, internal_id, sdp, model.settings, gate);
+        node_implementation_activate_connection_(model.node_resources, model.connection_resources, internal_id, transport_file, model.settings, gate);
 
         model.notify();
     }
@@ -1234,7 +1656,7 @@ namespace nvnmos
             return transport_params;
         }
 
-        // get the internal id from the custom attribute
+        // get the (required) internal id from the custom attribute; throws std::invalid_argument if absent or empty
         utility::string_t get_session_description_internal_id(const web::json::value& session_description)
         {
             const auto& session_attributes = sdp::fields::attributes(session_description);
@@ -1244,11 +1666,12 @@ namespace nvnmos
                 auto internal_id = sdp::find_name(sa, nvnmos::attributes::internal_id);
                 if (sa.end() != internal_id)
                 {
-                    return sdp::fields::value(*internal_id).as_string();
+                    const auto& value = sdp::fields::value(*internal_id).as_string();
+                    if (!value.empty()) return value;
                 }
             }
 
-            return U("");
+            throw std::invalid_argument("Missing or empty x-nvnmos-id attribute in SDP");
         }
 
         // get the optional group hint from the custom attribute
@@ -1285,7 +1708,7 @@ namespace nvnmos
 
             const auto& media_descriptions = sdp::fields::media_descriptions(session_description);
             // hm, for simplicity, read caps only from the first media description
-            if (0 == media_descriptions.size()) return false;
+            if (web::json::empty(media_descriptions)) return false;
             const auto& media_description = media_descriptions.at(0);
             const auto& media_attributes = sdp::fields::attributes(media_description);
             {
@@ -1330,12 +1753,17 @@ namespace nvnmos
         // identify supported format from media type
         format get_format(const nmos::media_type& media_type)
         {
+            // ST 2110 media types
             if (nmos::media_types::video_raw == media_type) return format::video;
             if (nmos::media_types::video_jxsv == media_type) return format::video;
             if (nmos::media_types::audio_L(24) == media_type) return format::audio;
             if (nmos::media_types::audio_L(16) == media_type) return format::audio;
             if (nmos::media_types::video_smpte291 == media_type) return format::data;
             if (nmos::media_types::video_SMPTE2022_6 == media_type) return format::mux;
+            // MXL media types
+            if (nmos::media_type{ U("video/v210") } == media_type) return format::video;
+            if (nmos::media_type{ U("video/v210a") } == media_type) return format::video;
+            if (nmos::media_type{ U("audio/float32") } == media_type) return format::audio;
             throw node_implementation_exception{};
         }
 
@@ -1393,9 +1821,9 @@ namespace nvnmos
         utility::string_t get_internal_id(const nmos::resource& resource)
         {
             const auto& tags = resource.data.at(nmos::fields::tags);
-            const auto& internal_ids = nvnmos::fields::internal_id_tag(tags);
-            return 0 != internal_ids.as_array().size()
-                ? internal_ids.as_array().begin()->as_string()
+            const auto& internal_ids = nvnmos::fields::internal_id_tag(tags).as_array();
+            return !web::json::empty(internal_ids)
+                ? web::json::front(internal_ids).as_string()
                 : U("");
         }
 
@@ -1411,9 +1839,9 @@ namespace nvnmos
         utility::string_t get_group_hint(const nmos::resource& resource)
         {
             const auto& tags = resource.data.at(nmos::fields::tags);
-            const auto& group_hints = nmos::fields::group_hint(tags);
-            return 0 != group_hints.as_array().size()
-                ? group_hints.as_array().begin()->as_string()
+            const auto& group_hints = nmos::fields::group_hint(tags).as_array();
+            return !web::json::empty(group_hints)
+                ? web::json::front(group_hints).as_string()
                 : U("");
         }
 
@@ -1560,10 +1988,85 @@ namespace nvnmos
                 });
             }
         }
+
+        // parse an MXL flow definition (JSON) including nvnmos extensions
+        // (x-nvnmos-* top-level properties); propagates web::json::json_exception on parse error
+        web::json::value parse_mxl_flow_def(const std::string& flow_def)
+        {
+            return web::json::value::parse(utility::s2us(flow_def));
+        }
+
+        // extract the (required) internal id from the x-nvnmos-id top-level property;
+        // throws std::invalid_argument if absent or empty
+        utility::string_t get_mxl_flow_def_internal_id(const web::json::value& flow_def)
+        {
+            if (flow_def.has_string_field(nvnmos::fields::internal_id))
+            {
+                const auto& value = nvnmos::fields::internal_id(flow_def);
+                if (!value.empty()) return value;
+            }
+            throw std::invalid_argument("Missing or empty x-nvnmos-id property in MXL flow definition");
+        }
+
+        // extract an optional group hint from the tags property (or empty)
+        utility::string_t get_mxl_flow_def_group_hint(const web::json::value& flow_def)
+        {
+            if (flow_def.has_object_field(nmos::fields::tags))
+            {
+                const auto& tags = flow_def.at(nmos::fields::tags);
+                if (tags.has_array_field(nmos::fields::group_hint))
+                {
+                    const auto& group_hints = nmos::fields::group_hint(tags).as_array();
+                    if (!web::json::empty(group_hints) && web::json::front(group_hints).is_string())
+                    {
+                        return web::json::front(group_hints).as_string();
+                    }
+                }
+            }
+            return utility::string_t{};
+        }
+
+        // returns true if the x-nvnmos-caps top-level property is present
+        bool has_mxl_flow_def_caps(const web::json::value& flow_def)
+        {
+            return flow_def.has_field(nvnmos::fields::caps);
+        }
+
+        // extract the (required) MXL domain id from the x-nvnmos-mxl-domain-id top-level property;
+        // throws std::invalid_argument if absent or empty (the IS-05 transport parameter defaults
+        // to "auto" and is resolved at activation time from this value)
+        utility::string_t get_mxl_flow_def_domain_id(const web::json::value& flow_def)
+        {
+            if (flow_def.has_string_field(nvnmos::fields::mxl_domain_id))
+            {
+                const auto& value = nvnmos::fields::mxl_domain_id(flow_def);
+                if (!value.empty()) return value;
+            }
+            throw std::invalid_argument("Missing or empty x-nvnmos-mxl-domain-id property in MXL flow definition");
+        }
+
+        // extract the top-level 'id' property (or empty)
+        utility::string_t get_mxl_flow_def_id(const web::json::value& flow_def)
+        {
+            return flow_def.has_string_field(nmos::fields::id)
+                ? nmos::fields::id(flow_def)
+                : utility::string_t{};
+        }
+
+        // produce a flow definition JSON string with the active MXL transport parameters spliced in
+        std::string make_mxl_flow_def(web::json::value flow_def, const utility::string_t& mxl_domain_id, const utility::string_t& mxl_flow_id)
+        {
+            using web::json::value;
+
+            flow_def[nvnmos::fields::mxl_domain_id] = value::string(mxl_domain_id);
+            flow_def[nmos::fields::id] = value::string(mxl_flow_id);
+
+            return utility::us2s(flow_def.serialize());
+        }
     }
 
     // This constructs all the callbacks used to integrate the application into the server instance for the NMOS Node.
-    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, rtp_connection_activation_handler rtp_connection_activated, slog::base_gate& gate)
+    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, slog::base_gate& gate)
     {
         return nmos::experimental::node_implementation()
             .on_load_server_certificates(nmos::make_load_server_certificates_handler(model.settings, gate))
@@ -1575,6 +2078,6 @@ namespace nvnmos
             .on_validate_connection_resource_patch(make_node_implementation_patch_validator()) // may be omitted if not required
             .on_resolve_auto(make_node_implementation_auto_resolver())
             .on_set_transportfile(make_node_implementation_transportfile_setter(model.node_resources, model.settings))
-            .on_connection_activated(make_node_implementation_connection_activation_handler(std::move(rtp_connection_activated), model.settings, gate));
+            .on_connection_activated(make_node_implementation_connection_activation_handler(std::move(connection_activated), model.settings, gate));
     }
 }

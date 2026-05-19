@@ -90,9 +90,10 @@ namespace nvnmos
         void add_sender(const NvNmosSenderConfig& config);
         void remove_sender(const std::string& id);
 
-        void activate_rtp_connection(const std::string& id, const std::string& sdp);
+        void activate_connection(const std::string& id, const std::string& transport_file);
 
     private:
+        static nmos::transport to_transport(NvNmosTransport transport);
         static nmos::settings make_settings(const NvNmosNodeConfig& config);
         void log_current_exception();
 
@@ -128,18 +129,18 @@ namespace nvnmos
 
             // Set up the callbacks between the node server and the underlying implementation
 
-            const auto& activated = config.rtp_connection_activated;
+            const auto& activated = config.connection_activated;
             auto& gate_ = gate;
-            auto rtp_connection_activated = [activated, server, &gate_](const std::string& id, const std::string& sdp)
+            auto connection_activated = [activated, server, &gate_](const std::string& id, const std::string& transport_file)
             {
                 if (!activated) return;
-                const bool success = activated(server, id.c_str(), !sdp.empty() ? sdp.c_str() : 0);
+                const bool success = activated(server, id.c_str(), !transport_file.empty() ? transport_file.c_str() : 0);
                 if (!success)
                 {
                     slog::log<slog::severities::warning>(gate_, SLOG_FLF) << "Activation failed for internal id: " << id;
                 }
             };
-            node_implementation = make_node_implementation(node_model, rtp_connection_activated, gate);
+            node_implementation = make_node_implementation(node_model, connection_activated, gate);
 
             // Set up the node server
 
@@ -158,14 +159,14 @@ namespace nvnmos
 
             for (auto& receiver : boost::make_iterator_range_n(config.receivers, config.num_receivers))
             {
-                if (!receiver.sdp) throw std::logic_error("invalid receiver config");
-                node_implementation_add_receiver(node_model, receiver.sdp, gate);
+                if (!receiver.transport_file) throw std::logic_error("invalid receiver config");
+                node_implementation_add_receiver(node_model, to_transport(receiver.transport), receiver.transport_file, gate);
             }
 
             for (auto& sender : boost::make_iterator_range_n(config.senders, config.num_senders))
             {
-                if (!sender.sdp) throw std::logic_error("invalid sender config");
-                node_implementation_add_sender(node_model, sender.sdp, gate);
+                if (!sender.transport_file) throw std::logic_error("invalid sender config");
+                node_implementation_add_sender(node_model, to_transport(sender.transport), sender.transport_file, gate);
             }
 
             // Open the API ports and start up node operation (including the DNS-SD advertisements)
@@ -400,14 +401,24 @@ namespace nvnmos
         }
     }
 
+    nmos::transport server::to_transport(NvNmosTransport transport)
+    {
+        switch (transport)
+        {
+        case NVNMOS_TRANSPORT_RTP: return nmos::transports::rtp;
+        case NVNMOS_TRANSPORT_MXL: return nmos::transports::mxl;
+        }
+        throw std::logic_error("invalid NvNmosTransport");
+    }
+
     void server::add_receiver(const NvNmosReceiverConfig& config)
     {
         using web::json::value_of;
 
         try
         {
-            if (!config.sdp) throw std::logic_error("invalid receiver config");
-            node_implementation_add_receiver(node_model, config.sdp, gate);
+            if (!config.transport_file) throw std::logic_error("invalid receiver config");
+            node_implementation_add_receiver(node_model, to_transport(config.transport), config.transport_file, gate);
         }
         catch (...)
         {
@@ -435,8 +446,8 @@ namespace nvnmos
 
         try
         {
-            if (!config.sdp) throw std::logic_error("invalid sender config");
-            node_implementation_add_sender(node_model, config.sdp, gate);
+            if (!config.transport_file) throw std::logic_error("invalid sender config");
+            node_implementation_add_sender(node_model, to_transport(config.transport), config.transport_file, gate);
         }
         catch (...)
         {
@@ -458,11 +469,11 @@ namespace nvnmos
         }
     }
 
-    void server::activate_rtp_connection(const std::string& id, const std::string& sdp)
+    void server::activate_connection(const std::string& id, const std::string& transport_file)
     {
         try
         {
-            node_implementation_activate_rtp_connection(node_model, utility::s2us(id), sdp, gate);
+            node_implementation_activate_connection(node_model, utility::s2us(id), transport_file, gate);
         }
         catch (...)
         {
@@ -588,20 +599,20 @@ bool remove_nmos_sender_from_node_server(
 }
 
 NVNMOS_API
-bool nmos_connection_rtp_activate(
+bool nmos_connection_activate(
     NvNmosNodeServer* server,
     const char* id,
-    const char* sdp)
+    const char* transport_file)
 {
     if (!server) return false;
     auto impl = (nvnmos::server*)server->impl;
     if (!impl) return false;
     if (!id) return false;
-    if (!sdp) sdp = "";
+    if (!transport_file) transport_file = "";
 
     try
     {
-        impl->activate_rtp_connection(id, sdp);
+        impl->activate_connection(id, transport_file);
         return true;
     }
     catch (...)

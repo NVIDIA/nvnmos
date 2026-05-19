@@ -29,17 +29,19 @@ The library can automatically discover and register with an NMOS Registry on the
 The library provides callbacks for NMOS events such as [AMWA IS-05](https://specs.amwa.tv/is-05/) Connection API requests from an NMOS Controller.
 These callbacks can be used to update running DeepStream pipelines with new transport parameters, for example.
 
-NvNmos currently supports Senders and Receivers for uncompressed Video and Audio, i.e., SMPTE ST 2110-20 and SMPTE ST 2110-30 streams.
+NvNmos currently supports Senders and Receivers for video, audio, and ancillary data flows over RTP (i.e., SMPTE ST 2110-20, -22, -30, and -40 streams) and over the Media eXchange Layer (MXL).
 
 The NvNmos library supports the following specifications, using the [Sony nmos-cpp](https://github.com/sony/nmos-cpp) implementation internally:
 - [AMWA IS-04 NMOS Discovery and Registration Specification](https://specs.amwa.tv/is-04/) v1.3
-- [AMWA IS-05 NMOS Device Connection Management Specification](https://specs.amwa.tv/is-05/) v1.1
+- [AMWA IS-05 NMOS Device Connection Management Specification](https://specs.amwa.tv/is-05/) v1.1 and v1.2-dev (for MXL)
 - [AMWA IS-09 NMOS System Parameters Specification](https://specs.amwa.tv/is-09/) v1.0
 - [AMWA BCP-002-01 Natural Grouping of NMOS Resources](https://specs.amwa.tv/bcp-002-01/) v1.0
 - [AMWA BCP-002-02 NMOS Asset Distinguishing Information](https://specs.amwa.tv/bcp-002-02/) v1.0
 - [AMWA BCP-004-01 NMOS Receiver Capabilities](https://specs.amwa.tv/bcp-004-01/) v1.0
 - [AMWA BCP-006-01 NMOS With JPEG XS](https://specs.amwa.tv/bcp-006-01/) v1.0
+- [AMWA BCP-007-03 NMOS With MXL](https://specs.amwa.tv/bcp-007-03/) v1.0-dev
 - Session Description Protocol conforming to SMPTE ST 2110-20, -22, -30, -40, and ST 2022-7
+- MXL flow definition JSON as consumed by the [MXL SDK](https://github.com/dmf-mxl/mxl)
 
 ## Supported Platforms
 
@@ -55,6 +57,36 @@ NvNmos consists of a single shared library (_libnvnmos.so_ on Linux, _nvnmos.dll
 The API is specified by the _nvnmos.h_ header file.
 
 The nvnmos-example application demonstrates use of the library.
+
+### Transports
+
+Each `NvNmosSenderConfig` and `NvNmosReceiverConfig` includes a `transport` field (an `NvNmosTransport` enum) that selects the transport. A zero-initialised configuration defaults to RTP. The `transport_file` field then holds the transport file as the appropriate text:
+
+| `transport`             | `transport_file` format                                              | Reference  |
+| ---                     | ---                                                                  | ---        |
+| `NVNMOS_TRANSPORT_RTP`  | Session Description Protocol (SDP) per SMPTE ST 2110 / IETF RFCs     | RFC 4566   |
+| `NVNMOS_TRANSPORT_MXL`  | MXL flow definition (JSON) as consumed by the MXL SDK                | MXL SDK    |
+
+### NvNmos extensions to the transport file
+
+NvNmos uses a small set of `x-nvnmos-*` extensions in the transport file to convey configuration that the standard transport file format does not carry. In some cases, the same names are used as an SDP attribute (e.g. `a=x-nvnmos-id:<value>`) for RTP and as a top-level JSON property (e.g. `"x-nvnmos-id": "<value>"`) for MXL flow definitions.
+
+| Extension                  | Where                            | Meaning                                                                                                                |
+| ---                        | ---                              | ---                                                                                                                    |
+| `x-nvnmos-id`              | Senders and Receivers (required) | The application's unique identifier for the Sender or Receiver, used in all NvNmos API callbacks                       |
+| `x-nvnmos-group-hint`      | Senders and Receivers (RTP only) | A group hint tag advertised via `urn:x-nmos:tag:grouphint/v1.0`                                                        |
+| `x-nvnmos-caps`            | Receivers (optional)             | If present, suppress format-derived Receiver Capabilities so the Receiver advertises a more permissive profile         |
+| `x-nvnmos-iface-ip`        | Receivers (RTP only)             | The interface IP address on which the stream is received                                                               |
+| `x-nvnmos-src-port`        | Senders (RTP only)               | The source port from which the stream is transmitted                                                                   |
+| `x-nvnmos-mxl-domain-id`   | Senders and Receivers (MXL only, required) | The MXL domain identity (UUID) for the Sender or Receiver; the IS-05 `mxl_domain_id` transport parameter defaults to `"auto"` and is resolved at activation time from this value |
+
+For MXL Senders and Receivers, a group hint tag is conveyed using the standard NMOS tag `urn:x-nmos:tag:grouphint/v1.0` in the flow definition's `tags` object (the first entry of the array, if present, is used). The SDP-only `x-nvnmos-group-hint` attribute exists because SDP has no native equivalent.
+
+For MXL Senders, the top-level `id` field of the flow definition (if present, a UUID) is used as the MXL flow identity (i.e. the `mxl_flow_id` IS-05 transport parameter); if absent, the generated NMOS Flow id is used in its place. The NMOS Flow id itself is always derived from the `seed` and `x-nvnmos-id` and is independent of the flow definition's `id` field. For MXL Receivers, the MXL flow identity is supplied dynamically through IS-05 Connection Management, so the `id` field of the flow definition is ignored.
+
+### Connection activations
+
+When an IS-05 Connection API activation occurs, the library invokes the application's `connection_activated` callback with the application's `id` and an updated `transport_file` reflecting the new active transport parameters. For an RTP Sender or Receiver, the callback receives an SDP file; for an MXL Sender or Receiver, the callback receives an MXL flow definition (JSON) with the new active `mxl_domain_id` and `mxl_flow_id` spliced in (as `x-nvnmos-mxl-domain-id` and the top-level `id`, respectively). The application is expected to dispatch on `id` to identify the Sender or Receiver and react accordingly (for example, by reconfiguring its data plane). Conversely, if an activation (or deactivation) has already occurred in the application's data plane by some other means, outside the NMOS API, the application calls `nmos_connection_activate` to update the IS-04 and IS-05 model to reflect it. The library does not initiate any activation on the application's behalf.
 
 ## Docker-Based Build
 
@@ -417,6 +449,8 @@ Continue ([y]/n)?
 
 If the app runs successfully to completion, the process exits with code 0.
 If any step fails, or the user responds negatively to a prompt, the process exits immediately with code 1.
+
+The example application also creates two MXL Senders and two MXL Receivers (uncompressed `video/v210` and `audio/float32`) and exercises the same add/remove/activate/deactivate cycle for them, alongside the RTP Senders and Receivers.
 
 ### Accessing the NMOS APIs
 
