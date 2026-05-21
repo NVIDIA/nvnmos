@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "nvnmosd-example"
+description = "Example/regression client for nvnmosd, modelled on the C nvnmos-example"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nvnmosd-example"
+path = "src/main.rs"
+
+[dependencies]
+nvnmos-rpc = { path = "../nvnmos-rpc" }
+
+tokio.workspace = true
+tonic.workspace = true
+tower.workspace = true
+hyper-util.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

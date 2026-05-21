@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "nvnmos-sys"
+description = "FFI bindings to libnvnmos (NVIDIA Networked Media Open Specifications utility library)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+links = "nvnmos"
+
+[lib]
+
+[build-dependencies]
+bindgen.workspace = true

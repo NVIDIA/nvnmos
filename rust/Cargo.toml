@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+resolver = "2"
+members = [
+    "nvnmos-sys",
+    "nvnmos-rpc",
+    "nvnmosd",
+    "nvnmosd-example",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+rust-version = "1.85"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/NVIDIA/nvnmos"
+
+[workspace.dependencies]
+# FFI / build tooling
+bindgen = "0.72"
+
+# gRPC
+prost = "0.13"
+tonic = { version = "0.13", default-features = false, features = ["codegen", "prost", "router", "server", "channel"] }
+tonic-build = "0.13"
+protobuf-src = "2.1"
+
+# Async runtime
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "signal", "fs", "io-util"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tower = "0.5"
+
+# UDS transport plumbing for tonic clients (hyper 1.x rt adapter).
+hyper-util = { version = "0.1", features = ["tokio"] }
+
+# Glue
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
