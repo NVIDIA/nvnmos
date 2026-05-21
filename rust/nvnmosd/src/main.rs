@@ -18,8 +18,9 @@ use anyhow::Context;
 use clap::Parser;
 use nvnmos_rpc::v1::nvnmos_daemon_server::{NvnmosDaemon, NvnmosDaemonServer};
 use nvnmos_rpc::v1::{
-    AckActivationRequest, ActivationEvent, AddReceiverRequest, AddSenderRequest, Empty,
-    OpenSessionRequest, OpenSessionResponse, RemoveResourceRequest, ResourceHandle, SessionId,
+    AckActivationRequest, ActivationEvent, AddNodeRequest, AddNodeResponse, AddReceiverRequest,
+    AddResourceResponse, AddSenderRequest, CloseSessionRequest, Empty, OpenSessionRequest,
+    OpenSessionResponse, RemoveNodeRequest, RemoveResourceRequest, SubscribeActivationsRequest,
     SyncResourceStateRequest,
 };
 use tokio::net::UnixListener;
@@ -37,56 +38,72 @@ struct Args {
 
 #[derive(Default)]
 struct Daemon {
-    /// Monotonically-increasing session id source. Replaced with
+    /// Monotonically-increasing session handle source. Replaced with
     /// proper session state (NvNmos node-server backing, refcounting,
     /// per-session activation queues) in the next commit.
-    next_session_id: AtomicU64,
+    next_session_handle: AtomicU64,
 }
 
 impl Daemon {
-    fn allocate_session_id(&self) -> String {
-        let id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
-        format!("sess-{id}")
+    fn allocate_session_handle(&self) -> String {
+        let n = self.next_session_handle.fetch_add(1, Ordering::Relaxed);
+        format!("sess-{n}")
     }
 }
 
 #[tonic::async_trait]
 impl NvnmosDaemon for Daemon {
+    async fn add_node(
+        &self,
+        _request: Request<AddNodeRequest>,
+    ) -> Result<Response<AddNodeResponse>, Status> {
+        Err(unimplemented_rpc("AddNode"))
+    }
+
+    async fn remove_node(
+        &self,
+        _request: Request<RemoveNodeRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        Err(unimplemented_rpc("RemoveNode"))
+    }
+
     async fn open_session(
         &self,
         request: Request<OpenSessionRequest>,
     ) -> Result<Response<OpenSessionResponse>, Status> {
         let req = request.into_inner();
-        let session_id = self.allocate_session_id();
+        let session_handle = self.allocate_session_handle();
         tracing::info!(
             node_seed = %req.node_seed,
-            persistent = req.persistent,
-            session_id = %session_id,
+            session_handle = %session_handle,
             "OpenSession",
         );
         Ok(Response::new(OpenSessionResponse {
-            session_id,
-            node_uuid: String::new(),
+            session_handle,
+            node_id: String::new(),
         }))
     }
 
-    async fn close_session(&self, request: Request<SessionId>) -> Result<Response<Empty>, Status> {
+    async fn close_session(
+        &self,
+        request: Request<CloseSessionRequest>,
+    ) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
-        tracing::info!(session_id = %req.id, "CloseSession");
+        tracing::info!(session_handle = %req.session_handle, "CloseSession");
         Ok(Response::new(Empty {}))
     }
 
     async fn add_sender(
         &self,
         _request: Request<AddSenderRequest>,
-    ) -> Result<Response<ResourceHandle>, Status> {
+    ) -> Result<Response<AddResourceResponse>, Status> {
         Err(unimplemented_rpc("AddSender"))
     }
 
     async fn add_receiver(
         &self,
         _request: Request<AddReceiverRequest>,
-    ) -> Result<Response<ResourceHandle>, Status> {
+    ) -> Result<Response<AddResourceResponse>, Status> {
         Err(unimplemented_rpc("AddReceiver"))
     }
 
@@ -101,7 +118,7 @@ impl NvnmosDaemon for Daemon {
 
     async fn subscribe_activations(
         &self,
-        _request: Request<SessionId>,
+        _request: Request<SubscribeActivationsRequest>,
     ) -> Result<Response<Self::SubscribeActivationsStream>, Status> {
         Err(unimplemented_rpc("SubscribeActivations"))
     }

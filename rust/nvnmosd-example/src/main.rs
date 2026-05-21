@@ -18,7 +18,7 @@ use anyhow::Context;
 use clap::Parser;
 use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
-use nvnmos_rpc::v1::{NodeConfig, OpenSessionRequest, SessionId};
+use nvnmos_rpc::v1::{CloseSessionRequest, NodeConfig, OpenSessionRequest};
 use tokio::net::UnixStream;
 use tonic::transport::{Endpoint, Uri};
 use tower::service_fn;
@@ -60,18 +60,21 @@ async fn main() -> anyhow::Result<()> {
                 seed: args.node_seed.clone(),
                 ..Default::default()
             }),
-            persistent: false,
         })
         .await
         .context("OpenSession failed")?
         .into_inner();
 
-    tracing::info!(session_id = %resp.session_id, node_uuid = %resp.node_uuid, "session open");
+    tracing::info!(
+        session_handle = %resp.session_handle,
+        node_id = %resp.node_id,
+        "session open",
+    );
 
-    tracing::info!(session_id = %resp.session_id, "CloseSession");
+    tracing::info!(session_handle = %resp.session_handle, "CloseSession");
     client
-        .close_session(SessionId {
-            id: resp.session_id.clone(),
+        .close_session(CloseSessionRequest {
+            session_handle: resp.session_handle.clone(),
         })
         .await
         .context("CloseSession failed")?;
