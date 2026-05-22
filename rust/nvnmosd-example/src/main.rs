@@ -4,13 +4,24 @@
 //! `nvnmosd-example` — minimal regression client for `nvnmosd`.
 //!
 //! Modelled on the C `nvnmos-example` in `src/main.c`. This commit
-//! exercises the session-refcounted Node lifetime end-to-end:
+//! exercises both Node lifetimes end-to-end.
 //!
-//! 1. `OpenSession` on `--node-seed` — creates the Node, refcount 0→1.
-//! 2. `OpenSession` on the same seed — attaches to the existing Node,
-//!    refcount 1→2; the returned `node_id` must match (1).
+//! **Session-refcounted Node** (`--node-seed`):
+//!
+//! 1. `OpenSession` — creates the Node, refcount 0→1.
+//! 2. `OpenSession` on the same seed — attaches; refcount 1→2; the
+//!    returned `node_id` must match (1).
 //! 3. `CloseSession` of the first handle — refcount 2→1, Node alive.
 //! 4. `CloseSession` of the second handle — refcount 1→0, Node destroyed.
+//!
+//! **Persistent Node** (`<seed>-persistent`):
+//!
+//! 5. `AddNode` — creates the persistent Node.
+//! 6. `OpenSession` (twice) on its seed — attaches without affecting
+//!    lifetime; same `node_id` as (5).
+//! 7. `CloseSession` (twice) — Node survives the last close because it
+//!    is persistent.
+//! 8. `RemoveNode` — tears the Node down explicitly.
 //!
 //! Subsequent commits will grow this binary into a full regression
 //! harness mirroring the C example's interactive flow (register
@@ -25,7 +36,10 @@ use anyhow::Context;
 use clap::Parser;
 use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
-use nvnmos_rpc::v1::{CloseSessionRequest, NodeConfig, OpenSessionRequest, OpenSessionResponse};
+use nvnmos_rpc::v1::{
+    AddNodeRequest, AddNodeResponse, CloseSessionRequest, NodeConfig, OpenSessionRequest,
+    OpenSessionResponse, RemoveNodeRequest,
+};
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
@@ -85,6 +99,43 @@ async fn main() -> anyhow::Result<()> {
     // (4) Close the second session: refcount 1→0, Node destroyed.
     close(&mut client, &b.session_handle, "second close (Node destroyed)").await?;
 
+    // -------- Persistent Node lifecycle --------
+    let persistent_seed = format!("{}-persistent", args.node_seed);
+
+    // (5) AddNode: create a persistent Node.
+    let added = add_node(&mut client, &persistent_seed).await?;
+
+    // (6) Two OpenSessions on the persistent seed: attach to it without
+    // affecting its lifetime. Both must return the persistent Node's id.
+    let c = open(&mut client, &persistent_seed, "first session on persistent Node").await?;
+    let d = open(&mut client, &persistent_seed, "second session on persistent Node").await?;
+    anyhow::ensure!(
+        c.node_id == added.node_id && d.node_id == added.node_id,
+        "OpenSession on the persistent seed returned the wrong node_id: \
+         added={} session1={} session2={}",
+        added.node_id,
+        c.node_id,
+        d.node_id,
+    );
+
+    // (7) Close both sessions. The Node must survive the last close
+    // because it is persistent.
+    close(
+        &mut client,
+        &c.session_handle,
+        "first close (persistent, Node alive)",
+    )
+    .await?;
+    close(
+        &mut client,
+        &d.session_handle,
+        "last close (persistent, Node still alive)",
+    )
+    .await?;
+
+    // (8) RemoveNode: now the Node is actually destroyed.
+    remove_node(&mut client, &persistent_seed).await?;
+
     tracing::info!("done");
     Ok(())
 }
@@ -126,6 +177,40 @@ async fn close(
         })
         .await
         .with_context(|| format!("CloseSession ({label}) failed"))?;
+    Ok(())
+}
+
+async fn add_node(
+    client: &mut NvnmosDaemonClient<Channel>,
+    node_seed: &str,
+) -> anyhow::Result<AddNodeResponse> {
+    tracing::info!(node_seed = %node_seed, "AddNode (create persistent Node)");
+    let resp = client
+        .add_node(AddNodeRequest {
+            node_seed: node_seed.to_string(),
+            node_config: Some(NodeConfig {
+                seed: node_seed.to_string(),
+                ..Default::default()
+            }),
+        })
+        .await
+        .context("AddNode failed")?
+        .into_inner();
+    tracing::info!(node_id = %resp.node_id, "AddNode succeeded");
+    Ok(resp)
+}
+
+async fn remove_node(
+    client: &mut NvnmosDaemonClient<Channel>,
+    node_seed: &str,
+) -> anyhow::Result<()> {
+    tracing::info!(node_seed = %node_seed, "RemoveNode (destroy persistent Node)");
+    client
+        .remove_node(RemoveNodeRequest {
+            node_seed: node_seed.to_string(),
+        })
+        .await
+        .context("RemoveNode failed")?;
     Ok(())
 }
 

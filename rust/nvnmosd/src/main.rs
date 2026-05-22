@@ -72,16 +72,39 @@ impl Daemon {
 impl NvnmosDaemon for Daemon {
     async fn add_node(
         &self,
-        _request: Request<AddNodeRequest>,
+        request: Request<AddNodeRequest>,
     ) -> Result<Response<AddNodeResponse>, Status> {
-        Err(unimplemented_rpc("AddNode"))
+        let req = request.into_inner();
+        let config = state::translate_config(req.node_config.as_ref(), &req.node_seed)?;
+        let outcome = {
+            let mut state = self.lock_state();
+            state.add_node(&req.node_seed, || build_node_server(&config))?
+        };
+        tracing::info!(
+            node_seed = %req.node_seed,
+            node_id = %outcome.node_id,
+            "AddNode",
+        );
+        Ok(Response::new(AddNodeResponse {
+            node_id: outcome.node_id,
+        }))
     }
 
     async fn remove_node(
         &self,
-        _request: Request<RemoveNodeRequest>,
+        request: Request<RemoveNodeRequest>,
     ) -> Result<Response<Empty>, Status> {
-        Err(unimplemented_rpc("RemoveNode"))
+        let req = request.into_inner();
+        let outcome = {
+            let mut state = self.lock_state();
+            state.remove_node(&req.node_seed)?
+        };
+        tracing::info!(
+            node_seed = %req.node_seed,
+            node_id = %outcome.node_id,
+            "RemoveNode",
+        );
+        Ok(Response::new(Empty {}))
     }
 
     async fn open_session(
@@ -100,20 +123,14 @@ impl NvnmosDaemon for Daemon {
         // revisit when multi-client throughput matters.
         let outcome = {
             let mut state = self.lock_state();
-            state.open_session(&req.node_seed, || {
-                NodeServer::builder(&config)
-                    .on_log(log_bridge::forward)
-                    .build()
-                    .map_err(|e| {
-                        Status::internal(format!("create_nmos_node_server failed: {e}"))
-                    })
-            })?
+            state.open_session(&req.node_seed, || build_node_server(&config))?
         };
 
         tracing::info!(
             node_seed = %req.node_seed,
             session_handle = %outcome.session_handle,
             node_id = %outcome.node_id,
+            lifetime = outcome.lifetime.label(),
             created_node = outcome.created_node,
             "OpenSession",
         );
@@ -136,8 +153,9 @@ impl NvnmosDaemon for Daemon {
             session_handle = %req.session_handle,
             node_seed = %outcome.node_seed,
             node_id = %outcome.node_id,
-            remaining_refcount = outcome.remaining_refcount,
-            node_destroyed = outcome.remaining_refcount == 0,
+            lifetime = outcome.lifetime.label(),
+            remaining_sessions = outcome.remaining_sessions,
+            node_destroyed = outcome.node_destroyed,
             "CloseSession",
         );
         Ok(Response::new(Empty {}))
@@ -190,6 +208,16 @@ impl NvnmosDaemon for Daemon {
 
 fn unimplemented_rpc(rpc: &str) -> Status {
     Status::unimplemented(format!("{rpc}: not implemented yet"))
+}
+
+/// Construct the daemon's standard [`NodeServer`]: wraps the wrapper's
+/// builder with the daemon's log bridge so every libnvnmos slog message
+/// flows through `tracing`.
+fn build_node_server(config: &nvnmos::NodeConfig) -> Result<NodeServer, Status> {
+    NodeServer::builder(config)
+        .on_log(log_bridge::forward)
+        .build()
+        .map_err(|e| Status::internal(format!("create_nmos_node_server failed: {e}")))
 }
 
 #[tokio::main]

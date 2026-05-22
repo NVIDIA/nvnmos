@@ -10,14 +10,18 @@
 //!   same Node by referencing the same seed.
 //! * **Sessions** are keyed by daemon-allocated `session_handle` strings.
 //!   Each session remembers which `node_seed` it attached to so
-//!   [`State::close_session`] can find the right [`NodeEntry`] to
-//!   decrement.
+//!   [`State::close_session`] can find the right [`NodeEntry`] to detach
+//!   from.
 //!
-//! Lifetime today is always session-refcounted: the last
-//! [`State::close_session`] to bring `refcount` to 0 drops the
-//! [`NodeServer`], which destroys the underlying C node server. Persistent
-//! Nodes (managed by `AddNode`/`RemoveNode`) will land in the next commit
-//! and will pin `refcount >= 1` independent of session attachments.
+//! Every Node has a [`Lifetime`]:
+//!
+//! * [`Lifetime::SessionRefcounted`] — Nodes created implicitly by
+//!   [`State::open_session`]. Destroyed when the last attached session
+//!   closes.
+//! * [`Lifetime::Persistent`] — Nodes created explicitly by
+//!   [`State::add_node`]. Survive every [`State::close_session`]; only
+//!   [`State::remove_node`] tears them down, and only when no sessions
+//!   are currently attached.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,9 +32,34 @@ use tonic::Status;
 
 use crate::log_bridge;
 
+/// What governs a Node's destruction.
+///
+/// Exposed publicly because the daemon's log lines and the per-RPC
+/// outcomes surface it to operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifetime {
+    /// Created by [`State::open_session`] — destroyed when the last
+    /// attached session closes.
+    SessionRefcounted,
+    /// Created by [`State::add_node`] — survives every
+    /// [`State::close_session`]; only [`State::remove_node`] tears it
+    /// down (and only when no sessions are attached).
+    Persistent,
+}
+
+impl Lifetime {
+    /// Short string for log lines.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SessionRefcounted => "session-refcounted",
+            Self::Persistent => "persistent",
+        }
+    }
+}
+
 /// A live Node owned by the daemon.
 struct NodeEntry {
-    /// The C node server itself. Dropped when [`Self::refcount`] hits 0,
+    /// The C node server itself. Dropped when the entry is removed,
     /// which calls `destroy_nmos_node_server` via the wrapper's `Drop`.
     /// `#[allow(dead_code)]` because the field is held purely for its
     /// `Drop` side effect — Rust can't see the FFI-level usage.
@@ -40,8 +69,14 @@ struct NodeEntry {
     /// the state lock don't drop back into FFI for every read. Stable for
     /// the lifetime of the entry — libnvnmos derives it from the seed.
     node_id: String,
-    /// Number of attached sessions.
-    refcount: usize,
+    /// What governs this Node's destruction.
+    lifetime: Lifetime,
+    /// Number of sessions currently attached. For
+    /// [`Lifetime::SessionRefcounted`], destruction happens when this
+    /// hits 0. For [`Lifetime::Persistent`], this is consulted by
+    /// [`State::remove_node`] to refuse teardown while sessions are
+    /// still around.
+    attached_sessions: usize,
 }
 
 /// A live session.
@@ -58,8 +93,12 @@ struct SessionEntry {
 pub struct OpenOutcome {
     pub session_handle: String,
     pub node_id: String,
-    /// True if this call constructed a new [`NodeServer`]; false if it
-    /// merely attached to an existing one (refcount went 1→2, 2→3, …).
+    /// Lifetime of the Node the session is attached to (existing or
+    /// newly-created).
+    pub lifetime: Lifetime,
+    /// True if this call constructed a new [`NodeServer`] (necessarily
+    /// `SessionRefcounted`); false if it merely attached to an existing
+    /// one.
     pub created_node: bool,
 }
 
@@ -68,8 +107,25 @@ pub struct OpenOutcome {
 pub struct CloseOutcome {
     pub node_seed: String,
     pub node_id: String,
-    /// Refcount *after* the close. 0 means the Node was destroyed.
-    pub remaining_refcount: usize,
+    /// Lifetime of the Node the session was attached to.
+    pub lifetime: Lifetime,
+    /// Sessions still attached *after* the close.
+    pub remaining_sessions: usize,
+    /// True iff this call destroyed the Node — only possible for
+    /// [`Lifetime::SessionRefcounted`] when the last session detached.
+    pub node_destroyed: bool,
+}
+
+/// Outcome of [`State::add_node`].
+#[derive(Debug)]
+pub struct AddNodeOutcome {
+    pub node_id: String,
+}
+
+/// Outcome of [`State::remove_node`].
+#[derive(Debug)]
+pub struct RemoveNodeOutcome {
+    pub node_id: String,
 }
 
 /// All daemon state. Wrapped in `Arc<Mutex<…>>` by the gRPC service.
@@ -90,10 +146,12 @@ impl State {
 
     /// Open a session, attaching to or creating a Node for `seed`.
     ///
-    /// `build_node_server` is invoked only when no Node currently exists
-    /// for `seed`. The caller passes a translated [`NodeConfig`] plus
-    /// whatever callbacks it wants installed (the daemon at minimum
-    /// installs [`crate::log_bridge::forward`]).
+    /// If a Node already exists for `seed` (either [`Lifetime::Persistent`]
+    /// or [`Lifetime::SessionRefcounted`]), this attaches to it and
+    /// increments its session count; `build_node_server` is *not* invoked
+    /// and any `node_config` the caller supplied is ignored. If no Node
+    /// exists, this constructs a new [`Lifetime::SessionRefcounted`] Node
+    /// via `build_node_server`.
     ///
     /// Errors:
     /// * `INVALID_ARGUMENT` if `seed` is empty (the empty seed would
@@ -105,14 +163,12 @@ impl State {
         seed: &str,
         build_node_server: impl FnOnce() -> Result<NodeServer, Status>,
     ) -> Result<OpenOutcome, Status> {
-        if seed.is_empty() {
-            return Err(Status::invalid_argument("node_seed must be non-empty"));
-        }
+        require_non_empty_seed(seed)?;
 
-        let (created_node, node_id) = match self.nodes.get_mut(seed) {
+        let (created_node, node_id, lifetime) = match self.nodes.get_mut(seed) {
             Some(entry) => {
-                entry.refcount += 1;
-                (false, entry.node_id.clone())
+                entry.attached_sessions += 1;
+                (false, entry.node_id.clone(), entry.lifetime)
             }
             None => {
                 let server = build_node_server()?;
@@ -126,10 +182,11 @@ impl State {
                     NodeEntry {
                         server,
                         node_id: node_id.clone(),
-                        refcount: 1,
+                        lifetime: Lifetime::SessionRefcounted,
+                        attached_sessions: 1,
                     },
                 );
-                (true, node_id)
+                (true, node_id, Lifetime::SessionRefcounted)
             }
         };
 
@@ -143,12 +200,15 @@ impl State {
         Ok(OpenOutcome {
             session_handle,
             node_id,
+            lifetime,
             created_node,
         })
     }
 
-    /// Close a session, decrementing the backing Node's refcount and
-    /// destroying it if the refcount hits 0.
+    /// Close a session, detaching from the backing Node. For
+    /// [`Lifetime::SessionRefcounted`] Nodes, also destroys the Node when
+    /// the last session detaches. [`Lifetime::Persistent`] Nodes are
+    /// never destroyed by this call.
     pub fn close_session(&mut self, session_handle: &str) -> Result<CloseOutcome, Status> {
         let session = self.sessions.remove(session_handle).ok_or_else(|| {
             Status::not_found(format!(
@@ -163,21 +223,107 @@ impl State {
             ))
         })?;
         let node_id = entry.node_id.clone();
-        entry.refcount = entry.refcount.saturating_sub(1);
-        let remaining_refcount = entry.refcount;
-        if remaining_refcount == 0 {
+        let lifetime = entry.lifetime;
+        entry.attached_sessions = entry.attached_sessions.saturating_sub(1);
+        let remaining_sessions = entry.attached_sessions;
+        let node_destroyed =
+            lifetime == Lifetime::SessionRefcounted && remaining_sessions == 0;
+        if node_destroyed {
             self.nodes.remove(&seed);
         }
         Ok(CloseOutcome {
             node_seed: seed,
             node_id,
-            remaining_refcount,
+            lifetime,
+            remaining_sessions,
+            node_destroyed,
+        })
+    }
+
+    /// Create a persistent Node for `seed`.
+    ///
+    /// Errors:
+    /// * `INVALID_ARGUMENT` if `seed` is empty.
+    /// * `ALREADY_EXISTS` if any Node (persistent or session-refcounted)
+    ///   currently exists for `seed`.
+    /// * Whatever `build_node_server` returns, surfaced verbatim.
+    pub fn add_node(
+        &mut self,
+        seed: &str,
+        build_node_server: impl FnOnce() -> Result<NodeServer, Status>,
+    ) -> Result<AddNodeOutcome, Status> {
+        require_non_empty_seed(seed)?;
+        if let Some(entry) = self.nodes.get(seed) {
+            return Err(Status::already_exists(format!(
+                "a {} Node already exists for seed {seed:?}",
+                entry.lifetime.label(),
+            )));
+        }
+        let server = build_node_server()?;
+        let node_id = server.node_id().map_err(|e| {
+            Status::internal(format!(
+                "querying node_id from the new NodeServer failed: {e}"
+            ))
+        })?;
+        self.nodes.insert(
+            seed.to_string(),
+            NodeEntry {
+                server,
+                node_id: node_id.clone(),
+                lifetime: Lifetime::Persistent,
+                attached_sessions: 0,
+            },
+        );
+        Ok(AddNodeOutcome { node_id })
+    }
+
+    /// Tear down a persistent Node.
+    ///
+    /// Errors:
+    /// * `INVALID_ARGUMENT` if `seed` is empty.
+    /// * `NOT_FOUND` if no Node exists for `seed`.
+    /// * `FAILED_PRECONDITION` if the Node is [`Lifetime::SessionRefcounted`]
+    ///   (the caller must close sessions instead) or if any sessions are
+    ///   currently attached (the caller must close them first).
+    pub fn remove_node(&mut self, seed: &str) -> Result<RemoveNodeOutcome, Status> {
+        require_non_empty_seed(seed)?;
+        let entry = self.nodes.get(seed).ok_or_else(|| {
+            Status::not_found(format!("no Node exists for seed {seed:?}"))
+        })?;
+        match entry.lifetime {
+            Lifetime::Persistent => {}
+            Lifetime::SessionRefcounted => {
+                return Err(Status::failed_precondition(format!(
+                    "Node for seed {seed:?} is session-refcounted (created by OpenSession); \
+                     close its sessions to tear it down"
+                )));
+            }
+        }
+        if entry.attached_sessions != 0 {
+            return Err(Status::failed_precondition(format!(
+                "Node for seed {seed:?} still has {} attached session(s); close them first",
+                entry.attached_sessions,
+            )));
+        }
+        // Safe to unwrap because we just successfully got() the entry and
+        // we still hold the &mut self lock.
+        let entry = self.nodes.remove(seed).expect("checked above");
+        Ok(RemoveNodeOutcome {
+            node_id: entry.node_id,
         })
     }
 
     fn allocate_session_handle(&self) -> String {
         let n = self.next_session_id.fetch_add(1, Ordering::Relaxed);
         format!("sess-{n}")
+    }
+}
+
+fn require_non_empty_seed(seed: &str) -> Result<(), Status> {
+    if seed.is_empty() {
+        Err(Status::invalid_argument("node_seed must be non-empty"))
+    } else {
+        Ok(())
     }
 }
 
