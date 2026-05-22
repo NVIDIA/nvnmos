@@ -42,4 +42,4 @@ cargo run --bin nvnmosd
 cargo run --bin nvnmosd-example
 ```
 
-The example exercises every RPC the daemon currently implements: both Node lifetimes (session-refcounted and persistent), session attachment/refcounting, resource registration with `internal_id` ↔ `x-nvnmos-id` mismatch detection, resource removal, and session-close-time resource cleanup. Successful output is visible in both terminals via the `tracing` log.
+The example exercises every RPC the daemon currently implements: both Node lifetimes (session-refcounted and persistent), session attachment/refcounting, resource registration with `internal_id` ↔ `x-nvnmos-id` mismatch detection, out-of-band `SyncResourceState` (activate with an updated transport file + deactivate), resource removal, and session-close-time resource cleanup. Successful output is visible in both terminals via the `tracing` log.

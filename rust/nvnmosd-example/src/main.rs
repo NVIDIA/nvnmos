@@ -30,10 +30,14 @@
 //!     `nvnmos::make_sender_id(seed, internal_id)`.
 //! 11. `AddReceiver` — register a receiver, assert `resource_id` matches
 //!     `nvnmos::make_receiver_id(seed, internal_id)`.
-//! 12. `AddSender` with `internal_id` ≠ SDP's `x-nvnmos-id` — expect
+//! 12. `SyncResourceState` on the sender with an updated transport_file
+//!     (bumped SDP session version) — exercises the (re)activate path.
+//! 13. `SyncResourceState` on the sender with `transport_file = None` —
+//!     exercises the deactivate path.
+//! 14. `AddSender` with `internal_id` ≠ SDP's `x-nvnmos-id` — expect
 //!     `INVALID_ARGUMENT` (daemon-side mismatch detection).
-//! 13. `RemoveResource` — drop the sender; the receiver survives.
-//! 14. `CloseSession` — drops the surviving receiver through libnvnmos
+//! 15. `RemoveResource` — drop the sender; the receiver survives.
+//! 16. `CloseSession` — drops the surviving receiver through libnvnmos
 //!     and tears down the Node.
 //!
 //! Subsequent commits will grow this binary into a full regression
@@ -53,7 +57,7 @@ use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
     AddNodeRequest, AddNodeResponse, AddReceiverRequest, AddResourceResponse, AddSenderRequest,
     CloseSessionRequest, NodeConfig, OpenSessionRequest, OpenSessionResponse, RemoveNodeRequest,
-    RemoveResourceRequest, Transport as ProtoTransport,
+    RemoveResourceRequest, SyncResourceStateRequest, Transport as ProtoTransport,
 };
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -230,7 +234,33 @@ async fn main() -> anyhow::Result<()> {
         expected_receiver_id,
     );
 
-    // (12) Mismatch: claim internal_id="claimed" but build the SDP with a
+    // (12) SyncResourceState on the sender with a fresh transport_file.
+    // Bump the SDP session version (the `<sess-version>` token in `o=`)
+    // so libnvnmos sees a real change. The daemon maps this onto
+    // `nmos_connection_activate(Some(_))`.
+    let updated_sender_sdp =
+        build_video_sdp(sender_internal_id, true, &iface_ip).replacen("o=- 0 0", "o=- 0 1", 1);
+    sync_resource_state(
+        &mut client,
+        &r.session_handle,
+        &sender_resp.resource_handle,
+        Some(&updated_sender_sdp),
+        "sender re-sync with updated SDP",
+    )
+    .await?;
+
+    // (13) SyncResourceState on the sender with `transport_file = None`.
+    // The daemon maps this onto `nmos_connection_activate(None)`.
+    sync_resource_state(
+        &mut client,
+        &r.session_handle,
+        &sender_resp.resource_handle,
+        None,
+        "sender deactivation",
+    )
+    .await?;
+
+    // (14) Mismatch: claim internal_id="claimed" but build the SDP with a
     // different x-nvnmos-id ("real"). The daemon detects this by asking
     // libnvnmos to look up the claimed id after the add and returns
     // INVALID_ARGUMENT when the lookup misses.
@@ -258,7 +288,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(_) => anyhow::bail!("AddSender mismatch unexpectedly succeeded"),
     }
 
-    // (13) RemoveResource for the sender. The receiver must survive.
+    // (15) RemoveResource for the sender. The receiver must survive.
     remove_resource(
         &mut client,
         &r.session_handle,
@@ -267,7 +297,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    // (14) CloseSession: drops the surviving receiver through libnvnmos
+    // (16) CloseSession: drops the surviving receiver through libnvnmos
     // and tears down the (session-refcounted) Node.
     close(
         &mut client,
@@ -418,6 +448,31 @@ async fn remove_resource(
         })
         .await
         .with_context(|| format!("RemoveResource ({label}) failed"))?;
+    Ok(())
+}
+
+async fn sync_resource_state(
+    client: &mut NvnmosDaemonClient<Channel>,
+    session_handle: &str,
+    resource_handle: &str,
+    transport_file: Option<&str>,
+    label: &str,
+) -> anyhow::Result<()> {
+    let activated = transport_file.is_some();
+    tracing::info!(
+        session_handle,
+        resource_handle,
+        activated,
+        "SyncResourceState ({label})",
+    );
+    client
+        .sync_resource_state(SyncResourceStateRequest {
+            session_handle: session_handle.to_string(),
+            resource_handle: resource_handle.to_string(),
+            transport_file: transport_file.map(str::to_string),
+        })
+        .await
+        .with_context(|| format!("SyncResourceState ({label}) failed"))?;
     Ok(())
 }
 

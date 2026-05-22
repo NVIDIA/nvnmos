@@ -252,6 +252,18 @@ pub struct RemoveResourceOutcome {
     pub kind: ResourceKind,
 }
 
+/// Outcome of [`State::sync_resource_state`].
+#[derive(Debug)]
+pub struct SyncResourceStateOutcome {
+    pub node_seed: String,
+    pub internal_id: String,
+    pub kind: ResourceKind,
+    /// `true` when the call was an (re)activation (`transport_file =
+    /// Some`), `false` when it was a deactivation. Surfaces in the
+    /// daemon's log line so operators can tell the two paths apart.
+    pub activated: bool,
+}
+
 /// All daemon state. Wrapped in `Arc<Mutex<…>>` by the gRPC service.
 pub struct State {
     nodes: HashMap<String, NodeEntry>,
@@ -690,6 +702,72 @@ impl State {
             node_seed: resource.node_seed,
             internal_id: resource.internal_id,
             kind: resource.kind,
+        })
+    }
+
+    /// Push an out-of-band data-plane state change through libnvnmos so
+    /// the Node's IS-04 / IS-05 model reflects it. `transport_file =
+    /// Some(_)` (re)activates the resource with that transport file;
+    /// `transport_file = None` deactivates it. Maps onto
+    /// `nmos_connection_activate` via [`NodeServer::activate_connection`],
+    /// which (per the C contract) does **not** invoke the activation
+    /// callback — this RPC is the *out-of-band* path.
+    ///
+    /// Only the owning session may sync a resource; cross-session calls
+    /// return `NOT_FOUND`, matching [`State::remove_resource`].
+    pub fn sync_resource_state(
+        &mut self,
+        session_handle: &str,
+        resource_handle: &str,
+        transport_file: Option<&str>,
+    ) -> Result<SyncResourceStateOutcome, Status> {
+        let session = self.sessions.get(session_handle).ok_or_else(|| {
+            Status::not_found(format!(
+                "session_handle {session_handle:?} is not known to this daemon"
+            ))
+        })?;
+        if !session.resources.contains(resource_handle) {
+            return Err(Status::not_found(format!(
+                "session {session_handle:?} does not own resource_handle \
+                 {resource_handle:?}"
+            )));
+        }
+
+        let resource = self.resources.get(resource_handle).ok_or_else(|| {
+            Status::internal(format!(
+                "session {session_handle:?} owns resource_handle \
+                 {resource_handle:?} but no resource entry exists"
+            ))
+        })?;
+        let node = self.nodes.get(&resource.node_seed).ok_or_else(|| {
+            Status::internal(format!(
+                "resource {resource_handle:?} references seed {:?} but no \
+                 Node entry exists",
+                resource.node_seed,
+            ))
+        })?;
+
+        node.server
+            .activate_connection(&resource.internal_id, transport_file)
+            .map_err(|e| {
+                let verb = if transport_file.is_some() {
+                    "activate"
+                } else {
+                    "deactivate"
+                };
+                Status::invalid_argument(format!(
+                    "libnvnmos {verb} for {} {:?} failed (transport_file \
+                     parse error or libnvnmos state mismatch): {e}",
+                    resource.kind.label(),
+                    resource.internal_id,
+                ))
+            })?;
+
+        Ok(SyncResourceStateOutcome {
+            node_seed: resource.node_seed.clone(),
+            internal_id: resource.internal_id.clone(),
+            kind: resource.kind,
+            activated: transport_file.is_some(),
         })
     }
 

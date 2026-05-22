@@ -5,10 +5,11 @@
 //!
 //! This binary listens on a UDS socket and serves the `NvnmosDaemon` gRPC
 //! service. Node lifecycle (`OpenSession` / `CloseSession`, `AddNode` /
-//! `RemoveNode`) and resource lifecycle (`AddSender` / `AddReceiver` /
-//! `RemoveResource`) drive real [`nvnmos::NodeServer`]s with session-
-//! based ownership; the IS-05 activation flow (`SubscribeActivations` /
-//! `AckActivation` / `SyncResourceState`) is still pending and returns
+//! `RemoveNode`), resource lifecycle (`AddSender` / `AddReceiver` /
+//! `RemoveResource`) and out-of-band state sync (`SyncResourceState`)
+//! drive real [`nvnmos::NodeServer`]s with session-based ownership.
+//! The IS-05 activation callback path (`SubscribeActivations` /
+//! `AckActivation`) is still pending and returns
 //! [`tonic::Code::Unimplemented`] for now.
 //!
 //! See `doc/designs/nvnmosd/README.md` for the full design.
@@ -261,9 +262,27 @@ impl NvnmosDaemon for Daemon {
 
     async fn sync_resource_state(
         &self,
-        _request: Request<SyncResourceStateRequest>,
+        request: Request<SyncResourceStateRequest>,
     ) -> Result<Response<Empty>, Status> {
-        Err(unimplemented_rpc("SyncResourceState"))
+        let req = request.into_inner();
+        let outcome = {
+            let mut state = self.lock_state();
+            state.sync_resource_state(
+                &req.session_handle,
+                &req.resource_handle,
+                req.transport_file.as_deref(),
+            )?
+        };
+        tracing::info!(
+            session_handle = %req.session_handle,
+            resource_handle = %req.resource_handle,
+            node_seed = %outcome.node_seed,
+            internal_id = %outcome.internal_id,
+            kind = outcome.kind.label(),
+            activated = outcome.activated,
+            "SyncResourceState",
+        );
+        Ok(Response::new(Empty {}))
     }
 }
 
