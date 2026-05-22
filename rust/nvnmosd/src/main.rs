@@ -4,18 +4,28 @@
 //! `nvnmosd` — the NMOS daemon.
 //!
 //! This binary listens on a UDS socket and serves the `NvnmosDaemon` gRPC
-//! service. `OpenSession` and `CloseSession` are implemented end-to-end
-//! so we can verify the gRPC plumbing round-trips; the remaining RPCs
-//! return [`tonic::Code::Unimplemented`] until later commits land the
-//! NvNmos integration and the activation pump.
+//! service. `OpenSession` / `CloseSession` now drive real
+//! [`nvnmos::NodeServer`]s with session refcounting; the remaining RPCs
+//! still return [`tonic::Code::Unimplemented`] until later commits land
+//! the resource and activation plumbing.
 //!
 //! See `doc/designs/nvnmosd/README.md` for the full design.
 
+// `tonic::Status` is intentionally large (it carries gRPC metadata) so every
+// `Result<T, Status>` trips `result_large_err`. The alternative is to box
+// `Status` everywhere, which penalises the happy path; tonic-using crates
+// uniformly allow the lint at the crate root instead.
+#![allow(clippy::result_large_err)]
+
+mod log_bridge;
+mod state;
+
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use clap::Parser;
+use nvnmos::NodeServer;
 use nvnmos_rpc::v1::nvnmos_daemon_server::{NvnmosDaemon, NvnmosDaemonServer};
 use nvnmos_rpc::v1::{
     AckActivationRequest, ActivationEvent, AddNodeRequest, AddNodeResponse, AddReceiverRequest,
@@ -27,6 +37,8 @@ use tokio::net::UnixListener;
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::{Request, Response, Status};
 
+use crate::state::State;
+
 #[derive(Parser, Debug)]
 #[command(version, about = "NMOS daemon (nvnmosd)")]
 struct Args {
@@ -36,18 +48,23 @@ struct Args {
     uds: PathBuf,
 }
 
-#[derive(Default)]
 struct Daemon {
-    /// Monotonically-increasing session handle source. Replaced with
-    /// proper session state (NvNmos node-server backing, refcounting,
-    /// per-session activation queues) in the next commit.
-    next_session_handle: AtomicU64,
+    state: Arc<Mutex<State>>,
 }
 
 impl Daemon {
-    fn allocate_session_handle(&self) -> String {
-        let n = self.next_session_handle.fetch_add(1, Ordering::Relaxed);
-        format!("sess-{n}")
+    fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(State::new())),
+        }
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, State> {
+        // Daemon state is held by a single Mutex; poisoning would mean a
+        // panic on another RPC. Surface that as a panic here too — there's
+        // no useful recovery and silently continuing risks compounding the
+        // inconsistency that triggered the original panic.
+        self.state.lock().expect("daemon state mutex poisoned")
     }
 }
 
@@ -72,15 +89,37 @@ impl NvnmosDaemon for Daemon {
         request: Request<OpenSessionRequest>,
     ) -> Result<Response<OpenSessionResponse>, Status> {
         let req = request.into_inner();
-        let session_handle = self.allocate_session_handle();
+
+        // Translate the proto config outside the state lock — it can fail
+        // (bad port), and there's no reason to hold the lock for it.
+        let config = state::translate_config(req.node_config.as_ref(), &req.node_seed)?;
+
+        // Hold the state lock only over the registry update (and the
+        // libnvnmos create call inside it, which blocks on mDNS / bind /
+        // worker spawn). Acceptable while the daemon is single-client;
+        // revisit when multi-client throughput matters.
+        let outcome = {
+            let mut state = self.lock_state();
+            state.open_session(&req.node_seed, || {
+                NodeServer::builder(&config)
+                    .on_log(log_bridge::forward)
+                    .build()
+                    .map_err(|e| {
+                        Status::internal(format!("create_nmos_node_server failed: {e}"))
+                    })
+            })?
+        };
+
         tracing::info!(
             node_seed = %req.node_seed,
-            session_handle = %session_handle,
+            session_handle = %outcome.session_handle,
+            node_id = %outcome.node_id,
+            created_node = outcome.created_node,
             "OpenSession",
         );
         Ok(Response::new(OpenSessionResponse {
-            session_handle,
-            node_id: String::new(),
+            session_handle: outcome.session_handle,
+            node_id: outcome.node_id,
         }))
     }
 
@@ -89,7 +128,18 @@ impl NvnmosDaemon for Daemon {
         request: Request<CloseSessionRequest>,
     ) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
-        tracing::info!(session_handle = %req.session_handle, "CloseSession");
+        let outcome = {
+            let mut state = self.lock_state();
+            state.close_session(&req.session_handle)?
+        };
+        tracing::info!(
+            session_handle = %req.session_handle,
+            node_seed = %outcome.node_seed,
+            node_id = %outcome.node_id,
+            remaining_refcount = outcome.remaining_refcount,
+            node_destroyed = outcome.remaining_refcount == 0,
+            "CloseSession",
+        );
         Ok(Response::new(Empty {}))
     }
 
@@ -166,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("binding UDS socket at {}", args.uds.display()))?;
     let incoming = UnixListenerStream::new(listener);
 
-    let daemon = Daemon::default();
+    let daemon = Daemon::new();
 
     tracing::info!(uds = %args.uds.display(), "nvnmosd listening");
 

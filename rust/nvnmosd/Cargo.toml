@@ -16,7 +16,7 @@ name = "nvnmosd"
 path = "src/main.rs"
 
 [dependencies]
-nvnmos-sys = { path = "../nvnmos-sys" }
+nvnmos = { path = "../nvnmos" }
 nvnmos-rpc = { path = "../nvnmos-rpc" }
 
 tokio.workspace = true

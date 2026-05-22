@@ -694,8 +694,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "nvnmos",
  "nvnmos-rpc",
- "nvnmos-sys",
  "tokio",
  "tokio-stream",
  "tonic",
