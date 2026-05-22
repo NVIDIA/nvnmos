@@ -70,10 +70,18 @@ service NvnmosDaemon {
   // -------- Resource lifecycle --------
   //
   // `transport_file` is the same string libnvnmos consumes today: an SDP
-  // for `TRANSPORT_RTP`, or an MXL `flow_def` JSON for `TRANSPORT_MXL`. The
-  // session-level `x-nvnmos-id` attribute (SDP) or `x-nvnmos-id` key (MXL
-  // JSON) inside the transport_file carries the NvNmos internal id (seed)
-  // of the sender/receiver; NvNmos generates the NMOS UUID from it.
+  // for `TRANSPORT_RTP`, or an MXL `flow_def` JSON for `TRANSPORT_MXL`.
+  // libnvnmos extracts the session-level `x-nvnmos-id` attribute (SDP) or
+  // `x-nvnmos-id` key (MXL JSON) out of the transport_file and uses it as
+  // the resource's internal id, from which it derives the NMOS UUID.
+  //
+  // `internal_id` on the request **must** equal the `x-nvnmos-id` carried
+  // by `transport_file`. The daemon validates this by asking libnvnmos
+  // after the resource is added: a successful lookup of the claimed
+  // `internal_id` proves the two agreed. A mismatch returns
+  // `INVALID_ARGUMENT`; the disagreeing resource will exist in libnvnmos
+  // as a stray until the first activation, at which point the daemon's
+  // activation router cleans it up.
   //
   // The returned `resource_handle` is the daemon's local addressing
   // token. The corresponding NMOS `/senders/<id>` or `/receivers/<id>`
@@ -223,12 +231,24 @@ message AddSenderRequest {
   string session_handle = 1;
   Transport transport = 2;
   string transport_file = 3;
+
+  // The `x-nvnmos-id` inside `transport_file`. Required; must match the
+  // value embedded in `transport_file`. See the `Resource lifecycle`
+  // section above for how the daemon validates this and what happens on
+  // a mismatch.
+  string internal_id = 4;
 }
 
 message AddReceiverRequest {
   string session_handle = 1;
   Transport transport = 2;
   string transport_file = 3;
+
+  // The `x-nvnmos-id` inside `transport_file`. Required; must match the
+  // value embedded in `transport_file`. See the `Resource lifecycle`
+  // section above for how the daemon validates this and what happens on
+  // a mismatch.
+  string internal_id = 4;
 }
 
 message AddResourceResponse {

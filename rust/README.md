@@ -42,4 +42,4 @@ cargo run --bin nvnmosd
 cargo run --bin nvnmosd-example
 ```
 
-The example connects to the daemon's UDS socket, runs through a minimal `OpenSession` / `CloseSession` round-trip, and exits. Successful output is visible in both terminals via the `tracing` log.
+The example exercises every RPC the daemon currently implements: both Node lifetimes (session-refcounted and persistent), session attachment/refcounting, resource registration with `internal_id` ↔ `x-nvnmos-id` mismatch detection, resource removal, and session-close-time resource cleanup. Successful output is visible in both terminals via the `tracing` log.

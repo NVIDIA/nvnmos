@@ -17,6 +17,11 @@ path = "src/main.rs"
 
 [dependencies]
 nvnmos-rpc = { path = "../nvnmos-rpc" }
+# Used only to cross-check the daemon's resource_id against the pure
+# `make_{sender,receiver}_id` helpers. Drags libnvnmos into the client
+# binary, which is acceptable for this regression tool but would be
+# inappropriate for a production client.
+nvnmos = { path = "../nvnmos" }
 
 tokio.workspace = true
 tonic.workspace = true

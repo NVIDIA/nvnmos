@@ -4,10 +4,12 @@
 //! `nvnmosd` — the NMOS daemon.
 //!
 //! This binary listens on a UDS socket and serves the `NvnmosDaemon` gRPC
-//! service. `OpenSession` / `CloseSession` now drive real
-//! [`nvnmos::NodeServer`]s with session refcounting; the remaining RPCs
-//! still return [`tonic::Code::Unimplemented`] until later commits land
-//! the resource and activation plumbing.
+//! service. Node lifecycle (`OpenSession` / `CloseSession`, `AddNode` /
+//! `RemoveNode`) and resource lifecycle (`AddSender` / `AddReceiver` /
+//! `RemoveResource`) drive real [`nvnmos::NodeServer`]s with session-
+//! based ownership; the IS-05 activation flow (`SubscribeActivations` /
+//! `AckActivation` / `SyncResourceState`) is still pending and returns
+//! [`tonic::Code::Unimplemented`] for now.
 //!
 //! See `doc/designs/nvnmosd/README.md` for the full design.
 
@@ -31,7 +33,7 @@ use nvnmos_rpc::v1::{
     AckActivationRequest, ActivationEvent, AddNodeRequest, AddNodeResponse, AddReceiverRequest,
     AddResourceResponse, AddSenderRequest, CloseSessionRequest, Empty, OpenSessionRequest,
     OpenSessionResponse, RemoveNodeRequest, RemoveResourceRequest, SubscribeActivationsRequest,
-    SyncResourceStateRequest,
+    SyncResourceStateRequest, Transport as ProtoTransport,
 };
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
@@ -163,23 +165,82 @@ impl NvnmosDaemon for Daemon {
 
     async fn add_sender(
         &self,
-        _request: Request<AddSenderRequest>,
+        request: Request<AddSenderRequest>,
     ) -> Result<Response<AddResourceResponse>, Status> {
-        Err(unimplemented_rpc("AddSender"))
+        let req = request.into_inner();
+        let transport = state::translate_transport(decode_proto_transport(req.transport)?)?;
+        let outcome = {
+            let mut state = self.lock_state();
+            state.add_sender(
+                &req.session_handle,
+                transport,
+                &req.transport_file,
+                &req.internal_id,
+            )?
+        };
+        tracing::info!(
+            session_handle = %req.session_handle,
+            node_seed = %outcome.node_seed,
+            resource_handle = %outcome.resource_handle,
+            resource_id = %outcome.resource_id,
+            internal_id = %req.internal_id,
+            kind = outcome.kind.label(),
+            "AddSender",
+        );
+        Ok(Response::new(AddResourceResponse {
+            resource_handle: outcome.resource_handle,
+            resource_id: outcome.resource_id,
+        }))
     }
 
     async fn add_receiver(
         &self,
-        _request: Request<AddReceiverRequest>,
+        request: Request<AddReceiverRequest>,
     ) -> Result<Response<AddResourceResponse>, Status> {
-        Err(unimplemented_rpc("AddReceiver"))
+        let req = request.into_inner();
+        let transport = state::translate_transport(decode_proto_transport(req.transport)?)?;
+        let outcome = {
+            let mut state = self.lock_state();
+            state.add_receiver(
+                &req.session_handle,
+                transport,
+                &req.transport_file,
+                &req.internal_id,
+            )?
+        };
+        tracing::info!(
+            session_handle = %req.session_handle,
+            node_seed = %outcome.node_seed,
+            resource_handle = %outcome.resource_handle,
+            resource_id = %outcome.resource_id,
+            internal_id = %req.internal_id,
+            kind = outcome.kind.label(),
+            "AddReceiver",
+        );
+        Ok(Response::new(AddResourceResponse {
+            resource_handle: outcome.resource_handle,
+            resource_id: outcome.resource_id,
+        }))
     }
 
     async fn remove_resource(
         &self,
-        _request: Request<RemoveResourceRequest>,
+        request: Request<RemoveResourceRequest>,
     ) -> Result<Response<Empty>, Status> {
-        Err(unimplemented_rpc("RemoveResource"))
+        let req = request.into_inner();
+        let outcome = {
+            let mut state = self.lock_state();
+            state.remove_resource(&req.session_handle, &req.resource_handle)?
+        };
+        tracing::info!(
+            session_handle = %req.session_handle,
+            resource_handle = %req.resource_handle,
+            node_seed = %outcome.node_seed,
+            internal_id = %outcome.internal_id,
+            kind = outcome.kind.label(),
+            "RemoveResource",
+        );
+        Ok(Response::new(Empty {}))
     }
 
     type SubscribeActivationsStream = ReceiverStream<Result<ActivationEvent, Status>>;
@@ -208,6 +269,16 @@ impl NvnmosDaemon for Daemon {
 
 fn unimplemented_rpc(rpc: &str) -> Status {
     Status::unimplemented(format!("{rpc}: not implemented yet"))
+}
+
+/// Decode a wire-format proto3 `transport` field into the proto's
+/// generated [`ProtoTransport`] enum. Out-of-range values (a future client
+/// using a transport this daemon doesn't know) become `INVALID_ARGUMENT`
+/// rather than panicking inside `Transport::try_from`.
+fn decode_proto_transport(raw: i32) -> Result<ProtoTransport, Status> {
+    ProtoTransport::try_from(raw).map_err(|_| {
+        Status::invalid_argument(format!("unknown Transport value on the wire: {raw}"))
+    })
 }
 
 /// Construct the daemon's standard [`NodeServer`]: wraps the wrapper's

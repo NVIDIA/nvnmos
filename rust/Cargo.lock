@@ -711,6 +711,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hyper-util",
+ "nvnmos",
  "nvnmos-rpc",
  "tokio",
  "tonic",
