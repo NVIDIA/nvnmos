@@ -31,7 +31,7 @@ service NvnmosDaemon {
   // session-refcounted lifetime exposed by `OpenSession` is sufficient
   // and avoids the explicit teardown step.
 
-  // Create a persistent Node bound to `node_seed`. Errors with
+  // Create a persistent Node bound to `node_config.seed`. Errors with
   // `ALREADY_EXISTS` if a Node (persistent or session-refcounted)
   // already exists for that seed.
   rpc AddNode(AddNodeRequest) returns (AddNodeResponse);
@@ -45,17 +45,18 @@ service NvnmosDaemon {
   // -------- Sessions --------
   //
   // A session contributes resources to exactly one Node. Many sessions
-  // (across many client processes) may share a Node by `node_seed`.
-  // The session handle distinguishes them so that the daemon can
-  // refcount Node lifetime correctly, route activations only to the
-  // session that registered the affected resource, and drop the right
-  // resources when a stream dies.
+  // (across many client processes) may share a Node by reusing the
+  // same `seed`. The session handle distinguishes them so that the
+  // daemon can refcount Node lifetime correctly, route activations
+  // only to the session that registered the affected resource, and
+  // drop the right resources when a stream dies.
 
-  // Open a session on the Node identified by `node_seed`. Attaches to
-  // an existing Node (persistent or session-refcounted). If no Node
-  // currently exists for the seed, creates a session-refcounted Node
-  // from `node_config` and attaches to that. Returns a daemon-local
-  // session handle used to address all subsequent RPCs.
+  // Open a session on the Node identified by `node_config.seed`.
+  // Attaches to an existing Node (persistent or session-refcounted).
+  // If no Node currently exists for the seed, creates a
+  // session-refcounted Node from `node_config` and attaches to it.
+  // Returns a daemon-local session handle used to address all
+  // subsequent RPCs.
   rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
 
   // Close a session. Removes any resources the session contributed.
@@ -134,10 +135,14 @@ enum Transport {
 // fields take the daemon's defaults (autodetect host name, autodetect
 // addresses, default port).
 message NodeConfig {
-  // Node seed. The daemon's multi-Node lookup key. The NMOS `/self`
-  // `node_id` is a deterministic function of this seed; the same seed
-  // always yields the same `node_id`, whether the Node is created by
-  // `AddNode` or by the first `OpenSession`.
+  // Node seed. The daemon's multi-Node lookup key and the canonical
+  // Node identifier across every create / attach RPC. The NMOS
+  // `/self` `node_id` is a deterministic function of this seed; the
+  // same seed always yields the same `node_id`, whether the Node is
+  // created by `AddNode` or by the first `OpenSession`.
+  //
+  // Must be non-empty on `AddNode` and `OpenSession`; the daemon
+  // rejects an empty seed with `INVALID_ARGUMENT`.
   string seed = 1;
 
   string host_name = 2;
@@ -199,36 +204,38 @@ message NetworkServicesConfig {
 // -------- Node lifecycle --------
 
 message AddNodeRequest {
-  // Identifies the Node. Errors with `ALREADY_EXISTS` if a Node
-  // (persistent or session-refcounted) is already bound to this seed.
-  string node_seed = 1;
-
-  NodeConfig node_config = 2;
+  // Node identity and configuration. `node_config.seed` is both the
+  // daemon's lookup key (so `RemoveNode.node_seed` can later refer to
+  // this Node) and the NMOS UUID derivation seed. Errors with
+  // `ALREADY_EXISTS` if a Node (persistent or session-refcounted) is
+  // already bound to that seed.
+  NodeConfig node_config = 1;
 }
 
 message AddNodeResponse {
   // The NMOS `/self` UUID of the new Node — a deterministic function of
-  // `node_seed`. Informational; the daemon never accepts this as input.
+  // `node_config.seed`. Informational; the daemon never accepts this as
+  // input.
   string node_id = 1;
 }
 
 message RemoveNodeRequest {
+  // Identifies the persistent Node to tear down. Matched against the
+  // `seed` the Node was created with via `AddNode`.
   string node_seed = 1;
 }
 
 // -------- Sessions --------
 
 message OpenSessionRequest {
-  // Node seed identifying which Node to attach to. If no Node currently
-  // exists for this seed, `node_config` is used to create a
-  // session-refcounted Node.
-  string node_seed = 1;
-
-  // Consulted only when this `OpenSession` call creates the Node
-  // (i.e. when no Node currently exists for `node_seed`). Ignored
-  // otherwise — once a Node exists, its configuration is fixed,
-  // whether it was created by `AddNode` or by an earlier `OpenSession`.
-  NodeConfig node_config = 2;
+  // Identifies the Node to attach to (`node_config.seed`) and, when
+  // the daemon has to create a Node because none currently exists for
+  // that seed, supplies the rest of the configuration. The remaining
+  // fields are ignored when attaching to a pre-existing Node — once a
+  // Node exists its configuration is fixed, whether it was created by
+  // `AddNode` or by an earlier `OpenSession`. See
+  // `OpenSessionResponse.created_node` for which path was taken.
+  NodeConfig node_config = 1;
 }
 
 message OpenSessionResponse {
@@ -236,9 +243,16 @@ message OpenSessionResponse {
   string session_handle = 1;
 
   // The NMOS `/self` UUID of the Node this session is attached to.
-  // Stable across sessions that share the same `node_seed`.
+  // Stable across sessions that share the same `node_config.seed`.
   // Informational; the daemon never accepts this as input.
   string node_id = 2;
+
+  // True iff this call constructed a new Node (which is necessarily
+  // session-refcounted). False if it attached to an existing Node —
+  // whether that Node was created by `AddNode` (persistent) or by an
+  // earlier `OpenSession` (session-refcounted). Lets the caller tell
+  // whether the rest of `OpenSessionRequest.node_config` was consulted.
+  bool created_node = 3;
 }
 
 message CloseSessionRequest {

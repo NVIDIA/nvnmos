@@ -86,17 +86,18 @@ impl NvnmosDaemon for Daemon {
         request: Request<AddNodeRequest>,
     ) -> Result<Response<AddNodeResponse>, Status> {
         let req = request.into_inner();
-        let config = state::translate_config(req.node_config.as_ref(), &req.node_seed)?;
+        let config = state::translate_config(req.node_config.as_ref())?;
+        let seed = config.seed.clone();
         let state_for_callback = self.state.clone();
-        let seed_for_callback = req.node_seed.clone();
+        let seed_for_callback = seed.clone();
         let outcome = {
             let mut state = self.lock_state();
-            state.add_node(&req.node_seed, || {
+            state.add_node(&seed, || {
                 build_node_server(&config, state_for_callback, seed_for_callback)
             })?
         };
         tracing::info!(
-            node_seed = %req.node_seed,
+            node_seed = %seed,
             node_id = %outcome.node_id,
             "AddNode",
         );
@@ -130,23 +131,24 @@ impl NvnmosDaemon for Daemon {
 
         // Translate the proto config outside the state lock — it can fail
         // (bad port), and there's no reason to hold the lock for it.
-        let config = state::translate_config(req.node_config.as_ref(), &req.node_seed)?;
+        let config = state::translate_config(req.node_config.as_ref())?;
+        let seed = config.seed.clone();
 
         // Hold the state lock only over the registry update (and the
         // libnvnmos create call inside it, which blocks on mDNS / bind /
         // worker spawn). Acceptable while the daemon is single-client;
         // revisit when multi-client throughput matters.
         let state_for_callback = self.state.clone();
-        let seed_for_callback = req.node_seed.clone();
+        let seed_for_callback = seed.clone();
         let outcome = {
             let mut state = self.lock_state();
-            state.open_session(&req.node_seed, || {
+            state.open_session(&seed, || {
                 build_node_server(&config, state_for_callback, seed_for_callback)
             })?
         };
 
         tracing::info!(
-            node_seed = %req.node_seed,
+            node_seed = %seed,
             session_handle = %outcome.session_handle,
             node_id = %outcome.node_id,
             lifetime = outcome.lifetime.label(),
@@ -156,6 +158,7 @@ impl NvnmosDaemon for Daemon {
         Ok(Response::new(OpenSessionResponse {
             session_handle: outcome.session_handle,
             node_id: outcome.node_id,
+            created_node: outcome.created_node,
         }))
     }
 

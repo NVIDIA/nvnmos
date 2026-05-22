@@ -8,9 +8,10 @@
 //!
 //! **Session-refcounted Node** (`--node-seed`):
 //!
-//! 1. `OpenSession` — creates the Node, refcount 0→1.
+//! 1. `OpenSession` — creates the Node, refcount 0→1; asserts
+//!    `created_node = true`.
 //! 2. `OpenSession` on the same seed — attaches; refcount 1→2; the
-//!    returned `node_id` must match (1).
+//!    returned `node_id` must match (1) and `created_node = false`.
 //! 3. `CloseSession` of the first handle — refcount 2→1, Node alive.
 //! 4. `CloseSession` of the second handle — refcount 1→0, Node destroyed.
 //!
@@ -18,7 +19,8 @@
 //!
 //! 5. `AddNode` — creates the persistent Node.
 //! 6. `OpenSession` (twice) on its seed — attaches without affecting
-//!    lifetime; same `node_id` as (5).
+//!    lifetime; same `node_id` as (5); both must report
+//!    `created_node = false`.
 //! 7. `CloseSession` (twice) — Node survives the last close because it
 //!    is persistent.
 //! 8. `RemoveNode` — tears the Node down explicitly.
@@ -165,11 +167,23 @@ async fn main() -> anyhow::Result<()> {
 
     // (1) First OpenSession: creates the Node.
     let a = open(&mut client, &args.node_seed, "first session (creates Node)").await?;
+    anyhow::ensure!(
+        a.created_node,
+        "first OpenSession on a fresh seed should have created_node=true; got {}",
+        a.created_node,
+    );
 
     // (2) Second OpenSession on the same seed: attaches to the existing
-    // Node. `node_config` is intentionally omitted because the daemon
-    // ignores it when the Node already exists.
+    // Node. The rest of `node_config` (host_name, asset_tags, …) is
+    // ignored by the daemon when the Node already exists; we still
+    // send a NodeConfig because the wire requires `node_config.seed`
+    // to identify which Node to attach to.
     let b = open(&mut client, &args.node_seed, "second session (refcount bump)").await?;
+    anyhow::ensure!(
+        !b.created_node,
+        "second OpenSession on the same seed should have created_node=false; got {}",
+        b.created_node,
+    );
 
     anyhow::ensure!(
         a.node_id == b.node_id,
@@ -196,7 +210,9 @@ async fn main() -> anyhow::Result<()> {
     let added = add_node(&mut client, &persistent_seed).await?;
 
     // (6) Two OpenSessions on the persistent seed: attach to it without
-    // affecting its lifetime. Both must return the persistent Node's id.
+    // affecting its lifetime. Both must return the persistent Node's id
+    // *and* report `created_node=false` (the persistent Node was
+    // created by AddNode in step 5).
     let c = open(&mut client, &persistent_seed, "first session on persistent Node").await?;
     let d = open(&mut client, &persistent_seed, "second session on persistent Node").await?;
     anyhow::ensure!(
@@ -206,6 +222,13 @@ async fn main() -> anyhow::Result<()> {
         added.node_id,
         c.node_id,
         d.node_id,
+    );
+    anyhow::ensure!(
+        !c.created_node && !d.created_node,
+        "OpenSession on a pre-existing persistent Node should have \
+         created_node=false; got session1={}, session2={}",
+        c.created_node,
+        d.created_node,
     );
 
     // (7) Close both sessions. The Node must survive the last close
@@ -236,6 +259,12 @@ async fn main() -> anyhow::Result<()> {
         "resource phase session (creates Node)",
     )
     .await?;
+    anyhow::ensure!(
+        r.created_node,
+        "resource-phase OpenSession on a fresh seed should have \
+         created_node=true; got {}",
+        r.created_node,
+    );
 
     let iface_ip = match args.interface_ip.clone() {
         Some(ip) => ip,
@@ -522,7 +551,6 @@ async fn open(
     tracing::info!(node_seed = %node_seed, "OpenSession ({label})");
     let resp = client
         .open_session(OpenSessionRequest {
-            node_seed: node_seed.to_string(),
             node_config: Some(default_node_config(node_seed)),
         })
         .await
@@ -531,6 +559,7 @@ async fn open(
     tracing::info!(
         session_handle = %resp.session_handle,
         node_id = %resp.node_id,
+        created_node = resp.created_node,
         "session open ({label})",
     );
     Ok(resp)
@@ -583,7 +612,6 @@ async fn add_node(
     tracing::info!(node_seed = %node_seed, "AddNode (create persistent Node)");
     let resp = client
         .add_node(AddNodeRequest {
-            node_seed: node_seed.to_string(),
             node_config: Some(default_node_config(node_seed)),
         })
         .await

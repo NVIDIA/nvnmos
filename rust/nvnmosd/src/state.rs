@@ -1107,13 +1107,12 @@ pub fn translate_transport(proto: ProtoTransport) -> Result<Transport, Status> {
 /// Translate a proto [`ProtoNodeConfig`] into the wrapper's
 /// [`NodeConfig`].
 ///
-/// `seed` always comes from `OpenSessionRequest.node_seed` (the registry
-/// key), so any `seed` inside `proto` is intentionally overridden: the
-/// daemon's lookup key and libnvnmos's UUID derivation key must agree.
-pub fn translate_config(
-    proto: Option<&ProtoNodeConfig>,
-    seed: &str,
-) -> Result<NodeConfig, Status> {
+/// `node_config.seed` is the canonical Node identifier; the RPC
+/// handler reads it back off the returned [`NodeConfig`] and passes it
+/// to [`State::add_node`] / [`State::open_session`] as the registry
+/// key, ensuring the daemon's lookup key and libnvnmos's UUID
+/// derivation key always agree.
+pub fn translate_config(proto: Option<&ProtoNodeConfig>) -> Result<NodeConfig, Status> {
     let proto = proto.cloned().unwrap_or_default();
     let http_port = u16::try_from(proto.http_port).map_err(|_| {
         Status::invalid_argument(format!(
@@ -1124,7 +1123,7 @@ pub fn translate_config(
     let asset_tags = translate_asset_tags(proto.asset_tags.as_ref())?;
     let network_services = translate_network_services(proto.network_services.as_ref())?;
     Ok(NodeConfig {
-        seed: seed.to_string(),
+        seed: proto.seed,
         host_name: proto.host_name,
         host_addresses: proto.host_addresses,
         http_port,
