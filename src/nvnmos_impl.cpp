@@ -1167,7 +1167,10 @@ namespace nvnmos
                 }
 
                 // update session version since the resulting /transportfile isn't necessarily identical to the original SDP data
-                sdp_params.origin.session_version = sdp::ntp_now() >> 32;
+                // (stream-format through utility::ostringstreamed because origin.session_version is now a utility::string_t;
+                // a bare uint64_t would silently truncate to a single non-digit char via std::string::operator=(char),
+                // which then trips sdp::parse on the round-trip with "expected a sequence of digits at line 2")
+                sdp_params.origin.session_version = utility::ostringstreamed(sdp::ntp_now() >> 32);
 
                 auto& transport_params = nmos::fields::transport_params(nmos::fields::endpoint_active(connection_sender.data));
 
@@ -1260,7 +1263,7 @@ namespace nvnmos
 
                     // update session version since the resulting SDP data isn't necessarily identical to the original
                     // sender's /transportfile (e.g. due to rtp_enabled) or receiver's /active transport_file object
-                    sdp_params.origin.session_version = sdp::ntp_now() >> 32;
+                    sdp_params.origin.session_version = utility::ostringstreamed(sdp::ntp_now() >> 32);
 
                     const auto group_hint = impl::get_group_hint(resource);
                     const auto& session_info = nmos::fields::description(resource.data);
