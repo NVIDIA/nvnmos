@@ -158,6 +158,43 @@ The rules between the two flavours:
 - `RemoveNode` errors with `FAILED_PRECONDITION` if the Node is session-refcounted (close the sessions instead), or if any sessions are still attached to the persistent Node (close them first; we don't yank the rug out from under live clients).
 - `OpenSession` attaches to whichever flavour the Node happens to be. The session itself doesn't care, and `CloseSession` only triggers teardown for session-refcounted Nodes.
 
+### Daemon internal state
+
+The daemon's runtime state lives entirely in a single `State` struct in [`rust/nvnmosd/src/state.rs`](../../../rust/nvnmosd/src/state.rs), guarded by an `Arc<Mutex<State>>` in `main.rs`. There is no on-disk persistence; the daemon process is otherwise stateless beyond the UDS socket and tonic's per-connection internals. The shape below is the wire-protocol model expressed as data; it is what defines the per-RPC error rules quoted above.
+
+#### Collections
+
+| Collection | Keyed by | Holds | Used for |
+|---|---|---|---|
+| `nodes` | `node_seed` | `NodeServer` handle, cached `node_id`, `Lifetime`, attached-session refcount | At most one libnvnmos node-server per seed; many sessions can attach to the same Node. |
+| `sessions` | `session_handle` (`sess-N`) | the `node_seed` the session is attached to, the set of `resource_handle`s the session owns | Per-client logical attachment to a Node. |
+| `resources` | `resource_handle` (`res-N`) | `internal_id`, owning `session_handle`, owning `node_seed`, `ResourceKind` | Live senders / receivers contributed by sessions. |
+| `by_internal_id` | `(node_seed, internal_id)` | `resource_handle` | Reverse index for (a) the duplicate-id check in `AddSender` / `AddReceiver`, and (b) the activation router's lookup from libnvnmos's IS-05 callback back to the owning session. |
+| `subscriptions` | `session_handle` | tokio mpsc `Sender<ActivationEvent>` half | At most one open `SubscribeActivations` stream per session; the receiver half is held by the streaming RPC handler. |
+| `pending_activations` | `activation_handle` (`act-N`) | owning `session_handle`, `std::sync::mpsc::SyncSender<AckOutcome>` | Activations the daemon has pushed to a subscriber and is now blocking the libnvnmos worker on, waiting for `AckActivation`. The worker is parked in `recv_timeout` with `ACTIVATION_ACK_TIMEOUT` (currently 5 s; the libnvnmos IS-05 PATCH stays open for the same duration). |
+
+Three monotonic `AtomicU64` allocators inside `State` issue the daemon-local handles. The `sess-N` / `res-N` / `act-N` formats are deliberately opaque to clients (see *Naming convention*).
+
+#### Invariants
+
+- Every `resource_handle` in `sessions[s].resources` has a matching entry in `resources`, and `resources[h].session_handle == s`.
+- Every `(node_seed, internal_id)` in `by_internal_id` points at a `resource_handle` that exists in `resources`; the resource's `node_seed` and `internal_id` fields match the key. The activation router logs an error and NACKs if it ever finds this broken.
+- Every `session_handle` in `subscriptions` has a matching `sessions` entry. `CloseSession` removes both.
+- Every `activation_handle` in `pending_activations` belongs to a session that still has a `subscriptions` entry. `CloseSession` drains pending activations for the closing session; dropping the `SyncSender` wakes the libnvnmos worker with a `Disconnected` error and NACKs the IS-05 controller.
+- `nodes[seed].attached_sessions` equals the number of `sessions` entries whose `node_seed == seed`.
+
+#### Mutating entry points
+
+State is only modified through methods on `State`, all called under the daemon-wide mutex:
+
+| Concern | Methods |
+|---|---|
+| Node lifecycle | `add_node`, `remove_node`, `open_session`, `close_session` |
+| Resource lifecycle | `add_sender`, `add_receiver`, `remove_resource`, `sync_resource_state` |
+| Activation flow | `subscribe_activations`, `dispatch_activation` (from the libnvnmos worker via the activation trampoline), `complete_activation` (from `AckActivation`), `cleanup_pending_activation` (idempotent post-recv from the libnvnmos worker) |
+
+`dispatch_activation` is the only entry point reached from a libnvnmos worker thread; the others all run on the gRPC service's tokio executor. Holding the same mutex across both means the `AckActivation` handler can never observe a `pending_activations` entry that hasn't been published yet, even though the libnvnmos worker is blocked on the channel during the round-trip.
+
 ## Element design
 
 ### Pad config

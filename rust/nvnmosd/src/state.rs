@@ -4,7 +4,8 @@
 //! Daemon-wide state: Nodes, sessions, resources, and the operations
 //! that mutate them.
 //!
-//! Shape (matches the design doc, "Naming convention"):
+//! Shape (formalised in the design doc, "Daemon internal state"
+//! section of `doc/designs/nvnmosd/README.md`):
 //!
 //! * **Nodes** are keyed by `node_seed`. The daemon holds at most one
 //!   [`nvnmos::NodeServer`] per seed; multiple sessions may attach to the
@@ -165,8 +166,9 @@ struct ResourceEntry {
     /// what libnvnmos extracted; see the proto's "Resource lifecycle"
     /// section for the validation contract.
     internal_id: String,
-    /// Seed of the Node the resource lives on. Stored so [`State::close_session`]
-    /// and (in the next slice) the activation router can find the right
+    /// Seed of the Node the resource lives on. Stored so
+    /// [`State::close_session`] and the activation router
+    /// ([`State::dispatch_activation`]) can find the right
     /// [`NodeEntry`] back from a resource.
     node_seed: String,
     /// Session that created this resource. Closing that session drops the

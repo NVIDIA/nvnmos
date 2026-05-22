@@ -3,8 +3,8 @@
 
 //! `nvnmosd-example` — minimal regression client for `nvnmosd`.
 //!
-//! Modelled on the C `nvnmos-example` in `src/main.c`. This commit
-//! exercises both Node lifetimes plus the resource lifecycle end-to-end.
+//! Modelled on the C `nvnmos-example` in `src/main.c`. Exercises both
+//! Node lifetimes plus the resource lifecycle end-to-end.
 //!
 //! **Session-refcounted Node** (`--node-seed`):
 //!
@@ -869,7 +869,7 @@ async fn drive_connection_sender_activation(
 /// Minimal ST 2110-20 SDP. Cloned from `rust/nvnmos/examples/node.rs`'s
 /// `build_video_sdp` (same parameter set; same encoding parameters); the
 /// example client is intentionally self-contained, so duplication is
-/// preferable to inventing a shared "test fixtures" crate at this stage.
+/// preferable to a shared "test fixtures" crate.
 fn build_video_sdp(internal_id: &str, sender: bool, iface_ip: &str) -> String {
     const MULTICAST_IP: &str = "233.252.0.0";
     const SOURCE_IP: &str = "192.0.2.0";
