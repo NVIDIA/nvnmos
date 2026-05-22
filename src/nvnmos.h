@@ -88,11 +88,20 @@
 #endif
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C"
 {
 #endif
+
+/**
+ * Buffer size, in bytes, that is always sufficient to hold an NMOS
+ * resource id (a UUID in canonical 8-4-4-4-12 hex form) including the
+ * terminating null character. Callers may pass buffers of this size
+ * or larger to the id accessor functions defined below.
+ */
+#define NVNMOS_ID_LEN 37
 
 typedef struct _NvNmosNodeServer NvNmosNodeServer;
 
@@ -555,6 +564,134 @@ bool nmos_connection_activate(
     NvNmosNodeServer *server,
     const char *id,
     const char *transport_file);
+
+/**
+ * Compute the NMOS Node resource id (the '/self' UUID) that an
+ * @ref NvNmosNodeServer created with the given @p seed will use.
+ *
+ * Pure function of @p seed. The id is generated deterministically by
+ * the library, so calling this before @ref create_nmos_node_server
+ * yields the same value as @ref nmos_get_node_id on the resulting
+ * server. Useful for tooling that needs to pre-compute an id without
+ * standing up a server.
+ *
+ * @param[in]  seed    Seed string. Must not be null. The same string
+ *                     used in @ref NvNmosNodeConfig::seed.
+ * @param[out] out     Buffer to receive the id as a null-terminated
+ *                     ASCII string in canonical UUID form.
+ * @param[in]  out_len Size of @p out in bytes. Must be at least
+ *                     @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_make_node_id(
+    const char *seed,
+    char *out,
+    size_t out_len);
+
+/**
+ * Compute the NMOS Sender resource id that an
+ * @ref NvNmosNodeServer created with the given @p seed will use for
+ * the sender identified by the given @p internal_id.
+ *
+ * Pure function of (@p seed, @p internal_id). See
+ * @ref nmos_make_node_id for the contract; the same notes apply.
+ *
+ * @param[in]  seed        Seed string. Must not be null.
+ * @param[in]  internal_id The 'x-nvnmos-id' value of the sender.
+ *                         Must not be null.
+ * @param[out] out         Buffer to receive the id.
+ * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_make_sender_id(
+    const char *seed,
+    const char *internal_id,
+    char *out,
+    size_t out_len);
+
+/**
+ * Compute the NMOS Receiver resource id that an
+ * @ref NvNmosNodeServer created with the given @p seed will use for
+ * the receiver identified by the given @p internal_id.
+ *
+ * Pure function of (@p seed, @p internal_id). See
+ * @ref nmos_make_node_id for the contract.
+ *
+ * @param[in]  seed        Seed string. Must not be null.
+ * @param[in]  internal_id The 'x-nvnmos-id' value of the receiver.
+ *                         Must not be null.
+ * @param[out] out         Buffer to receive the id.
+ * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_make_receiver_id(
+    const char *seed,
+    const char *internal_id,
+    char *out,
+    size_t out_len);
+
+/**
+ * Get the NMOS Node resource id (the '/self' UUID) of a running
+ * @ref NvNmosNodeServer.
+ *
+ * @param[in]  server  Pointer to a server previously initialised by
+ *                     @ref create_nmos_node_server.
+ * @param[out] out     Buffer to receive the id.
+ * @param[in]  out_len Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_get_node_id(
+    const NvNmosNodeServer *server,
+    char *out,
+    size_t out_len);
+
+/**
+ * Get the NMOS Sender resource id of a sender currently registered
+ * with the specified server.
+ *
+ * Looks the sender up by its internal id. Returns false (without
+ * writing to @p out) if no sender with the given @p internal_id has
+ * been added to the server.
+ *
+ * @param[in]  server      Pointer to the server.
+ * @param[in]  internal_id The 'x-nvnmos-id' of the sender.
+ *                         Must not be null.
+ * @param[out] out         Buffer to receive the id.
+ * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_get_sender_id(
+    const NvNmosNodeServer *server,
+    const char *internal_id,
+    char *out,
+    size_t out_len);
+
+/**
+ * Get the NMOS Receiver resource id of a receiver currently
+ * registered with the specified server.
+ *
+ * Looks the receiver up by its internal id. Returns false (without
+ * writing to @p out) if no receiver with the given @p internal_id
+ * has been added to the server.
+ *
+ * @param[in]  server      Pointer to the server.
+ * @param[in]  internal_id The 'x-nvnmos-id' of the receiver.
+ *                         Must not be null.
+ * @param[out] out         Buffer to receive the id.
+ * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_get_receiver_id(
+    const NvNmosNodeServer *server,
+    const char *internal_id,
+    char *out,
+    size_t out_len);
 
 #ifdef __cplusplus
 }

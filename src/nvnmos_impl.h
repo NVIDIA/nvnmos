@@ -27,7 +27,9 @@
 #define NVNMOS_IMPL_H
 
 #include "cpprest/json_utils.h"
+#include "nmos/id.h"
 #include "nmos/transport.h"
+#include "nmos/type.h"
 
 namespace slog
 {
@@ -46,6 +48,12 @@ namespace nmos
 
 namespace nvnmos
 {
+    namespace impl
+    {
+        // generate repeated ids for the node's resources
+        nmos::id make_id(const nmos::id& seed_id, const nmos::type& type, const utility::string_t& internal_id = {});
+    }
+
     // custom settings fields
     namespace fields
     {

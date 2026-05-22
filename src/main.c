@@ -340,6 +340,77 @@ static bool get_continue(void)
     return result;
 }
 
+static inline void print_id(const char *type, const char *internal_id, const char *value)
+{
+    printf("  %-8s  %-12s  %s\n", type, internal_id, value);
+}
+
+// demonstrate the seed-only ID accessors: pure functions of the
+// node seed string and (for sender/receiver) the internal id; useful
+// for tooling that wants the NMOS IDs without standing up a server
+static void print_expected_ids(const char *seed)
+{
+    char id[NVNMOS_ID_LEN];
+
+    printf("Expected NMOS IDs (computed from seed):\n");
+
+    {
+        const bool success = nmos_make_node_id(seed, id, sizeof id);
+        print_id("node", "", success ? id : "<error>");
+    }
+
+    static const char *const sender_internal_ids[] = {
+        "sink-0", "sink-1", "mxl-sink-0", "mxl-sink-1"
+    };
+    for (size_t i = 0; i < sizeof sender_internal_ids / sizeof sender_internal_ids[0]; ++i)
+    {
+        const bool success = nmos_make_sender_id(seed, sender_internal_ids[i], id, sizeof id);
+        print_id("sender", sender_internal_ids[i], success ? id : "<error>");
+    }
+
+    static const char *const receiver_internal_ids[] = {
+        "source-0", "source-1", "mxl-source-0", "mxl-source-1"
+    };
+    for (size_t i = 0; i < sizeof receiver_internal_ids / sizeof receiver_internal_ids[0]; ++i)
+    {
+        const bool success = nmos_make_receiver_id(seed, receiver_internal_ids[i], id, sizeof id);
+        print_id("receiver", receiver_internal_ids[i], success ? id : "<error>");
+    }
+}
+
+// demonstrate the server-based ID accessors: read what the running
+// node server actually advertises; sender/receiver lookups also act
+// as an existence check, so removed resources return false
+static void print_actual_ids(const NvNmosNodeServer *server)
+{
+    char id[NVNMOS_ID_LEN];
+
+    printf("Actual NMOS IDs (queried from server):\n");
+
+    {
+        const bool success = nmos_get_node_id(server, id, sizeof id);
+        print_id("node", "", success ? id : "<error>");
+    }
+
+    static const char *const sender_internal_ids[] = {
+        "sink-0", "sink-1", "mxl-sink-0", "mxl-sink-1"
+    };
+    for (size_t i = 0; i < sizeof sender_internal_ids / sizeof sender_internal_ids[0]; ++i)
+    {
+        const bool success = nmos_get_sender_id(server, sender_internal_ids[i], id, sizeof id);
+        print_id("sender", sender_internal_ids[i], success ? id : "<missing>");
+    }
+
+    static const char *const receiver_internal_ids[] = {
+        "source-0", "source-1", "mxl-source-0", "mxl-source-1"
+    };
+    for (size_t i = 0; i < sizeof receiver_internal_ids / sizeof receiver_internal_ids[0]; ++i)
+    {
+        const bool success = nmos_get_receiver_id(server, receiver_internal_ids[i], id, sizeof id);
+        print_id("receiver", receiver_internal_ids[i], success ? id : "<missing>");
+    }
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 4)
@@ -432,14 +503,22 @@ int main(int argc, char *argv[])
     // as an example, use user_data to make handle_connection_activated print the transport file
     node_server.user_data = (void*)1;
 
+    print_expected_ids(seed);
+
     printf("Creating NvNmos server...\n");
     if (!create_nmos_node_server(&node_config, &node_server)) return 1;
+
+    print_actual_ids(&node_server);
+
     if (!get_continue()) goto cleanup;
     printf("Removing some senders and receivers...\n");
     if (!remove_nmos_receiver_from_node_server(&node_server, "source-0")) goto cleanup;
     if (!remove_nmos_sender_from_node_server(&node_server, "sink-1")) goto cleanup;
     if (!remove_nmos_receiver_from_node_server(&node_server, "mxl-source-0")) goto cleanup;
     if (!remove_nmos_sender_from_node_server(&node_server, "mxl-sink-1")) goto cleanup;
+
+    print_actual_ids(&node_server);
+
     if (!get_continue()) goto cleanup;
     printf("Adding back some senders and receivers...\n");
     if (!add_nmos_receiver_to_node_server(&node_server, &source_config[0])) goto cleanup;

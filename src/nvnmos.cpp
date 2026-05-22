@@ -25,6 +25,7 @@
 
 #include "nvnmos.h"
 
+#include <cstring>
 #include <boost/algorithm/string/join.hpp>
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/iterator_range_core.hpp>
@@ -91,6 +92,10 @@ namespace nvnmos
         void remove_sender(const std::string& id);
 
         void activate_connection(const std::string& id, const std::string& transport_file);
+
+        nmos::id node_id() const;
+        nmos::id sender_id(const std::string& internal_id) const;
+        nmos::id receiver_id(const std::string& internal_id) const;
 
     private:
         static nmos::transport to_transport(NvNmosTransport transport);
@@ -481,6 +486,28 @@ namespace nvnmos
             throw;
         }
     }
+
+    nmos::id server::node_id() const
+    {
+        auto lock = node_model.read_lock();
+        return impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::node);
+    }
+
+    nmos::id server::sender_id(const std::string& internal_id) const
+    {
+        auto lock = node_model.read_lock();
+        const auto candidate = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::sender, utility::s2us(internal_id.c_str()));
+        if (node_model.node_resources.end() == nmos::find_resource(node_model.node_resources, { candidate, nmos::types::sender })) return {};
+        return candidate;
+    }
+
+    nmos::id server::receiver_id(const std::string& internal_id) const
+    {
+        auto lock = node_model.read_lock();
+        const auto candidate = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::receiver, utility::s2us(internal_id.c_str()));
+        if (node_model.node_resources.end() == nmos::find_resource(node_model.node_resources, { candidate, nmos::types::receiver })) return {};
+        return candidate;
+    }
 }
 
 NVNMOS_API
@@ -614,6 +641,135 @@ bool nmos_connection_activate(
     {
         impl->activate_connection(id, transport_file);
         return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+namespace nvnmos
+{
+    inline bool copy_id_to_buffer(const nmos::id& id, char* out, size_t out_len)
+    {
+        if (!out || out_len < NVNMOS_ID_LEN) return false;
+        if (id.empty()) return false;
+        const auto narrow = utility::us2s(id);
+        if (narrow.size() + 1 > out_len) return false;
+        std::memcpy(out, narrow.data(), narrow.size());
+        out[narrow.size()] = '\0';
+        return true;
+    }
+}
+
+NVNMOS_API
+bool nmos_make_node_id(
+    const char* seed,
+    char* out,
+    size_t out_len)
+{
+    if (!seed) return false;
+    try
+    {
+        const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
+        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::node), out, out_len);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
+bool nmos_make_sender_id(
+    const char* seed,
+    const char* internal_id,
+    char* out,
+    size_t out_len)
+{
+    if (!seed || !internal_id) return false;
+    try
+    {
+        const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
+        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::sender, utility::s2us(internal_id)), out, out_len);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
+bool nmos_make_receiver_id(
+    const char* seed,
+    const char* internal_id,
+    char* out,
+    size_t out_len)
+{
+    if (!seed || !internal_id) return false;
+    try
+    {
+        const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
+        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::receiver, utility::s2us(internal_id)), out, out_len);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
+bool nmos_get_node_id(
+    const NvNmosNodeServer* server,
+    char* out,
+    size_t out_len)
+{
+    if (!server) return false;
+    auto impl = (nvnmos::server*)server->impl;
+    if (!impl) return false;
+    try
+    {
+        return nvnmos::copy_id_to_buffer(impl->node_id(), out, out_len);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
+bool nmos_get_sender_id(
+    const NvNmosNodeServer* server,
+    const char* internal_id,
+    char* out,
+    size_t out_len)
+{
+    if (!server || !internal_id) return false;
+    auto impl = (nvnmos::server*)server->impl;
+    if (!impl) return false;
+    try
+    {
+        return nvnmos::copy_id_to_buffer(impl->sender_id(internal_id), out, out_len);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
+bool nmos_get_receiver_id(
+    const NvNmosNodeServer* server,
+    const char* internal_id,
+    char* out,
+    size_t out_len)
+{
+    if (!server || !internal_id) return false;
+    auto impl = (nvnmos::server*)server->impl;
+    if (!impl) return false;
+    try
+    {
+        return nvnmos::copy_id_to_buffer(impl->receiver_id(internal_id), out, out_len);
     }
     catch (...)
     {

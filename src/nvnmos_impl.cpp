@@ -56,7 +56,6 @@
 #include "nmos/st2110_21_sender_type.h"
 #include "nmos/system_resources.h"
 #include "nmos/transfer_characteristic.h"
-#include "nmos/transport.h"
 #include "nmos/video_jxsv.h"
 #include "sdp/sdp.h"
 
@@ -117,9 +116,6 @@ namespace nvnmos
 
         // find interface with the specified address
         std::vector<web::hosts::experimental::host_interface>::const_iterator find_interface(const std::vector<web::hosts::experimental::host_interface>& interfaces, const utility::string_t& address);
-
-        // generate repeatable ids for the node's resources
-        nmos::id make_id(const nmos::id& seed_id, const nmos::type& type, const utility::string_t& internal_id = {});
 
         // generate a repeatable source-specific multicast address for each leg of a sender
         utility::string_t make_source_specific_multicast_address_v4(const nmos::id& id, int leg);
