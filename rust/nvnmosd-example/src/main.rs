@@ -26,38 +26,49 @@
 //! **Resource lifecycle** (`<seed>-resources`):
 //!
 //! 9.  `OpenSession` — fresh session-refcounted Node for the resource phase.
-//! 10. `AddSender` — register a sender, assert `resource_id` matches
+//! 10. `SubscribeActivations` — open the per-session activations stream
+//!     and start a background task that auto-acks each event with
+//!     `success = true`. Stays alive for the rest of the resource phase
+//!     so IS-05 PATCHes against libnvnmos can drive the round-trip.
+//! 11. `AddSender` — register a sender, assert `resource_id` matches
 //!     `nvnmos::make_sender_id(seed, internal_id)`.
-//! 11. `AddReceiver` — register a receiver, assert `resource_id` matches
+//! 12. `AddReceiver` — register a receiver, assert `resource_id` matches
 //!     `nvnmos::make_receiver_id(seed, internal_id)`.
-//! 12. `SyncResourceState` on the sender with an updated transport_file
+//! 13. `SyncResourceState` on the sender with an updated transport_file
 //!     (bumped SDP session version) — exercises the (re)activate path.
-//! 13. `SyncResourceState` on the sender with `transport_file = None` —
+//!     (`SyncResourceState` deliberately does not fire the activation
+//!     callback, so the auto-ack task stays quiet here.)
+//! 14. `SyncResourceState` on the sender with `transport_file = None` —
 //!     exercises the deactivate path.
-//! 14. `AddSender` with `internal_id` ≠ SDP's `x-nvnmos-id` — expect
+//! 15. `AddSender` with `internal_id` ≠ SDP's `x-nvnmos-id` — expect
 //!     `INVALID_ARGUMENT` (daemon-side mismatch detection).
-//! 15. `RemoveResource` — drop the sender; the receiver survives.
-//! 16. `CloseSession` — drops the surviving receiver through libnvnmos
-//!     and tears down the Node.
+//! 16. `RemoveResource` — drop the sender; the receiver survives.
+//! 17. Optional hold: with `--hold-secs N>0`, sleep N seconds with the
+//!     receiver still registered and the activations stream still open.
+//!     Designed for manually `curl`-ing an IS-05 PATCH at libnvnmos's
+//!     HTTP API to watch the full SubscribeActivations / AckActivation
+//!     round-trip in the daemon logs. With `--hold-secs 0` (the
+//!     default) this step is a no-op.
+//! 18. `CloseSession` — drops the surviving receiver through libnvnmos,
+//!     tears down the Node, and (because the daemon drops the
+//!     subscription on close) ends the activations stream so the
+//!     background ack task exits cleanly.
 //!
-//! Subsequent commits will grow this binary into a full regression
-//! harness mirroring the C example's interactive flow (observe
-//! activations, deactivate, tear down).
-//!
-//! See `doc/designs/nvnmosd/README.md` for the full design and the
-//! current rollout plan.
+//! See `doc/designs/nvnmosd/README.md` for the full design.
 
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
 use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
-    AddNodeRequest, AddNodeResponse, AddReceiverRequest, AddResourceResponse, AddSenderRequest,
-    CloseSessionRequest, NodeConfig, OpenSessionRequest, OpenSessionResponse, RemoveNodeRequest,
-    RemoveResourceRequest, SyncResourceStateRequest, Transport as ProtoTransport,
+    AckActivationRequest, AddNodeRequest, AddNodeResponse, AddReceiverRequest, AddResourceResponse,
+    AddSenderRequest, CloseSessionRequest, NodeConfig, OpenSessionRequest, OpenSessionResponse,
+    RemoveNodeRequest, RemoveResourceRequest, SubscribeActivationsRequest, SyncResourceStateRequest,
+    Transport as ProtoTransport,
 };
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -83,6 +94,16 @@ struct Args {
     /// public address, read back the local IP).
     #[arg(long, env = "NVNMOSD_EXAMPLE_INTERFACE_IP")]
     interface_ip: Option<String>,
+
+    /// Seconds to keep the resource-phase session open after the demo
+    /// flow finishes, with the activations stream still attached and
+    /// the receiver still registered. 0 (the default) exits
+    /// immediately. Set to a positive value to manually drive an IS-05
+    /// activation against libnvnmos (e.g. via `curl`) and observe the
+    /// SubscribeActivations / AckActivation round-trip in the daemon
+    /// log.
+    #[arg(long, default_value_t = 0)]
+    hold_secs: u64,
 }
 
 /// Autodetect a routable local IP via the standard "connect a UDP socket
@@ -192,7 +213,13 @@ async fn main() -> anyhow::Result<()> {
     };
     tracing::info!(%iface_ip, "resource phase using interface IP");
 
-    // (10) AddSender on the happy path. Cross-check the daemon's returned
+    // (10) Subscribe to activations and spawn the auto-ack task. Doing
+    // this before any AddSender/AddReceiver means we'd catch a spurious
+    // activation against the Node, but the main reason to subscribe
+    // early is so the smoke test always sees the stream attached.
+    let ack_task = spawn_auto_ack_task(client.clone(), r.session_handle.clone()).await?;
+
+    // (11) AddSender on the happy path. Cross-check the daemon's returned
     // resource_id against the pure helper.
     let sender_internal_id = "video-sender-a";
     let sender_resp = add_sender(
@@ -213,7 +240,7 @@ async fn main() -> anyhow::Result<()> {
         expected_sender_id,
     );
 
-    // (11) AddReceiver, same cross-check.
+    // (12) AddReceiver, same cross-check.
     let receiver_internal_id = "video-receiver-a";
     let receiver_resp = add_receiver(
         &mut client,
@@ -234,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
         expected_receiver_id,
     );
 
-    // (12) SyncResourceState on the sender with a fresh transport_file.
+    // (13) SyncResourceState on the sender with a fresh transport_file.
     // Bump the SDP session version (the `<sess-version>` token in `o=`)
     // so libnvnmos sees a real change. The daemon maps this onto
     // `nmos_connection_activate(Some(_))`.
@@ -249,7 +276,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    // (13) SyncResourceState on the sender with `transport_file = None`.
+    // (14) SyncResourceState on the sender with `transport_file = None`.
     // The daemon maps this onto `nmos_connection_activate(None)`.
     sync_resource_state(
         &mut client,
@@ -260,7 +287,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    // (14) Mismatch: claim internal_id="claimed" but build the SDP with a
+    // (15) Mismatch: claim internal_id="claimed" but build the SDP with a
     // different x-nvnmos-id ("real"). The daemon detects this by asking
     // libnvnmos to look up the claimed id after the add and returns
     // INVALID_ARGUMENT when the lookup misses.
@@ -288,7 +315,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(_) => anyhow::bail!("AddSender mismatch unexpectedly succeeded"),
     }
 
-    // (15) RemoveResource for the sender. The receiver must survive.
+    // (16) RemoveResource for the sender. The receiver must survive.
     remove_resource(
         &mut client,
         &r.session_handle,
@@ -297,8 +324,25 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    // (16) CloseSession: drops the surviving receiver through libnvnmos
-    // and tears down the (session-refcounted) Node.
+    // (17) Optional hold so an operator can curl an IS-05 PATCH at
+    // libnvnmos and observe SubscribeActivations / AckActivation in
+    // the daemon log. The receiver is still registered and the
+    // activations stream is still attached, so any incoming IS-05
+    // activation against the receiver will round-trip through the
+    // auto-ack task. With --hold-secs 0 (default) this is a no-op.
+    if args.hold_secs > 0 {
+        tracing::info!(
+            hold_secs = args.hold_secs,
+            receiver_resource_id = %receiver_resp.resource_id,
+            "holding session open for manual IS-05 PATCH testing",
+        );
+        tokio::time::sleep(Duration::from_secs(args.hold_secs)).await;
+    }
+
+    // (18) CloseSession: drops the surviving receiver through libnvnmos,
+    // tears down the (session-refcounted) Node, and (because the
+    // daemon drops the subscription on close) ends the activations
+    // stream so the auto-ack task exits cleanly.
     close(
         &mut client,
         &r.session_handle,
@@ -306,8 +350,84 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
+    // Join the auto-ack task. It exits once the stream closes; give it
+    // a brief grace period before complaining.
+    match tokio::time::timeout(Duration::from_secs(5), ack_task).await {
+        Ok(Ok(())) => tracing::info!("activation ack task joined cleanly"),
+        Ok(Err(e)) => tracing::error!(error = %e, "activation ack task panicked"),
+        Err(_) => tracing::warn!(
+            "activation ack task did not exit within 5s of CloseSession; \
+             abandoning",
+        ),
+    }
+
     tracing::info!("done");
     Ok(())
+}
+
+/// Open the per-session activations stream and spawn a background task
+/// that auto-acks each incoming activation with `success = true`. The
+/// task exits when the daemon ends the stream (e.g. on `CloseSession`)
+/// or when its peer errors.
+async fn spawn_auto_ack_task(
+    mut client: NvnmosDaemonClient<Channel>,
+    session_handle: String,
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    tracing::info!(session_handle, "SubscribeActivations");
+    let mut stream = client
+        .subscribe_activations(SubscribeActivationsRequest {
+            session_handle: session_handle.clone(),
+        })
+        .await
+        .context("SubscribeActivations failed")?
+        .into_inner();
+
+    Ok(tokio::spawn(async move {
+        loop {
+            match stream.message().await {
+                Ok(Some(event)) => {
+                    let activated = event.transport_file.is_some();
+                    tracing::info!(
+                        session_handle,
+                        resource_handle = %event.resource_handle,
+                        activation_handle = %event.activation_handle,
+                        activated,
+                        "received activation; auto-acking",
+                    );
+                    let ack = client
+                        .ack_activation(AckActivationRequest {
+                            session_handle: session_handle.clone(),
+                            activation_handle: event.activation_handle.clone(),
+                            success: true,
+                            failure_reason: String::new(),
+                        })
+                        .await;
+                    if let Err(status) = ack {
+                        tracing::error!(
+                            session_handle,
+                            activation_handle = %event.activation_handle,
+                            grpc_code = ?status.code(),
+                            grpc_message = %status.message(),
+                            "AckActivation failed",
+                        );
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!(session_handle, "activations stream ended");
+                    break;
+                }
+                Err(status) => {
+                    tracing::error!(
+                        session_handle,
+                        grpc_code = ?status.code(),
+                        grpc_message = %status.message(),
+                        "activations stream errored",
+                    );
+                    break;
+                }
+            }
+        }
+    }))
 }
 
 async fn open(

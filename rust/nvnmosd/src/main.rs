@@ -6,11 +6,10 @@
 //! This binary listens on a UDS socket and serves the `NvnmosDaemon` gRPC
 //! service. Node lifecycle (`OpenSession` / `CloseSession`, `AddNode` /
 //! `RemoveNode`), resource lifecycle (`AddSender` / `AddReceiver` /
-//! `RemoveResource`) and out-of-band state sync (`SyncResourceState`)
-//! drive real [`nvnmos::NodeServer`]s with session-based ownership.
-//! The IS-05 activation callback path (`SubscribeActivations` /
-//! `AckActivation`) is still pending and returns
-//! [`tonic::Code::Unimplemented`] for now.
+//! `RemoveResource`), out-of-band state sync (`SyncResourceState`), and
+//! the IS-05 activation callback path (`SubscribeActivations` /
+//! `AckActivation`) all drive real [`nvnmos::NodeServer`]s with
+//! session-based ownership.
 //!
 //! See `doc/designs/nvnmosd/README.md` for the full design.
 
@@ -24,11 +23,12 @@ mod log_bridge;
 mod state;
 
 use std::path::PathBuf;
+use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use clap::Parser;
-use nvnmos::NodeServer;
+use nvnmos::{Activation, NodeServer};
 use nvnmos_rpc::v1::nvnmos_daemon_server::{NvnmosDaemon, NvnmosDaemonServer};
 use nvnmos_rpc::v1::{
     AckActivationRequest, ActivationEvent, AddNodeRequest, AddNodeResponse, AddReceiverRequest,
@@ -37,10 +37,18 @@ use nvnmos_rpc::v1::{
     SyncResourceStateRequest, Transport as ProtoTransport,
 };
 use tokio::net::UnixListener;
+use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::{Request, Response, Status};
 
-use crate::state::State;
+use crate::state::{AckOutcome, ActivationDispatch, State};
+
+/// Bound on the per-session activations stream. Small because activations
+/// are rare (one per IS-05 PATCH) and the consumer is expected to ack
+/// each one promptly; a backed-up channel almost always means the client
+/// stopped reading, in which case NACKing further activations is the
+/// right behaviour.
+const SUBSCRIPTION_BUFFER: usize = 16;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "NMOS daemon (nvnmosd)")]
@@ -79,9 +87,13 @@ impl NvnmosDaemon for Daemon {
     ) -> Result<Response<AddNodeResponse>, Status> {
         let req = request.into_inner();
         let config = state::translate_config(req.node_config.as_ref(), &req.node_seed)?;
+        let state_for_callback = self.state.clone();
+        let seed_for_callback = req.node_seed.clone();
         let outcome = {
             let mut state = self.lock_state();
-            state.add_node(&req.node_seed, || build_node_server(&config))?
+            state.add_node(&req.node_seed, || {
+                build_node_server(&config, state_for_callback, seed_for_callback)
+            })?
         };
         tracing::info!(
             node_seed = %req.node_seed,
@@ -124,9 +136,13 @@ impl NvnmosDaemon for Daemon {
         // libnvnmos create call inside it, which blocks on mDNS / bind /
         // worker spawn). Acceptable while the daemon is single-client;
         // revisit when multi-client throughput matters.
+        let state_for_callback = self.state.clone();
+        let seed_for_callback = req.node_seed.clone();
         let outcome = {
             let mut state = self.lock_state();
-            state.open_session(&req.node_seed, || build_node_server(&config))?
+            state.open_session(&req.node_seed, || {
+                build_node_server(&config, state_for_callback, seed_for_callback)
+            })?
         };
 
         tracing::info!(
@@ -248,16 +264,44 @@ impl NvnmosDaemon for Daemon {
 
     async fn subscribe_activations(
         &self,
-        _request: Request<SubscribeActivationsRequest>,
+        request: Request<SubscribeActivationsRequest>,
     ) -> Result<Response<Self::SubscribeActivationsStream>, Status> {
-        Err(unimplemented_rpc("SubscribeActivations"))
+        let req = request.into_inner();
+        let (tx, rx) = tokio_mpsc::channel(SUBSCRIPTION_BUFFER);
+        {
+            let mut state = self.lock_state();
+            state.subscribe_activations(&req.session_handle, tx)?;
+        }
+        tracing::info!(
+            session_handle = %req.session_handle,
+            "SubscribeActivations",
+        );
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn ack_activation(
         &self,
-        _request: Request<AckActivationRequest>,
+        request: Request<AckActivationRequest>,
     ) -> Result<Response<Empty>, Status> {
-        Err(unimplemented_rpc("AckActivation"))
+        let req = request.into_inner();
+        {
+            let mut state = self.lock_state();
+            state.complete_activation(
+                &req.session_handle,
+                &req.activation_handle,
+                AckOutcome {
+                    success: req.success,
+                    failure_reason: req.failure_reason.clone(),
+                },
+            )?;
+        }
+        tracing::info!(
+            session_handle = %req.session_handle,
+            activation_handle = %req.activation_handle,
+            success = req.success,
+            "AckActivation",
+        );
+        Ok(Response::new(Empty {}))
     }
 
     async fn sync_resource_state(
@@ -286,10 +330,6 @@ impl NvnmosDaemon for Daemon {
     }
 }
 
-fn unimplemented_rpc(rpc: &str) -> Status {
-    Status::unimplemented(format!("{rpc}: not implemented yet"))
-}
-
 /// Decode a wire-format proto3 `transport` field into the proto's
 /// generated [`ProtoTransport`] enum. Out-of-range values (a future client
 /// using a transport this daemon doesn't know) become `INVALID_ARGUMENT`
@@ -301,13 +341,108 @@ fn decode_proto_transport(raw: i32) -> Result<ProtoTransport, Status> {
 }
 
 /// Construct the daemon's standard [`NodeServer`]: wraps the wrapper's
-/// builder with the daemon's log bridge so every libnvnmos slog message
-/// flows through `tracing`.
-fn build_node_server(config: &nvnmos::NodeConfig) -> Result<NodeServer, Status> {
+/// builder with the daemon's log bridge and the activation router so
+/// that libnvnmos's IS-05 callbacks are bridged into the right session's
+/// `SubscribeActivations` stream.
+///
+/// Takes the `Arc<Mutex<State>>` and `node_seed` by value because both
+/// have to be captured by the `'static` activation closure. The caller
+/// is expected to `clone()` from the daemon's own state and to forward
+/// the request's `node_seed`.
+fn build_node_server(
+    config: &nvnmos::NodeConfig,
+    state: Arc<Mutex<State>>,
+    node_seed: String,
+) -> Result<NodeServer, Status> {
     NodeServer::builder(config)
         .on_log(log_bridge::forward)
+        .on_activation(move |act| route_activation(&state, &node_seed, act))
         .build()
         .map_err(|e| Status::internal(format!("create_nmos_node_server failed: {e}")))
+}
+
+/// Bridge a single libnvnmos activation callback into the daemon's
+/// pending-activation flow.
+///
+/// Runs on a libnvnmos worker thread (non-tokio), synchronously: the
+/// IS-05 PATCH stays open until this returns. Translates each outcome
+/// from [`State::dispatch_activation`] into a NACK string for libnvnmos
+/// (and logs the reason); on a successful enqueue, blocks on the
+/// per-activation sync channel until the client's `AckActivation`
+/// arrives or [`state::ACTIVATION_ACK_TIMEOUT`] elapses.
+fn route_activation(
+    state: &Arc<Mutex<State>>,
+    node_seed: &str,
+    act: &Activation<'_>,
+) -> std::result::Result<(), String> {
+    let dispatch = {
+        let mut s = state.lock().expect("daemon state mutex poisoned");
+        s.dispatch_activation(node_seed, act.internal_id, act.transport_file)
+    };
+    let (activation_handle, ack_rx) = match dispatch {
+        ActivationDispatch::Routed {
+            activation_handle,
+            ack_rx,
+        } => (activation_handle, ack_rx),
+        ActivationDispatch::NoResource => {
+            tracing::warn!(
+                node_seed,
+                internal_id = act.internal_id,
+                activated = act.transport_file.is_some(),
+                "activation for unknown resource (likely a stray from a \
+                 prior internal_id mismatch); NACKing",
+            );
+            return Err("resource not registered with daemon".to_string());
+        }
+        ActivationDispatch::NoSubscriber => {
+            tracing::warn!(
+                node_seed,
+                internal_id = act.internal_id,
+                activated = act.transport_file.is_some(),
+                "activation for resource whose owning session has no \
+                 SubscribeActivations stream; NACKing",
+            );
+            return Err("no SubscribeActivations stream on owning session".to_string());
+        }
+        ActivationDispatch::SubscriberBusy => {
+            tracing::warn!(
+                node_seed,
+                internal_id = act.internal_id,
+                activated = act.transport_file.is_some(),
+                "subscriber stream buffer full; NACKing",
+            );
+            return Err("subscriber stream buffer is full".to_string());
+        }
+    };
+
+    let result = ack_rx.recv_timeout(state::ACTIVATION_ACK_TIMEOUT);
+
+    // Idempotent: ack handler may have already removed it on the
+    // happy path.
+    state
+        .lock()
+        .expect("daemon state mutex poisoned")
+        .cleanup_pending_activation(&activation_handle);
+
+    match result {
+        Ok(outcome) if outcome.success => Ok(()),
+        Ok(outcome) => Err(outcome.failure_reason),
+        Err(std_mpsc::RecvTimeoutError::Timeout) => {
+            tracing::warn!(
+                activation_handle,
+                "activation ack timed out; NACKing",
+            );
+            Err("activation ack timed out".to_string())
+        }
+        Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+            tracing::warn!(
+                activation_handle,
+                "activation ack channel disconnected (session closed or \
+                 ack handler dropped sender); NACKing",
+            );
+            Err("session closed before ack".to_string())
+        }
+    }
 }
 
 #[tokio::main]

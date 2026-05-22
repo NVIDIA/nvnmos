@@ -20,7 +20,14 @@
 //!   `x-nvnmos-id` inside the transport file), and the kind
 //!   (sender/receiver). A secondary `(node_seed, internal_id) →
 //!   resource_handle` index supports the daemon-level pre-add duplicate
-//!   check today and will route activation events in the next slice.
+//!   check and the activation router's lookup back from libnvnmos's
+//!   `internal_id` to the owning session.
+//! * **Activation subscriptions** are keyed by `session_handle`. Each
+//!   session may hold at most one subscriber stream at a time
+//!   ([`State::subscribe_activations`]); libnvnmos activation callbacks
+//!   for resources owned by that session are bridged into the stream by
+//!   [`State::dispatch_activation`] and awaited via
+//!   [`State::complete_activation`].
 //!
 //! Every Node has a [`Lifetime`]:
 //!
@@ -34,12 +41,22 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc as std_mpsc;
+use std::time::Duration;
 
 use nvnmos::{NodeConfig, NodeServer, ReceiverConfig, SenderConfig, Transport};
-use nvnmos_rpc::v1::{NodeConfig as ProtoNodeConfig, Transport as ProtoTransport};
+use nvnmos_rpc::v1::{ActivationEvent, NodeConfig as ProtoNodeConfig, Transport as ProtoTransport};
+use tokio::sync::mpsc as tokio_mpsc;
 use tonic::Status;
 
 use crate::log_bridge;
+
+/// Upper bound on how long the activation router will wait for a client's
+/// `AckActivation` before NACKing the IS-05 controller. The libnvnmos
+/// callback blocks the IS-05 PATCH for that long, so this is also the
+/// effective IS-05 latency ceiling for a healthy client. Tunable later
+/// if real workloads need a different bound.
+pub const ACTIVATION_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What governs a Node's destruction.
 ///
@@ -147,11 +164,8 @@ struct ResourceEntry {
     node_seed: String,
     /// Session that created this resource. Closing that session drops the
     /// resource; only that session is allowed to remove it. Read by the
-    /// activation router in the next slice (`SubscribeActivations`) to
-    /// dispatch an event to the right session's stream; not yet read
-    /// otherwise — the close/remove paths reach this entry by other
-    /// indices.
-    #[allow(dead_code)]
+    /// activation router ([`State::dispatch_activation`]) to find the
+    /// right subscriber stream for an incoming libnvnmos activation.
     session_handle: String,
     /// Sender vs receiver — dispatches the libnvnmos API call.
     kind: ResourceKind,
@@ -264,18 +278,87 @@ pub struct SyncResourceStateOutcome {
     pub activated: bool,
 }
 
+/// Client-side outcome of an activation, passed by the `AckActivation`
+/// RPC handler to the activation router via the pending-activation
+/// channel. `success = true` propagates as IS-05 success; `false` plus
+/// `failure_reason` propagates as IS-05 failure (the reason is logged
+/// today; libnvnmos's callback contract has no place to surface it
+/// directly, so this is best-effort context for operators).
+#[derive(Debug)]
+pub struct AckOutcome {
+    pub success: bool,
+    pub failure_reason: String,
+}
+
+/// One session's `SubscribeActivations` stream slot. The sender end of
+/// the tokio mpsc channel is shared with the streaming RPC handler;
+/// `try_send` from the activation router pushes events out without
+/// blocking the libnvnmos worker thread.
+struct ActivationSubscriber {
+    tx: tokio_mpsc::Sender<Result<ActivationEvent, Status>>,
+}
+
+/// One in-flight activation waiting on an `AckActivation`. Inserted by
+/// [`State::dispatch_activation`], drained by [`State::complete_activation`]
+/// (or by [`State::cleanup_pending_activation`] on the trampoline's
+/// timeout / disconnect path).
+struct PendingActivation {
+    /// Session that owns the resource. The ack must come from this
+    /// session — otherwise we'd let a peer ack another session's
+    /// activations.
+    session_handle: String,
+    /// Sync channel back to the libnvnmos worker thread that is
+    /// blocked waiting on the activation outcome. Dropping the sender
+    /// (e.g. on `close_session`) wakes the worker with a
+    /// `Disconnected` error and NACKs the activation.
+    ack_tx: std_mpsc::SyncSender<AckOutcome>,
+}
+
+/// Result of [`State::dispatch_activation`], returned to the activation
+/// router on the libnvnmos worker thread. Successful routing yields a
+/// receiver the router blocks on; every other variant maps to an
+/// immediate NACK with a logged reason.
+pub enum ActivationDispatch {
+    /// The event was placed in the subscriber's stream and a pending
+    /// entry was recorded; the router should block on `ack_rx` and
+    /// then call [`State::cleanup_pending_activation`].
+    Routed {
+        activation_handle: String,
+        ack_rx: std_mpsc::Receiver<AckOutcome>,
+    },
+    /// No resource is registered for `(node_seed, internal_id)`. Either
+    /// the activation is for a stray (a resource that survived the
+    /// `AddSender`/`AddReceiver` mismatch path) or for one that was
+    /// removed between the IS-05 PATCH arriving and the callback firing.
+    NoResource,
+    /// The owning session has no `SubscribeActivations` stream attached.
+    /// (Either the client never subscribed or its earlier stream was
+    /// torn down; we reaped a closed subscription in the same call.)
+    NoSubscriber,
+    /// The subscriber's bounded channel was full. The router NACKs
+    /// without enqueueing; libnvnmos will typically retry on the next
+    /// IS-05 PATCH.
+    SubscriberBusy,
+}
+
 /// All daemon state. Wrapped in `Arc<Mutex<…>>` by the gRPC service.
 pub struct State {
     nodes: HashMap<String, NodeEntry>,
     sessions: HashMap<String, SessionEntry>,
     /// Live resources keyed by daemon-allocated `resource_handle`.
     resources: HashMap<String, ResourceEntry>,
-    /// Secondary index: `(node_seed, internal_id) → resource_handle`. Used
-    /// today for the pre-add duplicate check and (next slice) for routing
-    /// activation callbacks from libnvnmos back to the owning session.
+    /// Secondary index: `(node_seed, internal_id) → resource_handle`.
+    /// Used for the pre-add duplicate check and for routing activation
+    /// callbacks from libnvnmos back to the owning session.
     by_internal_id: HashMap<(String, String), String>,
+    /// At most one `SubscribeActivations` subscriber per session.
+    subscriptions: HashMap<String, ActivationSubscriber>,
+    /// Activations currently waiting on `AckActivation`, keyed by
+    /// daemon-allocated `activation_handle`.
+    pending_activations: HashMap<String, PendingActivation>,
     next_session_id: AtomicU64,
     next_resource_id: AtomicU64,
+    next_activation_id: AtomicU64,
 }
 
 impl State {
@@ -285,8 +368,11 @@ impl State {
             sessions: HashMap::new(),
             resources: HashMap::new(),
             by_internal_id: HashMap::new(),
+            subscriptions: HashMap::new(),
+            pending_activations: HashMap::new(),
             next_session_id: AtomicU64::new(0),
             next_resource_id: AtomicU64::new(0),
+            next_activation_id: AtomicU64::new(0),
         }
     }
 
@@ -364,6 +450,31 @@ impl State {
                 "session_handle {session_handle:?} is not known to this daemon"
             ))
         })?;
+
+        // Drop the activation subscription, if any. The tokio mpsc tx is
+        // released here; the streaming RPC handler observes `rx` going
+        // empty and closed and returns.
+        self.subscriptions.remove(session_handle);
+
+        // Abort any in-flight activations belonging to this session.
+        // Dropping the sync-channel sender wakes the libnvnmos worker
+        // blocked in `recv_timeout` with a `Disconnected` error, which
+        // surfaces to IS-05 as activation failure. Collect the keys
+        // first to avoid mutating while iterating.
+        let aborted: Vec<String> = self
+            .pending_activations
+            .iter()
+            .filter(|(_, p)| p.session_handle == session_handle)
+            .map(|(h, _)| h.clone())
+            .collect();
+        for handle in aborted {
+            self.pending_activations.remove(&handle);
+            tracing::warn!(
+                session_handle,
+                activation_handle = %handle,
+                "close_session: aborting pending activation",
+            );
+        }
 
         let seed = session.node_seed;
         let node = self.nodes.get(&seed).ok_or_else(|| {
@@ -771,6 +882,184 @@ impl State {
         })
     }
 
+    /// Register a `SubscribeActivations` stream for `session_handle`.
+    ///
+    /// At most one subscription per session. If an existing slot is
+    /// present but its receiver has been dropped (e.g. the client
+    /// cancelled the previous stream), it is silently replaced; an
+    /// active slot returns `ALREADY_EXISTS`.
+    pub fn subscribe_activations(
+        &mut self,
+        session_handle: &str,
+        tx: tokio_mpsc::Sender<Result<ActivationEvent, Status>>,
+    ) -> Result<(), Status> {
+        if !self.sessions.contains_key(session_handle) {
+            return Err(Status::not_found(format!(
+                "session_handle {session_handle:?} is not known to this daemon"
+            )));
+        }
+        if let Some(existing) = self.subscriptions.get(session_handle) {
+            if !existing.tx.is_closed() {
+                return Err(Status::already_exists(format!(
+                    "session {session_handle:?} already has an active \
+                     SubscribeActivations stream"
+                )));
+            }
+        }
+        self.subscriptions
+            .insert(session_handle.to_string(), ActivationSubscriber { tx });
+        Ok(())
+    }
+
+    /// Activation router — called synchronously from a libnvnmos worker
+    /// thread via the activation trampoline installed at NodeServer
+    /// creation. Looks up the resource by `(node_seed, internal_id)`,
+    /// finds its owning session's subscription, places the event on the
+    /// subscriber's stream, and records a pending entry the caller
+    /// blocks on for the ack.
+    ///
+    /// Holds `&mut self` for the duration, so the AckActivation
+    /// handler can't race ahead: the pending entry is always visible
+    /// once the event has been enqueued.
+    pub fn dispatch_activation(
+        &mut self,
+        node_seed: &str,
+        internal_id: &str,
+        transport_file: Option<&str>,
+    ) -> ActivationDispatch {
+        let key = (node_seed.to_string(), internal_id.to_string());
+        let resource_handle = match self.by_internal_id.get(&key) {
+            Some(h) => h.clone(),
+            None => return ActivationDispatch::NoResource,
+        };
+        let resource = match self.resources.get(&resource_handle) {
+            Some(r) => r,
+            None => {
+                // by_internal_id is supposed to be in lockstep with
+                // resources; surface the inconsistency in the log path
+                // and NACK rather than panic.
+                tracing::error!(
+                    %node_seed,
+                    internal_id,
+                    %resource_handle,
+                    "dispatch_activation: by_internal_id pointed at a \
+                     resource_handle with no entry; treating as stray",
+                );
+                return ActivationDispatch::NoResource;
+            }
+        };
+        let session_handle = resource.session_handle.clone();
+
+        // Reap a closed subscription slot before consulting it, so a
+        // dropped stream from an earlier subscribe doesn't permanently
+        // mask a new one (and so a follow-up `subscribe_activations`
+        // sees no stale entry).
+        if self
+            .subscriptions
+            .get(&session_handle)
+            .is_some_and(|s| s.tx.is_closed())
+        {
+            self.subscriptions.remove(&session_handle);
+        }
+
+        let tx = match self.subscriptions.get(&session_handle) {
+            Some(s) => s.tx.clone(),
+            None => return ActivationDispatch::NoSubscriber,
+        };
+
+        let activation_handle = self.allocate_activation_handle();
+        let (ack_tx, ack_rx) = std_mpsc::sync_channel::<AckOutcome>(1);
+
+        let event = ActivationEvent {
+            resource_handle: resource_handle.clone(),
+            activation_handle: activation_handle.clone(),
+            transport_file: transport_file.map(str::to_string),
+        };
+
+        // Non-blocking — we must not stall the libnvnmos worker thread
+        // on a slow subscriber. A full channel is treated as "subscriber
+        // can't keep up"; a closed channel as "subscriber gone".
+        match tx.try_send(Ok(event)) {
+            Ok(()) => {}
+            Err(tokio_mpsc::error::TrySendError::Full(_)) => {
+                return ActivationDispatch::SubscriberBusy;
+            }
+            Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
+                self.subscriptions.remove(&session_handle);
+                return ActivationDispatch::NoSubscriber;
+            }
+        }
+
+        self.pending_activations.insert(
+            activation_handle.clone(),
+            PendingActivation {
+                session_handle,
+                ack_tx,
+            },
+        );
+        ActivationDispatch::Routed {
+            activation_handle,
+            ack_rx,
+        }
+    }
+
+    /// Apply an `AckActivation`: validate that the session owns the
+    /// pending activation, then forward the outcome to the libnvnmos
+    /// worker thread blocked on the activation router.
+    ///
+    /// `NOT_FOUND` is used for both "no such activation" and "wrong
+    /// session" so we don't leak the existence of other sessions'
+    /// pending handles.
+    pub fn complete_activation(
+        &mut self,
+        session_handle: &str,
+        activation_handle: &str,
+        outcome: AckOutcome,
+    ) -> Result<(), Status> {
+        if !self.sessions.contains_key(session_handle) {
+            return Err(Status::not_found(format!(
+                "session_handle {session_handle:?} is not known to this daemon"
+            )));
+        }
+        let owns = self
+            .pending_activations
+            .get(activation_handle)
+            .is_some_and(|p| p.session_handle == session_handle);
+        if !owns {
+            return Err(Status::not_found(format!(
+                "activation_handle {activation_handle:?} is not pending on \
+                 session {session_handle:?}"
+            )));
+        }
+        let pending = self
+            .pending_activations
+            .remove(activation_handle)
+            .expect("checked above");
+
+        // The sync_channel has capacity 1 and we just drained it from
+        // the map, so this send can only fail if the libnvnmos worker
+        // already gave up (timeout) and dropped the receiver. Surface
+        // that case as a warning — the IS-05 controller has already
+        // seen a NACK and there is nothing we can do.
+        if pending.ack_tx.send(outcome).is_err() {
+            tracing::warn!(
+                activation_handle,
+                session_handle,
+                "AckActivation: activation router already gave up; \
+                 ack discarded",
+            );
+        }
+        Ok(())
+    }
+
+    /// Idempotent removal of a pending activation entry, used by the
+    /// activation router after its `recv_timeout` returns (whether ok,
+    /// timed out, or disconnected). The ack handler may have removed
+    /// the entry already — that's fine.
+    pub fn cleanup_pending_activation(&mut self, activation_handle: &str) {
+        let _ = self.pending_activations.remove(activation_handle);
+    }
+
     fn allocate_session_handle(&self) -> String {
         let n = self.next_session_id.fetch_add(1, Ordering::Relaxed);
         format!("sess-{n}")
@@ -779,6 +1068,11 @@ impl State {
     fn allocate_resource_handle(&self) -> String {
         let n = self.next_resource_id.fetch_add(1, Ordering::Relaxed);
         format!("res-{n}")
+    }
+
+    fn allocate_activation_handle(&self) -> String {
+        let n = self.next_activation_id.fetch_add(1, Ordering::Relaxed);
+        format!("act-{n}")
     }
 }
 
