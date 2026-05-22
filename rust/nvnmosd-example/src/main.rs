@@ -44,16 +44,25 @@
 //!     callback, so the auto-ack task stays quiet here.)
 //! 14. `SyncResourceState` on the sender with `transport_file = None` —
 //!     exercises the deactivate path.
-//! 15. `AddSender` with `internal_id` ≠ SDP's `x-nvnmos-id` — expect
+//! 15. **In-band activation round-trip**: PATCH libnvnmos's IS-05
+//!     Connection API to activate then deactivate the sender. Each
+//!     PATCH triggers libnvnmos's activation callback, which the
+//!     daemon turns into an `ActivationEvent` on the
+//!     `SubscribeActivations` stream; the auto-ack task acks and
+//!     relays the event to the main flow, which asserts the
+//!     `resource_handle` and `transport_file` presence match the
+//!     PATCH. Skipped via `--skip-is05` when libnvnmos's HTTP server
+//!     isn't reachable.
+//! 16. `AddSender` with `internal_id` ≠ SDP's `x-nvnmos-id` — expect
 //!     `INVALID_ARGUMENT` (daemon-side mismatch detection).
-//! 16. `RemoveResource` — drop the sender; the receiver survives.
-//! 17. Optional hold: with `--hold-secs N>0`, sleep N seconds with the
+//! 17. `RemoveResource` — drop the sender; the receiver survives.
+//! 18. Optional hold: with `--hold-secs N>0`, sleep N seconds with the
 //!     receiver still registered and the activations stream still open.
 //!     Designed for manually `curl`-ing an IS-05 PATCH at libnvnmos's
 //!     HTTP API to watch the full SubscribeActivations / AckActivation
 //!     round-trip in the daemon logs. With `--hold-secs 0` (the
 //!     default) this step is a no-op.
-//! 18. `CloseSession` — drops the surviving receiver through libnvnmos,
+//! 19. `CloseSession` — drops the surviving receiver through libnvnmos,
 //!     tears down the Node, and (because the daemon drops the
 //!     subscription on close) ends the activations stream so the
 //!     background ack task exits cleanly.
@@ -69,12 +78,14 @@ use clap::Parser;
 use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
-    AckActivationRequest, AddNodeRequest, AddNodeResponse, AddReceiverRequest, AddResourceResponse,
-    AddSenderRequest, AssetConfig, CloseSessionRequest, NodeConfig, OpenSessionRequest,
-    OpenSessionResponse, RemoveNodeRequest, RemoveResourceRequest, SubscribeActivationsRequest,
-    SyncResourceStateRequest, Transport as ProtoTransport,
+    AckActivationRequest, ActivationEvent, AddNodeRequest, AddNodeResponse, AddReceiverRequest,
+    AddResourceResponse, AddSenderRequest, AssetConfig, CloseSessionRequest, NodeConfig,
+    OpenSessionRequest, OpenSessionResponse, RemoveNodeRequest, RemoveResourceRequest,
+    SubscribeActivationsRequest, SyncResourceStateRequest, Transport as ProtoTransport,
 };
-use tokio::net::UnixStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UnixStream};
+use tokio::sync::mpsc as tokio_mpsc;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::Code;
 use tower::service_fn;
@@ -108,6 +119,21 @@ struct Args {
     /// log.
     #[arg(long, default_value_t = 0)]
     hold_secs: u64,
+
+    /// TCP port libnvnmos listens on for the IS-05 Connection API.
+    /// Default 3215 matches the nmos-cpp default that libnvnmos uses
+    /// when `NodeConfig.http_port` is 0. Override if you've configured
+    /// a different port or are running the smoke against a remote
+    /// libnvnmos.
+    #[arg(long, default_value_t = 3215)]
+    is05_port: u16,
+
+    /// Skip the IS-05 PATCH round-trip step. Useful in environments
+    /// where libnvnmos's HTTP server isn't reachable from the example
+    /// (e.g. sandboxed CI), or for narrowing down a regression to the
+    /// gRPC-only paths.
+    #[arg(long, default_value_t = false)]
+    skip_is05: bool,
 }
 
 /// Autodetect a routable local IP via the standard "connect a UDP socket
@@ -217,11 +243,11 @@ async fn main() -> anyhow::Result<()> {
     };
     tracing::info!(%iface_ip, "resource phase using interface IP");
 
-    // (10) Subscribe to activations and spawn the auto-ack task. Doing
-    // this before any AddSender/AddReceiver means we'd catch a spurious
-    // activation against the Node, but the main reason to subscribe
-    // early is so the smoke test always sees the stream attached.
-    let ack_task = spawn_auto_ack_task(client.clone(), r.session_handle.clone()).await?;
+    // (10) Subscribe to activations and spawn the auto-ack task. The
+    // returned `activations_rx` lets the main flow observe and assert
+    // on activations once they round-trip through the daemon.
+    let (ack_task, mut activations_rx) =
+        spawn_auto_ack_task(client.clone(), r.session_handle.clone()).await?;
 
     // (11) AddSender on the happy path. Cross-check the daemon's returned
     // resource_id against the pure helper.
@@ -291,7 +317,43 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    // (15) Mismatch: claim internal_id="claimed" but build the SDP with a
+    // (15) IS-05 PATCH activate then deactivate against libnvnmos for
+    // the sender. Unlike steps 13/14, which call
+    // `nmos_connection_activate` directly (out-of-band), these PATCHes
+    // exercise the *in-band* path: libnvnmos's activation callback
+    // fires, the daemon turns it into an `ActivationEvent` on the
+    // session's `SubscribeActivations` stream, the auto-ack task
+    // acks, libnvnmos's PATCH returns 200. We assert every step
+    // observed end-to-end via the relay channel.
+    //
+    // Skipped when `--skip-is05` is set, since the round-trip needs
+    // libnvnmos's HTTP server to be reachable from this process.
+    if !args.skip_is05 {
+        drive_connection_sender_activation(
+            &mut activations_rx,
+            &sender_resp.resource_handle,
+            &iface_ip,
+            args.is05_port,
+            &sender_resp.resource_id,
+            true,
+        )
+        .await
+        .context("IS-05 PATCH activate round-trip")?;
+        drive_connection_sender_activation(
+            &mut activations_rx,
+            &sender_resp.resource_handle,
+            &iface_ip,
+            args.is05_port,
+            &sender_resp.resource_id,
+            false,
+        )
+        .await
+        .context("IS-05 PATCH deactivate round-trip")?;
+    } else {
+        tracing::info!("--skip-is05 set; skipping the in-band IS-05 PATCH round-trip");
+    }
+
+    // (16) Mismatch: claim internal_id="claimed" but build the SDP with a
     // different x-nvnmos-id ("real"). The daemon detects this by asking
     // libnvnmos to look up the claimed id after the add and returns
     // INVALID_ARGUMENT when the lookup misses.
@@ -319,7 +381,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(_) => anyhow::bail!("AddSender mismatch unexpectedly succeeded"),
     }
 
-    // (16) RemoveResource for the sender. The receiver must survive.
+    // (17) RemoveResource for the sender. The receiver must survive.
     remove_resource(
         &mut client,
         &r.session_handle,
@@ -328,7 +390,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    // (17) Optional hold so an operator can curl an IS-05 PATCH at
+    // (18) Optional hold so an operator can curl an IS-05 PATCH at
     // libnvnmos and observe SubscribeActivations / AckActivation in
     // the daemon log. The receiver is still registered and the
     // activations stream is still attached, so any incoming IS-05
@@ -343,7 +405,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_secs(args.hold_secs)).await;
     }
 
-    // (18) CloseSession: drops the surviving receiver through libnvnmos,
+    // (19) CloseSession: drops the surviving receiver through libnvnmos,
     // tears down the (session-refcounted) Node, and (because the
     // daemon drops the subscription on close) ends the activations
     // stream so the auto-ack task exits cleanly.
@@ -370,13 +432,20 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Open the per-session activations stream and spawn a background task
-/// that auto-acks each incoming activation with `success = true`. The
-/// task exits when the daemon ends the stream (e.g. on `CloseSession`)
-/// or when its peer errors.
+/// that auto-acks each incoming activation with `success = true`. Every
+/// successfully-acked event is also relayed on the returned channel so
+/// the main test flow can wait on activations and assert their content;
+/// the relay is best-effort (`try_send`), so a slow consumer just
+/// drops events rather than stalling the ack path. The task exits
+/// when the daemon ends the stream (e.g. on `CloseSession`) or when
+/// its peer errors.
 async fn spawn_auto_ack_task(
     mut client: NvnmosDaemonClient<Channel>,
     session_handle: String,
-) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+) -> anyhow::Result<(
+    tokio::task::JoinHandle<()>,
+    tokio_mpsc::Receiver<ActivationEvent>,
+)> {
     tracing::info!(session_handle, "SubscribeActivations");
     let mut stream = client
         .subscribe_activations(SubscribeActivationsRequest {
@@ -386,7 +455,9 @@ async fn spawn_auto_ack_task(
         .context("SubscribeActivations failed")?
         .into_inner();
 
-    Ok(tokio::spawn(async move {
+    let (relay_tx, relay_rx) = tokio_mpsc::channel::<ActivationEvent>(16);
+
+    let handle = tokio::spawn(async move {
         loop {
             match stream.message().await {
                 Ok(Some(event)) => {
@@ -414,6 +485,14 @@ async fn spawn_auto_ack_task(
                             grpc_message = %status.message(),
                             "AckActivation failed",
                         );
+                        continue;
+                    }
+                    if let Err(e) = relay_tx.try_send(event) {
+                        tracing::debug!(
+                            session_handle,
+                            error = %e,
+                            "relay channel full or closed; activation observation dropped",
+                        );
                     }
                 }
                 Ok(None) => {
@@ -431,7 +510,8 @@ async fn spawn_auto_ack_task(
                 }
             }
         }
-    }))
+    });
+    Ok((handle, relay_rx))
 }
 
 async fn open(
@@ -616,6 +696,145 @@ async fn sync_resource_state(
         })
         .await
         .with_context(|| format!("SyncResourceState ({label}) failed"))?;
+    Ok(())
+}
+
+/// Issue an IS-05 Connection API `PATCH` against libnvnmos's HTTP
+/// server and return the parsed response status + body.
+///
+/// We hand-roll the HTTP request over `tokio::net::TcpStream` to avoid
+/// dragging an HTTP client into the workspace just for one request.
+/// The request always sets `Connection: close`, so the server closes
+/// the socket after the response and we can drain the body with a
+/// single `read_to_end`. The whole exchange is capped at 10s so a
+/// stuck activation can't hang the test.
+///
+/// The IS-05 activation round-trip goes:
+///
+/// 1. We `PATCH /…/staged` with `master_enable` + `activation`.
+/// 2. libnvnmos accepts the staged change and invokes the activation
+///    callback.
+/// 3. The callback hops into the daemon, which puts an
+///    [`ActivationEvent`] on the session's `SubscribeActivations`
+///    stream.
+/// 4. The auto-ack task receives, sends back `AckActivation { success
+///    = true }`, then relays the event on `activations_rx`.
+/// 5. libnvnmos's callback returns successfully, the PATCH returns
+///    200 OK.
+///
+/// libnvnmos blocks the PATCH until step 4 completes, so this call
+/// only returns once the activation is fully applied (or until the
+/// activation-ack timeout in the daemon NACKs the round-trip).
+async fn connection_patch(
+    host: &str,
+    port: u16,
+    path: &str,
+    body: &str,
+) -> anyhow::Result<(u16, String)> {
+    let addr = format!("{host}:{port}");
+    let request = format!(
+        "PATCH {path} HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {len}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {body}",
+        len = body.len(),
+    );
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut sock = TcpStream::connect(&addr)
+            .await
+            .with_context(|| format!("TcpStream::connect({addr})"))?;
+        sock.write_all(request.as_bytes())
+            .await
+            .context("writing HTTP request")?;
+        let mut buf = Vec::with_capacity(4096);
+        sock.read_to_end(&mut buf)
+            .await
+            .context("reading HTTP response")?;
+        let resp = String::from_utf8_lossy(&buf).into_owned();
+
+        let status_line = resp.lines().next().unwrap_or("");
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!("could not parse HTTP status line: {status_line:?}")
+            })?;
+        Ok((status, resp))
+    })
+    .await
+    .context("IS-05 PATCH timed out after 10s")?
+}
+
+/// Drive one IS-05 sender activation/deactivation round-trip and
+/// assert the corresponding `ActivationEvent` makes it back through
+/// the daemon's `SubscribeActivations` stream. `expect_active`
+/// controls both the staged `master_enable` value sent to libnvnmos
+/// and the asserted shape of the event (`transport_file = Some` for
+/// activations, `None` for deactivations).
+async fn drive_connection_sender_activation(
+    activations_rx: &mut tokio_mpsc::Receiver<ActivationEvent>,
+    expected_resource_handle: &str,
+    connection_host: &str,
+    connection_port: u16,
+    sender_resource_id: &str,
+    expect_active: bool,
+) -> anyhow::Result<()> {
+    let body = format!(
+        r#"{{"master_enable":{enable},"activation":{{"mode":"activate_immediate"}}}}"#,
+        enable = expect_active,
+    );
+    let path = format!(
+        "/x-nmos/connection/v1.1/single/senders/{sender_resource_id}/staged"
+    );
+    tracing::info!(
+        connection_host,
+        connection_port,
+        sender_resource_id,
+        expect_active,
+        "IS-05 PATCH (sender {action})",
+        action = if expect_active { "activate" } else { "deactivate" },
+    );
+
+    let (status, body_resp) = connection_patch(connection_host, connection_port, &path, &body)
+        .await
+        .with_context(|| format!("IS-05 PATCH {path}"))?;
+    anyhow::ensure!(
+        status == 200,
+        "IS-05 PATCH returned HTTP {status}, expected 200; body:\n{body_resp}",
+    );
+
+    // libnvnmos blocks the PATCH until the activation has been
+    // acknowledged, so by the time `connection_patch` returns the relay must
+    // already have the event. A small timeout guards against the
+    // ack-task being scheduled-out for an instant after the daemon
+    // pushed onto the stream.
+    let event = tokio::time::timeout(Duration::from_secs(2), activations_rx.recv())
+        .await
+        .context("timed out waiting for ActivationEvent on the relay channel")?
+        .context("activations relay channel closed before an event arrived")?;
+    anyhow::ensure!(
+        event.resource_handle == expected_resource_handle,
+        "ActivationEvent for unexpected resource_handle: got {:?}, expected {:?}",
+        event.resource_handle,
+        expected_resource_handle,
+    );
+    anyhow::ensure!(
+        event.transport_file.is_some() == expect_active,
+        "ActivationEvent transport_file presence mismatch: got is_some={}, expected {}",
+        event.transport_file.is_some(),
+        expect_active,
+    );
+    tracing::info!(
+        resource_handle = %event.resource_handle,
+        activation_handle = %event.activation_handle,
+        expect_active,
+        "IS-05 activation round-trip observed on activations stream",
+    );
     Ok(())
 }
 
