@@ -44,8 +44,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
-use nvnmos::{NodeConfig, NodeServer, ReceiverConfig, SenderConfig, Transport};
-use nvnmos_rpc::v1::{ActivationEvent, NodeConfig as ProtoNodeConfig, Transport as ProtoTransport};
+use nvnmos::{
+    AssetConfig, NetworkServicesConfig, NodeConfig, NodeServer, ReceiverConfig, SenderConfig,
+    Transport,
+};
+use nvnmos_rpc::v1::{
+    ActivationEvent, AssetConfig as ProtoAssetConfig,
+    NetworkServicesConfig as ProtoNetworkServicesConfig, NodeConfig as ProtoNodeConfig,
+    Transport as ProtoTransport,
+};
 use tokio::sync::mpsc as tokio_mpsc;
 use tonic::Status;
 
@@ -1103,10 +1110,6 @@ pub fn translate_transport(proto: ProtoTransport) -> Result<Transport, Status> {
 /// `seed` always comes from `OpenSessionRequest.node_seed` (the registry
 /// key), so any `seed` inside `proto` is intentionally overridden: the
 /// daemon's lookup key and libnvnmos's UUID derivation key must agree.
-/// `proto.asset_tags` / `proto.network_services` are accepted but
-/// currently ignored — the wrapper doesn't yet expose them; they'll be
-/// plumbed through when [`nvnmos::NodeConfig`] grows the corresponding
-/// fields.
 pub fn translate_config(
     proto: Option<&ProtoNodeConfig>,
     seed: &str,
@@ -1118,6 +1121,8 @@ pub fn translate_config(
             proto.http_port,
         ))
     })?;
+    let asset_tags = translate_asset_tags(proto.asset_tags.as_ref())?;
+    let network_services = translate_network_services(proto.network_services.as_ref())?;
     Ok(NodeConfig {
         seed: seed.to_string(),
         host_name: proto.host_name,
@@ -1125,6 +1130,110 @@ pub fn translate_config(
         http_port,
         label: proto.label,
         description: proto.description,
+        asset_tags,
+        network_services,
         log_level: log_bridge::LIBNVNMOS_LOG_LEVEL,
     })
+}
+
+/// Translate a proto [`ProtoAssetConfig`] into the wrapper's
+/// [`AssetConfig`].
+///
+/// An entirely-default submessage (every string empty, no functions) is
+/// indistinguishable from "not set" on the wire and is treated as
+/// absent. A *partially* filled submessage is rejected with
+/// `INVALID_ARGUMENT`: libnvnmos requires all four fields when asset
+/// tags are present at all, so failing here gives the client a clearer
+/// error than letting the wrapper trip over an empty string later.
+fn translate_asset_tags(
+    proto: Option<&ProtoAssetConfig>,
+) -> Result<Option<AssetConfig>, Status> {
+    let Some(proto) = proto else { return Ok(None) };
+    let all_empty = proto.manufacturer.is_empty()
+        && proto.product.is_empty()
+        && proto.instance_id.is_empty()
+        && proto.functions.is_empty();
+    if all_empty {
+        return Ok(None);
+    }
+    if proto.manufacturer.is_empty() {
+        return Err(Status::invalid_argument(
+            "node_config.asset_tags.manufacturer must be non-empty when asset_tags is set",
+        ));
+    }
+    if proto.product.is_empty() {
+        return Err(Status::invalid_argument(
+            "node_config.asset_tags.product must be non-empty when asset_tags is set",
+        ));
+    }
+    if proto.instance_id.is_empty() {
+        return Err(Status::invalid_argument(
+            "node_config.asset_tags.instance_id must be non-empty when asset_tags is set",
+        ));
+    }
+    if proto.functions.is_empty() {
+        return Err(Status::invalid_argument(
+            "node_config.asset_tags.functions must contain at least one entry when \
+             asset_tags is set",
+        ));
+    }
+    for (i, f) in proto.functions.iter().enumerate() {
+        if f.is_empty() {
+            return Err(Status::invalid_argument(format!(
+                "node_config.asset_tags.functions[{i}] must be non-empty",
+            )));
+        }
+    }
+    Ok(Some(AssetConfig {
+        manufacturer: proto.manufacturer.clone(),
+        product: proto.product.clone(),
+        instance_id: proto.instance_id.clone(),
+        functions: proto.functions.clone(),
+    }))
+}
+
+/// Translate a proto [`ProtoNetworkServicesConfig`] into the wrapper's
+/// [`NetworkServicesConfig`].
+///
+/// Unlike `asset_tags`, every inner field is genuinely optional —
+/// libnvnmos accepts any combination, with each "unset" field falling
+/// back to its own default. Only the port-range validation is enforced
+/// here; an entirely-default submessage is treated as absent.
+fn translate_network_services(
+    proto: Option<&ProtoNetworkServicesConfig>,
+) -> Result<Option<NetworkServicesConfig>, Status> {
+    let Some(proto) = proto else { return Ok(None) };
+    let all_default = proto.domain.is_empty()
+        && proto.registration_address.is_empty()
+        && proto.registration_port == 0
+        && proto.registration_version.is_empty()
+        && proto.system_address.is_empty()
+        && proto.system_port == 0
+        && proto.system_version.is_empty();
+    if all_default {
+        return Ok(None);
+    }
+    let registration_port = u16::try_from(proto.registration_port).map_err(|_| {
+        Status::invalid_argument(format!(
+            "node_config.network_services.registration_port {} is not a valid TCP port \
+             (max 65535)",
+            proto.registration_port,
+        ))
+    })?;
+    let system_port = u16::try_from(proto.system_port).map_err(|_| {
+        Status::invalid_argument(format!(
+            "node_config.network_services.system_port {} is not a valid TCP port \
+             (max 65535)",
+            proto.system_port,
+        ))
+    })?;
+    Ok(Some(NetworkServicesConfig {
+        domain: proto.domain.clone(),
+        registration_address: proto.registration_address.clone(),
+        registration_port,
+        registration_version: proto.registration_version.clone(),
+        system_address: proto.system_address.clone(),
+        system_port,
+        system_version: proto.system_version.clone(),
+    }))
 }

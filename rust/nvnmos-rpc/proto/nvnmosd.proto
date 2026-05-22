@@ -144,14 +144,25 @@ message NodeConfig {
   repeated string host_addresses = 3;
   uint32 http_port = 4;
 
+  // Label and description for the Node. Empty falls back to a
+  // libnvnmos-synthesised value (using `asset_tags` when present).
   string label = 5;
   string description = 6;
 
+  // Optional BCP-002-02 Asset Distinguishing Information. See
+  // `AssetConfig` for partial-fill semantics.
   AssetConfig asset_tags = 7;
+
+  // Optional network-services overrides. Unset means "use DNS-SD
+  // based on `host_name`".
   NetworkServicesConfig network_services = 8;
 }
 
-// BCP-002-02 Asset Distinguishing Information.
+// BCP-002-02 Asset Distinguishing Information. Either supply all four
+// fields (with `functions` non-empty) or omit the whole submessage —
+// the daemon rejects a partially-filled `AssetConfig` with
+// `INVALID_ARGUMENT`. An entirely-default `AssetConfig` (all strings
+// empty, no functions) is treated as absent.
 message AssetConfig {
   string manufacturer = 1;
   string product = 2;
@@ -162,10 +173,27 @@ message AssetConfig {
 message NetworkServicesConfig {
   // DNS domain; use "local" to force mDNS. Empty for automatic.
   string domain = 1;
-  // Fixed IS-04 Registration API host/IP; disables DNS-SD when set.
+
+  // Host name or IP of a fixed IS-04 Registration API. When set,
+  // DNS-SD is disabled and the Registration API below is used
+  // directly. Empty falls back to DNS-SD discovery.
   string registration_address = 2;
+  // Port for the fixed IS-04 Registration API. 0 selects the protocol
+  // default (80 for HTTP).
   uint32 registration_port = 3;
+  // Version of the fixed IS-04 Registration API. Empty selects the
+  // Node's default (`v1.3`).
   string registration_version = 4;
+
+  // Host name or IP of a fixed IS-09 System API. Honoured only when
+  // `registration_address` is also set. Empty disables IS-09.
+  string system_address = 5;
+  // Port for the fixed IS-09 System API. 0 selects the protocol
+  // default (80 for HTTP).
+  uint32 system_port = 6;
+  // Version of the fixed IS-09 System API. Empty selects the Node's
+  // default (`v1.0`).
+  string system_version = 7;
 }
 
 // -------- Node lifecycle --------

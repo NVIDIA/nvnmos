@@ -26,6 +26,10 @@
 //! **Resource lifecycle** (`<seed>-resources`):
 //!
 //! 9.  `OpenSession` — fresh session-refcounted Node for the resource phase.
+//!     Every `OpenSession` and `AddNode` in this example sets BCP-002-02
+//!     `asset_tags` (manufacturer / product / instance_id / functions);
+//!     they should appear under `/self.tags` in IS-04 for any of the
+//!     Nodes this client touches.
 //! 10. `SubscribeActivations` — open the per-session activations stream
 //!     and start a background task that auto-acks each event with
 //!     `success = true`. Stays alive for the rest of the resource phase
@@ -66,9 +70,9 @@ use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
     AckActivationRequest, AddNodeRequest, AddNodeResponse, AddReceiverRequest, AddResourceResponse,
-    AddSenderRequest, CloseSessionRequest, NodeConfig, OpenSessionRequest, OpenSessionResponse,
-    RemoveNodeRequest, RemoveResourceRequest, SubscribeActivationsRequest, SyncResourceStateRequest,
-    Transport as ProtoTransport,
+    AddSenderRequest, AssetConfig, CloseSessionRequest, NodeConfig, OpenSessionRequest,
+    OpenSessionResponse, RemoveNodeRequest, RemoveResourceRequest, SubscribeActivationsRequest,
+    SyncResourceStateRequest, Transport as ProtoTransport,
 };
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -439,10 +443,7 @@ async fn open(
     let resp = client
         .open_session(OpenSessionRequest {
             node_seed: node_seed.to_string(),
-            node_config: Some(NodeConfig {
-                seed: node_seed.to_string(),
-                ..Default::default()
-            }),
+            node_config: Some(default_node_config(node_seed)),
         })
         .await
         .with_context(|| format!("OpenSession ({label}) failed"))?
@@ -453,6 +454,31 @@ async fn open(
         "session open ({label})",
     );
     Ok(resp)
+}
+
+/// Build the default `NodeConfig` used by every `OpenSession` / `AddNode`
+/// call in this example. The `seed` field is informational on the wire
+/// — the daemon overrides it with the explicit `node_seed` — but we
+/// still set it to the same value for consistency. `asset_tags` is
+/// populated unconditionally so the IS-04 `/self` endpoint always shows
+/// BCP-002-02 distinguishing info while exercising the daemon's
+/// `AssetConfig` translation path. `instance_id` is the node seed
+/// itself: BCP-002-02 calls for a per-instance serial-number-like
+/// value, and the seed is already the per-Node identity that drives
+/// every UUID we expose, so reusing it keeps the asset distinguishing
+/// info aligned with the rest of the Node's identity (and gives each
+/// of the three Nodes the example creates a distinct `instance_id`).
+fn default_node_config(node_seed: &str) -> NodeConfig {
+    NodeConfig {
+        seed: node_seed.to_string(),
+        asset_tags: Some(AssetConfig {
+            manufacturer: "NVIDIA".to_string(),
+            product: "nvnmosd-example".to_string(),
+            instance_id: node_seed.to_string(),
+            functions: vec!["Example".to_string()],
+        }),
+        ..Default::default()
+    }
 }
 
 async fn close(
@@ -478,10 +504,7 @@ async fn add_node(
     let resp = client
         .add_node(AddNodeRequest {
             node_seed: node_seed.to_string(),
-            node_config: Some(NodeConfig {
-                seed: node_seed.to_string(),
-                ..Default::default()
-            }),
+            node_config: Some(default_node_config(node_seed)),
         })
         .await
         .context("AddNode failed")?
