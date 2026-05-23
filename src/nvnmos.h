@@ -130,8 +130,10 @@ typedef enum _NvNmosTransport
  * @param[in] server         A pointer to the server issuing the callback.
  * @param[in] id             The unique identifier for the sender or receiver
  *                           to be activated or deactivated. This is the
- *                           same id specified in the configuration's
- *                           'x-nvnmos-id' attribute or property.
+ *                           same id originally supplied via the
+ *                           configuration's transport file (see
+ *                           @ref NvNmosSenderConfig::transport_file and
+ *                           @ref NvNmosReceiverConfig::transport_file).
  * @param[in] transport_file The updated transport file data for the
  *                           sender or receiver, or a null pointer when
  *                           the sender or receiver is being deactivated.
@@ -150,13 +152,14 @@ typedef enum _NvNmosTransport
  *                           the stream is transmitted.
  *
  *                           For an MXL sender or receiver this is an MXL
- *                           flow definition (JSON), with the
- *                           'x-nvnmos-id' property specifying the unique
- *                           identifier for the sender or receiver, @p id,
- *                           and the 'mxl_domain_id' and 'mxl_flow_id'
- *                           IS-05 transport parameters reflected as the
- *                           'x-nvnmos-mxl-domain-id' key and the JSON
- *                           document's 'id' field respectively.
+ *                           flow definition (JSON). The 'urn:x-nvnmos:tag:id'
+ *                           tag in the 'tags' property specifies the unique
+ *                           identifier for the sender or receiver, @p id;
+ *                           the 'mxl_domain_id' and 'mxl_flow_id' IS-05
+ *                           transport parameters are reflected in the
+ *                           'urn:x-nvnmos:tag:mxl-domain-id' tag (also in
+ *                           'tags') and the JSON document's top-level 'id'
+ *                           field respectively.
  *                           The application is expected to dispatch on
  *                           @p id (which it specified) to determine the
  *                           transport, if needed.
@@ -326,19 +329,22 @@ typedef struct _NvNmosReceiverConfig
         dynamically by IS-05).
 
         For ::NVNMOS_TRANSPORT_MXL, this is an MXL flow definition (JSON)
-        of the form consumed by the MXL library, with NvNmos extensions.
-        The 'x-nvnmos-id' top-level property specifies the unique
-        identifier for the receiver.
-        A group hint tag may be specified via the 'tags' property.
-        The 'x-nvnmos-caps' top-level property may be used to indicate
-        that the receiver should be advertised with the format-derived
-        capabilities omitted.
-        The 'x-nvnmos-mxl-domain-id' top-level property (UUID string)
-        is required and specifies the MXL domain for the receiver;
+        of the form consumed by the MXL library, with NvNmos extensions
+        carried as entries in the 'tags' property.
+        The 'urn:x-nvnmos:tag:id' tag (single-string array, required)
+        specifies the unique identifier for the receiver.
+        A group hint tag may be specified via the standard
+        'urn:x-nmos:tag:grouphint/v1.0' tag.
+        The 'urn:x-nvnmos:tag:caps' tag may be used (presence-only) to
+        indicate that the receiver should be advertised with the
+        format-derived capabilities omitted.
+        The 'urn:x-nvnmos:tag:mxl-domain-id' tag (single-string array of
+        a UUID, required) specifies the MXL domain for the receiver;
         the IS-05 transport parameter defaults to 'auto' and is
         resolved at activation time from this value.
-        The flow definition's 'id' field is not used by the receiver
-        itself (since the MXL flow id is set dynamically by IS-05). */
+        The flow definition's top-level 'id' field is not used by the
+        receiver itself (since the MXL flow id is set dynamically by
+        IS-05). */
     const char *transport_file;
 } NvNmosReceiverConfig;
 
@@ -367,19 +373,22 @@ typedef struct _NvNmosSenderConfig
         the source port from which the stream is transmitted.
 
         For ::NVNMOS_TRANSPORT_MXL, this is an MXL flow definition (JSON)
-        of the form consumed by the MXL library, with NvNmos extensions.
-        The 'x-nvnmos-id' top-level property specifies the unique
-        identifier for the sender.
-        A group hint tag may be specified via the 'tags' property.
-        The 'x-nvnmos-mxl-domain-id' top-level property (UUID string)
-        is required and specifies the MXL domain for the sender;
+        of the form consumed by the MXL library, with NvNmos extensions
+        carried as entries in the 'tags' property (following the same
+        URN convention as the standard 'urn:x-nmos:tag:grouphint/v1.0').
+        The 'urn:x-nvnmos:tag:id' tag (single-string array, required)
+        specifies the unique identifier for the sender.
+        A group hint tag may be specified via the standard
+        'urn:x-nmos:tag:grouphint/v1.0' tag.
+        The 'urn:x-nvnmos:tag:mxl-domain-id' tag (single-string array of
+        a UUID, required) specifies the MXL domain for the sender;
         the IS-05 transport parameter defaults to 'auto' and is
         resolved at activation time from this value.
-        The flow definition's 'id' field (UUID string), if present, is
-        used as the MXL flow identity for the sender's IS-05 transport
-        parameter 'mxl_flow_id'; if absent, the NMOS Flow id (derived
-        from @ref NvNmosNodeConfig::seed and the 'x-nvnmos-id') is used
-        in its place. */
+        The flow definition's top-level 'id' field (UUID string),
+        if present, is used as the MXL flow identity for the sender's
+        IS-05 transport parameter 'mxl_flow_id'; if absent, the NMOS
+        Flow id (derived from @ref NvNmosNodeConfig::seed and the
+        'urn:x-nvnmos:tag:id' value) is used in its place. */
     const char *transport_file;
 } NvNmosSenderConfig;
 
@@ -556,7 +565,7 @@ bool remove_nmos_sender_from_node_server(
  *                           @ref NvNmosReceiverConfig::transport_file
  *                           for the recognised format (SDP for RTP,
  *                           MXL flow definition JSON for MXL) and the
- *                           supported 'x-nvnmos-' extensions.
+ *                           supported NvNmos extensions.
  * @return Whether the update has been successfully applied.
  */
 NVNMOS_API
@@ -598,7 +607,8 @@ bool nmos_make_node_id(
  * @ref nmos_make_node_id for the contract; the same notes apply.
  *
  * @param[in]  seed        Seed string. Must not be null.
- * @param[in]  internal_id The 'x-nvnmos-id' value of the sender.
+ * @param[in]  internal_id The internal id of the sender (see
+ *                         @ref NvNmosSenderConfig::transport_file).
  *                         Must not be null.
  * @param[out] out         Buffer to receive the id.
  * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.
@@ -620,7 +630,8 @@ bool nmos_make_sender_id(
  * @ref nmos_make_node_id for the contract.
  *
  * @param[in]  seed        Seed string. Must not be null.
- * @param[in]  internal_id The 'x-nvnmos-id' value of the receiver.
+ * @param[in]  internal_id The internal id of the receiver (see
+ *                         @ref NvNmosReceiverConfig::transport_file).
  *                         Must not be null.
  * @param[out] out         Buffer to receive the id.
  * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.
@@ -658,7 +669,8 @@ bool nmos_get_node_id(
  * been added to the server.
  *
  * @param[in]  server      Pointer to the server.
- * @param[in]  internal_id The 'x-nvnmos-id' of the sender.
+ * @param[in]  internal_id The internal id of the sender (see
+ *                         @ref NvNmosSenderConfig::transport_file).
  *                         Must not be null.
  * @param[out] out         Buffer to receive the id.
  * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.
@@ -680,7 +692,8 @@ bool nmos_get_sender_id(
  * has been added to the server.
  *
  * @param[in]  server      Pointer to the server.
- * @param[in]  internal_id The 'x-nvnmos-id' of the receiver.
+ * @param[in]  internal_id The internal id of the receiver (see
+ *                         @ref NvNmosReceiverConfig::transport_file).
  *                         Must not be null.
  * @param[out] out         Buffer to receive the id.
  * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.

@@ -91,12 +91,26 @@ namespace nvnmos
         const web::json::field_as_integer channel_count{ U("channel_count") };
     }
 
-    // custom MXL flow definition JSON properties
+    // custom NvNmos tag fields
+    //
+    // These name entries in the `tags` property -- both within an MXL flow
+    // definition JSON document and on an NMOS resource.
+    // They follow the same tag URN convention as the standard
+    // `urn:x-nmos:tag:grouphint/v1.0` group hint.
+    //
+    // `internal_id` and `mxl_domain_id` values are single-element arrays
+    // holding a non-empty string; readers return the first entry.
+    //
+    // `caps` carries a single-element array whose first entry describes
+    // the receiver's capability advertisement: an empty string means
+    // "fully flexible" (format-derived capabilities omitted). Non-empty
+    // strings are reserved for future use (e.g. constraint expressions);
+    // today any non-empty array is treated as fully flexible.
     namespace fields
     {
-        const web::json::field_as_string internal_id{ U("x-nvnmos-id") };
-        const web::json::field_as_value_or caps{ U("x-nvnmos-caps"), {} }; // null when absent
-        const web::json::field_as_string mxl_domain_id{ U("x-nvnmos-mxl-domain-id") };
+        const web::json::field_as_value_or internal_id{ U("urn:x-nvnmos:tag:id"), web::json::value::array() };
+        const web::json::field_as_value_or caps{ U("urn:x-nvnmos:tag:caps"), web::json::value::array() };
+        const web::json::field_as_value_or mxl_domain_id{ U("urn:x-nvnmos:tag:mxl-domain-id"), web::json::value::array() };
     }
 
     // custom SDP format-specific parameters

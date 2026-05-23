@@ -61,11 +61,6 @@
 
 namespace nvnmos
 {
-    namespace fields
-    {
-        const web::json::field_as_value_or internal_id_tag{ U("urn:x-nvnmos:id"), web::json::value::array() };
-    }
-
     // node implementation details
     namespace impl
     {
@@ -149,18 +144,23 @@ namespace nvnmos
     namespace impl
     {
         // parse an MXL flow definition (JSON) including nvnmos extensions
-        // (x-nvnmos-* top-level properties); propagates web::json::json_exception on parse error
+        // (urn:x-nvnmos:tag:* entries inside the `tags` property);
+        // propagates web::json::json_exception on parse error
         web::json::value parse_mxl_flow_def(const std::string& flow_def);
-        // extract the (required) internal id from the x-nvnmos-id top-level property;
+        // extract the first string from the named tag in the flow definition's
+        // `tags` property (or empty if absent)
+        utility::string_t get_mxl_flow_def_tag(const web::json::value& flow_def, const web::json::field_as_value_or& tag_field);
+        // extract the (required) internal id from the urn:x-nvnmos:tag:id tag;
         // throws std::invalid_argument if absent or empty
         utility::string_t get_mxl_flow_def_internal_id(const web::json::value& flow_def);
-        // extract an optional group hint from the tags property (or empty)
+        // extract an optional group hint from the urn:x-nmos:tag:grouphint/v1.0 tag (or empty)
         utility::string_t get_mxl_flow_def_group_hint(const web::json::value& flow_def);
-        // returns true if the x-nvnmos-caps top-level property is present
+        // returns true if the urn:x-nvnmos:tag:caps tag asks for a fully-flexible
+        // receiver (format-derived capabilities omitted)
         bool has_mxl_flow_def_caps(const web::json::value& flow_def);
-        // extract the (required) MXL domain id from the x-nvnmos-mxl-domain-id top-level property;
-        // throws std::invalid_argument if absent or empty (the IS-05 transport parameter defaults
-        // to "auto" and is resolved at activation time from this value)
+        // extract the (required) MXL domain id from the urn:x-nvnmos:tag:mxl-domain-id tag;
+        // throws std::invalid_argument if absent or empty (the IS-05 transport parameter
+        // defaults to "auto" and is resolved at activation time from this value)
         utility::string_t get_mxl_flow_def_domain_id(const web::json::value& flow_def);
         // extract the top-level 'id' property (or empty)
         utility::string_t get_mxl_flow_def_id(const web::json::value& flow_def);
@@ -1813,14 +1813,13 @@ namespace nvnmos
         {
             using web::json::value_of;
 
-            resource.data[nmos::fields::tags][nvnmos::fields::internal_id_tag] = value_of({ internal_id });
+            resource.data[nmos::fields::tags][nvnmos::fields::internal_id] = value_of({ internal_id });
         }
 
         // get the internal id for the sender or receiver from a resource tag
         utility::string_t get_internal_id(const nmos::resource& resource)
         {
-            const auto& tags = resource.data.at(nmos::fields::tags);
-            const auto& internal_ids = nvnmos::fields::internal_id_tag(tags).as_array();
+            const auto& internal_ids = nvnmos::fields::internal_id(resource.data.at(nmos::fields::tags)).as_array();
             return !web::json::empty(internal_ids)
                 ? web::json::front(internal_ids).as_string()
                 : U("");
@@ -1989,59 +1988,54 @@ namespace nvnmos
         }
 
         // parse an MXL flow definition (JSON) including nvnmos extensions
-        // (x-nvnmos-* top-level properties); propagates web::json::json_exception on parse error
+        // (urn:x-nvnmos:tag:* entries inside the `tags` property);
+        // propagates web::json::json_exception on parse error
         web::json::value parse_mxl_flow_def(const std::string& flow_def)
         {
             return web::json::value::parse(utility::s2us(flow_def));
         }
 
-        // extract the (required) internal id from the x-nvnmos-id top-level property;
+        // extract the first string from the named tag in the flow definition's
+        // `tags` property (or empty if absent)
+        utility::string_t get_mxl_flow_def_tag(const web::json::value& flow_def, const web::json::field_as_value_or& tag_field)
+        {
+            if (!flow_def.has_object_field(nmos::fields::tags)) return {};
+            const auto& values = tag_field(flow_def.at(nmos::fields::tags)).as_array();
+            if (web::json::empty(values) || !web::json::front(values).is_string()) return {};
+            return web::json::front(values).as_string();
+        }
+
+        // extract the (required) internal id from the urn:x-nvnmos:tag:id tag;
         // throws std::invalid_argument if absent or empty
         utility::string_t get_mxl_flow_def_internal_id(const web::json::value& flow_def)
         {
-            if (flow_def.has_string_field(nvnmos::fields::internal_id))
-            {
-                const auto& value = nvnmos::fields::internal_id(flow_def);
-                if (!value.empty()) return value;
-            }
-            throw std::invalid_argument("Missing or empty x-nvnmos-id property in MXL flow definition");
+            const auto value = get_mxl_flow_def_tag(flow_def, nvnmos::fields::internal_id);
+            if (value.empty()) throw std::invalid_argument("Missing or empty urn:x-nvnmos:tag:id tag in MXL flow definition");
+            return value;
         }
 
-        // extract an optional group hint from the tags property (or empty)
+        // extract an optional group hint from the urn:x-nmos:tag:grouphint/v1.0 tag (or empty)
         utility::string_t get_mxl_flow_def_group_hint(const web::json::value& flow_def)
         {
-            if (flow_def.has_object_field(nmos::fields::tags))
-            {
-                const auto& tags = flow_def.at(nmos::fields::tags);
-                if (tags.has_array_field(nmos::fields::group_hint))
-                {
-                    const auto& group_hints = nmos::fields::group_hint(tags).as_array();
-                    if (!web::json::empty(group_hints) && web::json::front(group_hints).is_string())
-                    {
-                        return web::json::front(group_hints).as_string();
-                    }
-                }
-            }
-            return utility::string_t{};
+            return get_mxl_flow_def_tag(flow_def, nmos::fields::group_hint);
         }
 
-        // returns true if the x-nvnmos-caps top-level property is present
+        // returns true if the urn:x-nvnmos:tag:caps tag asks for a fully-flexible
+        // receiver (format-derived capabilities omitted)
         bool has_mxl_flow_def_caps(const web::json::value& flow_def)
         {
-            return flow_def.has_field(nvnmos::fields::caps);
+            if (!flow_def.has_object_field(nmos::fields::tags)) return false;
+            return !web::json::empty(nvnmos::fields::caps(flow_def.at(nmos::fields::tags)).as_array());
         }
 
-        // extract the (required) MXL domain id from the x-nvnmos-mxl-domain-id top-level property;
-        // throws std::invalid_argument if absent or empty (the IS-05 transport parameter defaults
-        // to "auto" and is resolved at activation time from this value)
+        // extract the (required) MXL domain id from the urn:x-nvnmos:tag:mxl-domain-id tag;
+        // throws std::invalid_argument if absent or empty (the IS-05 transport parameter
+        // defaults to "auto" and is resolved at activation time from this value)
         utility::string_t get_mxl_flow_def_domain_id(const web::json::value& flow_def)
         {
-            if (flow_def.has_string_field(nvnmos::fields::mxl_domain_id))
-            {
-                const auto& value = nvnmos::fields::mxl_domain_id(flow_def);
-                if (!value.empty()) return value;
-            }
-            throw std::invalid_argument("Missing or empty x-nvnmos-mxl-domain-id property in MXL flow definition");
+            const auto value = get_mxl_flow_def_tag(flow_def, nvnmos::fields::mxl_domain_id);
+            if (value.empty()) throw std::invalid_argument("Missing or empty urn:x-nvnmos:tag:mxl-domain-id tag in MXL flow definition");
+            return value;
         }
 
         // extract the top-level 'id' property (or empty)
@@ -2056,8 +2050,14 @@ namespace nvnmos
         std::string make_mxl_flow_def(web::json::value flow_def, const utility::string_t& mxl_domain_id, const utility::string_t& mxl_flow_id)
         {
             using web::json::value;
+            using web::json::value_of;
 
-            flow_def[nvnmos::fields::mxl_domain_id] = value::string(mxl_domain_id);
+            if (!flow_def.has_object_field(nmos::fields::tags))
+            {
+                flow_def[nmos::fields::tags] = value::object();
+            }
+            flow_def[nmos::fields::tags][nvnmos::fields::mxl_domain_id]
+                = value_of({ value::string(mxl_domain_id) });
             flow_def[nmos::fields::id] = value::string(mxl_flow_id);
 
             return utility::us2s(flow_def.serialize());

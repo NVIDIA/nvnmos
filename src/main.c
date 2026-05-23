@@ -266,12 +266,14 @@ static bool init_video_flow_def(char* flow_def, size_t flow_def_size, bool sende
     int result = snprintf(flow_def,
         flow_def_size,
         "{\n"
-        "  \"x-nvnmos-id\": \"%s\",\n"
-        "  \"x-nvnmos-mxl-domain-id\": \"%s\",\n"
         "  \"id\": \"%s\",\n"
         "  \"label\": \"%s\",\n"
         "  \"description\": \"" MXL_VIDEO_DESCRIPTION "\",\n"
-        "  \"tags\": { \"urn:x-nmos:tag:grouphint/v1.0\": [ \"%s\" ] },\n"
+        "  \"tags\": {\n"
+        "    \"urn:x-nmos:tag:grouphint/v1.0\": [ \"%s\" ],\n"
+        "    \"urn:x-nvnmos:tag:id\": [ \"%s\" ],\n"
+        "    \"urn:x-nvnmos:tag:mxl-domain-id\": [ \"%s\" ]\n"
+        "  },\n"
         "  \"format\": \"urn:x-nmos:format:video\",\n"
         "  \"media_type\": \"video/v210\",\n"
         "  \"grain_rate\": { \"numerator\": %d, \"denominator\": %d },\n"
@@ -286,11 +288,11 @@ static bool init_video_flow_def(char* flow_def, size_t flow_def_size, bool sende
         "    { \"name\": \"Cr\", \"width\": %d, \"height\": %d, \"bit_depth\": 10 }\n"
         "  ]\n"
         "}\n",
-        id,
-        mxl_domain_id,
         mxl_flow_id,
         label,
         group_hint,
+        id,
+        mxl_domain_id,
         MXL_VIDEO_GRAIN_RATE_NUM, MXL_VIDEO_GRAIN_RATE_DEN,
         MXL_VIDEO_FRAME_WIDTH, MXL_VIDEO_FRAME_HEIGHT,
         MXL_VIDEO_FRAME_WIDTH, MXL_VIDEO_FRAME_HEIGHT,
@@ -307,23 +309,25 @@ static bool init_audio_flow_def(char* flow_def, size_t flow_def_size, bool sende
     int result = snprintf(flow_def,
         flow_def_size,
         "{\n"
-        "  \"x-nvnmos-id\": \"%s\",\n"
-        "  \"x-nvnmos-mxl-domain-id\": \"%s\",\n"
         "  \"id\": \"%s\",\n"
         "  \"label\": \"%s\",\n"
         "  \"description\": \"" MXL_AUDIO_DESCRIPTION "\",\n"
-        "  \"tags\": { \"urn:x-nmos:tag:grouphint/v1.0\": [ \"%s\" ] },\n"
+        "  \"tags\": {\n"
+        "    \"urn:x-nmos:tag:grouphint/v1.0\": [ \"%s\" ],\n"
+        "    \"urn:x-nvnmos:tag:id\": [ \"%s\" ],\n"
+        "    \"urn:x-nvnmos:tag:mxl-domain-id\": [ \"%s\" ]\n"
+        "  },\n"
         "  \"format\": \"urn:x-nmos:format:audio\",\n"
         "  \"media_type\": \"audio/float32\",\n"
         "  \"sample_rate\": { \"numerator\": 48000, \"denominator\": 1 },\n"
         "  \"channel_count\": %d,\n"
         "  \"bit_depth\": 32\n"
         "}\n",
-        id,
-        mxl_domain_id,
         mxl_flow_id,
         label,
         group_hint,
+        id,
+        mxl_domain_id,
         MXL_AUDIO_CHANNEL_COUNT
     );
 

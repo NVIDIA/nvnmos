@@ -69,24 +69,37 @@ Each `NvNmosSenderConfig` and `NvNmosReceiverConfig` includes a `transport` fiel
 
 ### NvNmos extensions to the transport file
 
-NvNmos uses a small set of `x-nvnmos-*` extensions in the transport file to convey configuration that the standard transport file format does not carry. In some cases, the same names are used as an SDP attribute (e.g. `a=x-nvnmos-id:<value>`) for RTP and as a top-level JSON property (e.g. `"x-nvnmos-id": "<value>"`) for MXL flow definitions.
+NvNmos uses a small set of extensions in the transport file to convey configuration that the standard transport file format does not carry. The same conceptual extensions are carried differently in the two transport file formats:
 
-| Extension                  | Where                            | Meaning                                                                                                                |
-| ---                        | ---                              | ---                                                                                                                    |
-| `x-nvnmos-id`              | Senders and Receivers (required) | The application's unique identifier for the Sender or Receiver, used in all NvNmos API callbacks                       |
-| `x-nvnmos-group-hint`      | Senders and Receivers (RTP only) | A group hint tag advertised via `urn:x-nmos:tag:grouphint/v1.0`                                                        |
-| `x-nvnmos-caps`            | Receivers (optional)             | If present, suppress format-derived Receiver Capabilities so the Receiver advertises a more permissive profile         |
-| `x-nvnmos-iface-ip`        | Receivers (RTP only)             | The interface IP address on which the stream is received                                                               |
-| `x-nvnmos-src-port`        | Senders (RTP only)               | The source port from which the stream is transmitted                                                                   |
-| `x-nvnmos-mxl-domain-id`   | Senders and Receivers (MXL only, required) | The MXL domain identity (UUID) for the Sender or Receiver; the IS-05 `mxl_domain_id` transport parameter defaults to `"auto"` and is resolved at activation time from this value |
+- For RTP (SDP), as custom `a=x-nvnmos-*:<value>` attributes.
+- For MXL flow definitions (JSON), as entries in the standard `tags` property keyed by `urn:x-nvnmos:tag:*` URN strings. The tag's value is an array of strings; the first element is used.
 
-For MXL Senders and Receivers, a group hint tag is conveyed using the standard NMOS tag `urn:x-nmos:tag:grouphint/v1.0` in the flow definition's `tags` object (the first entry of the array, if present, is used). The SDP-only `x-nvnmos-group-hint` attribute exists because SDP has no native equivalent.
+| Concept                  | SDP attribute (RTP)        | MXL flow_def tag key (MXL)              | Applies to                                | Description                                                                                                                |
+| ---                      | ---                        | ---                                     | ---                                       | ---                                                                                                                        |
+| Internal id              | `a=x-nvnmos-id:<v>`        | `urn:x-nvnmos:tag:id`                   | Senders and Receivers (required)          | The application's unique identifier for the Sender or Receiver, used in all NvNmos API callbacks                           |
+| Group hint               | `a=x-nvnmos-group-hint:<v>`| standard `urn:x-nmos:tag:grouphint/v1.0`| Senders and Receivers (optional)          | A group hint tag advertised via `urn:x-nmos:tag:grouphint/v1.0` on the NMOS resource                                       |
+| Suppress narrow Receiver Caps | `a=x-nvnmos-caps:<v>` (media-level) | `urn:x-nvnmos:tag:caps` | Receivers (optional) | An empty string value selects a fully-flexible Receiver, with format-derived Capabilities omitted. Non-empty strings are reserved for future capability; today any value is treated the same.                                                                                                                                  |
+| Interface IP             | `a=x-nvnmos-iface-ip:<v>`  | n/a                                     | Receivers (RTP only)                      | The interface IP address on which the stream is received                                                                   |
+| Source port              | `a=x-nvnmos-src-port:<v>`  | n/a                                     | Senders (RTP only)                        | The source port from which the stream is transmitted                                                                       |
+| MXL domain id            | n/a                        | `urn:x-nvnmos:tag:mxl-domain-id`        | Senders and Receivers (MXL only, required)| The MXL domain identity (UUID) for the Sender or Receiver; the IS-05 `mxl_domain_id` transport parameter defaults to `"auto"` and is resolved at activation time from this value |
 
-For MXL Senders, the top-level `id` field of the flow definition (if present, a UUID) is used as the MXL flow identity (i.e. the `mxl_flow_id` IS-05 transport parameter); if absent, the generated NMOS Flow id is used in its place. The NMOS Flow id itself is always derived from the `seed` and `x-nvnmos-id` and is independent of the flow definition's `id` field. For MXL Receivers, the MXL flow identity is supplied dynamically through IS-05 Connection Management, so the `id` field of the flow definition is ignored.
+For an MXL flow definition, the tag entries are stored alongside (and follow the same shape as) the standard `urn:x-nmos:tag:grouphint/v1.0` tag, e.g.:
+
+```json
+"tags": {
+  "urn:x-nmos:tag:grouphint/v1.0": [ "video-sender-1:Video" ],
+  "urn:x-nvnmos:tag:id": [ "video-sender-1" ],
+  "urn:x-nvnmos:tag:mxl-domain-id": [ "1ac254d9-c9be-475a-93a7-f80b9c1063a8" ]
+}
+```
+
+NvNmos also publishes the `urn:x-nvnmos:tag:id` tag on the corresponding NMOS resources (visible to controllers via IS-04), so the URN is shared between the two artifacts.
+
+For MXL Senders, the top-level `id` field of the flow definition (if present, a UUID) is used as the MXL flow identity (i.e. the `mxl_flow_id` IS-05 transport parameter); if absent, the generated NMOS Flow id is used in its place. The NMOS Flow id itself is always derived from the `seed` and the internal id (`urn:x-nvnmos:tag:id` value) and is independent of the flow definition's `id` field. For MXL Receivers, the MXL flow identity is supplied dynamically through IS-05 Connection Management, so the `id` field of the flow definition is ignored.
 
 ### Connection activations
 
-When an IS-05 Connection API activation occurs, the library invokes the application's `connection_activated` callback with the application's `id` and an updated `transport_file` reflecting the new active transport parameters. For an RTP Sender or Receiver, the callback receives an SDP file; for an MXL Sender or Receiver, the callback receives an MXL flow definition (JSON) with the new active `mxl_domain_id` and `mxl_flow_id` spliced in (as `x-nvnmos-mxl-domain-id` and the top-level `id`, respectively). The application is expected to dispatch on `id` to identify the Sender or Receiver and react accordingly (for example, by reconfiguring its data plane). Conversely, if an activation (or deactivation) has already occurred in the application's data plane by some other means, outside the NMOS API, the application calls `nmos_connection_activate` to update the IS-04 and IS-05 model to reflect it. The library does not initiate any activation on the application's behalf.
+When an IS-05 Connection API activation occurs, the library invokes the application's `connection_activated` callback with the application's `id` and an updated `transport_file` reflecting the new active transport parameters. For an RTP Sender or Receiver, the callback receives an SDP file; for an MXL Sender or Receiver, the callback receives an MXL flow definition (JSON) with the new active `mxl_domain_id` and `mxl_flow_id` spliced in (as the `urn:x-nvnmos:tag:mxl-domain-id` tag value and the top-level `id` field, respectively). The application is expected to dispatch on `id` to identify the Sender or Receiver and react accordingly (for example, by reconfiguring its data plane). Conversely, if an activation (or deactivation) has already occurred in the application's data plane by some other means, outside the NMOS API, the application calls `nmos_connection_activate` to update the IS-04 and IS-05 model to reflect it. The library does not initiate any activation on the application's behalf.
 
 ## Docker-Based Build
 
