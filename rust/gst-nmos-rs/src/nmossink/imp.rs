@@ -31,6 +31,7 @@ struct Settings {
     transport: Transport,
     sender_name: String,
     mxl_domain_id: String,
+    mxl_domain_path: String,
     mxl_flow_id: String,
     label: String,
     description: String,
@@ -48,6 +49,7 @@ impl Default for Settings {
             transport: Transport::default(),
             sender_name: String::new(),
             mxl_domain_id: String::new(),
+            mxl_domain_path: String::new(),
             mxl_flow_id: String::new(),
             label: String::new(),
             description: String::new(),
@@ -116,10 +118,22 @@ impl ObjectImpl for NmosSink {
                 glib::ParamSpecString::builder("mxl-domain-id")
                     .nick("MXL Domain id")
                     .blurb(
-                        "MXL Domain identifier (UUID; becomes \
-                         `urn:x-nvnmos:tag:mxl-domain-id` in the transport_file). \
-                         Required when transport=mxl. Translation to the inner \
-                         mxlsink `domain` filesystem path is a stub.",
+                        "MXL Domain identifier (UUID) advertised in NMOS as \
+                         `urn:x-nvnmos:tag:mxl-domain-id` in the transport_file. \
+                         Required when transport=mxl. Independent of \
+                         `mxl-domain-path` in this scaffold; a follow-up will \
+                         cross-check it against the `domain_def.json` at \
+                         `mxl-domain-path` (per AMWA BCP-007-03 WIP).",
+                    )
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("mxl-domain-path")
+                    .nick("MXL Domain path")
+                    .blurb(
+                        "Local filesystem path identifying the MXL Domain on \
+                         this host. Independent of `mxl-domain-id` today; \
+                         consumed by the inner `mxlsink` `domain=` property \
+                         when the data path is wired up.",
                     )
                     .mutable_ready()
                     .build(),
@@ -202,6 +216,9 @@ impl ObjectImpl for NmosSink {
             "mxl-domain-id" => {
                 settings.mxl_domain_id = string_or_empty(value);
             }
+            "mxl-domain-path" => {
+                settings.mxl_domain_path = string_or_empty(value);
+            }
             "mxl-flow-id" => {
                 settings.mxl_flow_id = string_or_empty(value);
             }
@@ -235,6 +252,7 @@ impl ObjectImpl for NmosSink {
             "transport" => settings.transport.to_value(),
             "sender-name" => settings.sender_name.to_value(),
             "mxl-domain-id" => settings.mxl_domain_id.to_value(),
+            "mxl-domain-path" => settings.mxl_domain_path.to_value(),
             "mxl-flow-id" => settings.mxl_flow_id.to_value(),
             "label" => settings.label.to_value(),
             "description" => settings.description.to_value(),
@@ -361,6 +379,7 @@ impl From<Settings> for crate::session::CommonSettings {
             side: crate::session::Side::Sender,
             name: s.sender_name,
             mxl_domain_id: s.mxl_domain_id,
+            mxl_domain_path: s.mxl_domain_path,
             transport_file: s.transport_file,
             transport_file_path: s.transport_file_path,
         }

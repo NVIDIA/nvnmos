@@ -38,7 +38,8 @@ Both elements:
 | `daemon-uri`     | string  | optional  | gRPC endpoint. Only `unix:/path/to/sock` is currently supported. Default `unix:/tmp/nvnmosd.sock`. |
 | `node-seed`      | string  | required  | NvNmos Node seed; sessions sharing this seed share a Node. |
 | `transport`      | enum    | required  | Only `mxl` is currently supported. |
-| `mxl-domain-id`  | string  | required for MXL | MXL Domain id (UUID). Translation to the `mxlsink` filesystem path is currently a stub; a companion `mxl-domain-path` property will land alongside the MXL data path. |
+| `mxl-domain-id`  | string  | required for MXL | MXL Domain id (UUID) advertised in NMOS as `urn:x-nvnmos:tag:mxl-domain-id`. Independent of `mxl-domain-path` today; a follow-up will cross-check it against the `domain_def.json` at `mxl-domain-path` (per AMWA BCP-007-03 WIP). |
+| `mxl-domain-path` | string | optional in this scaffold; effectively required once the inner `mxlsink`/`mxlsrc` is wired up | Local filesystem path identifying the MXL Domain on this host. Independent of `mxl-domain-id` today; consumed by the inner element's `domain=` property when the data path is wired up. |
 | `label`          | string  | optional  | NMOS label. |
 | `description`    | string  | optional  | NMOS description. |
 | `transport-file` | string  | route-dependent | Literal contents of the IS-05 transport file (MXL `flow_def` JSON today; SDP later). Pass text, not a path. Convenient for programmatic callers; gst-launch users want `transport-file-path` instead. Mutually exclusive with `transport-file-path`. |

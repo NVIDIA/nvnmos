@@ -75,7 +75,17 @@ pub(crate) struct CommonSettings {
     /// `by_name` index by `(node_seed, side, name)` and the activation
     /// callback surfaces the side alongside the name.
     pub(crate) name: String,
+    /// MXL Domain identifier (UUID) advertised in NMOS via
+    /// `urn:x-nvnmos:tag:mxl-domain-id` in the flow_def. Independent
+    /// of `mxl_domain_path` in this scaffold; a follow-up will
+    /// cross-check `mxl_domain_id` against the `domain_def.json`
+    /// stored at `mxl_domain_path` (per AMWA BCP-007-03 WIP).
     pub(crate) mxl_domain_id: String,
+    /// Local filesystem path identifying the MXL Domain on this host.
+    /// Independent of `mxl_domain_id` today; consumed by the inner
+    /// `mxlsink` / `mxlsrc` `domain=` property when the data path is
+    /// wired up.
+    pub(crate) mxl_domain_path: String,
     /// Literal transport file contents (MXL `flow_def` JSON today).
     /// Convenient for programmatic callers (e.g. Rust/C apps that
     /// compute the flow_def in memory) but awkward to pass from
@@ -171,7 +181,8 @@ pub(crate) fn validate_and_open(
         Some((handle, id)) => gst::info!(
             cat,
             "session opened: handle={} node_id={} created_node={} \
-             (node_seed={}, side={:?}, name={}); \
+             (node_seed={}, side={:?}, name={}, \
+             mxl-domain-id={}, mxl-domain-path={:?}); \
              resource registered: resource_handle={} resource_id={}",
             new_session.session_handle,
             new_session.node_id,
@@ -179,13 +190,16 @@ pub(crate) fn validate_and_open(
             settings.node_seed,
             side,
             settings.name,
+            settings.mxl_domain_id,
+            settings.mxl_domain_path,
             handle,
             id,
         ),
         None => gst::info!(
             cat,
             "session opened: handle={} node_id={} created_node={} \
-             (node_seed={}, side={:?}, name={}); \
+             (node_seed={}, side={:?}, name={}, \
+             mxl-domain-id={}, mxl-domain-path={:?}); \
              no resource registered (transport-file unset)",
             new_session.session_handle,
             new_session.node_id,
@@ -193,6 +207,8 @@ pub(crate) fn validate_and_open(
             settings.node_seed,
             side,
             settings.name,
+            settings.mxl_domain_id,
+            settings.mxl_domain_path,
         ),
     }
 

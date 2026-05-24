@@ -31,6 +31,7 @@ struct Settings {
     transport: Transport,
     receiver_name: String,
     mxl_domain_id: String,
+    mxl_domain_path: String,
     label: String,
     description: String,
     transport_file: String,
@@ -48,6 +49,7 @@ impl Default for Settings {
             transport: Transport::default(),
             receiver_name: String::new(),
             mxl_domain_id: String::new(),
+            mxl_domain_path: String::new(),
             label: String::new(),
             description: String::new(),
             transport_file: String::new(),
@@ -116,10 +118,22 @@ impl ObjectImpl for NmosSrc {
                 glib::ParamSpecString::builder("mxl-domain-id")
                     .nick("MXL Domain id")
                     .blurb(
-                        "MXL Domain identifier (UUID; becomes \
-                         `urn:x-nvnmos:tag:mxl-domain-id` in the transport_file). \
-                         Required when transport=mxl. Translation to the inner \
-                         mxlsrc `domain` filesystem path is a stub.",
+                        "MXL Domain identifier (UUID) advertised in NMOS as \
+                         `urn:x-nvnmos:tag:mxl-domain-id` in the transport_file. \
+                         Required when transport=mxl. Independent of \
+                         `mxl-domain-path` in this scaffold; a follow-up will \
+                         cross-check it against the `domain_def.json` at \
+                         `mxl-domain-path` (per AMWA BCP-007-03 WIP).",
+                    )
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("mxl-domain-path")
+                    .nick("MXL Domain path")
+                    .blurb(
+                        "Local filesystem path identifying the MXL Domain on \
+                         this host. Independent of `mxl-domain-id` today; \
+                         consumed by the inner `mxlsrc` `domain=` property \
+                         when the data path is wired up.",
                     )
                     .mutable_ready()
                     .build(),
@@ -206,6 +220,9 @@ impl ObjectImpl for NmosSrc {
             "mxl-domain-id" => {
                 settings.mxl_domain_id = string_or_empty(value);
             }
+            "mxl-domain-path" => {
+                settings.mxl_domain_path = string_or_empty(value);
+            }
             "label" => {
                 settings.label = string_or_empty(value);
             }
@@ -239,6 +256,7 @@ impl ObjectImpl for NmosSrc {
             "transport" => settings.transport.to_value(),
             "receiver-name" => settings.receiver_name.to_value(),
             "mxl-domain-id" => settings.mxl_domain_id.to_value(),
+            "mxl-domain-path" => settings.mxl_domain_path.to_value(),
             "label" => settings.label.to_value(),
             "description" => settings.description.to_value(),
             "transport-file" => settings.transport_file.to_value(),
@@ -365,6 +383,7 @@ impl From<Settings> for crate::session::CommonSettings {
             side: crate::session::Side::Receiver,
             name: s.receiver_name,
             mxl_domain_id: s.mxl_domain_id,
+            mxl_domain_path: s.mxl_domain_path,
             transport_file: s.transport_file,
             transport_file_path: s.transport_file_path,
         }
