@@ -18,6 +18,7 @@ use gstreamer as gst;
 use nvnmos_rpc::v1::Transport as ProtoTransport;
 
 use crate::daemon::Session;
+use crate::domain::{self, DomainIdOrigin};
 use crate::runtime::SHARED_RUNTIME;
 use crate::types::Transport;
 
@@ -76,15 +77,17 @@ pub(crate) struct CommonSettings {
     /// callback surfaces the side alongside the name.
     pub(crate) name: String,
     /// MXL Domain identifier (UUID) advertised in NMOS via
-    /// `urn:x-nvnmos:tag:mxl-domain-id` in the flow_def. Independent
-    /// of `mxl_domain_path` in this scaffold; a follow-up will
-    /// cross-check `mxl_domain_id` against the `domain_def.json`
-    /// stored at `mxl_domain_path` (per AMWA BCP-007-03 WIP).
+    /// `urn:x-nvnmos:tag:mxl-domain-id` in the flow_def. If
+    /// `mxl_domain_path` is also set and contains a `domain_def.json`
+    /// (AMWA BCP-007-03 WIP), the file's `id` is cross-checked
+    /// against this property — see [`crate::domain`].
     pub(crate) mxl_domain_id: String,
     /// Local filesystem path identifying the MXL Domain on this host.
-    /// Independent of `mxl_domain_id` today; consumed by the inner
-    /// `mxlsink` / `mxlsrc` `domain=` property when the data path is
-    /// wired up.
+    /// If the directory contains a `domain_def.json` its `id` is used
+    /// to populate `mxl_domain_id` when the property is unset, or
+    /// cross-checked against it when both are supplied. The path
+    /// itself will be consumed by the inner `mxlsink` / `mxlsrc`
+    /// `domain=` property when the data path is wired up.
     pub(crate) mxl_domain_path: String,
     /// Literal transport file contents (MXL `flow_def` JSON today).
     /// Convenient for programmatic callers (e.g. Rust/C apps that
@@ -150,8 +153,31 @@ pub(crate) fn validate_and_open(
             settings.side.name_property()
         );
     }
-    if settings.mxl_domain_id.is_empty() {
-        bail!("{element}: `mxl-domain-id` is required when transport=mxl");
+
+    let resolved = domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path)
+        .with_context(|| format!("{element}: resolving MXL Domain identity"))?;
+    if resolved.id.is_empty() {
+        bail!(
+            "{element}: `mxl-domain-id` is required when transport=mxl \
+             (set the property directly or supply an `mxl-domain-path` whose `domain_def.json` provides the id)"
+        );
+    }
+    match resolved.origin {
+        DomainIdOrigin::Property => gst::debug!(
+            cat,
+            "mxl-domain-id from property; no `domain_def.json` consulted",
+        ),
+        DomainIdOrigin::DomainDef => gst::info!(
+            cat,
+            "mxl-domain-id taken from `domain_def.json` at `{}`",
+            settings.mxl_domain_path,
+        ),
+        DomainIdOrigin::Both => gst::debug!(
+            cat,
+            "mxl-domain-id cross-checked against `domain_def.json` at `{}`",
+            settings.mxl_domain_path,
+        ),
+        DomainIdOrigin::None => unreachable!("empty id rejected above"),
     }
 
     let transport = transport_to_proto(settings.transport);
@@ -190,7 +216,7 @@ pub(crate) fn validate_and_open(
             settings.node_seed,
             side,
             settings.name,
-            settings.mxl_domain_id,
+            resolved.id,
             settings.mxl_domain_path,
             handle,
             id,
@@ -207,7 +233,7 @@ pub(crate) fn validate_and_open(
             settings.node_seed,
             side,
             settings.name,
-            settings.mxl_domain_id,
+            resolved.id,
             settings.mxl_domain_path,
         ),
     }

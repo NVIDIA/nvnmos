@@ -19,7 +19,6 @@ use gst::glib;
 use gstreamer as gst;
 
 mod daemon;
-#[allow(dead_code)]
 mod domain;
 mod nmossink;
 mod nmossrc;

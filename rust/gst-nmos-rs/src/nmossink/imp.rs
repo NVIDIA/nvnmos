@@ -120,10 +120,11 @@ impl ObjectImpl for NmosSink {
                     .blurb(
                         "MXL Domain identifier (UUID) advertised in NMOS as \
                          `urn:x-nvnmos:tag:mxl-domain-id` in the transport_file. \
-                         Required when transport=mxl. Independent of \
-                         `mxl-domain-path` in this scaffold; a follow-up will \
-                         cross-check it against the `domain_def.json` at \
-                         `mxl-domain-path` (per AMWA BCP-007-03 WIP).",
+                         Required when transport=mxl, but may be omitted if \
+                         `mxl-domain-path` points at a directory containing a \
+                         `domain_def.json` (AMWA BCP-007-03 WIP): the file's \
+                         `id` is then used. When both are supplied they must \
+                         agree.",
                     )
                     .mutable_ready()
                     .build(),
@@ -131,9 +132,12 @@ impl ObjectImpl for NmosSink {
                     .nick("MXL Domain path")
                     .blurb(
                         "Local filesystem path identifying the MXL Domain on \
-                         this host. Independent of `mxl-domain-id` today; \
-                         consumed by the inner `mxlsink` `domain=` property \
-                         when the data path is wired up.",
+                         this host. If the directory contains a \
+                         `domain_def.json` (AMWA BCP-007-03 WIP) its `id` is \
+                         used to populate `mxl-domain-id` (or cross-checked \
+                         against it when both are set). The path itself will \
+                         be consumed by the inner `mxlsink` `domain=` \
+                         property when the data path is wired up.",
                     )
                     .mutable_ready()
                     .build(),
