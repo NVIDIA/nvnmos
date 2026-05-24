@@ -16,9 +16,14 @@ the workspace overview is in [`../README.md`](../README.md).
   surface (visible via `gst-inspect-1.0 nmossink` and `gst-inspect-1.0 nmossrc`).
 - `NULL→READY` opens a session against `nvnmosd` via gRPC over UDS
   and subscribes to activations; `READY→NULL` closes it.
-- Activation events arriving on the subscription are logged but not
-  yet acknowledged or acted on (the daemon will retry until its
-  5 s ack timeout).
+- When `transport-file` is set, the element also calls `AddSender`
+  (on `nmossink`) or `AddReceiver` (on `nmossrc`) so the resource is
+  published in IS-04 and reachable by IS-05 controllers. When
+  `transport-file` is unset the session is opened but no resource is
+  registered.
+- Activation events arriving on the subscription are auto-acked with
+  `success=true`; the plugin doesn't yet apply the activation to the
+  data path.
 - The external pad is wired to a placeholder `fakesink` or `fakesrc`;
   there is no real MXL data path yet.
 
@@ -36,7 +41,8 @@ Both elements:
 | `mxl-domain-id`  | string  | required for MXL | MXL Domain id (UUID). Translation to the `mxlsink` filesystem path is currently a stub; a companion `mxl-domain-path` property will land alongside the MXL data path. |
 | `label`          | string  | optional  | NMOS label. |
 | `description`    | string  | optional  | NMOS description. |
-| `transport-file` | string  | route-dependent | Literal contents of the IS-05 transport file (MXL `flow_def` JSON today; SDP later). Pass text, not a path; from `gst-launch` use `transport-file="$(<file)"`. |
+| `transport-file` | string  | route-dependent | Literal contents of the IS-05 transport file (MXL `flow_def` JSON today; SDP later). Pass text, not a path. Convenient for programmatic callers; gst-launch users want `transport-file-path` instead. Mutually exclusive with `transport-file-path`. |
+| `transport-file-path` | string | route-dependent | Filesystem path read at NULL→READY into `transport-file`. Convenience for `gst-launch-1.0`, whose pipeline parser doesn't cope with multi-line / quote-heavy property values. Mutually exclusive with `transport-file`. |
 | `caps`           | GstCaps | route-dependent | Essence caps for the property route. |
 | `transport-caps` | GstCaps | optional  | Typically empty for MXL. |
 
@@ -77,7 +83,8 @@ property surface above.
 ## Smoke test
 
 Drive an element through `NULL`→`PLAYING`→`NULL` against a live
-daemon to exercise the session lifecycle:
+daemon to exercise the session lifecycle. Without `transport-file`
+the element only opens a session:
 
 ```sh
 # terminal 1
@@ -90,6 +97,28 @@ GST_DEBUG=nmossink:5 gst-launch-1.0 -e \
     nmossink transport=mxl node-seed=demo sender-name=sender1 mxl-domain-id=1ac254d9-c9be-475a-93a7-f80b9c1063a8
 ```
 
-Expected: the element logs `session opened` then `session closed`
-around the pipeline run; the daemon logs the matching `OpenSession`,
+Expected: the element logs `session opened ... no resource registered`
+then `session closed`; the daemon logs the matching `OpenSession`,
 `SubscribeActivations`, and `CloseSession` calls.
+
+Add `transport-file-path=...` to additionally register the Sender via
+`AddSender`. The transport file's `urn:x-nvnmos:tag:name` tag must
+match `sender-name`:
+
+```sh
+GST_DEBUG=nmossink:5 gst-launch-1.0 -e \
+    fakesrc num-buffers=10 ! \
+    nmossink transport=mxl node-seed=demo sender-name=sender1 \
+             mxl-domain-id=1ac254d9-c9be-475a-93a7-f80b9c1063a8 \
+             transport-file-path=/tmp/sender1.flow_def.json
+```
+
+Expected: the element additionally logs `resource registered:
+resource_handle=... resource_id=...`; the daemon logs the matching
+`AddSender`. Any IS-05 PATCH activation against this resource is
+auto-acked with `success=true`.
+
+`transport-file` (literal text) remains available for programmatic
+callers that compute the flow_def in memory; from gst-launch the path
+form is much easier to type because the pipeline parser doesn't have
+to cope with newlines and embedded quotes.

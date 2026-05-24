@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use gstreamer as gst;
+use nvnmos_rpc::v1::Transport as ProtoTransport;
 
 use crate::daemon::Session;
 use crate::runtime::SHARED_RUNTIME;
@@ -26,8 +27,8 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Whether the snapshot came from `nmossink` or `nmossrc`. Surfaces in
 /// error/log messages so validation failures point the user at the
-/// right property name, and (in a later phase) selects which gRPC
-/// AddSender/AddReceiver call the session opens.
+/// right property name, and selects which gRPC AddSender/AddReceiver
+/// call the session opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Side {
     Sender,
@@ -43,6 +44,17 @@ impl Side {
             Self::Sender => "sender-name",
             Self::Receiver => "receiver-name",
         }
+    }
+}
+
+/// Translate the GObject `Transport` enum to the wire enum.
+///
+/// `Transport::Mxl` is the only variant on this branch; new
+/// transport variants and their proto mappings are added by the
+/// follow-up branches that wire their inner chains in.
+pub(crate) fn transport_to_proto(t: Transport) -> ProtoTransport {
+    match t {
+        Transport::Mxl => ProtoTransport::Mxl,
     }
 }
 
@@ -64,6 +76,51 @@ pub(crate) struct CommonSettings {
     /// callback surfaces the side alongside the name.
     pub(crate) name: String,
     pub(crate) mxl_domain_id: String,
+    /// Literal transport file contents (MXL `flow_def` JSON today).
+    /// Convenient for programmatic callers (e.g. Rust/C apps that
+    /// compute the flow_def in memory) but awkward to pass from
+    /// `gst-launch-1.0` because the JSON contains newlines and
+    /// quotes — those callers use `transport_file_path` instead.
+    pub(crate) transport_file: String,
+    /// Filesystem path that's read into `transport_file` at
+    /// NULL→READY. Mutually exclusive with `transport_file`.
+    pub(crate) transport_file_path: String,
+}
+
+/// Outcome of resolving `transport_file` / `transport_file_path`.
+/// `Some(text)` means a non-empty literal was supplied (directly or
+/// loaded from the path); `None` means neither was set and no
+/// resource will be registered.
+fn resolve_transport_file(
+    element: &str,
+    settings: &CommonSettings,
+) -> Result<Option<String>, anyhow::Error> {
+    let inline = !settings.transport_file.is_empty();
+    let path = !settings.transport_file_path.is_empty();
+    if inline && path {
+        bail!(
+            "{element}: `transport-file` and `transport-file-path` are mutually exclusive; set at most one"
+        );
+    }
+    if inline {
+        Ok(Some(settings.transport_file.clone()))
+    } else if path {
+        let text = std::fs::read_to_string(&settings.transport_file_path).with_context(|| {
+            format!(
+                "{element}: reading `transport-file-path` = `{}`",
+                settings.transport_file_path
+            )
+        })?;
+        if text.is_empty() {
+            bail!(
+                "{element}: `transport-file-path` = `{}` is empty",
+                settings.transport_file_path
+            );
+        }
+        Ok(Some(text))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Validate the settings snapshot and open a session via the shared
@@ -87,26 +144,57 @@ pub(crate) fn validate_and_open(
         bail!("{element}: `mxl-domain-id` is required when transport=mxl");
     }
 
+    let transport = transport_to_proto(settings.transport);
+    let side = settings.side;
+    let name = settings.name.clone();
+    let transport_file = resolve_transport_file(element, settings)?;
+
     let new_session = SHARED_RUNTIME
         .block_on(async {
             tokio::time::timeout(
                 OPEN_TIMEOUT,
-                Session::open(&settings.daemon_uri, &settings.node_seed),
+                Session::open(
+                    &settings.daemon_uri,
+                    &settings.node_seed,
+                    side,
+                    &name,
+                    transport,
+                    transport_file.as_deref(),
+                ),
             )
             .await
         })
         .with_context(|| format!("{element}: OpenSession against {} timed out", settings.daemon_uri))?
         .with_context(|| format!("{element}: OpenSession against {}", settings.daemon_uri))?;
 
-    gst::info!(
-        cat,
-        "session opened: handle={} node_id={} created_node={} (node_seed={}, name={})",
-        new_session.session_handle,
-        new_session.node_id,
-        new_session.created_node,
-        settings.node_seed,
-        settings.name,
-    );
+    match new_session.resource_id() {
+        Some((handle, id)) => gst::info!(
+            cat,
+            "session opened: handle={} node_id={} created_node={} \
+             (node_seed={}, side={:?}, name={}); \
+             resource registered: resource_handle={} resource_id={}",
+            new_session.session_handle,
+            new_session.node_id,
+            new_session.created_node,
+            settings.node_seed,
+            side,
+            settings.name,
+            handle,
+            id,
+        ),
+        None => gst::info!(
+            cat,
+            "session opened: handle={} node_id={} created_node={} \
+             (node_seed={}, side={:?}, name={}); \
+             no resource registered (transport-file unset)",
+            new_session.session_handle,
+            new_session.node_id,
+            new_session.created_node,
+            settings.node_seed,
+            side,
+            settings.name,
+        ),
+    }
 
     *session.lock().unwrap() = Some(new_session);
     Ok(())

@@ -4,15 +4,22 @@
 //! gRPC client glue for the `nvnmosd` daemon.
 //!
 //! [`Session`] wraps the per-element gRPC state: a `tonic` channel, the
-//! daemon's session handle, and a background task subscribed to
-//! [`SubscribeActivations`]. Constructed at NULL→READY and torn down at
-//! READY→NULL by the element's `change_state` override.
+//! daemon's session handle, an optional registered resource, and a
+//! background task subscribed to [`SubscribeActivations`]. Constructed
+//! at NULL→READY and torn down at READY→NULL by the element's
+//! `change_state` override.
 //!
-//! Today this only opens the session and drains the activation stream
-//! into log messages — the daemon will keep retrying activations until
-//! its 5 s ack timeout, which is exactly what proves the stream is
-//! live. Real activation handling (selector flips, `AckActivation`)
-//! is not yet wired up.
+//! When [`Session::open`] is called with a non-empty `transport_file`
+//! it also drives `AddSender` / `AddReceiver` (selected by `side`) so
+//! the resource is published in IS-04 immediately. With no
+//! `transport_file` the session is opened but no resource is
+//! registered — a future change will build the transport file from
+//! upstream caps and the element's properties.
+//!
+//! The activation task acks every `ActivationEvent` with `success=true`
+//! today. The inner data path isn't wired yet so the plugin can't
+//! actually apply an activation; once that lands the ack will be
+//! conditional on the local apply succeeding.
 //!
 //! [`SubscribeActivations`]: nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient::subscribe_activations
 
@@ -22,7 +29,8 @@ use std::time::Duration;
 use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
-    CloseSessionRequest, NodeConfig, OpenSessionRequest, SubscribeActivationsRequest,
+    AckActivationRequest, AddReceiverRequest, AddSenderRequest, CloseSessionRequest, NodeConfig,
+    OpenSessionRequest, Side as ProtoSide, SubscribeActivationsRequest, Transport as ProtoTransport,
 };
 use thiserror::Error;
 use tokio::net::UnixStream;
@@ -34,6 +42,7 @@ use gstreamer as gst;
 
 use crate::CAT;
 use crate::runtime::SHARED_RUNTIME;
+use crate::session::Side;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -41,13 +50,24 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// Open with [`Session::open`]; tear down with [`Session::close`]. Drop
 /// silently aborts the activation task but does **not** call
-/// `CloseSession` — prefer the explicit close path.
+/// `CloseSession` — prefer the explicit close path. `CloseSession`
+/// implicitly removes any resource the session added, so no explicit
+/// `RemoveResource` is needed in the close path.
 pub(crate) struct Session {
     pub(crate) session_handle: String,
     pub(crate) node_id: String,
     pub(crate) created_node: bool,
+    /// `Some((resource_handle, resource_id))` when `Session::open` was
+    /// called with a non-empty `transport_file` and the daemon
+    /// accepted the `AddSender` / `AddReceiver`. `None` otherwise.
+    resource: Option<RegisteredResource>,
     client: NvnmosDaemonClient<Channel>,
     activation_task: JoinHandle<()>,
+}
+
+struct RegisteredResource {
+    handle: String,
+    id: String,
 }
 
 #[derive(Debug, Error)]
@@ -74,14 +94,26 @@ impl From<tonic::Status> for DaemonError {
 
 impl Session {
     /// Open a session against the daemon at `daemon_uri` for Node
-    /// `node_seed`.
+    /// `node_seed`, subscribe to activations, and (when
+    /// `transport_file` is `Some`) register `name` as a Sender or
+    /// Receiver via `AddSender` / `AddReceiver`.
     ///
-    /// Only `unix:/path/to/sock` URIs are supported; the
-    /// `node_seed` is the only field set on `NodeConfig` (label,
-    /// description, asset_tags, network_services are left at their
-    /// proto-default and ignored by the daemon when attaching to an
-    /// existing Node).
-    pub(crate) async fn open(daemon_uri: &str, node_seed: &str) -> Result<Self, DaemonError> {
+    /// Only `unix:/path/to/sock` URIs are supported; the `node_seed`
+    /// is the only field set on `NodeConfig` (label, description,
+    /// asset_tags, network_services are left at their proto-default
+    /// and ignored by the daemon when attaching to an existing Node).
+    ///
+    /// If the resource registration fails the partially-open session
+    /// is rolled back via `CloseSession` so the daemon doesn't leak
+    /// state.
+    pub(crate) async fn open(
+        daemon_uri: &str,
+        node_seed: &str,
+        side: Side,
+        name: &str,
+        transport: ProtoTransport,
+        transport_file: Option<&str>,
+    ) -> Result<Self, DaemonError> {
         let uds_path = parse_unix_uri(daemon_uri)?;
         let channel = connect_uds(uds_path).await?;
         let mut client = NvnmosDaemonClient::new(channel.clone());
@@ -102,18 +134,53 @@ impl Session {
 
         let activation_task = spawn_activation_task(client.clone(), session_handle.clone());
 
+        let resource = match transport_file {
+            Some(file) => match add_resource(
+                &mut client,
+                &session_handle,
+                side,
+                name,
+                transport,
+                file,
+            )
+            .await
+            {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    activation_task.abort();
+                    let _ = activation_task.await;
+                    let _ = client
+                        .close_session(CloseSessionRequest {
+                            session_handle: session_handle.clone(),
+                        })
+                        .await;
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+
         Ok(Self {
             session_handle,
             node_id,
             created_node,
+            resource,
             client,
             activation_task,
         })
     }
 
+    pub(crate) fn resource_id(&self) -> Option<(&str, &str)> {
+        self.resource
+            .as_ref()
+            .map(|r| (r.handle.as_str(), r.id.as_str()))
+    }
+
     /// Cancel the background activation task and tell the daemon to
-    /// close this session. Errors are returned so callers can log
-    /// them; the session is consumed either way.
+    /// close this session. The daemon removes any resource the
+    /// session contributed as part of `CloseSession`, so no explicit
+    /// `RemoveResource` is sent here. Errors are returned so callers
+    /// can log them; the session is consumed either way.
     pub(crate) async fn close(self) -> Result<(), DaemonError> {
         let Session {
             session_handle,
@@ -131,6 +198,40 @@ impl Session {
 
         Ok(())
     }
+}
+
+async fn add_resource(
+    client: &mut NvnmosDaemonClient<Channel>,
+    session_handle: &str,
+    side: Side,
+    name: &str,
+    transport: ProtoTransport,
+    transport_file: &str,
+) -> Result<RegisteredResource, DaemonError> {
+    let resp = match side {
+        Side::Sender => client
+            .add_sender(AddSenderRequest {
+                session_handle: session_handle.to_owned(),
+                name: name.to_owned(),
+                transport: transport as i32,
+                transport_file: transport_file.to_owned(),
+            })
+            .await?
+            .into_inner(),
+        Side::Receiver => client
+            .add_receiver(AddReceiverRequest {
+                session_handle: session_handle.to_owned(),
+                name: name.to_owned(),
+                transport: transport as i32,
+                transport_file: transport_file.to_owned(),
+            })
+            .await?
+            .into_inner(),
+    };
+    Ok(RegisteredResource {
+        handle: resp.resource_handle,
+        id: resp.resource_id,
+    })
 }
 
 fn parse_unix_uri(daemon_uri: &str) -> Result<PathBuf, DaemonError> {
@@ -186,15 +287,37 @@ fn spawn_activation_task(
         loop {
             match stream.message().await {
                 Ok(Some(ev)) => {
+                    let deactivating = ev.transport_file.is_none();
+                    let side = ProtoSide::try_from(ev.side)
+                        .map(|s| s.as_str_name())
+                        .unwrap_or("UNKNOWN");
                     gst::info!(
                         CAT,
                         "ActivationEvent received (session={session_handle}, \
                          resource_handle={}, activation_handle={}, \
-                         deactivating={}); not yet acked",
+                         side={}, deactivating={}); auto-acking",
                         ev.resource_handle,
                         ev.activation_handle,
-                        ev.transport_file.is_none(),
+                        side,
+                        deactivating,
                     );
+
+                    let ack = client
+                        .ack_activation(AckActivationRequest {
+                            session_handle: session_handle.clone(),
+                            activation_handle: ev.activation_handle.clone(),
+                            success: true,
+                            failure_reason: String::new(),
+                        })
+                        .await;
+                    if let Err(status) = ack {
+                        gst::warning!(
+                            CAT,
+                            "AckActivation failed for session {session_handle} \
+                             (activation_handle={}): {status}",
+                            ev.activation_handle,
+                        );
+                    }
                 }
                 Ok(None) => {
                     gst::debug!(

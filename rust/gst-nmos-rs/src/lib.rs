@@ -7,9 +7,11 @@
 //! See [`doc/designs/nvnmosd/README.md`](../../../doc/designs/nvnmosd/README.md)
 //! for the architecture. The elements declare their property surface
 //! and run the session lifecycle: NULL→READY opens a session against
-//! `nvnmosd` and subscribes to activations, READY→NULL closes it.
-//! Activation events are logged but not yet handled, and the inner
-//! MXL data path is not yet wired up.
+//! `nvnmosd`, subscribes to activations, and (when `transport-file`
+//! is set) registers the Sender or Receiver via `AddSender` /
+//! `AddReceiver`; READY→NULL closes it. The activation task acks
+//! every event with `success=true`. The inner MXL data path is not
+//! yet wired up.
 
 use std::sync::LazyLock;
 

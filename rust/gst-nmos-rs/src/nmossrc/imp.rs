@@ -34,6 +34,7 @@ struct Settings {
     label: String,
     description: String,
     transport_file: String,
+    transport_file_path: String,
     caps: Option<gst::Caps>,
     transport_caps: Option<gst::Caps>,
     receiver_caps: bool,
@@ -50,6 +51,7 @@ impl Default for Settings {
             label: String::new(),
             description: String::new(),
             transport_file: String::new(),
+            transport_file_path: String::new(),
             caps: None,
             transport_caps: None,
             receiver_caps: true,
@@ -135,8 +137,19 @@ impl ObjectImpl for NmosSrc {
                     .nick("Transport file")
                     .blurb(
                         "Literal contents of the IS-05 transport file: MXL flow_def JSON \
-                         today; SDP later. Pass the text, not a path -- from gst-launch use \
-                         transport-file=\"$(<file)\". Required unless `caps` is provided.",
+                         today; SDP later. Pass the text, not a path. Convenient for \
+                         programmatic callers; from gst-launch use `transport-file-path` \
+                         instead. Mutually exclusive with `transport-file-path`. \
+                         Required unless `caps` is provided.",
+                    )
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("transport-file-path")
+                    .nick("Transport file path")
+                    .blurb(
+                        "Filesystem path read at NULL\u{2192}READY into `transport-file`. \
+                         Convenience for gst-launch; mutually exclusive with \
+                         `transport-file`.",
                     )
                     .mutable_ready()
                     .build(),
@@ -202,6 +215,9 @@ impl ObjectImpl for NmosSrc {
             "transport-file" => {
                 settings.transport_file = string_or_empty(value);
             }
+            "transport-file-path" => {
+                settings.transport_file_path = string_or_empty(value);
+            }
             "caps" => {
                 settings.caps = value.get().expect("type checked upstream");
             }
@@ -226,6 +242,7 @@ impl ObjectImpl for NmosSrc {
             "label" => settings.label.to_value(),
             "description" => settings.description.to_value(),
             "transport-file" => settings.transport_file.to_value(),
+            "transport-file-path" => settings.transport_file_path.to_value(),
             "caps" => settings.caps.to_value(),
             "transport-caps" => settings.transport_caps.to_value(),
             "receiver-caps" => settings.receiver_caps.to_value(),
@@ -348,6 +365,8 @@ impl From<Settings> for crate::session::CommonSettings {
             side: crate::session::Side::Receiver,
             name: s.receiver_name,
             mxl_domain_id: s.mxl_domain_id,
+            transport_file: s.transport_file,
+            transport_file_path: s.transport_file_path,
         }
     }
 }
