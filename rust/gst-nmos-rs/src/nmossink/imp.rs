@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `nmossink` impl: GstBin subclass that opens a session against
-//! `nvnmosd` at NULL→READY and closes it at READY→NULL. The data path
-//! is currently a placeholder `fakesink`; an `output-selector` driving
-//! `mxlsink` vs a blackhole `fakesink` lands when MXL is wired up.
+//! `nvnmosd` at NULL→READY and closes it at READY→NULL. The inner
+//! data path is a `mxlsink` when the resolved configuration pins a
+//! Domain path + Flow id; otherwise the bin keeps a placeholder
+//! `fakesink` so the element looks valid in the pipeline until a
+//! later step supplies the missing pieces.
 
 use std::sync::{LazyLock, Mutex};
 
@@ -14,7 +16,9 @@ use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
 
 use crate::daemon::Session;
-use crate::types::{DEFAULT_DAEMON_URI, Transport};
+use crate::inner;
+use crate::session::InnerConfig;
+use crate::types::{DEFAULT_DAEMON_URI, FlowFormat, Transport};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -65,6 +69,11 @@ impl Default for Settings {
 pub struct NmosSink {
     settings: Mutex<Settings>,
     session: Mutex<Option<Session>>,
+    /// Ghost pad that hides the current inner element behind the bin.
+    /// Created at `constructed`, re-targeted at NULL↔READY transitions
+    /// as the inner element swaps between the placeholder and a real
+    /// `mxlsink`.
+    ghost: Mutex<Option<gst::GhostPad>>,
 }
 
 #[glib::object_subclass]
@@ -270,8 +279,13 @@ impl ObjectImpl for NmosSink {
 
     fn constructed(&self) {
         self.parent_constructed();
-        if let Err(e) = build_placeholder(self.obj().upcast_ref::<gst::Bin>()) {
-            gst::error!(CAT, "failed to build nmossink placeholder data path: {e}");
+        let bin = self.obj();
+        let bin_ref: &gst::Bin = bin.upcast_ref();
+        match install_initial_placeholder(bin_ref) {
+            Ok(ghost) => {
+                *self.ghost.lock().unwrap() = Some(ghost);
+            }
+            Err(e) => gst::error!(CAT, "failed to build nmossink placeholder data path: {e}"),
         }
     }
 }
@@ -317,7 +331,7 @@ impl ElementImpl for NmosSink {
                     gst::element_imp_error!(
                         self,
                         gst::ResourceError::OpenWrite,
-                        ["failed to open session against nvnmosd: {e:#}"]
+                        ["nmossink NULL\u{2192}READY failed: {e:#}"]
                     );
                     return Err(gst::StateChangeError);
                 }
@@ -336,35 +350,61 @@ impl BinImpl for NmosSink {}
 impl NmosSink {
     fn open_session(&self) -> Result<(), anyhow::Error> {
         let snapshot = self.settings.lock().unwrap().clone();
-        crate::session::validate_and_open(&CAT, "nmossink", &snapshot.into(), &self.session)
+        let bin = self.obj();
+        let bin_ref: &gst::Bin = bin.upcast_ref();
+        let outcome =
+            crate::session::validate_and_open(&CAT, "nmossink", &snapshot.into(), &self.session)?;
+        if let Err(e) = self.activate_inner(bin_ref, &outcome) {
+            // Close the daemon session and restore the placeholder so the
+            // bin is left as if NULL→READY had never been attempted.
+            self.close_session();
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn activate_inner(
+        &self,
+        bin: &gst::Bin,
+        outcome: &InnerConfig,
+    ) -> Result<(), anyhow::Error> {
+        if let InnerConfig::Mxl { domain_path, flow_id, .. } = outcome {
+            let mxlsink = inner::build_mxlsink(domain_path, flow_id)?;
+            self.swap_inner(bin, &mxlsink)?;
+        }
+        Ok(())
     }
 
     fn close_session(&self) {
         crate::session::close(&CAT, "nmossink", &self.session);
+        let bin = self.obj();
+        let bin_ref: &gst::Bin = bin.upcast_ref();
+        match inner::build_placeholder_sink() {
+            Ok(placeholder) => {
+                if let Err(e) = self.swap_inner(bin_ref, &placeholder) {
+                    gst::warning!(CAT, "restoring nmossink placeholder: {e:#}");
+                }
+            }
+            Err(e) => gst::warning!(CAT, "rebuilding nmossink placeholder: {e:#}"),
+        }
+    }
+
+    fn swap_inner(&self, bin: &gst::Bin, new_inner: &gst::Element) -> Result<(), anyhow::Error> {
+        let ghost_guard = self.ghost.lock().unwrap();
+        let ghost = ghost_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("nmossink ghost pad missing"))?;
+        inner::swap_inner(bin, ghost, new_inner, "sink")
     }
 }
 
-fn build_placeholder(bin: &gst::Bin) -> Result<(), glib::BoolError> {
-    let fakesink = gst::ElementFactory::make("fakesink")
-        .name("nmossink-placeholder")
-        .property("sync", true)
-        .property("async", false)
-        .build()
-        .map_err(|e| glib::bool_error!("creating fakesink placeholder: {e}"))?;
-    bin.add(&fakesink)
-        .map_err(|e| glib::bool_error!("adding fakesink to nmossink: {e}"))?;
-
-    let sink_pad = fakesink
-        .static_pad("sink")
-        .expect("fakesink always has a sink pad");
-    let ghost = gst::GhostPad::with_target(&sink_pad)
-        .map_err(|e| glib::bool_error!("ghosting fakesink sink pad: {e}"))?;
-    ghost
-        .set_active(true)
-        .map_err(|e| glib::bool_error!("activating ghost pad: {e}"))?;
+fn install_initial_placeholder(bin: &gst::Bin) -> Result<gst::GhostPad, glib::BoolError> {
+    let placeholder = inner::build_placeholder_sink()
+        .map_err(|e| glib::bool_error!("{e}"))?;
+    let ghost = inner::build_initial(bin, placeholder, "sink", gst::PadDirection::Sink)?;
     bin.add_pad(&ghost)
         .map_err(|e| glib::bool_error!("adding ghost pad to nmossink: {e}"))?;
-    Ok(())
+    Ok(ghost)
 }
 
 fn string_or_empty(value: &glib::Value) -> String {
@@ -384,6 +424,10 @@ impl From<Settings> for crate::session::CommonSettings {
             name: s.sender_name,
             mxl_domain_id: s.mxl_domain_id,
             mxl_domain_path: s.mxl_domain_path,
+            mxl_flow_id: s.mxl_flow_id,
+            // mxlsink has a single flow-id slot so the receiver-only
+            // `mxl-flow-format` property doesn't exist on this side.
+            mxl_flow_format: FlowFormat::Unspecified,
             transport_file: s.transport_file,
             transport_file_path: s.transport_file_path,
         }

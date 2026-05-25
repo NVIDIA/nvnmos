@@ -19,8 +19,9 @@ use nvnmos_rpc::v1::Transport as ProtoTransport;
 
 use crate::daemon::Session;
 use crate::domain::{self, DomainIdOrigin};
+use crate::flow_def::{self, ValueOrigin};
 use crate::runtime::SHARED_RUNTIME;
-use crate::types::Transport;
+use crate::types::{FlowFormat, Transport};
 
 /// Open-session timeout. Aligned with the daemon's activation ack
 /// timeout — same order of magnitude, no special meaning.
@@ -85,10 +86,20 @@ pub(crate) struct CommonSettings {
     /// Local filesystem path identifying the MXL Domain on this host.
     /// If the directory contains a `domain_def.json` its `id` is used
     /// to populate `mxl_domain_id` when the property is unset, or
-    /// cross-checked against it when both are supplied. The path
-    /// itself will be consumed by the inner `mxlsink` / `mxlsrc`
-    /// `domain=` property when the data path is wired up.
+    /// cross-checked against it when both are supplied. Fed into the
+    /// inner `mxlsink` / `mxlsrc` `domain=` property.
     pub(crate) mxl_domain_path: String,
+    /// MXL flow id (UUID) to bind the inner `mxlsink.flow-id=` or the
+    /// matching `mxlsrc.{video,audio,data}-flow-id=`. Cross-checked
+    /// against the transport_file's top-level `id` when both are
+    /// supplied; either source alone is enough.
+    pub(crate) mxl_flow_id: String,
+    /// NMOS format family for the flow. Required on `nmossrc` (to
+    /// pick the right `mxlsrc` flow-id property); on `nmossink` it
+    /// is informational because `mxlsink` has only one flow-id slot.
+    /// Cross-checked against the transport_file's `format` field
+    /// when both are supplied.
+    pub(crate) mxl_flow_format: FlowFormat,
     /// Literal transport file contents (MXL `flow_def` JSON today).
     /// Convenient for programmatic callers (e.g. Rust/C apps that
     /// compute the flow_def in memory) but awkward to pass from
@@ -136,14 +147,43 @@ fn resolve_transport_file(
     }
 }
 
+/// What the element should build on its data path after a successful
+/// `validate_and_open`.
+///
+/// [`InnerConfig::Mxl`] carries everything the element needs to
+/// instantiate a `mxlsink` or `mxlsrc` (Domain path + Flow id, plus
+/// the flow format for the receiver). [`InnerConfig::Placeholder`]
+/// means the resolved configuration didn't pin a Domain path and/or a
+/// Flow id; the element keeps its placeholder `fakesink` / `fakesrc`
+/// in place and a later step (caps→flow_def, IS-05 activation) will
+/// supply the missing pieces.
+#[derive(Debug, Clone)]
+pub(crate) enum InnerConfig {
+    Mxl {
+        domain_path: String,
+        flow_id: String,
+        /// Unspecified on `nmossink` — `mxlsink` has only one
+        /// flow-id slot — and one of Video/Audio/Data on `nmossrc`.
+        format: FlowFormat,
+    },
+    Placeholder {
+        /// One-line summary of which piece of state was missing.
+        /// Logged at INFO so it's clear why the placeholder path is
+        /// in use.
+        reason: String,
+    },
+}
+
 /// Validate the settings snapshot and open a session via the shared
-/// tokio runtime. On success the session is stored under `session`.
+/// tokio runtime. On success the session is stored under `session`
+/// and the returned [`InnerConfig`] tells the element how to wire its
+/// data path.
 pub(crate) fn validate_and_open(
     cat: &gst::DebugCategory,
     element: &str,
     settings: &CommonSettings,
     session: &Mutex<Option<Session>>,
-) -> Result<(), anyhow::Error> {
+) -> Result<InnerConfig, anyhow::Error> {
     if settings.node_seed.is_empty() {
         bail!("{element}: `node-seed` is required");
     }
@@ -154,15 +194,16 @@ pub(crate) fn validate_and_open(
         );
     }
 
-    let resolved = domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path)
-        .with_context(|| format!("{element}: resolving MXL Domain identity"))?;
-    if resolved.id.is_empty() {
+    let domain_resolution =
+        domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path)
+            .with_context(|| format!("{element}: resolving MXL Domain identity"))?;
+    if domain_resolution.id.is_empty() {
         bail!(
             "{element}: `mxl-domain-id` is required when transport=mxl \
              (set the property directly or supply an `mxl-domain-path` whose `domain_def.json` provides the id)"
         );
     }
-    match resolved.origin {
+    match domain_resolution.origin {
         DomainIdOrigin::Property => gst::debug!(
             cat,
             "mxl-domain-id from property; no `domain_def.json` consulted",
@@ -180,10 +221,22 @@ pub(crate) fn validate_and_open(
         DomainIdOrigin::None => unreachable!("empty id rejected above"),
     }
 
+    let transport_file = resolve_transport_file(element, settings)?;
+
+    let flow = flow_def::resolve_mxl_flow_meta(
+        &settings.mxl_flow_id,
+        settings.mxl_flow_format,
+        transport_file.as_deref(),
+    )
+    .with_context(|| format!("{element}: resolving MXL flow id / format"))?;
+    log_flow_origin(cat, "mxl-flow-id", flow.id_origin);
+    log_flow_origin(cat, "mxl-flow-format", flow.format_origin);
+
+    let inner = decide_inner_config(settings, &flow);
+
     let transport = transport_to_proto(settings.transport);
     let side = settings.side;
     let name = settings.name.clone();
-    let transport_file = resolve_transport_file(element, settings)?;
 
     let new_session = SHARED_RUNTIME
         .block_on(async {
@@ -203,43 +256,76 @@ pub(crate) fn validate_and_open(
         .with_context(|| format!("{element}: OpenSession against {} timed out", settings.daemon_uri))?
         .with_context(|| format!("{element}: OpenSession against {}", settings.daemon_uri))?;
 
-    match new_session.resource_id() {
-        Some((handle, id)) => gst::info!(
-            cat,
-            "session opened: handle={} node_id={} created_node={} \
-             (node_seed={}, side={:?}, name={}, \
-             mxl-domain-id={}, mxl-domain-path={:?}); \
-             resource registered: resource_handle={} resource_id={}",
-            new_session.session_handle,
-            new_session.node_id,
-            new_session.created_node,
-            settings.node_seed,
-            side,
-            settings.name,
-            resolved.id,
-            settings.mxl_domain_path,
-            handle,
-            id,
-        ),
-        None => gst::info!(
-            cat,
-            "session opened: handle={} node_id={} created_node={} \
-             (node_seed={}, side={:?}, name={}, \
-             mxl-domain-id={}, mxl-domain-path={:?}); \
-             no resource registered (transport-file unset)",
-            new_session.session_handle,
-            new_session.node_id,
-            new_session.created_node,
-            settings.node_seed,
-            side,
-            settings.name,
-            resolved.id,
-            settings.mxl_domain_path,
-        ),
-    }
+    let resource_summary = match new_session.resource_id() {
+        Some((handle, id)) => format!("resource registered: resource_handle={handle} resource_id={id}"),
+        None => "no resource registered (transport-file unset)".to_owned(),
+    };
+    let inner_summary = match &inner {
+        InnerConfig::Mxl { domain_path, flow_id, format } => {
+            format!("inner data path: mxl (domain_path={domain_path:?}, flow_id={flow_id}, format={format:?})")
+        }
+        InnerConfig::Placeholder { reason } => {
+            format!("inner data path: placeholder ({reason})")
+        }
+    };
+    gst::info!(
+        cat,
+        "session opened: handle={} node_id={} created_node={} \
+         (node_seed={}, side={:?}, name={}, \
+         mxl-domain-id={}); {}; {}",
+        new_session.session_handle,
+        new_session.node_id,
+        new_session.created_node,
+        settings.node_seed,
+        side,
+        settings.name,
+        domain_resolution.id,
+        resource_summary,
+        inner_summary,
+    );
 
     *session.lock().unwrap() = Some(new_session);
-    Ok(())
+    Ok(inner)
+}
+
+fn log_flow_origin(cat: &gst::DebugCategory, field: &str, origin: ValueOrigin) {
+    match origin {
+        ValueOrigin::Property => gst::debug!(cat, "{field} from property; no transport_file constraint"),
+        ValueOrigin::File => gst::info!(cat, "{field} taken from transport_file"),
+        ValueOrigin::Both => gst::debug!(cat, "{field} cross-checked against transport_file"),
+        ValueOrigin::None => gst::debug!(cat, "{field} not supplied by either source"),
+    }
+}
+
+/// Decide whether the element can build a real `mxlsink` / `mxlsrc`
+/// or has to fall back to its placeholder. Both sides need a
+/// non-empty Domain path and a non-empty flow id; the receiver
+/// additionally needs a specific [`FlowFormat`] (because `mxlsrc`
+/// has separate `video-flow-id` / `audio-flow-id` / `data-flow-id`
+/// properties).
+fn decide_inner_config(settings: &CommonSettings, flow: &flow_def::FlowResolution) -> InnerConfig {
+    if settings.mxl_domain_path.is_empty() {
+        return InnerConfig::Placeholder {
+            reason: "`mxl-domain-path` unset".to_owned(),
+        };
+    }
+    if flow.id.is_empty() {
+        return InnerConfig::Placeholder {
+            reason: "`mxl-flow-id` unset (neither property nor transport_file supplied it)".to_owned(),
+        };
+    }
+    if settings.side == Side::Receiver && flow.format == FlowFormat::Unspecified {
+        return InnerConfig::Placeholder {
+            reason:
+                "`mxl-flow-format` unset on nmossrc (neither property nor transport_file supplied it)"
+                    .to_owned(),
+        };
+    }
+    InnerConfig::Mxl {
+        domain_path: settings.mxl_domain_path.clone(),
+        flow_id: flow.id.clone(),
+        format: flow.format,
+    }
 }
 
 /// Drop the session and tell the daemon to close it. Logged-only on

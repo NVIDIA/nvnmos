@@ -10,8 +10,15 @@
 //! `nvnmosd`, subscribes to activations, and (when `transport-file`
 //! is set) registers the Sender or Receiver via `AddSender` /
 //! `AddReceiver`; READY→NULL closes it. The activation task acks
-//! every event with `success=true`. The inner MXL data path is not
-//! yet wired up.
+//! every event with `success=true`.
+//!
+//! Inner data path: when the resolved configuration pins a Domain
+//! path and a Flow id (plus a Flow format on the receiver), the bin
+//! instantiates the real `mxlsink` / `mxlsrc` and ghosts its pad
+//! through the bin's external pad. Otherwise it keeps a placeholder
+//! `fakesink` / `fakesrc` so the element remains valid in the
+//! pipeline until a later step (caps→flow_def, IS-05 activation)
+//! supplies the missing pieces.
 
 use std::sync::LazyLock;
 
@@ -20,6 +27,8 @@ use gstreamer as gst;
 
 mod daemon;
 mod domain;
+mod flow_def;
+mod inner;
 mod nmossink;
 mod nmossrc;
 mod runtime;

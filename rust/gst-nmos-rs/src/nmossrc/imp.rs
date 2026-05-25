@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `nmossrc` impl: GstBin subclass that opens a session against
-//! `nvnmosd` at NULL→READY and closes it at READY→NULL. The data path
-//! is currently a placeholder `fakesrc`; an `input-selector` driving
-//! `mxlsrc` vs a disabled pad lands when MXL is wired up.
+//! `nvnmosd` at NULL→READY and closes it at READY→NULL. The inner
+//! data path is a `mxlsrc` when the resolved configuration pins a
+//! Domain path + Flow id + Flow format; otherwise the bin keeps a
+//! placeholder `fakesrc` so the element looks valid in the pipeline
+//! until an IS-05 activation (or a later configuration update)
+//! supplies the missing pieces.
 
 use std::sync::{LazyLock, Mutex};
 
@@ -14,7 +17,9 @@ use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
 
 use crate::daemon::Session;
-use crate::types::{DEFAULT_DAEMON_URI, Transport};
+use crate::inner;
+use crate::session::InnerConfig;
+use crate::types::{DEFAULT_DAEMON_URI, FlowFormat, Transport};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -32,6 +37,8 @@ struct Settings {
     receiver_name: String,
     mxl_domain_id: String,
     mxl_domain_path: String,
+    mxl_flow_id: String,
+    mxl_flow_format: FlowFormat,
     label: String,
     description: String,
     transport_file: String,
@@ -50,6 +57,8 @@ impl Default for Settings {
             receiver_name: String::new(),
             mxl_domain_id: String::new(),
             mxl_domain_path: String::new(),
+            mxl_flow_id: String::new(),
+            mxl_flow_format: FlowFormat::default(),
             label: String::new(),
             description: String::new(),
             transport_file: String::new(),
@@ -65,6 +74,11 @@ impl Default for Settings {
 pub struct NmosSrc {
     settings: Mutex<Settings>,
     session: Mutex<Option<Session>>,
+    /// Ghost pad that hides the current inner element behind the bin.
+    /// Created at `constructed`, re-targeted at NULL↔READY transitions
+    /// as the inner element swaps between the placeholder and a real
+    /// `mxlsrc`.
+    ghost: Mutex<Option<gst::GhostPad>>,
 }
 
 #[glib::object_subclass]
@@ -135,12 +149,42 @@ impl ObjectImpl for NmosSrc {
                          this host. If the directory contains a \
                          `domain_def.json` (AMWA BCP-007-03 WIP) its `id` is \
                          used to populate `mxl-domain-id` (or cross-checked \
-                         against it when both are set). The path itself will \
-                         be consumed by the inner `mxlsrc` `domain=` \
-                         property when the data path is wired up.",
+                         against it when both are set). Fed into the inner \
+                         `mxlsrc` `domain=` property at NULL→READY when an \
+                         `mxl-flow-id` is also pinned.",
                     )
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecString::builder("mxl-flow-id")
+                    .nick("MXL flow id")
+                    .blurb(
+                        "MXL flow id (UUID) the inner `mxlsrc` should pull. \
+                         An NMOS Receiver is normally configured by IS-05 \
+                         PATCH activation, so this is mainly a development \
+                         convenience: setting it (plus `mxl-flow-format` and \
+                         `mxl-domain-path`) lets the receiver start up \
+                         pre-bound to a known flow. When `transport-file` \
+                         also carries an `id` the two must agree.",
+                    )
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecEnum::builder_with_default(
+                    "mxl-flow-format",
+                    FlowFormat::Unspecified,
+                )
+                .nick("MXL flow format")
+                .blurb(
+                    "NMOS format (`video`, `audio`, `data`) picking which of \
+                     `mxlsrc.{video,audio,data}-flow-id=` receives \
+                     `mxl-flow-id`. `unspecified` (default) means the \
+                     receiver waits for a `transport-file` or an IS-05 \
+                     activation to pin the format; while it's `unspecified` \
+                     the inner data path stays on the placeholder. When \
+                     `transport-file` carries a `format` the two must \
+                     agree.",
+                )
+                .mutable_ready()
+                .build(),
                 glib::ParamSpecString::builder("label")
                     .nick("Label")
                     .blurb("NMOS label for the receiver. Optional.")
@@ -227,6 +271,12 @@ impl ObjectImpl for NmosSrc {
             "mxl-domain-path" => {
                 settings.mxl_domain_path = string_or_empty(value);
             }
+            "mxl-flow-id" => {
+                settings.mxl_flow_id = string_or_empty(value);
+            }
+            "mxl-flow-format" => {
+                settings.mxl_flow_format = value.get().expect("type checked upstream");
+            }
             "label" => {
                 settings.label = string_or_empty(value);
             }
@@ -261,6 +311,8 @@ impl ObjectImpl for NmosSrc {
             "receiver-name" => settings.receiver_name.to_value(),
             "mxl-domain-id" => settings.mxl_domain_id.to_value(),
             "mxl-domain-path" => settings.mxl_domain_path.to_value(),
+            "mxl-flow-id" => settings.mxl_flow_id.to_value(),
+            "mxl-flow-format" => settings.mxl_flow_format.to_value(),
             "label" => settings.label.to_value(),
             "description" => settings.description.to_value(),
             "transport-file" => settings.transport_file.to_value(),
@@ -274,8 +326,13 @@ impl ObjectImpl for NmosSrc {
 
     fn constructed(&self) {
         self.parent_constructed();
-        if let Err(e) = build_placeholder(self.obj().upcast_ref::<gst::Bin>()) {
-            gst::error!(CAT, "failed to build nmossrc placeholder data path: {e}");
+        let bin = self.obj();
+        let bin_ref: &gst::Bin = bin.upcast_ref();
+        match install_initial_placeholder(bin_ref) {
+            Ok(ghost) => {
+                *self.ghost.lock().unwrap() = Some(ghost);
+            }
+            Err(e) => gst::error!(CAT, "failed to build nmossrc placeholder data path: {e}"),
         }
     }
 }
@@ -321,7 +378,7 @@ impl ElementImpl for NmosSrc {
                     gst::element_imp_error!(
                         self,
                         gst::ResourceError::OpenRead,
-                        ["failed to open session against nvnmosd: {e:#}"]
+                        ["nmossrc NULL\u{2192}READY failed: {e:#}"]
                     );
                     return Err(gst::StateChangeError);
                 }
@@ -340,35 +397,61 @@ impl BinImpl for NmosSrc {}
 impl NmosSrc {
     fn open_session(&self) -> Result<(), anyhow::Error> {
         let snapshot = self.settings.lock().unwrap().clone();
-        crate::session::validate_and_open(&CAT, "nmossrc", &snapshot.into(), &self.session)
+        let bin = self.obj();
+        let bin_ref: &gst::Bin = bin.upcast_ref();
+        let outcome =
+            crate::session::validate_and_open(&CAT, "nmossrc", &snapshot.into(), &self.session)?;
+        if let Err(e) = self.activate_inner(bin_ref, &outcome) {
+            // Close the daemon session and restore the placeholder so the
+            // bin is left as if NULL→READY had never been attempted.
+            self.close_session();
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn activate_inner(
+        &self,
+        bin: &gst::Bin,
+        outcome: &InnerConfig,
+    ) -> Result<(), anyhow::Error> {
+        if let InnerConfig::Mxl { domain_path, flow_id, format } = outcome {
+            let mxlsrc = inner::build_mxlsrc(domain_path, flow_id, *format)?;
+            self.swap_inner(bin, &mxlsrc)?;
+        }
+        Ok(())
     }
 
     fn close_session(&self) {
         crate::session::close(&CAT, "nmossrc", &self.session);
+        let bin = self.obj();
+        let bin_ref: &gst::Bin = bin.upcast_ref();
+        match inner::build_placeholder_src() {
+            Ok(placeholder) => {
+                if let Err(e) = self.swap_inner(bin_ref, &placeholder) {
+                    gst::warning!(CAT, "restoring nmossrc placeholder: {e:#}");
+                }
+            }
+            Err(e) => gst::warning!(CAT, "rebuilding nmossrc placeholder: {e:#}"),
+        }
+    }
+
+    fn swap_inner(&self, bin: &gst::Bin, new_inner: &gst::Element) -> Result<(), anyhow::Error> {
+        let ghost_guard = self.ghost.lock().unwrap();
+        let ghost = ghost_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("nmossrc ghost pad missing"))?;
+        inner::swap_inner(bin, ghost, new_inner, "src")
     }
 }
 
-fn build_placeholder(bin: &gst::Bin) -> Result<(), glib::BoolError> {
-    let fakesrc = gst::ElementFactory::make("fakesrc")
-        .name("nmossrc-placeholder")
-        .property("is-live", true)
-        .property_from_str("num-buffers", "-1")
-        .build()
-        .map_err(|e| glib::bool_error!("creating fakesrc placeholder: {e}"))?;
-    bin.add(&fakesrc)
-        .map_err(|e| glib::bool_error!("adding fakesrc to nmossrc: {e}"))?;
-
-    let src_pad = fakesrc
-        .static_pad("src")
-        .expect("fakesrc always has a src pad");
-    let ghost = gst::GhostPad::with_target(&src_pad)
-        .map_err(|e| glib::bool_error!("ghosting fakesrc src pad: {e}"))?;
-    ghost
-        .set_active(true)
-        .map_err(|e| glib::bool_error!("activating ghost pad: {e}"))?;
+fn install_initial_placeholder(bin: &gst::Bin) -> Result<gst::GhostPad, glib::BoolError> {
+    let placeholder = inner::build_placeholder_src()
+        .map_err(|e| glib::bool_error!("{e}"))?;
+    let ghost = inner::build_initial(bin, placeholder, "src", gst::PadDirection::Src)?;
     bin.add_pad(&ghost)
         .map_err(|e| glib::bool_error!("adding ghost pad to nmossrc: {e}"))?;
-    Ok(())
+    Ok(ghost)
 }
 
 fn string_or_empty(value: &glib::Value) -> String {
@@ -388,6 +471,8 @@ impl From<Settings> for crate::session::CommonSettings {
             name: s.receiver_name,
             mxl_domain_id: s.mxl_domain_id,
             mxl_domain_path: s.mxl_domain_path,
+            mxl_flow_id: s.mxl_flow_id,
+            mxl_flow_format: s.mxl_flow_format,
             transport_file: s.transport_file,
             transport_file_path: s.transport_file_path,
         }
