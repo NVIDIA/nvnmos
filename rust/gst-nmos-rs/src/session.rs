@@ -17,7 +17,7 @@ use anyhow::{Context, bail};
 use gstreamer as gst;
 use nvnmos_rpc::v1::Transport as ProtoTransport;
 
-use crate::daemon::Session;
+use crate::daemon::{ActivationHandler, ActivationRequest, Session};
 use crate::domain::{self, DomainIdOrigin};
 use crate::flow_def::{self, FlowDefBuildInput, ValueOrigin};
 use crate::runtime::SHARED_RUNTIME;
@@ -45,6 +45,19 @@ impl Side {
         match self {
             Self::Sender => "sender-name",
             Self::Receiver => "receiver-name",
+        }
+    }
+
+    /// Decode the proto-level `Side` enum value carried on
+    /// `ActivationEvent.side`. Returns `None` for `SIDE_UNSPECIFIED`
+    /// or any value not in the proto enum — the daemon never sends
+    /// those, so the activation handler treats them as a bug and
+    /// acks failure.
+    pub(crate) fn try_from_proto(value: i32) -> Option<Self> {
+        match nvnmos_rpc::v1::Side::try_from(value).ok()? {
+            nvnmos_rpc::v1::Side::Sender => Some(Self::Sender),
+            nvnmos_rpc::v1::Side::Receiver => Some(Self::Receiver),
+            nvnmos_rpc::v1::Side::Unspecified => None,
         }
     }
 }
@@ -190,12 +203,14 @@ pub(crate) enum InnerConfig {
 /// Validate the settings snapshot and open a session via the shared
 /// tokio runtime. On success the session is stored under `session`
 /// and the returned [`InnerConfig`] tells the element how to wire its
-/// data path.
+/// data path. `activation_handler` is forwarded to
+/// [`Session::open`] to receive `ActivationEvent`s.
 pub(crate) fn validate_and_open(
     cat: &gst::DebugCategory,
     element: &str,
     settings: &CommonSettings,
     session: &Mutex<Option<Session>>,
+    activation_handler: ActivationHandler,
 ) -> Result<InnerConfig, anyhow::Error> {
     if settings.node_seed.is_empty() {
         bail!("{element}: `node-seed` is required");
@@ -269,6 +284,7 @@ pub(crate) fn validate_and_open(
                     &name,
                     transport,
                     transport_file.as_deref(),
+                    activation_handler,
                 ),
             )
             .await
@@ -412,5 +428,366 @@ pub(crate) fn close(cat: &gst::DebugCategory, element: &str, session: &Mutex<Opt
             Ok(()) => gst::info!(cat, "session closed: handle={handle}"),
             Err(e) => gst::warning!(cat, "{element}: CloseSession (handle={handle}): {e}"),
         }
+    }
+}
+
+/// What an [`ActivationRequest`] resolves to once the element re-runs
+/// the same identity / flow cross-checks `validate_and_open` did at
+/// NULL→READY, but with the event's `transport_file` substituted in.
+///
+/// `inner` is what the element should install on the data path;
+/// `ack` is what the element should report to the daemon via
+/// `AckActivation` once the swap completes. Deactivations always
+/// ack success; failed activations swap to the placeholder but ack
+/// failure so the IS-05 controller knows the resource is not live.
+#[derive(Debug)]
+pub(crate) struct ActivationPlan {
+    pub(crate) inner: InnerConfig,
+    pub(crate) ack: ActivationAck,
+}
+
+/// Two variants matching the proto `AckActivationRequest` shape
+/// (`bool success`, `string failure_reason`). The element produces
+/// one of these, the activation task forwards it.
+#[derive(Debug, Clone)]
+pub(crate) enum ActivationAck {
+    Success,
+    Failure { reason: String },
+}
+
+/// Resolve an [`ActivationRequest`] into an [`ActivationPlan`].
+///
+/// Logic:
+///
+/// * `req.side` must match the element's own [`Side`]. Mismatches
+///   indicate a daemon-routing bug; we swap to placeholder and ack
+///   failure.
+///
+/// * `req.transport_file.is_none()` is a deactivation: swap to
+///   placeholder and ack **success**.
+///
+/// * Otherwise re-resolve `mxl-domain-id` (re-runs the
+///   `domain_def.json` cross-check) and the flow id/format
+///   (`flow_def::resolve_mxl_flow_meta` against the new
+///   `transport_file`). Either resolver failing → placeholder +
+///   failure ack.
+///
+/// * Run `decide_inner_config`: if it returns `InnerConfig::Mxl`,
+///   ack success; if it returns `InnerConfig::Placeholder` we have
+///   a live transport_file but can't bring up the inner element
+///   (typically `mxl-domain-path` is unset on this host) — swap to
+///   placeholder but ack **failure** so the controller surfaces the
+///   misconfiguration.
+pub(crate) fn plan_activation(
+    cat: &gst::DebugCategory,
+    element: &str,
+    settings: &CommonSettings,
+    req: &ActivationRequest,
+) -> ActivationPlan {
+    if req.side != settings.side {
+        return ActivationPlan {
+            inner: InnerConfig::Placeholder {
+                reason: "activation side mismatch".to_owned(),
+            },
+            ack: ActivationAck::Failure {
+                reason: format!(
+                    "{element}: ActivationEvent side={:?} does not match element side={:?}",
+                    req.side, settings.side,
+                ),
+            },
+        };
+    }
+
+    let Some(transport_file) = req.transport_file.as_deref() else {
+        gst::info!(
+            cat,
+            "{element}: activation is a deactivation (resource_handle={}); \
+             swapping to placeholder",
+            req.resource_handle,
+        );
+        return ActivationPlan {
+            inner: InnerConfig::Placeholder {
+                reason: "deactivation".to_owned(),
+            },
+            ack: ActivationAck::Success,
+        };
+    };
+
+    let domain_resolution =
+        match domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path) {
+            Ok(r) => r,
+            Err(e) => {
+                return ActivationPlan {
+                    inner: InnerConfig::Placeholder {
+                        reason: "mxl-domain-id resolution failed".to_owned(),
+                    },
+                    ack: ActivationAck::Failure {
+                        reason: format!(
+                            "{element}: resolving MXL Domain identity for activation: {e:#}"
+                        ),
+                    },
+                };
+            }
+        };
+    if domain_resolution.id.is_empty() {
+        return ActivationPlan {
+            inner: InnerConfig::Placeholder {
+                reason: "mxl-domain-id unresolved".to_owned(),
+            },
+            ack: ActivationAck::Failure {
+                reason: format!(
+                    "{element}: activation rejected — `mxl-domain-id` is not resolvable on this \
+                     host (neither the property nor `mxl-domain-path`/`domain_def.json` \
+                     supplied an id)",
+                ),
+            },
+        };
+    }
+    match domain_resolution.origin {
+        DomainIdOrigin::Property | DomainIdOrigin::DomainDef | DomainIdOrigin::Both => gst::debug!(
+            cat,
+            "{element}: activation mxl-domain-id resolved (origin={:?})",
+            domain_resolution.origin,
+        ),
+        DomainIdOrigin::None => unreachable!("empty id handled above"),
+    }
+
+    let flow = match flow_def::resolve_mxl_flow_meta(
+        &settings.mxl_flow_id,
+        settings.mxl_flow_format,
+        Some(transport_file),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            return ActivationPlan {
+                inner: InnerConfig::Placeholder {
+                    reason: "flow_def resolution failed".to_owned(),
+                },
+                ack: ActivationAck::Failure {
+                    reason: format!(
+                        "{element}: resolving MXL flow id / format from activation \
+                         transport_file: {e:#}"
+                    ),
+                },
+            };
+        }
+    };
+
+    let inner = decide_inner_config(settings, &flow);
+    let ack = match &inner {
+        InnerConfig::Mxl { .. } => ActivationAck::Success,
+        // Per design: if the activation supplies a live transport_file
+        // but the element can't bring up mxlsink/mxlsrc (typically
+        // `mxl-domain-path` is unset), ack failure so the controller
+        // sees the resource as misconfigured rather than silently
+        // deactivated.
+        InnerConfig::Placeholder { reason } => ActivationAck::Failure {
+            reason: format!(
+                "{element}: activation cannot bring up inner data path: {reason}"
+            ),
+        },
+    };
+
+    ActivationPlan { inner, ack }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NODE_SEED: &str = "test-seed";
+    const FLOW_ID_A: &str = "00000000-0000-0000-0000-000000000001";
+    const FLOW_ID_B: &str = "00000000-0000-0000-0000-000000000002";
+    const DOMAIN_ID: &str = "1ac254d9-c9be-475a-93a7-f80b9c1063a8";
+
+    fn cat() -> gst::DebugCategory {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let _ = gst::init();
+        });
+        gst::DebugCategory::new("test", gst::DebugColorFlags::empty(), Some("test"))
+    }
+
+    fn settings(side: Side) -> CommonSettings {
+        CommonSettings {
+            daemon_uri: "unix:/dev/null".to_owned(),
+            node_seed: NODE_SEED.to_owned(),
+            transport: Transport::Mxl,
+            side,
+            name: "test-name".to_owned(),
+            mxl_domain_id: DOMAIN_ID.to_owned(),
+            mxl_domain_path: "/var/lib/mxl/domain-a".to_owned(),
+            mxl_flow_id: String::new(),
+            mxl_flow_format: FlowFormat::Unspecified,
+            transport_file: String::new(),
+            transport_file_path: String::new(),
+            label: String::new(),
+            description: String::new(),
+            caps: None,
+        }
+    }
+
+    fn video_flow_def(id: &str) -> String {
+        format!(r#"{{"id":"{id}","format":"urn:x-nmos:format:video"}}"#)
+    }
+
+    fn req(side: Side, transport_file: Option<&str>) -> ActivationRequest {
+        ActivationRequest {
+            activation_handle: "test-activation".to_owned(),
+            resource_handle: "test-resource".to_owned(),
+            side,
+            transport_file: transport_file.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn deactivation_is_placeholder_success() {
+        let plan = plan_activation(&cat(), "nmossink", &settings(Side::Sender), &req(Side::Sender, None));
+        assert!(matches!(plan.inner, InnerConfig::Placeholder { .. }));
+        assert!(matches!(plan.ack, ActivationAck::Success));
+    }
+
+    #[test]
+    fn side_mismatch_is_failure() {
+        let plan = plan_activation(
+            &cat(),
+            "nmossink",
+            &settings(Side::Sender),
+            &req(Side::Receiver, Some(&video_flow_def(FLOW_ID_A))),
+        );
+        assert!(matches!(plan.inner, InnerConfig::Placeholder { .. }));
+        match plan.ack {
+            ActivationAck::Failure { reason } => assert!(
+                reason.contains("side mismatch") || reason.contains("does not match"),
+                "expected side-mismatch reason: {reason}"
+            ),
+            ActivationAck::Success => panic!("expected failure ack on side mismatch"),
+        }
+    }
+
+    #[test]
+    fn happy_path_video_is_mxl_success() {
+        let s = CommonSettings {
+            mxl_flow_id: FLOW_ID_A.to_owned(),
+            mxl_flow_format: FlowFormat::Video,
+            ..settings(Side::Receiver)
+        };
+        let plan = plan_activation(
+            &cat(),
+            "nmossrc",
+            &s,
+            &req(Side::Receiver, Some(&video_flow_def(FLOW_ID_A))),
+        );
+        match plan.inner {
+            InnerConfig::Mxl { domain_path, flow_id, format } => {
+                assert_eq!(domain_path, "/var/lib/mxl/domain-a");
+                assert_eq!(flow_id, FLOW_ID_A);
+                assert_eq!(format, FlowFormat::Video);
+            }
+            InnerConfig::Placeholder { reason } => panic!("expected Mxl, got Placeholder({reason})"),
+        }
+        assert!(matches!(plan.ack, ActivationAck::Success));
+    }
+
+    #[test]
+    fn flow_id_mismatch_is_failure() {
+        let s = CommonSettings {
+            mxl_flow_id: FLOW_ID_B.to_owned(),
+            mxl_flow_format: FlowFormat::Video,
+            ..settings(Side::Sender)
+        };
+        let plan = plan_activation(
+            &cat(),
+            "nmossink",
+            &s,
+            &req(Side::Sender, Some(&video_flow_def(FLOW_ID_A))),
+        );
+        assert!(matches!(plan.inner, InnerConfig::Placeholder { .. }));
+        match plan.ack {
+            ActivationAck::Failure { reason } => assert!(
+                reason.contains("mxl-flow-id mismatch"),
+                "expected flow-id mismatch reason: {reason}",
+            ),
+            ActivationAck::Success => panic!("expected failure ack on flow-id mismatch"),
+        }
+    }
+
+    #[test]
+    fn domain_path_unset_is_failure_with_live_transport_file() {
+        // Activation supplies the spliced transport_file, but this
+        // host has no `mxl-domain-path` so the element can't bring
+        // up mxlsink/mxlsrc. Per design: placeholder + failure ack.
+        let s = CommonSettings {
+            mxl_domain_path: String::new(),
+            mxl_flow_id: FLOW_ID_A.to_owned(),
+            mxl_flow_format: FlowFormat::Video,
+            ..settings(Side::Sender)
+        };
+        let plan = plan_activation(
+            &cat(),
+            "nmossink",
+            &s,
+            &req(Side::Sender, Some(&video_flow_def(FLOW_ID_A))),
+        );
+        match plan.inner {
+            InnerConfig::Placeholder { reason } => assert!(
+                reason.contains("mxl-domain-path"),
+                "expected mxl-domain-path reason, got: {reason}"
+            ),
+            InnerConfig::Mxl { .. } => panic!("expected Placeholder when mxl-domain-path unset"),
+        }
+        match plan.ack {
+            ActivationAck::Failure { reason } => assert!(
+                reason.contains("cannot bring up inner data path")
+                    && reason.contains("mxl-domain-path"),
+                "expected user-facing failure reason: {reason}",
+            ),
+            ActivationAck::Success => panic!(
+                "expected failure ack when activation can't be honoured locally; got Success",
+            ),
+        }
+    }
+
+    #[test]
+    fn domain_id_unresolvable_is_failure() {
+        let s = CommonSettings {
+            mxl_domain_id: String::new(),
+            mxl_domain_path: String::new(),
+            mxl_flow_id: FLOW_ID_A.to_owned(),
+            mxl_flow_format: FlowFormat::Video,
+            ..settings(Side::Sender)
+        };
+        let plan = plan_activation(
+            &cat(),
+            "nmossink",
+            &s,
+            &req(Side::Sender, Some(&video_flow_def(FLOW_ID_A))),
+        );
+        match plan.ack {
+            ActivationAck::Failure { reason } => assert!(
+                reason.contains("mxl-domain-id"),
+                "expected mxl-domain-id failure reason: {reason}",
+            ),
+            ActivationAck::Success => {
+                panic!("expected failure ack when mxl-domain-id is unresolvable")
+            }
+        }
+    }
+
+    #[test]
+    fn bad_transport_file_json_is_failure() {
+        let s = CommonSettings {
+            mxl_flow_id: FLOW_ID_A.to_owned(),
+            mxl_flow_format: FlowFormat::Video,
+            ..settings(Side::Sender)
+        };
+        let plan = plan_activation(
+            &cat(),
+            "nmossink",
+            &s,
+            &req(Side::Sender, Some("not json")),
+        );
+        assert!(matches!(plan.inner, InnerConfig::Placeholder { .. }));
+        assert!(matches!(plan.ack, ActivationAck::Failure { .. }));
     }
 }

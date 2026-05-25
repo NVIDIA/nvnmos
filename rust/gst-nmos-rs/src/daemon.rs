@@ -16,14 +16,18 @@
 //! registered — a future change will build the transport file from
 //! upstream caps and the element's properties.
 //!
-//! The activation task acks every `ActivationEvent` with `success=true`
-//! today. The inner data path isn't wired yet so the plugin can't
-//! actually apply an activation; once that lands the ack will be
-//! conditional on the local apply succeeding.
+//! Each `ActivationEvent` arriving on the subscription is routed to
+//! the element-supplied [`ActivationHandler`] (see [`Session::open`]).
+//! The handler returns an [`ActivationOutcome`] via a `oneshot` —
+//! `Applied` becomes `AckActivation { success=true }`, `Failed` becomes
+//! `AckActivation { success=false, failure_reason }`. The next event
+//! is read only after the current one's ack lands, so the IS-05
+//! controller and the local data path stay in lock-step.
 //!
 //! [`SubscribeActivations`]: nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient::subscribe_activations
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
@@ -34,6 +38,7 @@ use nvnmos_rpc::v1::{
 };
 use thiserror::Error;
 use tokio::net::UnixStream;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
@@ -45,6 +50,43 @@ use crate::runtime::SHARED_RUNTIME;
 use crate::session::Side;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Per-event input to an [`ActivationHandler`]. Mirrors
+/// `nvnmos.daemon.v1.ActivationEvent` with the `side` decoded into
+/// the crate-local enum and the proto `optional string transport_file`
+/// already flattened.
+#[derive(Debug, Clone)]
+pub(crate) struct ActivationRequest {
+    pub(crate) activation_handle: String,
+    pub(crate) resource_handle: String,
+    pub(crate) side: Side,
+    /// `Some(text)` for an activation, `None` for a deactivation.
+    /// For MXL receivers the daemon synthesises this by splicing the
+    /// PATCHed `mxl_domain_id` / `mxl_flow_id` into the resource's
+    /// internal `flow_def`; the element just consumes the result.
+    pub(crate) transport_file: Option<String>,
+}
+
+/// What the handler tells the activation task to ack back to the
+/// daemon. `Applied` translates to `AckActivation { success=true }`,
+/// `Failed { reason }` to `AckActivation { success=false, failure_reason=reason }`.
+#[derive(Debug)]
+pub(crate) enum ActivationOutcome {
+    Applied,
+    Failed { reason: String },
+}
+
+/// Element-side callback invoked once per [`ActivationEvent`]. The
+/// activation task creates a fresh oneshot per event, hands the
+/// sender to the handler, and awaits the receiver before acking.
+///
+/// Implementations must not block the calling task: dispatch the
+/// real work onto the GStreamer thread via
+/// `gst::glib::object::Cast::call_async` (see `nmossink::imp` /
+/// `nmossrc::imp`) and arrange for the eventual outcome to land on
+/// the supplied sender.
+pub(crate) type ActivationHandler =
+    Arc<dyn Fn(ActivationRequest, oneshot::Sender<ActivationOutcome>) + Send + Sync>;
 
 /// A live session against `nvnmosd`.
 ///
@@ -103,6 +145,10 @@ impl Session {
     /// asset_tags, network_services are left at their proto-default
     /// and ignored by the daemon when attaching to an existing Node).
     ///
+    /// `activation_handler` is invoked for every `ActivationEvent`
+    /// the daemon delivers on this session. See
+    /// [`ActivationHandler`].
+    ///
     /// If the resource registration fails the partially-open session
     /// is rolled back via `CloseSession` so the daemon doesn't leak
     /// state.
@@ -113,6 +159,7 @@ impl Session {
         name: &str,
         transport: ProtoTransport,
         transport_file: Option<&str>,
+        activation_handler: ActivationHandler,
     ) -> Result<Self, DaemonError> {
         let uds_path = parse_unix_uri(daemon_uri)?;
         let channel = connect_uds(uds_path).await?;
@@ -132,7 +179,8 @@ impl Session {
         let node_id = resp.node_id.clone();
         let created_node = resp.created_node;
 
-        let activation_task = spawn_activation_task(client.clone(), session_handle.clone());
+        let activation_task =
+            spawn_activation_task(client.clone(), session_handle.clone(), activation_handler);
 
         let resource = match transport_file {
             Some(file) => match add_resource(
@@ -265,6 +313,7 @@ async fn connect_uds(uds_path: PathBuf) -> Result<Channel, tonic::transport::Err
 fn spawn_activation_task(
     mut client: NvnmosDaemonClient<Channel>,
     session_handle: String,
+    handler: ActivationHandler,
 ) -> JoinHandle<()> {
     SHARED_RUNTIME.spawn(async move {
         let sub = client
@@ -288,26 +337,66 @@ fn spawn_activation_task(
             match stream.message().await {
                 Ok(Some(ev)) => {
                     let deactivating = ev.transport_file.is_none();
-                    let side = ProtoSide::try_from(ev.side)
+                    let side_name = ProtoSide::try_from(ev.side)
                         .map(|s| s.as_str_name())
                         .unwrap_or("UNKNOWN");
                     gst::info!(
                         CAT,
                         "ActivationEvent received (session={session_handle}, \
                          resource_handle={}, activation_handle={}, \
-                         side={}, deactivating={}); auto-acking",
+                         side={}, deactivating={}); dispatching to element",
                         ev.resource_handle,
                         ev.activation_handle,
-                        side,
+                        side_name,
                         deactivating,
                     );
+
+                    let outcome = match Side::try_from_proto(ev.side) {
+                        None => ActivationOutcome::Failed {
+                            reason: format!(
+                                "daemon delivered ActivationEvent with unrecognised `side` enum value {}",
+                                ev.side,
+                            ),
+                        },
+                        Some(side) => {
+                            let req = ActivationRequest {
+                                activation_handle: ev.activation_handle.clone(),
+                                resource_handle: ev.resource_handle.clone(),
+                                side,
+                                transport_file: ev.transport_file.clone(),
+                            };
+                            let (tx, rx) = oneshot::channel();
+                            handler(req, tx);
+                            match rx.await {
+                                Ok(o) => o,
+                                Err(_) => ActivationOutcome::Failed {
+                                    reason: "element dropped its activation oneshot before \
+                                             completing the apply"
+                                        .to_owned(),
+                                },
+                            }
+                        }
+                    };
+
+                    let (success, failure_reason) = match outcome {
+                        ActivationOutcome::Applied => (true, String::new()),
+                        ActivationOutcome::Failed { reason } => {
+                            gst::warning!(
+                                CAT,
+                                "activation apply failed (session={session_handle}, \
+                                 activation_handle={}): {reason}",
+                                ev.activation_handle,
+                            );
+                            (false, reason)
+                        }
+                    };
 
                     let ack = client
                         .ack_activation(AckActivationRequest {
                             session_handle: session_handle.clone(),
                             activation_handle: ev.activation_handle.clone(),
-                            success: true,
-                            failure_reason: String::new(),
+                            success,
+                            failure_reason,
                         })
                         .await;
                     if let Err(status) = ack {

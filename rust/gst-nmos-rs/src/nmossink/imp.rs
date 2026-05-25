@@ -5,19 +5,28 @@
 //! `nvnmosd` at NULL→READY and closes it at READY→NULL. The inner
 //! data path is a `mxlsink` when the resolved configuration pins a
 //! Domain path + Flow id; otherwise the bin keeps a placeholder
-//! `fakesink` so the element looks valid in the pipeline until a
-//! later step supplies the missing pieces.
+//! `fakesink` so the element looks valid in the pipeline until an
+//! IS-05 activation (or a later configuration update) supplies the
+//! missing pieces.
+//!
+//! Activations arriving on the daemon subscription are dispatched to
+//! [`NmosSink::apply_activation`], which marshals the work onto the
+//! GStreamer thread via `Element::call_async`. At state ≤ READY the
+//! swap happens inline; at state ≥ PAUSED we gate it on a single-shot
+//! IDLE pad probe on the bin's external ghost pad so the streaming
+//! thread isn't inside the inner element when we tear it down.
 
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
+use tokio::sync::oneshot;
 
-use crate::daemon::Session;
+use crate::daemon::{ActivationHandler, ActivationOutcome, ActivationRequest, Session};
 use crate::inner;
-use crate::session::InnerConfig;
+use crate::session::{ActivationAck, ActivationPlan, InnerConfig};
 use crate::types::{DEFAULT_DAEMON_URI, FlowFormat, Transport};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
@@ -357,8 +366,14 @@ impl NmosSink {
         let snapshot = self.settings.lock().unwrap().clone();
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
-        let outcome =
-            crate::session::validate_and_open(&CAT, "nmossink", &snapshot.into(), &self.session)?;
+        let handler = self.activation_handler();
+        let outcome = crate::session::validate_and_open(
+            &CAT,
+            "nmossink",
+            &snapshot.into(),
+            &self.session,
+            handler,
+        )?;
         if let Err(e) = self.activate_inner(bin_ref, &outcome) {
             // Close the daemon session and restore the placeholder so the
             // bin is left as if NULL→READY had never been attempted.
@@ -400,6 +415,144 @@ impl NmosSink {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("nmossink ghost pad missing"))?;
         inner::swap_inner(bin, ghost, new_inner, "sink")
+    }
+
+    /// Build the [`ActivationHandler`] passed to
+    /// [`crate::session::validate_and_open`]. Captures a weak ref to
+    /// the element so the session's activation task doesn't keep
+    /// the bin alive on its own.
+    fn activation_handler(&self) -> ActivationHandler {
+        let weak: glib::WeakRef<super::NmosSink> = self.obj().downgrade();
+        Arc::new(move |req: ActivationRequest, tx: oneshot::Sender<ActivationOutcome>| {
+            let Some(bin) = weak.upgrade() else {
+                let _ = tx.send(ActivationOutcome::Failed {
+                    reason: "nmossink element was dropped before activation could be applied"
+                        .to_owned(),
+                });
+                return;
+            };
+            // Hop onto the GStreamer thread to inspect state and
+            // touch the bin's children. `call_async` is the
+            // canonical bridge from a tokio worker.
+            bin.call_async(move |bin| {
+                bin.imp().apply_activation(req, tx);
+            });
+        })
+    }
+
+    /// Apply an activation. Runs on a GStreamer worker thread (via
+    /// `call_async`). The state-≤-READY branch swaps inline; the
+    /// state-≥-PAUSED branch gates the swap on a single-shot IDLE
+    /// pad probe and reports back asynchronously when the probe
+    /// fires.
+    fn apply_activation(&self, req: ActivationRequest, tx: oneshot::Sender<ActivationOutcome>) {
+        let snapshot = self.settings.lock().unwrap().clone();
+        let plan = crate::session::plan_activation(&CAT, "nmossink", &snapshot.into(), &req);
+        gst::info!(
+            CAT,
+            "nmossink applying activation (activation_handle={}, resource_handle={}, side={:?}): \
+             plan inner={:?}, ack={:?}",
+            req.activation_handle,
+            req.resource_handle,
+            req.side,
+            plan.inner,
+            plan.ack,
+        );
+
+        let current = self.obj().current_state();
+        if current <= gst::State::Ready {
+            let outcome = self.apply_plan_inline(&plan);
+            let _ = tx.send(outcome);
+        } else {
+            self.schedule_apply_via_probe(plan, tx);
+        }
+    }
+
+    /// Perform the inner swap and translate the result into an
+    /// [`ActivationOutcome`]. Called either directly (state ≤ READY)
+    /// or from the IDLE probe (state ≥ PAUSED). On swap failure the
+    /// element is left on the placeholder and the outcome is
+    /// `Failed`.
+    fn apply_plan_inline(&self, plan: &ActivationPlan) -> ActivationOutcome {
+        let bin = self.obj();
+        let bin_ref: &gst::Bin = bin.upcast_ref();
+        let new_inner = match &plan.inner {
+            InnerConfig::Mxl { domain_path, flow_id, .. } => {
+                match inner::build_mxlsink(domain_path, flow_id) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return ActivationOutcome::Failed {
+                            reason: format!("nmossink: building inner mxlsink: {e:#}"),
+                        };
+                    }
+                }
+            }
+            InnerConfig::Placeholder { .. } => match inner::build_placeholder_sink() {
+                Ok(e) => e,
+                Err(e) => {
+                    return ActivationOutcome::Failed {
+                        reason: format!("nmossink: building placeholder: {e:#}"),
+                    };
+                }
+            },
+        };
+        if let Err(e) = self.swap_inner(bin_ref, &new_inner) {
+            // Try one more time with a fresh placeholder so the bin
+            // is left in a known state even on the failure path.
+            if let Ok(p) = inner::build_placeholder_sink() {
+                let _ = self.swap_inner(bin_ref, &p);
+            }
+            return ActivationOutcome::Failed {
+                reason: format!("nmossink: swapping inner element: {e:#}"),
+            };
+        }
+        match &plan.ack {
+            ActivationAck::Success => ActivationOutcome::Applied,
+            ActivationAck::Failure { reason } => ActivationOutcome::Failed {
+                reason: reason.clone(),
+            },
+        }
+    }
+
+    /// Install a single-shot IDLE pad probe on the bin's external
+    /// ghost pad; when it fires (i.e. no buffer is in flight through
+    /// the bin's data path), run [`apply_plan_inline`] and forward
+    /// the outcome via `tx`. Logged-only if the ghost pad is gone
+    /// (the bin is being torn down).
+    fn schedule_apply_via_probe(
+        &self,
+        plan: ActivationPlan,
+        tx: oneshot::Sender<ActivationOutcome>,
+    ) {
+        let ghost = self.ghost.lock().unwrap().clone();
+        let Some(ghost) = ghost else {
+            let _ = tx.send(ActivationOutcome::Failed {
+                reason: "nmossink ghost pad missing when scheduling activation probe".to_owned(),
+            });
+            return;
+        };
+        // Probe callbacks are `Fn` so they may run multiple times;
+        // the take()-once pattern guarantees we only do the swap +
+        // ack on the first invocation. `Remove` afterwards prevents
+        // it from being called again, but we belt-and-brace the
+        // bookkeeping anyway.
+        let weak: glib::WeakRef<super::NmosSink> = self.obj().downgrade();
+        let plan_cell = Arc::new(Mutex::new(Some(plan)));
+        let tx_cell = Arc::new(Mutex::new(Some(tx)));
+        ghost.add_probe(gst::PadProbeType::IDLE, move |_pad, _info| {
+            let plan = plan_cell.lock().unwrap().take();
+            let tx = tx_cell.lock().unwrap().take();
+            if let (Some(plan), Some(tx)) = (plan, tx) {
+                let outcome = match weak.upgrade() {
+                    Some(bin) => bin.imp().apply_plan_inline(&plan),
+                    None => ActivationOutcome::Failed {
+                        reason: "nmossink dropped before activation probe fired".to_owned(),
+                    },
+                };
+                let _ = tx.send(outcome);
+            }
+            gst::PadProbeReturn::Remove
+        });
     }
 }
 

@@ -9,8 +9,19 @@
 //! and run the session lifecycle: NULL→READY opens a session against
 //! `nvnmosd`, subscribes to activations, and (when `transport-file`
 //! is set) registers the Sender or Receiver via `AddSender` /
-//! `AddReceiver`; READY→NULL closes it. The activation task acks
-//! every event with `success=true`.
+//! `AddReceiver`; READY→NULL closes it.
+//!
+//! Each `ActivationEvent` arriving on the subscription is routed
+//! through the element: the daemon's activation task hands the event
+//! to an element-supplied handler, the handler hops onto the
+//! GStreamer thread via `Element::call_async`, re-runs the same
+//! domain/flow cross-checks `validate_and_open` did at NULL→READY
+//! (with the event's `transport_file` substituted in), and swaps the
+//! inner element accordingly. Swaps at state ≥ PAUSED are gated on a
+//! single-shot IDLE pad probe so the streaming thread is not inside
+//! the inner element during the swap. The outcome (Applied / Failed)
+//! is reported back to the daemon as the `AckActivation` `success` /
+//! `failure_reason`.
 //!
 //! Inner data path: when the resolved configuration pins a Domain
 //! path and a Flow id (plus a Flow format on the receiver), the bin

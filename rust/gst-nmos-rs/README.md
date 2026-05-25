@@ -21,16 +21,27 @@ the workspace overview is in [`../README.md`](../README.md).
   published in IS-04 and reachable by IS-05 controllers. When
   `transport-file` is unset the session is opened but no resource is
   registered.
-- Activation events arriving on the subscription are auto-acked with
-  `success=true`; the plugin doesn't yet apply the activation to the
-  data path.
+- Activation events arriving on the subscription drive the inner
+  data path. The element re-runs the `mxl-domain-id` / flow id
+  cross-checks against the event's `transport_file` (for MXL
+  receivers this is the daemon-spliced internal `flow_def` carrying
+  the PATCHed `mxl_domain_id` / `mxl_flow_id`), then swaps the
+  inner element between `mxlsink` / `mxlsrc` and the placeholder.
+  Swaps run inline at state ≤ READY and via a single-shot IDLE pad
+  probe at state ≥ PAUSED, following the idiomatic gst-plugins-rs
+  pattern (`transcriberbin`, `fallbackswitch`). The activation is
+  acked back to the daemon as `success=true` when the inner
+  element was successfully brought up (or deactivation completed),
+  and `success=false` with a `failure_reason` when it could not —
+  most commonly because `mxl-domain-path` is unset on this host,
+  or the event's `transport_file` mismatches a user-pinned
+  `mxl-flow-id` / `mxl-flow-format`.
 - When the resolved configuration pins a Domain path *and* a Flow id
   (plus a Flow format on the receiver), the inner data path is the
   real `mxlsink` / `mxlsrc` configured from those values. Otherwise
   the bin keeps a placeholder `fakesink` / `fakesrc` so the element
-  remains valid in the pipeline; a later step (IS-05 activation,
-  upstream-caps deferred mode) will rebuild the inner element from
-  richer state.
+  remains valid in the pipeline; a later step (upstream-caps
+  deferred mode) will broaden where the configuration may come from.
 - On `nmossink` the `transport-file` may be omitted in favour of the
   `caps` property: when the user supplies essence caps (`video/x-raw,format=v210,…`,
   `audio/x-raw,format=F32LE,…`, or `meta/x-st-2038,framerate=…`) plus
@@ -141,8 +152,17 @@ GST_DEBUG=nmossink:5 gst-launch-1.0 -e \
 Expected: the element additionally logs `resource registered:
 resource_handle=... resource_id=...; inner data path: mxl
 (domain_path=..., flow_id=..., format=...)`. The daemon logs the
-matching `AddSender`. Any IS-05 PATCH activation against this
-resource is auto-acked with `success=true`.
+matching `AddSender`. An IS-05 PATCH activation against this
+resource is dispatched through the element: it logs `applying
+activation … plan inner=Mxl(…), ack=Success` and (when the
+pipeline is past READY) the swap happens behind a single-shot IDLE
+pad probe before the daemon receives the success ack. A
+deactivation logs `activation is a deactivation … swapping to
+placeholder` and acks success. A PATCH that the element can't
+honour locally (e.g. `mxl-domain-path` is unset on this host, or
+the `mxl-flow-id` property contradicts the activation's
+`transport_file`) is acked back with `success=false` and a
+`failure_reason` that names the specific check that failed.
 
 On `nmossrc` the inner `mxlsrc` also needs to know which media kind
 the flow carries; supply it either via `mxl-flow-format=video|audio|data`
