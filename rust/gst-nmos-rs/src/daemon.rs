@@ -120,6 +120,10 @@ pub(crate) enum DaemonError {
     Transport(#[from] Box<tonic::transport::Error>),
     #[error("RPC error: {0}")]
     Rpc(#[from] Box<tonic::Status>),
+    #[error(
+        "session already has a resource registered; deferred registration is a one-shot operation"
+    )]
+    AlreadyRegistered,
 }
 
 impl From<tonic::transport::Error> for DaemonError {
@@ -222,6 +226,40 @@ impl Session {
         self.resource
             .as_ref()
             .map(|r| (r.handle.as_str(), r.id.as_str()))
+    }
+
+    /// Register a Sender or Receiver on this open session. Used by
+    /// the deferred-mode path: at NULL→READY the session is opened
+    /// with no resource (because neither `transport-file*` nor `caps`
+    /// was supplied), and the actual `AddSender` / `AddReceiver` is
+    /// driven later from inside `change_state(ReadyToPaused)` once
+    /// upstream peer caps have negotiated and a flow_def can be
+    /// synthesised.
+    ///
+    /// Errors with [`DaemonError::AlreadyRegistered`] if called on a
+    /// session that already has a resource (caller bug —
+    /// deferred-mode registration is one-shot).
+    pub(crate) async fn add_resource(
+        &mut self,
+        side: Side,
+        name: &str,
+        transport: ProtoTransport,
+        transport_file: &str,
+    ) -> Result<(), DaemonError> {
+        if self.resource.is_some() {
+            return Err(DaemonError::AlreadyRegistered);
+        }
+        let resource = add_resource(
+            &mut self.client,
+            &self.session_handle,
+            side,
+            name,
+            transport,
+            transport_file,
+        )
+        .await?;
+        self.resource = Some(resource);
+        Ok(())
     }
 
     /// Cancel the background activation task and tell the daemon to

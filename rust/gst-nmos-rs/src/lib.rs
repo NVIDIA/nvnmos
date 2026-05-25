@@ -28,8 +28,19 @@
 //! instantiates the real `mxlsink` / `mxlsrc` and ghosts its pad
 //! through the bin's external pad. Otherwise it keeps a placeholder
 //! `fakesink` / `fakesrc` so the element remains valid in the
-//! pipeline until a later step (caps→flow_def, IS-05 activation)
-//! supplies the missing pieces.
+//! pipeline until an IS-05 activation supplies the missing pieces.
+//!
+//! On `nmossink` there is also a *deferred mode*: if NULL→READY runs
+//! with neither `transport-file*` nor `caps` set, the session is
+//! opened without a resource and the actual `AddSender` is driven
+//! from `change_state(ReadyToPaused)`. The ghost sink pad's upstream
+//! peer is queried for caps, the result is fixated and fed to the
+//! shared caps-driven flow_def builder, and on success the inner is
+//! swapped to `mxlsink`. State-change errors propagate when peer
+//! caps are ANY/EMPTY or unsupported by the builder so the user gets
+//! a clear, pipeline-visible "declare `caps=…` or insert a
+//! `capsfilter`" hint. Receiver-side deferred mode is intentionally
+//! out of scope (no peer to query).
 
 use std::sync::LazyLock;
 

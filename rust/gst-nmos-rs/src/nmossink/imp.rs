@@ -353,6 +353,23 @@ impl ElementImpl for NmosSink {
             gst::StateChange::ReadyToNull => {
                 self.close_session();
             }
+            gst::StateChange::ReadyToPaused => {
+                // Children transition up first so caps negotiate
+                // (the placeholder fakesink accepts whatever upstream
+                // proposes); we then query the negotiated peer caps
+                // and, if no resource is yet registered, drive the
+                // deferred AddSender.
+                let res = self.parent_change_state(transition)?;
+                if let Err(e) = self.maybe_register_deferred() {
+                    gst::element_imp_error!(
+                        self,
+                        gst::ResourceError::OpenWrite,
+                        ["nmossink READY\u{2192}PAUSED deferred registration failed: {e:#}"]
+                    );
+                    return Err(gst::StateChangeError);
+                }
+                return Ok(res);
+            }
             _ => (),
         }
         self.parent_change_state(transition)
@@ -415,6 +432,60 @@ impl NmosSink {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("nmossink ghost pad missing"))?;
         inner::swap_inner(bin, ghost, new_inner, "sink")
+    }
+
+    /// Drive a deferred `AddSender` from inside
+    /// `change_state(ReadyToPaused)`. Only attempts registration when
+    /// the session is open without a resource and neither
+    /// `transport-file*` nor `caps` were supplied at NULL→READY. The
+    /// ghost sink pad is queried for the upstream peer's caps, which
+    /// are then fed to the shared caps-driven flow_def builder; on
+    /// success the inner element is swapped to a real `mxlsink`.
+    ///
+    /// Returns `Ok(())` both when deferred mode is not applicable and
+    /// when registration succeeds. Errors are propagated only on real
+    /// failures (ANY/EMPTY caps, builder rejection, AddSender RPC
+    /// failure) so that change_state surfaces a clear,
+    /// pipeline-visible error.
+    fn maybe_register_deferred(&self) -> Result<(), anyhow::Error> {
+        let snapshot = self.settings.lock().unwrap().clone();
+        let static_inputs_set = !snapshot.transport_file.is_empty()
+            || !snapshot.transport_file_path.is_empty()
+            || snapshot.caps.is_some();
+        let resource_registered = self
+            .session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|s| s.resource_id().map(|_| ()))
+            .is_some();
+        let session_open = self.session.lock().unwrap().is_some();
+        if !session_open || resource_registered || static_inputs_set {
+            return Ok(());
+        }
+
+        let ghost = self
+            .ghost
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("nmossink ghost pad missing"))?;
+        let peer_caps = ghost.peer_query_caps(None);
+        gst::debug!(CAT, imp = self, "deferred mode peer_query_caps -> {peer_caps}");
+
+        let common: crate::session::CommonSettings = snapshot.into();
+        let outcome = crate::session::register_deferred(
+            &CAT,
+            "nmossink",
+            &common,
+            &self.session,
+            peer_caps,
+        )?;
+
+        let bin = self.obj();
+        let bin_ref: &gst::Bin = bin.upcast_ref();
+        self.activate_inner(bin_ref, &outcome)?;
+        Ok(())
     }
 
     /// Build the [`ActivationHandler`] passed to

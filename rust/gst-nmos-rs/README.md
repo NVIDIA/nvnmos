@@ -40,8 +40,7 @@ the workspace overview is in [`../README.md`](../README.md).
   (plus a Flow format on the receiver), the inner data path is the
   real `mxlsink` / `mxlsrc` configured from those values. Otherwise
   the bin keeps a placeholder `fakesink` / `fakesrc` so the element
-  remains valid in the pipeline; a later step (upstream-caps
-  deferred mode) will broaden where the configuration may come from.
+  remains valid in the pipeline.
 - On `nmossink` the `transport-file` may be omitted in favour of the
   `caps` property: when the user supplies essence caps (`video/x-raw,format=v210,…`,
   `audio/x-raw,format=F32LE,…`, or `meta/x-st-2038,framerate=…`) plus
@@ -50,10 +49,21 @@ the workspace overview is in [`../README.md`](../README.md).
   [`mxl/lib/tests/data/`](https://github.com/dmf-mxl/mxl/tree/main/lib/tests/data)
   and feeds it to `AddSender` as it would a user-supplied
   transport-file. When both `transport-file*` and `caps` are set the
-  file wins and the caps are ignored. Receiver caps→flow_def
-  synthesis is intentionally not wired yet — a Receiver's
-  transport-file describes the Sender's flow, not its own essence
-  caps; that path will land alongside deferred mode.
+  file wins and the caps are ignored.
+- `nmossink` also supports a *deferred mode*: when neither
+  `transport-file*` nor `caps` is supplied at NULL→READY the session
+  opens without a resource, and the actual `AddSender` is driven
+  from `READY→PAUSED`. The ghost sink pad's upstream peer is queried
+  for caps via `gst_pad_peer_query_caps()`, the result is fixated,
+  and the caps-driven flow_def builder runs against those caps; on
+  success the inner element swaps to `mxlsink` and the resource is
+  registered. `mxl-flow-id` / `mxl-domain-id` (or
+  `mxl-domain-path` with a `domain_def.json`) must still be set. If
+  the peer returned ANY/EMPTY caps or a shape the builder can't
+  accept (e.g. `video/x-raw,format=I420`), the state change fails
+  with a clear message telling the user to declare `caps=…` or insert
+  a `capsfilter` upstream. Receiver-side deferred mode is
+  intentionally out of scope — `nmossrc` has no peer to query.
 
 ## Property surface
 
@@ -207,3 +217,29 @@ Fields included:
   and a Y/Cb/Cr 4:2:2 10-bit `components` triple derived from
   `frame_width` / `frame_height`. Use `transport-file` if you need
   BT2020 / a different layout.
+
+Finally, `nmossink` can also defer registration to `READY→PAUSED`
+and pick up the caps from upstream — useful when the upstream
+element fixes caps for the sink anyway (a `capsfilter`, a parser,
+or another negotiation point):
+
+```sh
+GST_DEBUG=nmossink:5 gst-launch-1.0 -e \
+    videotestsrc num-buffers=10 ! \
+    video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001 ! \
+    nmossink transport=mxl node-seed=demo sender-name=sender1 \
+             mxl-domain-id=1ac254d9-c9be-475a-93a7-f80b9c1063a8 \
+             mxl-domain-path=/var/lib/mxl/domain-a \
+             mxl-flow-id=5fbec3b1-1b0f-417d-9059-8b94a47197ed
+```
+
+Expected: at NULL→READY the element logs `session opened … no
+resource registered`; at READY→PAUSED it logs `deferred mode: peer
+caps fixated to …` then `deferred mode: synthesised flow_def` and
+`deferred registration complete: resource_handle=… resource_id=…;
+inner data path: Mxl(…)`. When upstream can't fix caps — for
+example `fakesrc ! nmossink` — the state change fails with a clear
+`READY→PAUSED deferred registration failed:` error telling the
+user to declare `caps=…` on the element or insert a `capsfilter`
+upstream. Receiver-side deferred mode is intentionally out of scope:
+`nmossrc` has no peer to query.

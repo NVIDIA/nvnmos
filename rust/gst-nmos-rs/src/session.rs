@@ -267,7 +267,22 @@ pub(crate) fn validate_and_open(
     log_flow_origin(cat, "mxl-flow-id", flow.id_origin);
     log_flow_origin(cat, "mxl-flow-format", flow.format_origin);
 
-    let inner = decide_inner_config(settings, &flow);
+    let mut inner = decide_inner_config(settings, &flow);
+    // Deferred-mode case (sender only): no resource is going to be
+    // registered at NULL→READY because neither `transport-file*` nor
+    // `caps` was supplied. Keep the placeholder so we don't bring
+    // `mxlsink` up against an unregistered Flow (which would fail to
+    // preroll); the inner is swapped to `mxlsink` only after
+    // `register_deferred` registers the Sender at READY→PAUSED.
+    if transport_file.is_none()
+        && settings.side == Side::Sender
+        && matches!(inner, InnerConfig::Mxl { .. })
+    {
+        inner = InnerConfig::Placeholder {
+            reason: "deferred — peer caps will drive registration at READY\u{2192}PAUSED"
+                .to_owned(),
+        };
+    }
 
     let transport = transport_to_proto(settings.transport);
     let side = settings.side;
@@ -415,6 +430,137 @@ fn decide_inner_config(settings: &CommonSettings, flow: &flow_def::FlowResolutio
         flow_id: flow.id.clone(),
         format: flow.format,
     }
+}
+
+/// Register a Sender via the deferred-mode path: synthesise a
+/// flow_def from upstream peer caps and call `AddSender` against a
+/// session that was opened without one. Used by `nmossink` from
+/// inside `change_state(ReadyToPaused)` when neither `transport-file*`
+/// nor `caps` was set at NULL→READY.
+///
+/// `peer_caps` is what `gst_pad_peer_query_caps()` returned, before
+/// fixation. The helper fixates internally and rejects ANY / EMPTY
+/// caps with a clear, user-facing error message telling them to
+/// declare `caps=…` or insert a `capsfilter` upstream — that's the
+/// same recipe the plan doc spells out for pipelines where the peer
+/// query can't fix caps (h264parse pre-data, etc.).
+///
+/// Returns the [`InnerConfig`] the element should install on the
+/// data path; today always [`InnerConfig::Mxl`] on success because
+/// deferred-mode registration is only attempted when `mxl-domain-path`
+/// is set (the placeholder path is the alternative the caller picks
+/// when this helper isn't called).
+pub(crate) fn register_deferred(
+    cat: &gst::DebugCategory,
+    element: &str,
+    settings: &CommonSettings,
+    session: &Mutex<Option<Session>>,
+    peer_caps: gst::Caps,
+) -> Result<InnerConfig, anyhow::Error> {
+    if settings.side != Side::Sender {
+        // Receiver deferred mode is explicitly out of scope (plan doc:
+        // “`nmossrc` cannot use deferred mode — there is no peer to
+        // query.”). Reject so we don't accidentally try.
+        bail!("{element}: deferred registration is sender-only");
+    }
+
+    if peer_caps.is_empty() {
+        bail!(
+            "{element}: deferred registration: upstream peer offered no caps. \
+             Declare `caps=\"…\"` on the element or insert a `capsfilter` \
+             upstream so the element knows what flow_def to register."
+        );
+    }
+    if peer_caps.is_any() {
+        bail!(
+            "{element}: deferred registration: upstream peer offered ANY caps \
+             (likely no negotiated caps yet — e.g. `fakesrc` with no upstream \
+             capsfilter). Declare `caps=\"…\"` on the element or insert a \
+             `capsfilter` upstream so the element knows what flow_def to register."
+        );
+    }
+
+    // Fixate the (possibly under-constrained) peer caps into a single,
+    // concrete shape — the same operation any sink performs to decide
+    // its negotiated caps. The fixated caps drive the flow_def
+    // builder.
+    let mut fixated = peer_caps;
+    fixated.fixate();
+    gst::info!(
+        cat,
+        "{element}: deferred mode: peer caps fixated to `{fixated}`",
+    );
+
+    let domain_resolution =
+        domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path)
+            .with_context(|| {
+                format!("{element}: resolving MXL Domain identity for deferred registration")
+            })?;
+    if domain_resolution.id.is_empty() {
+        bail!(
+            "{element}: deferred registration: `mxl-domain-id` is required \
+             (set the property directly or supply an `mxl-domain-path` whose \
+             `domain_def.json` provides the id)"
+        );
+    }
+
+    let json = flow_def::build_from_caps(&FlowDefBuildInput {
+        flow_id: &settings.mxl_flow_id,
+        format_hint: settings.mxl_flow_format,
+        name: &settings.name,
+        mxl_domain_id: &domain_resolution.id,
+        label: &settings.label,
+        description: &settings.description,
+        caps: &fixated,
+    })
+    .with_context(|| format!("{element}: synthesising flow_def from peer caps"))?;
+    gst::info!(cat, "{element}: deferred mode: synthesised flow_def");
+
+    let flow = flow_def::resolve_mxl_flow_meta(
+        &settings.mxl_flow_id,
+        settings.mxl_flow_format,
+        Some(&json),
+    )
+    .with_context(|| {
+        format!("{element}: resolving MXL flow id / format for deferred registration")
+    })?;
+    let inner = decide_inner_config(settings, &flow);
+
+    let transport = transport_to_proto(settings.transport);
+    let side = settings.side;
+    let name = settings.name.clone();
+    // Take the Session out of the std::Mutex before doing async work
+    // (clippy's `await_holding_lock` lint, same pattern `close()` uses
+    // for the symmetrical CloseSession call). The session is put back
+    // afterwards whether AddSender succeeded or failed so READY→NULL
+    // still has something to close.
+    let mut taken = session.lock().unwrap().take().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{element}: deferred registration but no open session — was NULL→READY skipped?"
+        )
+    })?;
+    let rpc_result = SHARED_RUNTIME.block_on(async {
+        tokio::time::timeout(
+            OPEN_TIMEOUT,
+            taken.add_resource(side, &name, transport, &json),
+        )
+        .await
+        .with_context(|| format!("{element}: AddSender for deferred registration timed out"))?
+        .with_context(|| format!("{element}: AddSender for deferred registration"))
+    });
+    let summary = taken
+        .resource_id()
+        .map(|(h, id)| format!("resource_handle={h} resource_id={id}"))
+        .unwrap_or_else(|| "<no resource id>".to_owned());
+    *session.lock().unwrap() = Some(taken);
+    rpc_result?;
+
+    gst::info!(
+        cat,
+        "{element}: deferred registration complete: {summary}; inner data path: {:?}",
+        inner,
+    );
+    Ok(inner)
 }
 
 /// Drop the session and tell the daemon to close it. Logged-only on
@@ -789,5 +935,141 @@ mod tests {
         );
         assert!(matches!(plan.inner, InnerConfig::Placeholder { .. }));
         assert!(matches!(plan.ack, ActivationAck::Failure { .. }));
+    }
+
+    mod register_deferred {
+        use super::*;
+        use std::str::FromStr;
+
+        fn no_session() -> Mutex<Option<Session>> {
+            Mutex::new(None)
+        }
+
+        fn good_caps() -> gst::Caps {
+            cat(); // ensures gst::init() ran
+            gst::Caps::from_str(
+                "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1,\
+                 interlace-mode=progressive,pixel-aspect-ratio=1/1",
+            )
+            .expect("static caps parse")
+        }
+
+        fn sender_settings() -> CommonSettings {
+            CommonSettings {
+                mxl_flow_id: FLOW_ID_A.to_owned(),
+                mxl_flow_format: FlowFormat::Video,
+                ..settings(Side::Sender)
+            }
+        }
+
+        #[test]
+        fn empty_caps_is_error() {
+            let res = register_deferred(
+                &cat(),
+                "nmossink",
+                &sender_settings(),
+                &no_session(),
+                gst::Caps::new_empty(),
+            );
+            let err = res.expect_err("empty caps must be rejected");
+            assert!(
+                format!("{err:#}").contains("offered no caps"),
+                "expected EMPTY-caps reason: {err:#}"
+            );
+        }
+
+        #[test]
+        fn any_caps_is_error() {
+            let res = register_deferred(
+                &cat(),
+                "nmossink",
+                &sender_settings(),
+                &no_session(),
+                gst::Caps::new_any(),
+            );
+            let err = res.expect_err("ANY caps must be rejected");
+            assert!(
+                format!("{err:#}").contains("ANY caps"),
+                "expected ANY-caps reason: {err:#}"
+            );
+        }
+
+        #[test]
+        fn wrong_side_is_error() {
+            // Receiver deferred mode is explicitly out of scope.
+            let s = CommonSettings {
+                side: Side::Receiver,
+                ..sender_settings()
+            };
+            let res = register_deferred(&cat(), "nmossrc", &s, &no_session(), good_caps());
+            let err = res.expect_err("receiver deferred mode is out of scope");
+            assert!(
+                format!("{err:#}").contains("sender-only"),
+                "expected sender-only reason: {err:#}"
+            );
+        }
+
+        #[test]
+        fn missing_domain_id_is_error() {
+            let s = CommonSettings {
+                mxl_domain_id: String::new(),
+                mxl_domain_path: String::new(),
+                ..sender_settings()
+            };
+            let res = register_deferred(&cat(), "nmossink", &s, &no_session(), good_caps());
+            let err = res.expect_err("missing mxl-domain-id must be rejected");
+            assert!(
+                format!("{err:#}").contains("mxl-domain-id"),
+                "expected mxl-domain-id reason: {err:#}"
+            );
+        }
+
+        #[test]
+        fn missing_flow_id_is_error_via_builder() {
+            let s = CommonSettings {
+                mxl_flow_id: String::new(),
+                ..sender_settings()
+            };
+            let res = register_deferred(&cat(), "nmossink", &s, &no_session(), good_caps());
+            let err = res.expect_err("missing mxl-flow-id must be rejected");
+            assert!(
+                format!("{err:#}").contains("flow_id") || format!("{err:#}").contains("flow-id"),
+                "expected mxl-flow-id reason: {err:#}"
+            );
+        }
+
+        #[test]
+        fn unsupported_caps_shape_is_error_via_builder() {
+            // I420 isn't in the MXL pad template; the builder must
+            // reject it, and the user is expected to add a capsfilter.
+            let caps = gst::Caps::from_str("video/x-raw,format=I420,width=1920,height=1080")
+                .expect("static caps parse");
+            let res = register_deferred(&cat(), "nmossink", &sender_settings(), &no_session(), caps);
+            let err = res.expect_err("unsupported caps must be rejected");
+            // exact message is owned by build_from_caps; we just want
+            // the synthesis-context wrapper to be present.
+            assert!(
+                format!("{err:#}").contains("synthesising flow_def"),
+                "expected synthesis context in error: {err:#}"
+            );
+        }
+
+        #[test]
+        fn no_open_session_is_error() {
+            // Caps are valid and validation passes; we should reach
+            // the session-take step and surface a clear error.
+            let res = register_deferred(
+                &cat(),
+                "nmossink",
+                &sender_settings(),
+                &no_session(),
+                good_caps(),
+            );
+            let err = res.expect_err("missing session must be reported");
+            assert!(
+                format!("{err:#}").contains("no open session"),
+                "expected no-open-session reason: {err:#}"
+            );
+        }
     }
 }
