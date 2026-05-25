@@ -10,8 +10,9 @@
 //! (`mxlsink.flow-id=` and `mxlsrc.{video,audio,data}-flow-id=`).
 //!
 //! [`read_flow_def_meta`] parses the JSON into [`FlowDefMeta`].
-//! [`resolve_mxl_flow_meta`] combines that with the `mxl-flow-id` /
-//! `mxl-flow-format` property overrides, mirroring
+//! [`resolve_mxl_flow_meta`] combines that with the `mxl-flow-id`
+//! property and the caps-derived [`FlowFormat`] (see
+//! [`FlowFormat::from_caps`]), mirroring
 //! [`crate::domain::resolve_mxl_domain_id`]:
 //!
 //! * Property only: use it.
@@ -45,6 +46,27 @@ struct RawFlowDef {
     format: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RawRational {
+    numerator: i64,
+    denominator: i64,
+}
+
+/// Subset of the flow_def schema needed by [`caps_from_flow_def`].
+/// `media_type` selects the GStreamer caps name, the remaining
+/// fields populate its structure; everything `RawFlowDef` already
+/// covers (`id`, `format`) is repeated so we can deserialise once.
+#[derive(Debug, Deserialize)]
+struct RawFlowDefForCaps {
+    media_type: Option<String>,
+    grain_rate: Option<RawRational>,
+    sample_rate: Option<RawRational>,
+    frame_width: Option<i32>,
+    frame_height: Option<i32>,
+    channel_count: Option<i32>,
+    interlace_mode: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum FlowDefError {
     #[error("failed to parse transport_file as JSON: {source}")]
@@ -59,7 +81,7 @@ pub(crate) enum FlowDefError {
     )]
     IdMismatch { property: String, file: String },
     #[error(
-        "mxl-flow-format mismatch: property `{property:?}` != transport_file `format` `{file:?}`"
+        "flow format mismatch: caps-derived `{property:?}` != transport_file `format` `{file:?}`"
     )]
     FormatMismatch {
         property: FlowFormat,
@@ -113,9 +135,14 @@ pub(crate) fn read_flow_def_meta(text: &str) -> Result<FlowDefMeta, FlowDefError
     Ok(FlowDefMeta { id, format })
 }
 
-/// Combine the user's `mxl-flow-id` / `mxl-flow-format` properties
-/// with `id` / `format` read from the transport_file. See the module
-/// docs for the truth table.
+/// Combine the user's `mxl-flow-id` property and the caps-derived
+/// [`FlowFormat`] with `id` / `format` read from the transport_file.
+/// See the module docs for the truth table. `property_format` is
+/// derived from `caps` via [`FlowFormat::from_caps`] (both elements
+/// route their caps through the same helper); when `caps` is unset
+/// or its media-type isn't recognised it falls back to
+/// [`FlowFormat::Unspecified`] and the file or the placeholder
+/// decides.
 pub(crate) fn resolve_mxl_flow_meta(
     property_id: &str,
     property_format: FlowFormat,
@@ -174,9 +201,6 @@ pub(crate) struct FlowDefBuildInput<'a> {
     /// `mxlsink.flow-id=` / `mxlsrc.{video,audio,data}-flow-id=` ends
     /// up consuming.
     pub(crate) flow_id: &'a str,
-    /// Cross-checked against the format implied by the caps. When
-    /// [`FlowFormat::Unspecified`] the caps decide.
-    pub(crate) format_hint: FlowFormat,
     /// NMOS resource name. Used both as the `<group>` portion of the
     /// `urn:x-nmos:tag:grouphint/v1.0` tag (required by MXL
     /// `FlowParser`) and as the value of the
@@ -223,8 +247,6 @@ pub(crate) enum FlowDefBuildError {
         field: &'static str,
         value: String,
     },
-    #[error("mxl-flow-format mismatch: property `{property:?}` != caps-derived `{caps:?}`")]
-    FormatMismatch { property: FlowFormat, caps: FlowFormat },
 }
 
 /// Build an MXL `flow_def` JSON document from essence caps and
@@ -258,13 +280,6 @@ pub(crate) fn build_from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, F
         "meta/x-st-2038" => build_data_body(structure)?,
         other => return Err(FlowDefBuildError::UnsupportedCaps(other.to_owned())),
     };
-
-    if input.format_hint != FlowFormat::Unspecified && input.format_hint != format {
-        return Err(FlowDefBuildError::FormatMismatch {
-            property: input.format_hint,
-            caps: format,
-        });
-    }
 
     let role = match format {
         FlowFormat::Video => "Video",
@@ -426,6 +441,134 @@ fn build_data_body(
         ),
     ];
     Ok((FlowFormat::Data, fields))
+}
+
+/// Errors from [`caps_from_flow_def`].
+#[derive(Debug, Error)]
+pub(crate) enum FlowDefCapsError {
+    #[error("failed to parse transport_file as JSON: {source}")]
+    Parse {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error(
+        "transport_file is missing required field `{0}` (cannot derive essence caps without it)"
+    )]
+    MissingField(&'static str),
+    #[error(
+        "transport_file `media_type` `{0}` is not supported by the caps reverse mapping; supported: `video/v210`, `audio/float32`, `video/smpte291`"
+    )]
+    UnsupportedMediaType(String),
+    #[error("transport_file `{field}` has an out-of-range value `{value}` (must fit in i32)")]
+    OutOfRangeField {
+        field: &'static str,
+        value: i64,
+    },
+}
+
+/// Reverse of [`build_from_caps`]: turn an MXL `flow_def` JSON
+/// document into essence Caps that `nmossrc` advertises on its
+/// ghost source pad so downstream caps queries (and a peer-querying
+/// deferred `nmossink`) see the concrete shape the flow will carry.
+///
+/// Supports the same caps shapes the forward path emits:
+/// * `media_type=video/v210` → `video/x-raw,format=v210,width=…,height=…,framerate=…[,interlace-mode=…]`
+/// * `media_type=audio/float32` → `audio/x-raw,format=F32LE,rate=…,channels=…,layout=interleaved`
+/// * `media_type=video/smpte291` → `meta/x-st-2038,framerate=…`
+///
+/// Other media types produce [`FlowDefCapsError::UnsupportedMediaType`];
+/// missing required fields produce [`FlowDefCapsError::MissingField`].
+/// The receiver treats both as a hard NULL→READY (or activation)
+/// failure — if the user supplied a transport_file (or the daemon
+/// spliced one), the file is expected to be complete.
+pub(crate) fn caps_from_flow_def(text: &str) -> Result<gst::Caps, FlowDefCapsError> {
+    let raw: RawFlowDefForCaps =
+        serde_json::from_str(text).map_err(|source| FlowDefCapsError::Parse { source })?;
+    let media_type = raw
+        .media_type
+        .ok_or(FlowDefCapsError::MissingField("media_type"))?;
+    match media_type.as_str() {
+        "video/v210" => {
+            let rate = raw
+                .grain_rate
+                .ok_or(FlowDefCapsError::MissingField("grain_rate"))?;
+            let width = raw
+                .frame_width
+                .ok_or(FlowDefCapsError::MissingField("frame_width"))?;
+            let height = raw
+                .frame_height
+                .ok_or(FlowDefCapsError::MissingField("frame_height"))?;
+            let framerate = rational_to_gst_fraction("grain_rate", rate)?;
+            let mut builder = gst::Caps::builder("video/x-raw")
+                .field("format", "v210")
+                .field("width", width)
+                .field("height", height)
+                .field("framerate", framerate);
+            if let Some(im) = raw.interlace_mode {
+                builder = builder.field("interlace-mode", im);
+            }
+            Ok(builder.build())
+        }
+        "audio/float32" => {
+            let rate = raw
+                .sample_rate
+                .ok_or(FlowDefCapsError::MissingField("sample_rate"))?;
+            let channels = raw
+                .channel_count
+                .ok_or(FlowDefCapsError::MissingField("channel_count"))?;
+            // sample_rate is integer in practice; downcast the
+            // numerator and require denominator == 1.
+            if rate.denominator != 1 {
+                return Err(FlowDefCapsError::OutOfRangeField {
+                    field: "sample_rate.denominator",
+                    value: rate.denominator,
+                });
+            }
+            let rate_i32: i32 = rate.numerator.try_into().map_err(|_| {
+                FlowDefCapsError::OutOfRangeField {
+                    field: "sample_rate.numerator",
+                    value: rate.numerator,
+                }
+            })?;
+            Ok(gst::Caps::builder("audio/x-raw")
+                .field("format", "F32LE")
+                .field("rate", rate_i32)
+                .field("channels", channels)
+                .field("layout", "interleaved")
+                .build())
+        }
+        "video/smpte291" => {
+            let rate = raw
+                .grain_rate
+                .ok_or(FlowDefCapsError::MissingField("grain_rate"))?;
+            let framerate = rational_to_gst_fraction("grain_rate", rate)?;
+            Ok(gst::Caps::builder("meta/x-st-2038")
+                .field("framerate", framerate)
+                .build())
+        }
+        other => Err(FlowDefCapsError::UnsupportedMediaType(other.to_owned())),
+    }
+}
+
+fn rational_to_gst_fraction(
+    field: &'static str,
+    r: RawRational,
+) -> Result<gst::Fraction, FlowDefCapsError> {
+    let num: i32 = r
+        .numerator
+        .try_into()
+        .map_err(|_| FlowDefCapsError::OutOfRangeField {
+            field,
+            value: r.numerator,
+        })?;
+    let den: i32 = r
+        .denominator
+        .try_into()
+        .map_err(|_| FlowDefCapsError::OutOfRangeField {
+            field,
+            value: r.denominator,
+        })?;
+    Ok(gst::Fraction::new(num, den))
 }
 
 fn caps_field_string(
@@ -590,7 +733,6 @@ mod tests {
     ) -> FlowDefBuildInput<'a> {
         FlowDefBuildInput {
             flow_id,
-            format_hint: FlowFormat::Unspecified,
             name,
             mxl_domain_id: DOMAIN_ID,
             label: "",
@@ -768,31 +910,6 @@ mod tests {
     }
 
     #[test]
-    fn format_hint_mismatch_is_hard_error() {
-        let caps =
-            caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
-        let err = build_from_caps(&FlowDefBuildInput {
-            format_hint: FlowFormat::Audio,
-            ..input(UUID_A, "cam-1", &caps)
-        })
-        .unwrap_err();
-        assert!(matches!(err, FlowDefBuildError::FormatMismatch { .. }), "got: {err:?}");
-    }
-
-    #[test]
-    fn format_hint_agreeing_is_accepted() {
-        let caps =
-            caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
-        let json = build_from_caps(&FlowDefBuildInput {
-            format_hint: FlowFormat::Video,
-            ..input(UUID_A, "cam-1", &caps)
-        })
-        .unwrap();
-        let v = parse(&json);
-        assert_eq!(v["format"], "urn:x-nmos:format:video");
-    }
-
-    #[test]
     fn build_then_parse_round_trips_through_read_flow_def_meta() {
         let caps =
             caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
@@ -800,5 +917,169 @@ mod tests {
         let meta = read_flow_def_meta(&json).unwrap();
         assert_eq!(meta.id, UUID_B);
         assert_eq!(meta.format, FlowFormat::Video);
+    }
+
+    mod caps_from_flow_def {
+        use super::*;
+
+        #[test]
+        fn video_v210() {
+            ensure_gst_initialised();
+            let json = r#"{
+                "id": "00000000-0000-0000-0000-000000000001",
+                "format": "urn:x-nmos:format:video",
+                "media_type": "video/v210",
+                "grain_rate": { "numerator": 60000, "denominator": 1001 },
+                "frame_width": 1920,
+                "frame_height": 1080
+            }"#;
+            let caps = super::caps_from_flow_def(json).unwrap();
+            let s = caps.structure(0).expect("structure");
+            assert_eq!(s.name().as_str(), "video/x-raw");
+            assert_eq!(s.get::<String>("format").unwrap(), "v210");
+            assert_eq!(s.get::<i32>("width").unwrap(), 1920);
+            assert_eq!(s.get::<i32>("height").unwrap(), 1080);
+            let fr = s.get::<gst::Fraction>("framerate").unwrap();
+            assert_eq!((fr.numer(), fr.denom()), (60000, 1001));
+            assert!(s.get::<String>("interlace-mode").is_err());
+        }
+
+        #[test]
+        fn video_v210_with_interlace_mode() {
+            ensure_gst_initialised();
+            let json = r#"{
+                "id": "00000000-0000-0000-0000-000000000001",
+                "format": "urn:x-nmos:format:video",
+                "media_type": "video/v210",
+                "grain_rate": { "numerator": 25, "denominator": 1 },
+                "frame_width": 720, "frame_height": 576,
+                "interlace_mode": "interleaved"
+            }"#;
+            let caps = super::caps_from_flow_def(json).unwrap();
+            let s = caps.structure(0).expect("structure");
+            assert_eq!(s.get::<String>("interlace-mode").unwrap(), "interleaved");
+        }
+
+        #[test]
+        fn audio_f32le() {
+            ensure_gst_initialised();
+            let json = r#"{
+                "id": "00000000-0000-0000-0000-000000000001",
+                "format": "urn:x-nmos:format:audio",
+                "media_type": "audio/float32",
+                "sample_rate": { "numerator": 48000, "denominator": 1 },
+                "channel_count": 2,
+                "bit_depth": 32
+            }"#;
+            let caps = super::caps_from_flow_def(json).unwrap();
+            let s = caps.structure(0).expect("structure");
+            assert_eq!(s.name().as_str(), "audio/x-raw");
+            assert_eq!(s.get::<String>("format").unwrap(), "F32LE");
+            assert_eq!(s.get::<i32>("rate").unwrap(), 48000);
+            assert_eq!(s.get::<i32>("channels").unwrap(), 2);
+            assert_eq!(s.get::<String>("layout").unwrap(), "interleaved");
+        }
+
+        #[test]
+        fn data_st2038() {
+            ensure_gst_initialised();
+            let json = r#"{
+                "id": "00000000-0000-0000-0000-000000000001",
+                "format": "urn:x-nmos:format:data",
+                "media_type": "video/smpte291",
+                "grain_rate": { "numerator": 30, "denominator": 1 }
+            }"#;
+            let caps = super::caps_from_flow_def(json).unwrap();
+            let s = caps.structure(0).expect("structure");
+            assert_eq!(s.name().as_str(), "meta/x-st-2038");
+            let fr = s.get::<gst::Fraction>("framerate").unwrap();
+            assert_eq!((fr.numer(), fr.denom()), (30, 1));
+        }
+
+        #[test]
+        fn missing_media_type_is_error() {
+            let err = super::caps_from_flow_def(r#"{"id":"a"}"#).unwrap_err();
+            assert!(
+                matches!(err, FlowDefCapsError::MissingField("media_type")),
+                "got: {err:?}"
+            );
+        }
+
+        #[test]
+        fn unsupported_media_type_is_error() {
+            let err = super::caps_from_flow_def(r#"{"media_type":"image/jpeg"}"#).unwrap_err();
+            assert!(matches!(err, FlowDefCapsError::UnsupportedMediaType(_)), "got: {err:?}");
+        }
+
+        #[test]
+        fn missing_grain_rate_for_video_is_error() {
+            let err = super::caps_from_flow_def(
+                r#"{"media_type":"video/v210","frame_width":1920,"frame_height":1080}"#,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, FlowDefCapsError::MissingField("grain_rate")),
+                "got: {err:?}"
+            );
+        }
+
+        #[test]
+        fn missing_frame_width_for_video_is_error() {
+            let err = super::caps_from_flow_def(
+                r#"{"media_type":"video/v210","grain_rate":{"numerator":30,"denominator":1},"frame_height":1080}"#,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, FlowDefCapsError::MissingField("frame_width")),
+                "got: {err:?}"
+            );
+        }
+
+        #[test]
+        fn parse_error_is_surfaced() {
+            let err = super::caps_from_flow_def("not json").unwrap_err();
+            assert!(matches!(err, FlowDefCapsError::Parse { .. }), "got: {err:?}");
+        }
+
+        #[test]
+        fn round_trip_with_build_from_caps_video() {
+            ensure_gst_initialised();
+            let original_caps =
+                caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
+            let json = build_from_caps(&input(UUID_A, "cam-1", &original_caps)).unwrap();
+            let derived = super::caps_from_flow_def(&json).unwrap();
+            // Both should agree on the structure name + the essence
+            // fields the builder emits (framerate, width, height,
+            // format).
+            assert!(
+                derived.can_intersect(&original_caps),
+                "derived caps `{derived}` should intersect original `{original_caps}`"
+            );
+        }
+
+        #[test]
+        fn round_trip_with_build_from_caps_audio() {
+            ensure_gst_initialised();
+            let original_caps =
+                caps_from_str("audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved");
+            let json = build_from_caps(&input(UUID_A, "mic-1", &original_caps)).unwrap();
+            let derived = super::caps_from_flow_def(&json).unwrap();
+            assert!(
+                derived.can_intersect(&original_caps),
+                "derived caps `{derived}` should intersect original `{original_caps}`"
+            );
+        }
+
+        #[test]
+        fn round_trip_with_build_from_caps_data() {
+            ensure_gst_initialised();
+            let original_caps = caps_from_str("meta/x-st-2038,framerate=30/1");
+            let json = build_from_caps(&input(UUID_A, "anc-1", &original_caps)).unwrap();
+            let derived = super::caps_from_flow_def(&json).unwrap();
+            assert!(
+                derived.can_intersect(&original_caps),
+                "derived caps `{derived}` should intersect original `{original_caps}`"
+            );
+        }
     }
 }

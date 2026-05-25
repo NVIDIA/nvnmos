@@ -27,7 +27,7 @@ use tokio::sync::oneshot;
 use crate::daemon::{ActivationHandler, ActivationOutcome, ActivationRequest, Session};
 use crate::inner;
 use crate::session::{ActivationAck, ActivationPlan, InnerConfig};
-use crate::types::{DEFAULT_DAEMON_URI, FlowFormat, Transport};
+use crate::types::{DEFAULT_DAEMON_URI, Transport};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -654,9 +654,6 @@ impl From<Settings> for crate::session::CommonSettings {
             mxl_domain_id: s.mxl_domain_id,
             mxl_domain_path: s.mxl_domain_path,
             mxl_flow_id: s.mxl_flow_id,
-            // mxlsink has a single flow-id slot so the receiver-only
-            // `mxl-flow-format` property doesn't exist on this side.
-            mxl_flow_format: FlowFormat::Unspecified,
             transport_file: s.transport_file,
             transport_file_path: s.transport_file_path,
             label: s.label,

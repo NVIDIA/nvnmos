@@ -109,10 +109,20 @@ pub(crate) fn build_mxlsink(domain_path: &str, flow_id: &str) -> Result<gst::Ele
 /// `flow_id`; [`FlowFormat::Unspecified`] is rejected because the
 /// caller is responsible for falling back to the placeholder before
 /// reaching this helper.
+///
+/// When `advertise_caps` is `Some`, the returned element is a small
+/// `Bin` containing `mxlsrc ! capsfilter caps=advertise_caps` with
+/// its src pad ghosted out; downstream caps queries against the
+/// outer bin's ghost pad then see the concrete essence caps the
+/// flow will carry, rather than `mxlsrc`'s broad pad template.
+/// `None` returns the bare `mxlsrc` and the outer bin's ghost pad
+/// reflects whatever `mxlsrc` advertises (broad template until the
+/// first CAPS event flows).
 pub(crate) fn build_mxlsrc(
     domain_path: &str,
     flow_id: &str,
     format: FlowFormat,
+    advertise_caps: Option<&gst::Caps>,
 ) -> Result<gst::Element, anyhow::Error> {
     require_mxl_factory("mxlsrc")?;
     let prop = match format {
@@ -125,7 +135,7 @@ pub(crate) fn build_mxlsrc(
             ));
         }
     };
-    gst::ElementFactory::make("mxlsrc")
+    let mxlsrc = gst::ElementFactory::make("mxlsrc")
         .name("nmossrc-mxl")
         .property("domain", domain_path)
         .property(prop, flow_id)
@@ -134,7 +144,38 @@ pub(crate) fn build_mxlsrc(
             format!(
                 "instantiating `mxlsrc` with domain={domain_path:?}, {prop}={flow_id}"
             )
-        })
+        })?;
+
+    let Some(caps) = advertise_caps else {
+        return Ok(mxlsrc);
+    };
+
+    let capsfilter = gst::ElementFactory::make("capsfilter")
+        .name("nmossrc-caps")
+        .property("caps", caps)
+        .build()
+        .map_err(|e| anyhow!("instantiating `capsfilter` for nmossrc caps advertisement: {e}"))?;
+    let bin = gst::Bin::with_name("nmossrc-inner");
+    bin.add_many([&mxlsrc, &capsfilter])
+        .map_err(|e| anyhow!("adding mxlsrc + capsfilter to inner bin: {e}"))?;
+    mxlsrc
+        .link(&capsfilter)
+        .with_context(|| "linking mxlsrc to inner capsfilter")?;
+    let capsfilter_src = capsfilter
+        .static_pad("src")
+        .ok_or_else(|| anyhow!("capsfilter missing src pad"))?;
+    let ghost = gst::GhostPad::builder(gst::PadDirection::Src)
+        .name("src")
+        .build();
+    ghost
+        .set_target(Some(&capsfilter_src))
+        .map_err(|e| anyhow!("setting inner ghost src target: {e}"))?;
+    ghost
+        .set_active(true)
+        .map_err(|e| anyhow!("activating inner ghost src: {e}"))?;
+    bin.add_pad(&ghost)
+        .map_err(|e| anyhow!("adding ghost src to inner bin: {e}"))?;
+    Ok(bin.upcast())
 }
 
 fn require_mxl_factory(name: &'static str) -> Result<(), anyhow::Error> {

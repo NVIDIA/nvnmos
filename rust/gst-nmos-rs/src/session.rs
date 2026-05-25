@@ -107,12 +107,6 @@ pub(crate) struct CommonSettings {
     /// against the transport_file's top-level `id` when both are
     /// supplied; either source alone is enough.
     pub(crate) mxl_flow_id: String,
-    /// NMOS format family for the flow. Required on `nmossrc` (to
-    /// pick the right `mxlsrc` flow-id property); on `nmossink` it
-    /// is informational because `mxlsink` has only one flow-id slot.
-    /// Cross-checked against the transport_file's `format` field
-    /// when both are supplied.
-    pub(crate) mxl_flow_format: FlowFormat,
     /// Literal transport file contents (MXL `flow_def` JSON today).
     /// Convenient for programmatic callers (e.g. Rust/C apps that
     /// compute the flow_def in memory) but awkward to pass from
@@ -128,12 +122,17 @@ pub(crate) struct CommonSettings {
     /// NMOS `description` for the synthesised flow_def. Optional;
     /// omitted from the JSON when empty.
     pub(crate) description: String,
-    /// Essence caps for the property route. When neither
-    /// `transport_file` nor `transport_file_path` is set and `caps`
-    /// is, the element synthesises a flow_def JSON from these caps
-    /// plus the resolved property state (see
-    /// [`crate::flow_def::build_from_caps`]). When `transport_file*`
-    /// is also supplied, the file wins and `caps` is ignored.
+    /// Essence caps. On `nmossink`, when no `transport_file*` is
+    /// supplied, the element synthesises a flow_def JSON from these
+    /// caps plus the resolved property state
+    /// (see [`crate::flow_def::build_from_caps`]). On `nmossrc`,
+    /// the media-type structure name decides which `mxlsrc` flow-id
+    /// slot receives `mxl-flow-id` and the caps are pinned on the
+    /// ghost source pad so downstream caps queries see the concrete
+    /// shape the flow will carry. When `transport_file*` is supplied
+    /// the file is authoritative; for `nmossink` the caps are
+    /// ignored; for `nmossrc` the caps-derived format is
+    /// cross-checked against the file's `format` field.
     pub(crate) caps: Option<gst::Caps>,
 }
 
@@ -191,6 +190,15 @@ pub(crate) enum InnerConfig {
         /// Unspecified on `nmossink` — `mxlsink` has only one
         /// flow-id slot — and one of Video/Audio/Data on `nmossrc`.
         format: FlowFormat,
+        /// Resolved `flow_def` JSON (when one is in play). Receivers
+        /// reverse-map this into essence Caps and pin them on the
+        /// ghost source pad so downstream caps queries see the
+        /// concrete shape the flow will carry (rather than the broad
+        /// `mxlsrc` pad template). Senders ignore it. `None` when no
+        /// transport_file is available, e.g. deferred-mode sender
+        /// registration or receiver dev convenience with properties
+        /// only.
+        transport_file: Option<String>,
     },
     Placeholder {
         /// One-line summary of which piece of state was missing.
@@ -258,16 +266,17 @@ pub(crate) fn validate_and_open(
         resolved_transport_file,
     )?;
 
+    let caps_format = caps_format(settings);
     let flow = flow_def::resolve_mxl_flow_meta(
         &settings.mxl_flow_id,
-        settings.mxl_flow_format,
+        caps_format,
         transport_file.as_deref(),
     )
     .with_context(|| format!("{element}: resolving MXL flow id / format"))?;
     log_flow_origin(cat, "mxl-flow-id", flow.id_origin);
-    log_flow_origin(cat, "mxl-flow-format", flow.format_origin);
+    log_flow_origin(cat, "caps format", flow.format_origin);
 
-    let mut inner = decide_inner_config(settings, &flow);
+    let mut inner = decide_inner_config(settings, &flow, transport_file.as_deref());
     // Deferred-mode case (sender only): no resource is going to be
     // registered at NULL→READY because neither `transport-file*` nor
     // `caps` was supplied. Keep the placeholder so we don't bring
@@ -312,7 +321,7 @@ pub(crate) fn validate_and_open(
         None => "no resource registered (transport-file unset)".to_owned(),
     };
     let inner_summary = match &inner {
-        InnerConfig::Mxl { domain_path, flow_id, format } => {
+        InnerConfig::Mxl { domain_path, flow_id, format, .. } => {
             format!("inner data path: mxl (domain_path={domain_path:?}, flow_id={flow_id}, format={format:?})")
         }
         InnerConfig::Placeholder { reason } => {
@@ -369,7 +378,6 @@ fn synthesise_or_passthrough(
             Side::Sender => {
                 let json = flow_def::build_from_caps(&FlowDefBuildInput {
                     flow_id: &settings.mxl_flow_id,
-                    format_hint: settings.mxl_flow_format,
                     name: &settings.name,
                     mxl_domain_id: resolved_mxl_domain_id,
                     label: &settings.label,
@@ -381,15 +389,35 @@ fn synthesise_or_passthrough(
                 Ok(Some(json))
             }
             Side::Receiver => {
-                gst::info!(
+                // On `nmossrc` the caps decide which `mxlsrc`
+                // flow-id slot to use (see [`caps_format`]) but the
+                // receiver does not synthesise a flow_def — the
+                // daemon ships the live transport_file at IS-05
+                // activation time, and a receiver driven entirely
+                // by properties (development convenience) runs
+                // against `mxlsrc` directly without one.
+                gst::debug!(
                     cat,
-                    "{element}: `caps` on receiver does not yet drive flow_def synthesis; ignoring"
+                    "{element}: `caps` consumed by mxlsrc flow-format selection"
                 );
                 Ok(None)
             }
         },
         (None, None) => Ok(None),
     }
+}
+
+/// Best-effort [`FlowFormat`] derived from the `caps` property.
+/// Returns [`FlowFormat::Unspecified`] when `caps` is unset or the
+/// first structure's media type isn't one of the recognised essence
+/// shapes — the caller then falls through to the transport_file's
+/// `format` (if present) or to the placeholder data path.
+fn caps_format(settings: &CommonSettings) -> FlowFormat {
+    settings
+        .caps
+        .as_ref()
+        .map(FlowFormat::from_caps)
+        .unwrap_or(FlowFormat::Unspecified)
 }
 
 fn log_flow_origin(cat: &gst::DebugCategory, field: &str, origin: ValueOrigin) {
@@ -407,7 +435,11 @@ fn log_flow_origin(cat: &gst::DebugCategory, field: &str, origin: ValueOrigin) {
 /// additionally needs a specific [`FlowFormat`] (because `mxlsrc`
 /// has separate `video-flow-id` / `audio-flow-id` / `data-flow-id`
 /// properties).
-fn decide_inner_config(settings: &CommonSettings, flow: &flow_def::FlowResolution) -> InnerConfig {
+fn decide_inner_config(
+    settings: &CommonSettings,
+    flow: &flow_def::FlowResolution,
+    transport_file: Option<&str>,
+) -> InnerConfig {
     if settings.mxl_domain_path.is_empty() {
         return InnerConfig::Placeholder {
             reason: "`mxl-domain-path` unset".to_owned(),
@@ -421,7 +453,8 @@ fn decide_inner_config(settings: &CommonSettings, flow: &flow_def::FlowResolutio
     if settings.side == Side::Receiver && flow.format == FlowFormat::Unspecified {
         return InnerConfig::Placeholder {
             reason:
-                "`mxl-flow-format` unset on nmossrc (neither property nor transport_file supplied it)"
+                "`caps` media-type unrecognised or unset on nmossrc \
+                 (neither caps nor transport_file pinned a flow format)"
                     .to_owned(),
         };
     }
@@ -429,6 +462,7 @@ fn decide_inner_config(settings: &CommonSettings, flow: &flow_def::FlowResolutio
         domain_path: settings.mxl_domain_path.clone(),
         flow_id: flow.id.clone(),
         format: flow.format,
+        transport_file: transport_file.map(str::to_owned),
     }
 }
 
@@ -506,7 +540,6 @@ pub(crate) fn register_deferred(
 
     let json = flow_def::build_from_caps(&FlowDefBuildInput {
         flow_id: &settings.mxl_flow_id,
-        format_hint: settings.mxl_flow_format,
         name: &settings.name,
         mxl_domain_id: &domain_resolution.id,
         label: &settings.label,
@@ -518,13 +551,13 @@ pub(crate) fn register_deferred(
 
     let flow = flow_def::resolve_mxl_flow_meta(
         &settings.mxl_flow_id,
-        settings.mxl_flow_format,
+        FlowFormat::from_caps(&fixated),
         Some(&json),
     )
     .with_context(|| {
         format!("{element}: resolving MXL flow id / format for deferred registration")
     })?;
-    let inner = decide_inner_config(settings, &flow);
+    let inner = decide_inner_config(settings, &flow, Some(&json));
 
     let transport = transport_to_proto(settings.transport);
     let side = settings.side;
@@ -700,7 +733,7 @@ pub(crate) fn plan_activation(
 
     let flow = match flow_def::resolve_mxl_flow_meta(
         &settings.mxl_flow_id,
-        settings.mxl_flow_format,
+        caps_format(settings),
         Some(transport_file),
     ) {
         Ok(r) => r,
@@ -719,7 +752,7 @@ pub(crate) fn plan_activation(
         }
     };
 
-    let inner = decide_inner_config(settings, &flow);
+    let inner = decide_inner_config(settings, &flow, Some(transport_file));
     let ack = match &inner {
         InnerConfig::Mxl { .. } => ActivationAck::Success,
         // Per design: if the activation supplies a live transport_file
@@ -764,13 +797,21 @@ mod tests {
             mxl_domain_id: DOMAIN_ID.to_owned(),
             mxl_domain_path: "/var/lib/mxl/domain-a".to_owned(),
             mxl_flow_id: String::new(),
-            mxl_flow_format: FlowFormat::Unspecified,
             transport_file: String::new(),
             transport_file_path: String::new(),
             label: String::new(),
             description: String::new(),
             caps: None,
         }
+    }
+
+    fn video_caps() -> gst::Caps {
+        use std::str::FromStr;
+        cat(); // ensures gst::init() ran
+        gst::Caps::from_str(
+            "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1",
+        )
+        .expect("static caps parse")
     }
 
     fn video_flow_def(id: &str) -> String {
@@ -812,10 +853,64 @@ mod tests {
     }
 
     #[test]
+    fn nmossrc_caps_st2038_drives_data_format() {
+        use std::str::FromStr;
+        let caps = gst::Caps::from_str("meta/x-st-2038,framerate=30/1")
+            .expect("static caps parse");
+        let s = CommonSettings {
+            mxl_flow_id: FLOW_ID_A.to_owned(),
+            caps: Some(caps),
+            ..settings(Side::Receiver)
+        };
+        let plan = plan_activation(
+            &cat(),
+            "nmossrc",
+            &s,
+            &req(
+                Side::Receiver,
+                Some(r#"{"id":"00000000-0000-0000-0000-000000000001","format":"urn:x-nmos:format:data"}"#),
+            ),
+        );
+        match plan.inner {
+            InnerConfig::Mxl { format, .. } => assert_eq!(format, FlowFormat::Data),
+            InnerConfig::Placeholder { reason } => {
+                panic!("expected Mxl(data), got Placeholder({reason})")
+            }
+        }
+        assert!(matches!(plan.ack, ActivationAck::Success));
+    }
+
+    #[test]
+    fn nmossrc_caps_unset_falls_back_to_placeholder() {
+        // Receiver with neither `caps` nor a transport_file `format`
+        // can't pick a `mxlsrc` slot, so it stays on the placeholder.
+        let s = CommonSettings {
+            mxl_flow_id: FLOW_ID_A.to_owned(),
+            ..settings(Side::Receiver)
+        };
+        let plan = plan_activation(
+            &cat(),
+            "nmossrc",
+            &s,
+            &req(
+                Side::Receiver,
+                Some(r#"{"id":"00000000-0000-0000-0000-000000000001"}"#),
+            ),
+        );
+        match plan.inner {
+            InnerConfig::Placeholder { reason } => assert!(
+                reason.contains("caps") && reason.contains("flow format"),
+                "expected caps-driven reason: {reason}"
+            ),
+            InnerConfig::Mxl { .. } => panic!("expected Placeholder, got Mxl"),
+        }
+    }
+
+    #[test]
     fn happy_path_video_is_mxl_success() {
         let s = CommonSettings {
             mxl_flow_id: FLOW_ID_A.to_owned(),
-            mxl_flow_format: FlowFormat::Video,
+            caps: Some(video_caps()),
             ..settings(Side::Receiver)
         };
         let plan = plan_activation(
@@ -825,10 +920,14 @@ mod tests {
             &req(Side::Receiver, Some(&video_flow_def(FLOW_ID_A))),
         );
         match plan.inner {
-            InnerConfig::Mxl { domain_path, flow_id, format } => {
+            InnerConfig::Mxl { domain_path, flow_id, format, transport_file } => {
                 assert_eq!(domain_path, "/var/lib/mxl/domain-a");
                 assert_eq!(flow_id, FLOW_ID_A);
                 assert_eq!(format, FlowFormat::Video);
+                assert!(
+                    transport_file.is_some(),
+                    "plan_activation must thread req.transport_file into InnerConfig",
+                );
             }
             InnerConfig::Placeholder { reason } => panic!("expected Mxl, got Placeholder({reason})"),
         }
@@ -839,7 +938,6 @@ mod tests {
     fn flow_id_mismatch_is_failure() {
         let s = CommonSettings {
             mxl_flow_id: FLOW_ID_B.to_owned(),
-            mxl_flow_format: FlowFormat::Video,
             ..settings(Side::Sender)
         };
         let plan = plan_activation(
@@ -866,7 +964,6 @@ mod tests {
         let s = CommonSettings {
             mxl_domain_path: String::new(),
             mxl_flow_id: FLOW_ID_A.to_owned(),
-            mxl_flow_format: FlowFormat::Video,
             ..settings(Side::Sender)
         };
         let plan = plan_activation(
@@ -900,7 +997,6 @@ mod tests {
             mxl_domain_id: String::new(),
             mxl_domain_path: String::new(),
             mxl_flow_id: FLOW_ID_A.to_owned(),
-            mxl_flow_format: FlowFormat::Video,
             ..settings(Side::Sender)
         };
         let plan = plan_activation(
@@ -924,7 +1020,6 @@ mod tests {
     fn bad_transport_file_json_is_failure() {
         let s = CommonSettings {
             mxl_flow_id: FLOW_ID_A.to_owned(),
-            mxl_flow_format: FlowFormat::Video,
             ..settings(Side::Sender)
         };
         let plan = plan_activation(
@@ -957,7 +1052,6 @@ mod tests {
         fn sender_settings() -> CommonSettings {
             CommonSettings {
                 mxl_flow_id: FLOW_ID_A.to_owned(),
-                mxl_flow_format: FlowFormat::Video,
                 ..settings(Side::Sender)
             }
         }

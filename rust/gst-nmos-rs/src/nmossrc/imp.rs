@@ -4,7 +4,8 @@
 //! `nmossrc` impl: GstBin subclass that opens a session against
 //! `nvnmosd` at NULL→READY and closes it at READY→NULL. The inner
 //! data path is a `mxlsrc` when the resolved configuration pins a
-//! Domain path + Flow id + Flow format; otherwise the bin keeps a
+//! Domain path + Flow id + a recognised essence shape (from `caps`
+//! or the transport_file's `format`); otherwise the bin keeps a
 //! placeholder `fakesrc` so the element looks valid in the pipeline
 //! until an IS-05 activation (or a later configuration update)
 //! supplies the missing pieces.
@@ -27,7 +28,7 @@ use tokio::sync::oneshot;
 use crate::daemon::{ActivationHandler, ActivationOutcome, ActivationRequest, Session};
 use crate::inner;
 use crate::session::{ActivationAck, ActivationPlan, InnerConfig};
-use crate::types::{DEFAULT_DAEMON_URI, FlowFormat, Transport};
+use crate::types::{DEFAULT_DAEMON_URI, Transport};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -46,7 +47,6 @@ struct Settings {
     mxl_domain_id: String,
     mxl_domain_path: String,
     mxl_flow_id: String,
-    mxl_flow_format: FlowFormat,
     label: String,
     description: String,
     transport_file: String,
@@ -66,7 +66,6 @@ impl Default for Settings {
             mxl_domain_id: String::new(),
             mxl_domain_path: String::new(),
             mxl_flow_id: String::new(),
-            mxl_flow_format: FlowFormat::default(),
             label: String::new(),
             description: String::new(),
             transport_file: String::new(),
@@ -169,30 +168,13 @@ impl ObjectImpl for NmosSrc {
                         "MXL flow id (UUID) the inner `mxlsrc` should pull. \
                          An NMOS Receiver is normally configured by IS-05 \
                          PATCH activation, so this is mainly a development \
-                         convenience: setting it (plus `mxl-flow-format` and \
+                         convenience: setting it (plus `caps` and \
                          `mxl-domain-path`) lets the receiver start up \
                          pre-bound to a known flow. When `transport-file` \
                          also carries an `id` the two must agree.",
                     )
                     .mutable_ready()
                     .build(),
-                glib::ParamSpecEnum::builder_with_default(
-                    "mxl-flow-format",
-                    FlowFormat::Unspecified,
-                )
-                .nick("MXL flow format")
-                .blurb(
-                    "NMOS format (`video`, `audio`, `data`) picking which of \
-                     `mxlsrc.{video,audio,data}-flow-id=` receives \
-                     `mxl-flow-id`. `unspecified` (default) means the \
-                     receiver waits for a `transport-file` or an IS-05 \
-                     activation to pin the format; while it's `unspecified` \
-                     the inner data path stays on the placeholder. When \
-                     `transport-file` carries a `format` the two must \
-                     agree.",
-                )
-                .mutable_ready()
-                .build(),
                 glib::ParamSpecString::builder("label")
                     .nick("Label")
                     .blurb("NMOS label for the receiver. Optional.")
@@ -226,8 +208,11 @@ impl ObjectImpl for NmosSrc {
                 glib::ParamSpecBoxed::builder::<gst::Caps>("caps")
                     .nick("Essence caps")
                     .blurb(
-                        "Essence-shaped pad caps used by the property route. Required if \
-                         `transport-file` is not provided.",
+                        "Essence-shaped pad caps. Required if `transport-file` is not \
+                         provided: the media-type structure name (`video/x-raw` / \
+                         `audio/x-raw` / `meta/x-st-2038`) decides which `mxlsrc` flow-id \
+                         slot receives `mxl-flow-id`. Cross-checked against the \
+                         transport_file's `format` field when both are supplied.",
                     )
                     .mutable_ready()
                     .build(),
@@ -282,9 +267,6 @@ impl ObjectImpl for NmosSrc {
             "mxl-flow-id" => {
                 settings.mxl_flow_id = string_or_empty(value);
             }
-            "mxl-flow-format" => {
-                settings.mxl_flow_format = value.get().expect("type checked upstream");
-            }
             "label" => {
                 settings.label = string_or_empty(value);
             }
@@ -320,7 +302,6 @@ impl ObjectImpl for NmosSrc {
             "mxl-domain-id" => settings.mxl_domain_id.to_value(),
             "mxl-domain-path" => settings.mxl_domain_path.to_value(),
             "mxl-flow-id" => settings.mxl_flow_id.to_value(),
-            "mxl-flow-format" => settings.mxl_flow_format.to_value(),
             "label" => settings.label.to_value(),
             "description" => settings.description.to_value(),
             "transport-file" => settings.transport_file.to_value(),
@@ -429,8 +410,14 @@ impl NmosSrc {
         bin: &gst::Bin,
         outcome: &InnerConfig,
     ) -> Result<(), anyhow::Error> {
-        if let InnerConfig::Mxl { domain_path, flow_id, format } = outcome {
-            let mxlsrc = inner::build_mxlsrc(domain_path, flow_id, *format)?;
+        if let InnerConfig::Mxl { domain_path, flow_id, format, transport_file } = outcome {
+            let advertise_caps = derive_advertise_caps(transport_file.as_deref())?;
+            let mxlsrc = inner::build_mxlsrc(
+                domain_path,
+                flow_id,
+                *format,
+                advertise_caps.as_ref(),
+            )?;
             self.swap_inner(bin, &mxlsrc)?;
         }
         Ok(())
@@ -515,8 +502,18 @@ impl NmosSrc {
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
         let new_inner = match &plan.inner {
-            InnerConfig::Mxl { domain_path, flow_id, format } => {
-                match inner::build_mxlsrc(domain_path, flow_id, *format) {
+            InnerConfig::Mxl { domain_path, flow_id, format, transport_file } => {
+                let advertise_caps = match derive_advertise_caps(transport_file.as_deref()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return ActivationOutcome::Failed {
+                            reason: format!(
+                                "nmossrc: deriving caps from activation transport_file: {e:#}"
+                            ),
+                        };
+                    }
+                };
+                match inner::build_mxlsrc(domain_path, flow_id, *format, advertise_caps.as_ref()) {
                     Ok(e) => e,
                     Err(e) => {
                         return ActivationOutcome::Failed {
@@ -594,6 +591,26 @@ fn install_initial_placeholder(bin: &gst::Bin) -> Result<gst::GhostPad, glib::Bo
     Ok(ghost)
 }
 
+/// Reverse-map a resolved transport_file into essence caps that
+/// the bin should advertise on its ghost src pad. `None` is
+/// returned when no transport_file is in play (development
+/// convenience path where only properties are set); the caller
+/// then builds a bare `mxlsrc` whose broad pad template propagates.
+fn derive_advertise_caps(
+    transport_file: Option<&str>,
+) -> Result<Option<gst::Caps>, anyhow::Error> {
+    let Some(text) = transport_file.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let caps = crate::flow_def::caps_from_flow_def(text).map_err(|e| {
+        anyhow::anyhow!(
+            "deriving essence caps from transport_file for ghost-pad advertisement: {e}",
+        )
+    })?;
+    gst::info!(CAT, "nmossrc: advertising caps `{caps}` from transport_file");
+    Ok(Some(caps))
+}
+
 fn string_or_empty(value: &glib::Value) -> String {
     value
         .get::<Option<String>>()
@@ -612,16 +629,10 @@ impl From<Settings> for crate::session::CommonSettings {
             mxl_domain_id: s.mxl_domain_id,
             mxl_domain_path: s.mxl_domain_path,
             mxl_flow_id: s.mxl_flow_id,
-            mxl_flow_format: s.mxl_flow_format,
             transport_file: s.transport_file,
             transport_file_path: s.transport_file_path,
             label: s.label,
             description: s.description,
-            // `nmossrc` accepts `caps` today but does not yet use it
-            // to synthesise a flow_def; that wiring lands with
-            // receiver-side deferred mode. Pass it through so the
-            // settings snapshot stays in sync with the property
-            // surface.
             caps: s.caps,
         }
     }

@@ -1,8 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! GObject enum types and defaults shared between `nmossrc` and
-//! `nmossink`.
+//! Shared enum types and defaults used by `nmossrc` and `nmossink`.
+//!
+//! [`Transport`] is exposed as a GObject enum property (`transport`
+//! on both elements). [`FlowFormat`] is an internal-only helper used
+//! to bridge between caps media-type names and `flow_def.format`
+//! URNs — it isn't exposed as a property.
 
 use gstreamer::glib;
 
@@ -23,35 +27,32 @@ pub enum Transport {
 
 /// NMOS Flow format family carried in `flow_def.format`.
 ///
+/// Internal type bridging between caps media-type names
+/// (`video/x-raw`, `audio/x-raw`, `meta/x-st-2038`) and
+/// `flow_def.format` URNs (`urn:x-nmos:format:{video,audio,data}`).
 /// Used by `nmossrc` to route the resolved `mxl-flow-id` into the
 /// matching `mxlsrc` property (`video-flow-id` / `audio-flow-id` /
 /// `data-flow-id`). `Unspecified` means the format is not known yet
-/// — neither the property nor a `transport-file` pinned it — and the
-/// element falls back to its placeholder data path until a later
-/// reconfiguration supplies one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, glib::Enum)]
-#[repr(i32)]
-#[enum_type(name = "GstNmosFlowFormat")]
-pub enum FlowFormat {
-    /// Format not pinned. Default for `mxl-flow-format`.
+/// — neither the `caps` property nor a `transport-file` pinned it
+/// — and the element falls back to its placeholder data path until
+/// a later reconfiguration supplies one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum FlowFormat {
+    /// Format not pinned.
     #[default]
-    #[enum_value(name = "Unspecified", nick = "unspecified")]
-    Unspecified = 0,
+    Unspecified,
     /// `urn:x-nmos:format:video`.
-    #[enum_value(name = "Video", nick = "video")]
-    Video = 1,
+    Video,
     /// `urn:x-nmos:format:audio`.
-    #[enum_value(name = "Audio", nick = "audio")]
-    Audio = 2,
+    Audio,
     /// `urn:x-nmos:format:data`.
-    #[enum_value(name = "Data", nick = "data")]
-    Data = 3,
+    Data,
 }
 
 impl FlowFormat {
     /// `urn:x-nmos:format:*` string for this format, or `None` for
     /// [`FlowFormat::Unspecified`].
-    pub fn as_format_urn(self) -> Option<&'static str> {
+    pub(crate) fn as_format_urn(self) -> Option<&'static str> {
         match self {
             Self::Unspecified => None,
             Self::Video => Some("urn:x-nmos:format:video"),
@@ -63,11 +64,30 @@ impl FlowFormat {
     /// Parse a `urn:x-nmos:format:*` string. Unknown formats map to
     /// [`FlowFormat::Unspecified`] so the element falls through to
     /// its placeholder path rather than failing hard.
-    pub fn from_format_urn(s: &str) -> Self {
+    pub(crate) fn from_format_urn(s: &str) -> Self {
         match s {
             "urn:x-nmos:format:video" => Self::Video,
             "urn:x-nmos:format:audio" => Self::Audio,
             "urn:x-nmos:format:data" => Self::Data,
+            _ => Self::Unspecified,
+        }
+    }
+
+    /// Map the first structure of a [`gstreamer::Caps`] to its
+    /// `FlowFormat`. Mirrors the dispatch in
+    /// [`crate::flow_def::build_from_caps`] (`video/x-raw` → Video,
+    /// `audio/x-raw` → Audio, `meta/x-st-2038` → Data). Returns
+    /// [`FlowFormat::Unspecified`] for empty/ANY caps and for any
+    /// other media type — the caller is responsible for falling
+    /// back to the placeholder.
+    pub(crate) fn from_caps(caps: &gstreamer::Caps) -> Self {
+        let Some(structure) = caps.structure(0) else {
+            return Self::Unspecified;
+        };
+        match structure.name().as_str() {
+            "video/x-raw" => Self::Video,
+            "audio/x-raw" => Self::Audio,
+            "meta/x-st-2038" => Self::Data,
             _ => Self::Unspecified,
         }
     }

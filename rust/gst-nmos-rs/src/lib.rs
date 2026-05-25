@@ -41,6 +41,20 @@
 //! a clear, pipeline-visible "declare `caps=…` or insert a
 //! `capsfilter`" hint. Receiver-side deferred mode is intentionally
 //! out of scope (no peer to query).
+//!
+//! `nmossrc` advertises essence caps on its ghost source pad
+//! whenever a flow_def is in play (`transport-file*` at NULL→READY,
+//! or the daemon-spliced internal transport_file at activation).
+//! The flow_def is reverse-mapped via
+//! [`flow_def::caps_from_flow_def`] and pinned by an internal
+//! `mxlsrc ! capsfilter` chain so downstream caps queries see the
+//! concrete shape the flow will carry — the canonical
+//! `nmossrc ! transform ! nmossink` pipeline then resolves end-to-end
+//! at READY→PAUSED: the deferred `nmossink`'s peer_query_caps lands
+//! on the pinned caps and `AddSender` runs against the right
+//! flow_def. When no transport_file is in play (development
+//! convenience with properties only) the bare `mxlsrc` is used and
+//! its broad pad template propagates.
 
 use std::sync::LazyLock;
 
