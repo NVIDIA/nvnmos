@@ -28,8 +28,21 @@ the workspace overview is in [`../README.md`](../README.md).
   (plus a Flow format on the receiver), the inner data path is the
   real `mxlsink` / `mxlsrc` configured from those values. Otherwise
   the bin keeps a placeholder `fakesink` / `fakesrc` so the element
-  remains valid in the pipeline; a later step (caps→flow_def, IS-05
-  activation) will rebuild the inner element from richer state.
+  remains valid in the pipeline; a later step (IS-05 activation,
+  upstream-caps deferred mode) will rebuild the inner element from
+  richer state.
+- On `nmossink` the `transport-file` may be omitted in favour of the
+  `caps` property: when the user supplies essence caps (`video/x-raw,format=v210,…`,
+  `audio/x-raw,format=F32LE,…`, or `meta/x-st-2038,framerate=…`) plus
+  `mxl-flow-id` and `sender-name`, the element synthesises a MXL
+  `flow_def` JSON document matching the SDK reference shapes in
+  [`mxl/lib/tests/data/`](https://github.com/dmf-mxl/mxl/tree/main/lib/tests/data)
+  and feeds it to `AddSender` as it would a user-supplied
+  transport-file. When both `transport-file*` and `caps` are set the
+  file wins and the caps are ignored. Receiver caps→flow_def
+  synthesis is intentionally not wired yet — a Receiver's
+  transport-file describes the Sender's flow, not its own essence
+  caps; that path will land alongside deferred mode.
 
 ## Property surface
 
@@ -46,9 +59,9 @@ Both elements:
 | `mxl-domain-path` | string | optional in this scaffold; effectively required once the inner `mxlsink`/`mxlsrc` is wired up | Local filesystem path identifying the MXL Domain on this host. If a `domain_def.json` is present in the directory its `id` is used to populate or cross-check `mxl-domain-id` (see above). The path itself will be consumed by the inner element's `domain=` property when the data path is wired up. |
 | `label`          | string  | optional  | NMOS label. |
 | `description`    | string  | optional  | NMOS description. |
-| `transport-file` | string  | route-dependent | Literal contents of the IS-05 transport file (MXL `flow_def` JSON today; SDP later). Pass text, not a path. Convenient for programmatic callers; gst-launch users want `transport-file-path` instead. Mutually exclusive with `transport-file-path`. |
+| `transport-file` | string  | route-dependent | Literal contents of the IS-05 transport file (MXL `flow_def` JSON today; SDP later). Pass text, not a path. Convenient for programmatic callers; gst-launch users want `transport-file-path` instead. Mutually exclusive with `transport-file-path`. On `nmossink`, may be substituted by `caps`. |
 | `transport-file-path` | string | route-dependent | Filesystem path read at NULL→READY into `transport-file`. Convenience for `gst-launch-1.0`, whose pipeline parser doesn't cope with multi-line / quote-heavy property values. Mutually exclusive with `transport-file`. |
-| `caps`           | GstCaps | route-dependent | Essence caps for the property route. |
+| `caps`           | GstCaps | route-dependent | Essence caps. On `nmossink`, when `transport-file*` is unset, used to synthesise the MXL `flow_def` JSON. Supported shapes (mirroring `mxlsink`'s pad template): `video/x-raw,format=v210,width=…,height=…,framerate=…[,interlace-mode=…]`; `audio/x-raw,format=F32LE,rate=…,channels=…`; `meta/x-st-2038,framerate=…` (the framerate must be present — set it upstream with a `capsfilter caps="meta/x-st-2038,framerate=30/1"` if needed). On `nmossrc`, accepted today but not yet used to drive flow_def synthesis. |
 | `transport-caps` | GstCaps | optional  | Typically empty for MXL. |
 
 `nmossink`-only:
@@ -139,3 +152,38 @@ or via the `format` field of the `transport-file`.
 callers that compute the flow_def in memory; from gst-launch the path
 form is much easier to type because the pipeline parser doesn't have
 to cope with newlines and embedded quotes.
+
+For a sender driven entirely by properties (no `transport-file*`) the
+essence caps can be supplied directly:
+
+```sh
+GST_DEBUG=nmossink:5 gst-launch-1.0 -e \
+    videotestsrc num-buffers=10 ! \
+    video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001 ! \
+    nmossink transport=mxl node-seed=demo sender-name=sender1 \
+             mxl-domain-id=1ac254d9-c9be-475a-93a7-f80b9c1063a8 \
+             mxl-domain-path=/var/lib/mxl/domain-a \
+             mxl-flow-id=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
+             label="Studio A v210" \
+             caps="video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001"
+```
+
+Expected: `nmossink: synthesised flow_def from caps` then the usual
+`resource registered`, `inner data path: mxl (…)`, and the daemon's
+matching `AddSender`. The synthesised JSON follows the MXL SDK
+reference flow shapes in [`mxl/lib/tests/data/`](https://github.com/dmf-mxl/mxl/tree/main/lib/tests/data).
+Fields included:
+
+- Caps-driven: `media_type`, `grain_rate` / `sample_rate`, `frame_width` /
+  `frame_height` (video), `channel_count` / `bit_depth` (audio),
+  `interlace_mode` (video, only when caps carry it).
+- Property-driven: `id` (= `mxl-flow-id`), `label` (= `label` property,
+  falls back to `sender-name` when empty), `description` (= `description`
+  property, may be empty), plus three required tags
+  (`urn:x-nmos:tag:grouphint/v1.0` derived from `sender-name`,
+  `urn:x-nvnmos:tag:name` = `sender-name`,
+  `urn:x-nvnmos:tag:mxl-domain-id` = the resolved `mxl-domain-id`).
+- Video-only defaults required by `libnvnmos`: `colorspace` = `BT709`
+  and a Y/Cb/Cr 4:2:2 10-bit `components` triple derived from
+  `frame_width` / `frame_height`. Use `transport-file` if you need
+  BT2020 / a different layout.

@@ -19,7 +19,7 @@ use nvnmos_rpc::v1::Transport as ProtoTransport;
 
 use crate::daemon::Session;
 use crate::domain::{self, DomainIdOrigin};
-use crate::flow_def::{self, ValueOrigin};
+use crate::flow_def::{self, FlowDefBuildInput, ValueOrigin};
 use crate::runtime::SHARED_RUNTIME;
 use crate::types::{FlowFormat, Transport};
 
@@ -109,6 +109,19 @@ pub(crate) struct CommonSettings {
     /// Filesystem path that's read into `transport_file` at
     /// NULL→READY. Mutually exclusive with `transport_file`.
     pub(crate) transport_file_path: String,
+    /// NMOS `label` for the synthesised flow_def. Optional: the
+    /// builder falls back to the flow id when this is empty.
+    pub(crate) label: String,
+    /// NMOS `description` for the synthesised flow_def. Optional;
+    /// omitted from the JSON when empty.
+    pub(crate) description: String,
+    /// Essence caps for the property route. When neither
+    /// `transport_file` nor `transport_file_path` is set and `caps`
+    /// is, the element synthesises a flow_def JSON from these caps
+    /// plus the resolved property state (see
+    /// [`crate::flow_def::build_from_caps`]). When `transport_file*`
+    /// is also supplied, the file wins and `caps` is ignored.
+    pub(crate) caps: Option<gst::Caps>,
 }
 
 /// Outcome of resolving `transport_file` / `transport_file_path`.
@@ -221,7 +234,14 @@ pub(crate) fn validate_and_open(
         DomainIdOrigin::None => unreachable!("empty id rejected above"),
     }
 
-    let transport_file = resolve_transport_file(element, settings)?;
+    let resolved_transport_file = resolve_transport_file(element, settings)?;
+    let transport_file = synthesise_or_passthrough(
+        cat,
+        element,
+        settings,
+        &domain_resolution.id,
+        resolved_transport_file,
+    )?;
 
     let flow = flow_def::resolve_mxl_flow_meta(
         &settings.mxl_flow_id,
@@ -286,6 +306,59 @@ pub(crate) fn validate_and_open(
 
     *session.lock().unwrap() = Some(new_session);
     Ok(inner)
+}
+
+/// If the user supplied a `transport-file` (literal or path), pass
+/// it through; otherwise, when `caps` is set on a Sender, synthesise
+/// a flow_def JSON document via [`flow_def::build_from_caps`]. When
+/// *both* are set, the file wins and the caps are logged as ignored
+/// — same precedence rule the file/property cross-checks use.
+///
+/// Receiver-side caps→flow_def is intentionally not wired here: a
+/// Receiver's transport-file describes the *Sender's* flow (IS-05
+/// PATCH), not its own essence caps; the deferred-mode work will
+/// add upstream/IS-05 driven flow_def discovery.
+fn synthesise_or_passthrough(
+    cat: &gst::DebugCategory,
+    element: &str,
+    settings: &CommonSettings,
+    resolved_mxl_domain_id: &str,
+    resolved: Option<String>,
+) -> Result<Option<String>, anyhow::Error> {
+    match (resolved, settings.caps.as_ref()) {
+        (Some(text), Some(_)) => {
+            gst::info!(
+                cat,
+                "{element}: `caps` ignored for flow_def synthesis — transport-file is set"
+            );
+            Ok(Some(text))
+        }
+        (Some(text), None) => Ok(Some(text)),
+        (None, Some(caps)) => match settings.side {
+            Side::Sender => {
+                let json = flow_def::build_from_caps(&FlowDefBuildInput {
+                    flow_id: &settings.mxl_flow_id,
+                    format_hint: settings.mxl_flow_format,
+                    name: &settings.name,
+                    mxl_domain_id: resolved_mxl_domain_id,
+                    label: &settings.label,
+                    description: &settings.description,
+                    caps,
+                })
+                .with_context(|| format!("{element}: synthesising flow_def from caps"))?;
+                gst::info!(cat, "{element}: synthesised flow_def from `caps`");
+                Ok(Some(json))
+            }
+            Side::Receiver => {
+                gst::info!(
+                    cat,
+                    "{element}: `caps` on receiver does not yet drive flow_def synthesis; ignoring"
+                );
+                Ok(None)
+            }
+        },
+        (None, None) => Ok(None),
+    }
 }
 
 fn log_flow_origin(cat: &gst::DebugCategory, field: &str, origin: ValueOrigin) {

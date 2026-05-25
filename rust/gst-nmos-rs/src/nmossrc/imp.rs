@@ -475,6 +475,14 @@ impl From<Settings> for crate::session::CommonSettings {
             mxl_flow_format: s.mxl_flow_format,
             transport_file: s.transport_file,
             transport_file_path: s.transport_file_path,
+            label: s.label,
+            description: s.description,
+            // `nmossrc` accepts `caps` today but does not yet use it
+            // to synthesise a flow_def; that wiring lands with
+            // receiver-side deferred mode. Pass it through so the
+            // settings snapshot stays in sync with the property
+            // surface.
+            caps: s.caps,
         }
     }
 }

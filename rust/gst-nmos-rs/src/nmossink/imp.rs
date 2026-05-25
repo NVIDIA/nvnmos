@@ -175,7 +175,8 @@ impl ObjectImpl for NmosSink {
                          today; SDP later. Pass the text, not a path. Convenient for \
                          programmatic callers; from gst-launch use `transport-file-path` \
                          instead. Mutually exclusive with `transport-file-path`. \
-                         Optional in deferred mode.",
+                         When unset and `caps` is supplied the element synthesises a \
+                         flow_def from the essence caps.",
                     )
                     .mutable_ready()
                     .build(),
@@ -191,8 +192,12 @@ impl ObjectImpl for NmosSink {
                 glib::ParamSpecBoxed::builder::<gst::Caps>("caps")
                     .nick("Essence caps")
                     .blurb(
-                        "Essence-shaped pad caps used by the property route. Optional; \
-                         deferred mode resolves this from the upstream peer.",
+                        "Essence caps used to synthesise the MXL `flow_def` JSON when \
+                         `transport-file` / `transport-file-path` are unset. Supported \
+                         shapes match `mxlsink`'s pad template: `video/x-raw,format=v210,…`, \
+                         `audio/x-raw,format=F32LE,…`, and `meta/x-st-2038,framerate=…`. \
+                         Requires `mxl-flow-id` to be set. Ignored when `transport-file*` \
+                         is also set.",
                     )
                     .mutable_ready()
                     .build(),
@@ -430,6 +435,9 @@ impl From<Settings> for crate::session::CommonSettings {
             mxl_flow_format: FlowFormat::Unspecified,
             transport_file: s.transport_file,
             transport_file_path: s.transport_file_path,
+            label: s.label,
+            description: s.description,
+            caps: s.caps,
         }
     }
 }
