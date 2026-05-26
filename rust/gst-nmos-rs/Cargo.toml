@@ -34,6 +34,11 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Used by the multi-flow integration test (tests/multi_flow_video_data.rs)
+# to drive a v210 + ANC producer and pull samples back out of appsinks,
+# mirroring gst-mxl-rs's tests/video_data_sync.rs setup.
+gstreamer-app = "0.24.4"
+gstreamer-video = { version = "0.24.5", features = ["v1_24"] }
 
 [build-dependencies]
 gst-plugin-version-helper = "0.8.3"
