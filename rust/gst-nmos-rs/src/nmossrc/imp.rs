@@ -133,7 +133,9 @@ impl ObjectImpl for NmosSrc {
                          `urn:x-nvnmos:tag:name` flow-def tag in the \
                          transport file). Unique across Receivers on the \
                          Node; a Sender on the same Node may share the \
-                         same name (the daemon scopes names by side).",
+                         same name (the daemon scopes names by side). \
+                         Property-overrides-transport_file: a value set \
+                         here splices into the transport_file's tag.",
                     )
                     .mutable_ready()
                     .build(),
@@ -163,19 +165,31 @@ impl ObjectImpl for NmosSrc {
                          PATCH activation, so this is mainly a development \
                          convenience: setting it (plus `caps` and \
                          `mxl-domain-path`) lets the receiver start up \
-                         pre-bound to a known flow. When `transport-file` \
-                         also carries an `id` the two must agree.",
+                         pre-bound to a known flow. \
+                         Property-overrides-transport_file: a value set \
+                         here splices into the transport_file's top-level \
+                         `id`.",
                     )
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("label")
                     .nick("Label")
-                    .blurb("NMOS label for the receiver. Optional.")
+                    .blurb(
+                        "NMOS label for the Receiver. Optional. \
+                         Property-overrides-transport_file: a value set \
+                         here splices into the transport_file's top-level \
+                         `label`.",
+                    )
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("description")
                     .nick("Description")
-                    .blurb("NMOS description for the receiver. Optional.")
+                    .blurb(
+                        "NMOS description for the Receiver. Optional. \
+                         Property-overrides-transport_file: a value set \
+                         here splices into the transport_file's top-level \
+                         `description`.",
+                    )
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("transport-file")
@@ -202,7 +216,9 @@ impl ObjectImpl for NmosSrc {
                          provided: the media-type structure name (`video/x-raw` / \
                          `audio/x-raw` / `meta/x-st-2038`) decides which `mxlsrc` flow-id \
                          slot receives `mxl-flow-id`. Cross-checked against the \
-                         transport_file's `format` field when both are supplied.",
+                         transport_file's `format` field when both are supplied — \
+                         mismatch is a hard error (the caps and the flow's essence shape \
+                         must describe the same thing).",
                     )
                     .mutable_ready()
                     .build(),
@@ -220,8 +236,8 @@ impl ObjectImpl for NmosSrc {
                          trusts the transport_file (tag present = wide, absent = narrow; \
                          narrow if no transport_file). `narrow` strips the tag from the \
                          transport_file if present. `wide` ensures the tag is present \
-                         with an empty value. Override behaviour wires up in a follow-on \
-                         change; the property is accepted today.",
+                         with a non-empty marker (libnvnmos's rule for wide is \
+                         \"present + non-empty\").",
                     )
                     .default_value(CapsMode::Auto)
                     .mutable_ready()

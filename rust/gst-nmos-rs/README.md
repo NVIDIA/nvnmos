@@ -28,27 +28,51 @@ Both elements:
 | `description`    | string  | optional  | NMOS description. |
 | `transport-file` | string  | route-dependent | Literal contents of the NvNmos `transport_file` (MXL `flow_def` JSON today; SDP later) the daemon will register with the resource and re-publish into IS-05. Pass text, not a path. Convenient for programmatic callers; gst-launch users want `transport-file-path` instead. Mutually exclusive with `transport-file-path`. On `nmossink`, may be substituted by `caps`. |
 | `transport-file-path` | string | route-dependent | Filesystem path read at NULL→READY into `transport-file`. Convenience for `gst-launch-1.0`, whose pipeline parser doesn't cope with multi-line / quote-heavy property values. Mutually exclusive with `transport-file`. |
-| `label`          | string  | optional  | NMOS label. |
-| `description`    | string  | optional  | NMOS description. |
+| `label`          | string  | optional  | NMOS label for this Sender/Receiver (not the Node). Overrides the transport_file's top-level `label` when both are supplied. |
+| `description`    | string  | optional  | NMOS description for this Sender/Receiver. Overrides the transport_file's top-level `description` when both are supplied. |
 | `caps`           | GstCaps | required when `transport-file*` is unset | Essence caps. Supported shapes (mirroring `mxlsink`'s pad template): `video/x-raw,format=v210,width=…,height=…,framerate=…[,interlace-mode=…]`; `audio/x-raw,format=F32LE,rate=…,channels=…`; `meta/x-st-2038,framerate=…` (the framerate must be present — set it upstream with a `capsfilter caps="meta/x-st-2038,framerate=30/1"` if needed). On `nmossink`, drives flow_def JSON synthesis when `transport-file*` is unset. On `nmossrc`, the media-type structure name (`video/x-raw` / `audio/x-raw` / `meta/x-st-2038`) decides which `mxlsrc.{video,audio,data}-flow-id=` slot receives `mxl-flow-id`. Cross-checked against the transport_file's `format` field when both are supplied. |
 | `transport-caps` | GstCaps | optional  | Typically empty for MXL. |
 | `mxl-domain-path` | string | optional in this scaffold; effectively required once the inner `mxlsink`/`mxlsrc` is wired up | Local filesystem path identifying the MXL Domain on this host. If a `domain_def.json` is present in the directory its `id` is used to populate or cross-check `mxl-domain-id` (see below). The path itself will be consumed by the inner element's `domain=` property when the data path is wired up. |
-| `mxl-domain-id`  | string  | required for MXL (may be omitted if `mxl-domain-path` supplies it) | MXL Domain id (UUID) advertised in NMOS as `urn:x-nvnmos:tag:mxl-domain-id`. If `mxl-domain-path` points at a directory containing a `domain_def.json` (AMWA BCP-007-03 WIP) the file's `id` is used to populate this property when unset, or cross-checked against it when both are supplied (mismatch is an error). |
+| `mxl-domain-id`  | string  | required for MXL (may be omitted if `mxl-domain-path` supplies it) | MXL Domain id (UUID) advertised in NMOS as `urn:x-nvnmos:tag:mxl-domain-id`. If `mxl-domain-path` points at a directory containing a `domain_def.json` (AMWA BCP-007-03 WIP) the file's `id` is used to populate this property when unset, or cross-checked against it when both are supplied (mismatch is an error — this is host-level identity). Overrides the transport_file's tag when both are supplied. |
 
 `nmossink`-only:
 
 | Property      | Type   | Required? | Notes |
 | ------------- | ------ | --------- | ----- |
-| `sender-name` | string | required  | NMOS Sender name within the Node (`x-nvnmos-name` SDP attribute or `urn:x-nvnmos:tag:name` flow-def tag). Unique among Senders on the Node; a Receiver on the same Node may share the same name (the daemon's `by_name` index is keyed on `(node_seed, side, name)`). |
-| `mxl-flow-id` | string | required to instantiate inner `mxlsink` (else placeholder) | MXL flow id (UUID) fed into `mxlsink.flow-id=`. Cross-checked against the transport_file's top-level `id` when both are supplied. |
+| `sender-name` | string | required  | NMOS Sender name within the Node (`x-nvnmos-name` SDP attribute or `urn:x-nvnmos:tag:name` flow-def tag). Unique among Senders on the Node; a Receiver on the same Node may share the same name (the daemon's `by_name` index is keyed on `(node_seed, side, name)`). Overrides the transport_file's name tag when both are supplied. |
+| `mxl-flow-id` | string | required to instantiate inner `mxlsink` (else placeholder) | MXL flow id (UUID) fed into `mxlsink.flow-id=`. Overrides the transport_file's top-level `id` when both are supplied. |
 
 `nmossrc`-only:
 
 | Property          | Type   | Required? | Notes |
 | ----------------- | ------ | --------- | ----- |
-| `receiver-name`   | string | required  | NMOS Receiver name within the Node (`x-nvnmos-name` SDP attribute or `urn:x-nvnmos:tag:name` flow-def tag). Unique among Receivers on the Node; a Sender on the same Node may share the same name. |
-| `mxl-flow-id`     | string | required to instantiate inner `mxlsrc` (else placeholder) | MXL flow id (UUID) the inner `mxlsrc` should pull. Cross-checked against the transport_file's top-level `id` when both are supplied. Normally an NMOS Receiver learns this from IS-05 PATCH activation; setting it as a property is a development convenience. |
-| `receiver-caps-mode` | enum (`auto`/`narrow`/`wide`) | optional | Controls whether the Receiver published to IS-04 advertises narrow or wide Receiver Caps, via the presence of the `urn:x-nvnmos:tag:caps` flow-def tag (presence = wide, absence = narrow). `auto` (default) trusts the transport_file (or defaults to narrow when no transport_file is supplied). `narrow` strips the tag if present; `wide` ensures it is present with an empty value. Override wires up in a follow-on change. |
+| `receiver-name`   | string | required  | NMOS Receiver name within the Node (`x-nvnmos-name` SDP attribute or `urn:x-nvnmos:tag:name` flow-def tag). Unique among Receivers on the Node; a Sender on the same Node may share the same name. Overrides the transport_file's name tag when both are supplied. |
+| `mxl-flow-id`     | string | required to instantiate inner `mxlsrc` (else placeholder) | MXL flow id (UUID) the inner `mxlsrc` should pull. Overrides the transport_file's top-level `id` when both are supplied. Normally an NMOS Receiver learns this from IS-05 PATCH activation; setting it as a property is a development convenience. |
+| `receiver-caps-mode` | enum (`auto`/`narrow`/`wide`) | optional | Controls whether the Receiver published to IS-04 advertises narrow or wide Receiver Caps, via the presence of the `urn:x-nvnmos:tag:caps` flow-def tag (libnvnmos's rule: present + non-empty array means wide; absent or empty means narrow). `auto` (default) trusts the transport_file (or defaults to narrow when no transport_file is supplied). `narrow` strips the tag if present; `wide` ensures it is present with a non-empty marker. |
+
+### Property interaction with `transport-file`
+
+When a `transport-file` (literal or path) and an overlapping property
+are both set, the resulting `transport_file` handed to the daemon is
+built with these rules:
+
+| Group         | Properties | Rule when both set |
+| ------------- | ---------- | ------------------ |
+| Identity / cosmetic | `sender-name` / `receiver-name`, `mxl-flow-id`, `mxl-domain-id`, `label`, `description`, `receiver-caps-mode` | **Property overrides file.** The element rewrites the file's matching field/tag to the property value before the daemon sees it. |
+| Essence shape | `caps`, `transport-caps` | **Cross-check.** Property must agree with the file's shape (today: `caps` first structure name vs `format`). Mismatch is a hard error at NULL→READY. |
+| No interaction | `daemon-uri`, `node-seed`, `http-port`, `transport`, `mxl-domain-path` | These don't appear in the transport_file at all. |
+
+`mxl-domain-id` is in the override group for the file tag, but is
+still **cross-checked** against `mxl-domain-path/domain_def.json`
+because that file describes which Domain identity belongs to this
+local mount — a different ID would be a host-level misconfiguration,
+not a labelling choice.
+
+At IS-05 activation time the daemon's transport_file is authoritative
+for the identity/cosmetic group (an IS-05 PATCH legitimately replaces
+the configured-at-startup flow id); the essence-shape cross-check
+still applies, so an activation that asks an `nmossrc` configured for
+v210 video to receive an audio flow is ack-failed.
 
 ## Building
 

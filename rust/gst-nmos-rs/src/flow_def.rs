@@ -12,8 +12,7 @@
 //! [`read_flow_def_meta`] parses the JSON into [`FlowDefMeta`].
 //! [`resolve_mxl_flow_meta`] combines that with the `mxl-flow-id`
 //! property and the caps-derived [`FlowFormat`] (see
-//! [`FlowFormat::from_caps`]), mirroring
-//! [`crate::domain::resolve_mxl_domain_id`]:
+//! [`FlowFormat::from_caps`]):
 //!
 //! * Property only: use it.
 //! * File only: use it.
@@ -21,6 +20,18 @@
 //! * Both disagreeing: hard error.
 //! * Neither: empty id / `Unspecified` format — the element will
 //!   fall back to its placeholder data path.
+//!
+//! At NULL→READY the element-level rule is "property overrides
+//! file", not "cross-check, error on mismatch". The caller therefore
+//! splices the user's properties into the transport_file with
+//! [`splice_overrides`] before invoking [`resolve_mxl_flow_meta`],
+//! at which point only the `Both`-agree and `File`-only branches can
+//! be reached. The `Property`-only branch is reachable when the user
+//! supplies no transport_file at all (deferred/synthesised path).
+//! Activations from the daemon are *not* re-spliced — the IS-05
+//! PATCH is authoritative, and the activation path passes an empty
+//! `property_id` to [`resolve_mxl_flow_meta`] so the file always
+//! wins silently.
 //!
 //! [`build_from_caps`] is the reverse path: given GStreamer essence
 //! caps plus property state, emit a `flow_def` JSON document that
@@ -34,7 +45,7 @@ use gstreamer as gst;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::types::FlowFormat;
+use crate::types::{CapsMode, FlowFormat};
 
 #[derive(Debug, Deserialize)]
 struct RawFlowDef {
@@ -87,6 +98,10 @@ pub(crate) enum FlowDefError {
         property: FlowFormat,
         file: FlowFormat,
     },
+    #[error("transport_file top-level JSON is not an object")]
+    NotAnObject,
+    #[error("transport_file `tags` is not a JSON object")]
+    TagsNotAnObject,
 }
 
 #[derive(Debug)]
@@ -191,6 +206,109 @@ fn resolve_format(
         (p, f) if p == f => Ok((p, ValueOrigin::Both)),
         (p, f) => Err(FlowDefError::FormatMismatch { property: p, file: f }),
     }
+}
+
+/// User-set properties that, when present, are spliced into a
+/// transport_file before it reaches the daemon. The element-level
+/// rule is "property overrides file" — each `Option` field that is
+/// `Some` replaces the corresponding field/tag in the JSON; `None`
+/// leaves the file's value untouched.
+///
+/// `caps_mode` always applies (no `Option` wrapping) because the
+/// [`crate::types::CapsMode`] enum carries its own "don't touch the
+/// file" state in `Auto`.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct FlowDefOverrides<'a> {
+    /// Top-level `id` (the MXL flow id).
+    pub(crate) flow_id: Option<&'a str>,
+    /// Top-level `label`.
+    pub(crate) label: Option<&'a str>,
+    /// Top-level `description`.
+    pub(crate) description: Option<&'a str>,
+    /// `tags["urn:x-nvnmos:tag:name"]` (the per-side resource name).
+    pub(crate) name: Option<&'a str>,
+    /// `tags["urn:x-nvnmos:tag:mxl-domain-id"]`.
+    pub(crate) mxl_domain_id: Option<&'a str>,
+    /// Presence of `tags["urn:x-nvnmos:tag:caps"]`. See [`CapsMode`].
+    pub(crate) caps_mode: CapsMode,
+}
+
+/// Splice user-set property values into a transport_file before
+/// handing it to the daemon. Empty-string `Option`s are treated as
+/// "unset" by the caller convention used throughout the element
+/// code (see [`crate::session::CommonSettings`]) so this function
+/// does not have to special-case them — pass `None` when the
+/// property is empty.
+///
+/// libnvnmos's [BCP-007-03 WIP] reading rule for the caps tag is
+/// "present + non-empty array means wide"; `CapsMode::Wide` writes
+/// `[""]` to satisfy that rule, `CapsMode::Narrow` removes the tag,
+/// and `CapsMode::Auto` leaves the file's existing presence alone.
+pub(crate) fn splice_overrides(
+    text: &str,
+    overrides: &FlowDefOverrides<'_>,
+) -> Result<String, FlowDefError> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(text).map_err(|source| FlowDefError::Parse { source })?;
+    let object = value.as_object_mut().ok_or(FlowDefError::NotAnObject)?;
+
+    if let Some(flow_id) = overrides.flow_id {
+        object.insert("id".to_owned(), serde_json::Value::String(flow_id.to_owned()));
+    }
+    if let Some(label) = overrides.label {
+        object.insert(
+            "label".to_owned(),
+            serde_json::Value::String(label.to_owned()),
+        );
+    }
+    if let Some(description) = overrides.description {
+        object.insert(
+            "description".to_owned(),
+            serde_json::Value::String(description.to_owned()),
+        );
+    }
+
+    // We only need a mutable `tags` if at least one tag-affecting
+    // override is active. Bypass the tag fix-ups (and the type check)
+    // when there's nothing to do, so a transport_file without a
+    // `tags` object still round-trips cleanly.
+    let touches_tags = overrides.name.is_some()
+        || overrides.mxl_domain_id.is_some()
+        || overrides.caps_mode != CapsMode::Auto;
+    if touches_tags {
+        let tags_value = object
+            .entry("tags".to_owned())
+            .or_insert_with(|| serde_json::json!({}));
+        let tags = tags_value
+            .as_object_mut()
+            .ok_or(FlowDefError::TagsNotAnObject)?;
+        if let Some(name) = overrides.name {
+            tags.insert(
+                "urn:x-nvnmos:tag:name".to_owned(),
+                serde_json::json!([name]),
+            );
+        }
+        if let Some(mxl_domain_id) = overrides.mxl_domain_id {
+            tags.insert(
+                "urn:x-nvnmos:tag:mxl-domain-id".to_owned(),
+                serde_json::json!([mxl_domain_id]),
+            );
+        }
+        match overrides.caps_mode {
+            CapsMode::Auto => {}
+            CapsMode::Narrow => {
+                tags.remove("urn:x-nvnmos:tag:caps");
+            }
+            CapsMode::Wide => {
+                tags.insert(
+                    "urn:x-nvnmos:tag:caps".to_owned(),
+                    serde_json::json!([""]),
+                );
+            }
+        }
+    }
+
+    Ok(serde_json::to_string(&value).expect("flow_def value is always serialisable"))
 }
 
 /// Inputs to [`build_from_caps`]. All borrowed; the builder doesn't
@@ -709,6 +827,158 @@ mod tests {
         assert_eq!(r.id_origin, ValueOrigin::Property);
         assert_eq!(r.format, FlowFormat::Video);
         assert_eq!(r.format_origin, ValueOrigin::Property);
+    }
+
+    fn parse_value(text: &str) -> serde_json::Value {
+        serde_json::from_str(text).expect("splice output must be valid JSON")
+    }
+
+    #[test]
+    fn splice_noop_when_all_overrides_unset() {
+        let original = video_flow_def(UUID_A);
+        let spliced = splice_overrides(&original, &FlowDefOverrides::default()).unwrap();
+        assert_eq!(parse_value(&spliced), parse_value(&original));
+    }
+
+    #[test]
+    fn splice_overrides_top_level_id_label_description() {
+        let original = format!(
+            r#"{{"id":"{UUID_A}","format":"urn:x-nmos:format:video","label":"orig","description":"od"}}"#
+        );
+        let spliced = splice_overrides(
+            &original,
+            &FlowDefOverrides {
+                flow_id: Some(UUID_B),
+                label: Some("new label"),
+                description: Some("new description"),
+                ..FlowDefOverrides::default()
+            },
+        )
+        .unwrap();
+        let v = parse_value(&spliced);
+        assert_eq!(v["id"], UUID_B);
+        assert_eq!(v["label"], "new label");
+        assert_eq!(v["description"], "new description");
+        // unrelated fields untouched
+        assert_eq!(v["format"], "urn:x-nmos:format:video");
+    }
+
+    #[test]
+    fn splice_overrides_name_and_mxl_domain_id_tags() {
+        let original = format!(
+            r#"{{"id":"{UUID_A}","format":"urn:x-nmos:format:video","tags":{{"urn:x-nvnmos:tag:name":["old-name"],"urn:x-nvnmos:tag:mxl-domain-id":["00000000-0000-0000-0000-000000000abc"],"urn:x-nmos:tag:grouphint/v1.0":["g:Video"]}}}}"#
+        );
+        let spliced = splice_overrides(
+            &original,
+            &FlowDefOverrides {
+                name: Some("new-name"),
+                mxl_domain_id: Some(DOMAIN_ID),
+                ..FlowDefOverrides::default()
+            },
+        )
+        .unwrap();
+        let v = parse_value(&spliced);
+        assert_eq!(v["tags"]["urn:x-nvnmos:tag:name"], serde_json::json!(["new-name"]));
+        assert_eq!(
+            v["tags"]["urn:x-nvnmos:tag:mxl-domain-id"],
+            serde_json::json!([DOMAIN_ID])
+        );
+        // grouphint preserved
+        assert_eq!(
+            v["tags"]["urn:x-nmos:tag:grouphint/v1.0"],
+            serde_json::json!(["g:Video"])
+        );
+    }
+
+    #[test]
+    fn splice_creates_tags_object_if_missing_when_needed() {
+        let original = video_flow_def(UUID_A);
+        let spliced = splice_overrides(
+            &original,
+            &FlowDefOverrides {
+                name: Some("foo"),
+                ..FlowDefOverrides::default()
+            },
+        )
+        .unwrap();
+        let v = parse_value(&spliced);
+        assert_eq!(v["tags"]["urn:x-nvnmos:tag:name"], serde_json::json!(["foo"]));
+    }
+
+    #[test]
+    fn splice_caps_mode_narrow_removes_tag() {
+        let original = format!(
+            r#"{{"id":"{UUID_A}","format":"urn:x-nmos:format:video","tags":{{"urn:x-nvnmos:tag:caps":[""]}}}}"#
+        );
+        let spliced = splice_overrides(
+            &original,
+            &FlowDefOverrides {
+                caps_mode: CapsMode::Narrow,
+                ..FlowDefOverrides::default()
+            },
+        )
+        .unwrap();
+        let v = parse_value(&spliced);
+        assert!(
+            v["tags"].as_object().unwrap().get("urn:x-nvnmos:tag:caps").is_none(),
+            "tag should be removed; got {v}"
+        );
+    }
+
+    #[test]
+    fn splice_caps_mode_wide_inserts_non_empty_array() {
+        let original = video_flow_def(UUID_A);
+        let spliced = splice_overrides(
+            &original,
+            &FlowDefOverrides {
+                caps_mode: CapsMode::Wide,
+                ..FlowDefOverrides::default()
+            },
+        )
+        .unwrap();
+        let v = parse_value(&spliced);
+        let arr = v["tags"]["urn:x-nvnmos:tag:caps"]
+            .as_array()
+            .expect("caps tag must be an array");
+        // libnvnmos's rule is "present + non-empty array means wide";
+        // assert that's what we wrote.
+        assert!(!arr.is_empty(), "wide-mode array must be non-empty; got {v}");
+    }
+
+    #[test]
+    fn splice_caps_mode_auto_leaves_file_tag_alone() {
+        let with_tag = format!(
+            r#"{{"id":"{UUID_A}","format":"urn:x-nmos:format:video","tags":{{"urn:x-nvnmos:tag:caps":[""]}}}}"#
+        );
+        let unchanged = splice_overrides(&with_tag, &FlowDefOverrides::default()).unwrap();
+        assert_eq!(parse_value(&unchanged), parse_value(&with_tag));
+
+        let without_tag = video_flow_def(UUID_A);
+        let still_without = splice_overrides(&without_tag, &FlowDefOverrides::default()).unwrap();
+        let v = parse_value(&still_without);
+        // No tags object was needed, so none should have been
+        // synthesised either.
+        assert!(v.get("tags").is_none(), "auto must not synthesise tags; got {v}");
+    }
+
+    #[test]
+    fn splice_rejects_non_object_top_level() {
+        let err = splice_overrides("[]", &FlowDefOverrides::default()).unwrap_err();
+        assert!(matches!(err, FlowDefError::NotAnObject), "got: {err:?}");
+    }
+
+    #[test]
+    fn splice_rejects_tags_that_are_not_an_object() {
+        let original = format!(r#"{{"id":"{UUID_A}","tags":42}}"#);
+        let err = splice_overrides(
+            &original,
+            &FlowDefOverrides {
+                name: Some("x"),
+                ..FlowDefOverrides::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, FlowDefError::TagsNotAnObject), "got: {err:?}");
     }
 
     fn ensure_gst_initialised() {

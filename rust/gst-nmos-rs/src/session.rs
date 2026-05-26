@@ -19,7 +19,7 @@ use nvnmos_rpc::v1::Transport as ProtoTransport;
 
 use crate::daemon::{ActivationHandler, ActivationRequest, Session};
 use crate::domain::{self, DomainIdOrigin};
-use crate::flow_def::{self, FlowDefBuildInput, ValueOrigin};
+use crate::flow_def::{self, FlowDefBuildInput, FlowDefOverrides, ValueOrigin};
 use crate::runtime::SHARED_RUNTIME;
 use crate::types::{CapsMode, FlowFormat, Transport};
 
@@ -113,7 +113,10 @@ pub(crate) const MXL_DOMAIN_ID_BLURB: &str =
      Required when transport=mxl, but may be omitted if \
      `mxl-domain-path` points at a directory containing a \
      `domain_def.json` (AMWA BCP-007-03 WIP): the file's `id` is \
-     then used. When both are supplied they must agree.";
+     then used. Property-overrides-transport_file: a value set here \
+     splices into the transport_file's tag. Cross-checked against \
+     `domain_def.json` when both are supplied (mismatch is an \
+     error — this is host-level identity, not just labelling).";
 
 pub(crate) const TRANSPORT_FILE_PATH_BLURB: &str =
     "Filesystem path read at NULL\u{2192}READY into `transport-file`. \
@@ -191,8 +194,6 @@ pub(crate) struct CommonSettings {
     /// only when `side` is `Receiver` (driven by the
     /// `receiver-caps-mode` property on `nmossrc`); `nmossink` leaves
     /// it at [`CapsMode::Auto`].
-    // Read once the override path consumes it; see follow-on commit.
-    #[allow(dead_code)]
     pub(crate) caps_mode: CapsMode,
 }
 
@@ -326,6 +327,20 @@ pub(crate) fn validate_and_open(
         resolved_transport_file,
     )?;
 
+    // Property-overrides-file: splice any user-set identity/cosmetic
+    // properties (name, flow_id, mxl-domain-id, label, description,
+    // receiver-caps-mode) into the transport_file before the daemon
+    // sees it. `caps` and `transport-caps` remain cross-checked by
+    // `resolve_mxl_flow_meta` below — they describe the essence
+    // shape and a mismatch is a real error.
+    let transport_file = match transport_file {
+        Some(text) => Some(
+            flow_def::splice_overrides(&text, &property_overrides(settings, &domain_resolution.id))
+                .with_context(|| format!("{element}: splicing property overrides into transport_file"))?,
+        ),
+        None => None,
+    };
+
     let caps_format = caps_format(settings);
     let flow = flow_def::resolve_mxl_flow_meta(
         &settings.mxl_flow_id,
@@ -428,9 +443,9 @@ fn synthesise_or_passthrough(
 ) -> Result<Option<String>, anyhow::Error> {
     match (resolved, settings.caps.as_ref()) {
         (Some(text), Some(_)) => {
-            gst::info!(
+            gst::debug!(
                 cat,
-                "{element}: `caps` ignored for flow_def synthesis — transport-file is set"
+                "{element}: transport-file set; `caps` will be cross-checked against the file's `format`"
             );
             Ok(Some(text))
         }
@@ -479,6 +494,29 @@ fn caps_format(settings: &CommonSettings) -> FlowFormat {
         .as_ref()
         .map(FlowFormat::from_caps)
         .unwrap_or(FlowFormat::Unspecified)
+}
+
+/// Build a [`FlowDefOverrides`] from the element's property snapshot.
+/// Empty-string properties map to `None` (i.e. "user did not set
+/// this; leave the file's value alone"). `mxl_domain_id` is taken
+/// from the domain resolution result, not the raw property, so the
+/// `domain_def.json`-derived value also flows into the splice when
+/// the user didn't set the property directly.
+fn property_overrides<'a>(
+    settings: &'a CommonSettings,
+    resolved_mxl_domain_id: &'a str,
+) -> FlowDefOverrides<'a> {
+    fn opt(s: &str) -> Option<&str> {
+        if s.is_empty() { None } else { Some(s) }
+    }
+    FlowDefOverrides {
+        flow_id: opt(&settings.mxl_flow_id),
+        label: opt(&settings.label),
+        description: opt(&settings.description),
+        name: opt(&settings.name),
+        mxl_domain_id: opt(resolved_mxl_domain_id),
+        caps_mode: settings.caps_mode,
+    }
 }
 
 fn log_flow_origin(cat: &gst::DebugCategory, field: &str, origin: ValueOrigin) {
@@ -792,8 +830,15 @@ pub(crate) fn plan_activation(
         DomainIdOrigin::None => unreachable!("empty id handled above"),
     }
 
+    // Activation: the daemon's transport_file is authoritative. Pass
+    // an empty `property_id` so the file always wins silently (the
+    // element's `mxl-flow-id` property is just a NULL→READY default;
+    // an IS-05 PATCH legitimately replaces it). The `caps` format
+    // cross-check stays because a v210 video activation arriving at
+    // an `nmossrc` configured for audio is a real misconfiguration
+    // the element must ack-fail.
     let flow = match flow_def::resolve_mxl_flow_meta(
-        &settings.mxl_flow_id,
+        "",
         caps_format(settings),
         Some(transport_file),
     ) {
@@ -888,6 +933,33 @@ mod tests {
             side,
             transport_file: transport_file.map(str::to_owned),
         }
+    }
+
+    /// Property-overrides-file at NULL→READY: when the user sets
+    /// `mxl-flow-id` on the element and also supplies a
+    /// transport_file with a different id, the property wins and the
+    /// file is rewritten to match (rather than rejecting the
+    /// mismatch as a hard error, which is what we did before the
+    /// splice layer existed).
+    #[test]
+    fn setup_property_overrides_file_flow_id() {
+        let s = CommonSettings {
+            mxl_flow_id: FLOW_ID_B.to_owned(),
+            ..settings(Side::Sender)
+        };
+        let overrides = property_overrides(&s, DOMAIN_ID);
+        let spliced =
+            flow_def::splice_overrides(&video_flow_def(FLOW_ID_A), &overrides).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&spliced).unwrap();
+        assert_eq!(v["id"], FLOW_ID_B);
+        // Subsequent resolve_mxl_flow_meta with property==B and
+        // file==B agrees silently; the previous "hard error on
+        // mismatch" branch is no longer reachable from the setup
+        // path.
+        let resolved =
+            flow_def::resolve_mxl_flow_meta(FLOW_ID_B, FlowFormat::Video, Some(&spliced)).unwrap();
+        assert_eq!(resolved.id, FLOW_ID_B);
+        assert_eq!(resolved.id_origin, flow_def::ValueOrigin::Both);
     }
 
     #[test]
@@ -997,8 +1069,13 @@ mod tests {
         assert!(matches!(plan.ack, ActivationAck::Success));
     }
 
+    /// IS-05 PATCHes legitimately replace the flow id the element
+    /// was configured with at NULL→READY. The activation's
+    /// transport_file is authoritative, so the activation must
+    /// silently succeed and the inner be reconfigured against the
+    /// new flow id.
     #[test]
-    fn flow_id_mismatch_is_failure() {
+    fn activation_flow_id_overrides_element_property() {
         let s = CommonSettings {
             mxl_flow_id: FLOW_ID_B.to_owned(),
             ..settings(Side::Sender)
@@ -1009,13 +1086,11 @@ mod tests {
             &s,
             &req(Side::Sender, Some(&video_flow_def(FLOW_ID_A))),
         );
-        assert!(matches!(plan.inner, InnerConfig::Placeholder { .. }));
-        match plan.ack {
-            ActivationAck::Failure { reason } => assert!(
-                reason.contains("mxl-flow-id mismatch"),
-                "expected flow-id mismatch reason: {reason}",
-            ),
-            ActivationAck::Success => panic!("expected failure ack on flow-id mismatch"),
+        match (&plan.inner, &plan.ack) {
+            (InnerConfig::Mxl { flow_id, .. }, ActivationAck::Success) => {
+                assert_eq!(flow_id, FLOW_ID_A, "activation file's id must win");
+            }
+            other => panic!("expected ack-success + inner using FLOW_ID_A, got: {other:?}"),
         }
     }
 
