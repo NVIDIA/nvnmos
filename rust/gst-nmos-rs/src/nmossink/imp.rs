@@ -173,12 +173,13 @@ impl ObjectImpl for NmosSink {
                 glib::ParamSpecString::builder("transport-file")
                     .nick("Transport file")
                     .blurb(
-                        "Literal contents of the IS-05 transport file: MXL flow_def JSON \
-                         today; SDP later. Pass the text, not a path. Convenient for \
-                         programmatic callers; from gst-launch use `transport-file-path` \
-                         instead. Mutually exclusive with `transport-file-path`. \
-                         When unset and `caps` is supplied the element synthesises a \
-                         flow_def from the essence caps.",
+                        "Literal contents of the NvNmos `transport_file`: MXL flow_def \
+                         JSON today; SDP later. The daemon registers it with the \
+                         resource and re-publishes it via IS-05. Pass the text, not a \
+                         path. Convenient for programmatic callers; from gst-launch \
+                         use `transport-file-path` instead. Mutually exclusive with \
+                         `transport-file-path`. When unset and `caps` is supplied the \
+                         element synthesises a flow_def from the essence caps.",
                     )
                     .mutable_ready()
                     .build(),

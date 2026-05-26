@@ -3,7 +3,7 @@
 
 //! MXL `flow_def` JSON helpers.
 //!
-//! The IS-05 transport_file for transport=mxl is a JSON document
+//! The NvNmos `transport_file` for transport=mxl is a JSON document
 //! whose top-level `id` is the MXL flow id and whose `format` is the
 //! NMOS format URN (`urn:x-nmos:format:video|audio|data`). The
 //! element needs both to configure the inner `mxlsink` / `mxlsrc`

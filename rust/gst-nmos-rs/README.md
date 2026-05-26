@@ -10,78 +10,6 @@ talking to the `nvnmosd` NMOS daemon over gRPC. Design lives in
 [`doc/designs/nvnmosd/README.md`](../../doc/designs/nvnmosd/README.md);
 the workspace overview is in [`../README.md`](../README.md).
 
-## Status
-
-- `nmossrc` and `nmossink` are registered with their current property
-  surface (visible via `gst-inspect-1.0 nmossink` and `gst-inspect-1.0 nmossrc`).
-- `NULL→READY` opens a session against `nvnmosd` via gRPC over UDS
-  and subscribes to activations; `READY→NULL` closes it.
-- When `transport-file` is set, the element also calls `AddSender`
-  (on `nmossink`) or `AddReceiver` (on `nmossrc`) so the resource is
-  published in IS-04 and reachable by IS-05 controllers. When
-  `transport-file` is unset the session is opened but no resource is
-  registered.
-- Activation events arriving on the subscription drive the inner
-  data path. The element re-runs the `mxl-domain-id` / flow id
-  cross-checks against the event's `transport_file` (for MXL
-  receivers this is the daemon-spliced internal `flow_def` carrying
-  the PATCHed `mxl_domain_id` / `mxl_flow_id`), then swaps the
-  inner element between `mxlsink` / `mxlsrc` and the placeholder.
-  Swaps run inline at state ≤ READY and via a single-shot IDLE pad
-  probe at state ≥ PAUSED, following the idiomatic gst-plugins-rs
-  pattern (`transcriberbin`, `fallbackswitch`). The activation is
-  acked back to the daemon as `success=true` when the inner
-  element was successfully brought up (or deactivation completed),
-  and `success=false` with a `failure_reason` when it could not —
-  most commonly because `mxl-domain-path` is unset on this host,
-  or the event's `transport_file` mismatches a user-pinned
-  `mxl-flow-id` / caps-derived flow format.
-- When the resolved configuration pins a Domain path *and* a Flow id
-  (plus a recognised essence shape on the receiver, supplied via
-  `caps` or read from the transport_file's `format`), the inner data
-  path is the real `mxlsink` / `mxlsrc` configured from those
-  values. Otherwise the bin keeps a placeholder `fakesink` /
-  `fakesrc` so the element remains valid in the pipeline.
-- On `nmossink` the `transport-file` may be omitted in favour of the
-  `caps` property: when the user supplies essence caps (`video/x-raw,format=v210,…`,
-  `audio/x-raw,format=F32LE,…`, or `meta/x-st-2038,framerate=…`) plus
-  `mxl-flow-id` and `sender-name`, the element synthesises a MXL
-  `flow_def` JSON document matching the SDK reference shapes in
-  [`mxl/lib/tests/data/`](https://github.com/dmf-mxl/mxl/tree/main/lib/tests/data)
-  and feeds it to `AddSender` as it would a user-supplied
-  transport-file. When both `transport-file*` and `caps` are set the
-  file wins and the caps are ignored.
-- `nmossink` also supports a *deferred mode*: when neither
-  `transport-file*` nor `caps` is supplied at NULL→READY the session
-  opens without a resource, and the actual `AddSender` is driven
-  from `READY→PAUSED`. The ghost sink pad's upstream peer is queried
-  for caps via `gst_pad_peer_query_caps()`, the result is fixated,
-  and the caps-driven flow_def builder runs against those caps; on
-  success the inner element swaps to `mxlsink` and the resource is
-  registered. `mxl-flow-id` / `mxl-domain-id` (or
-  `mxl-domain-path` with a `domain_def.json`) must still be set. If
-  the peer returned ANY/EMPTY caps or a shape the builder can't
-  accept (e.g. `video/x-raw,format=I420`), the state change fails
-  with a clear message telling the user to declare `caps=…` or insert
-  a `capsfilter` upstream. Receiver-side deferred mode is
-  intentionally out of scope — `nmossrc` has no peer to query.
-- `nmossrc` advertises essence caps on its ghost source pad whenever
-  a flow_def is in play. The transport_file (`transport-file*` at
-  NULL→READY, or the daemon-spliced internal one at activation) is
-  reverse-mapped to GStreamer caps (`video/x-raw,format=v210,…`,
-  `audio/x-raw,format=F32LE,…`, `meta/x-st-2038,framerate=…`) and
-  pinned by an internal `mxlsrc ! capsfilter` chain. Downstream caps
-  queries see the concrete shape the flow will carry — this is what
-  makes the canonical `nmossrc ! transform ! nmossink` pipeline work
-  end-to-end at READY→PAUSED, since the deferred `nmossink`'s
-  upstream peer query lands on those pinned caps and `AddSender`
-  runs against the right flow_def. When no transport_file is
-  available (development convenience with `mxl-domain-path` +
-  `mxl-flow-id` + `caps` set but no flow_def supplied), the bare
-  `mxlsrc` is used and its broad pad template propagates; the
-  `caps` media-type still decides which `mxlsrc.{video,audio,data}-flow-id=`
-  slot receives `mxl-flow-id`.
-
 ## Property surface
 
 Set via the standard `prop=value` syntax in `gst-launch-1.0`.
@@ -98,7 +26,7 @@ Both elements:
 | `mxl-domain-path` | string | optional in this scaffold; effectively required once the inner `mxlsink`/`mxlsrc` is wired up | Local filesystem path identifying the MXL Domain on this host. If a `domain_def.json` is present in the directory its `id` is used to populate or cross-check `mxl-domain-id` (see above). The path itself will be consumed by the inner element's `domain=` property when the data path is wired up. |
 | `label`          | string  | optional  | NMOS label. |
 | `description`    | string  | optional  | NMOS description. |
-| `transport-file` | string  | route-dependent | Literal contents of the IS-05 transport file (MXL `flow_def` JSON today; SDP later). Pass text, not a path. Convenient for programmatic callers; gst-launch users want `transport-file-path` instead. Mutually exclusive with `transport-file-path`. On `nmossink`, may be substituted by `caps`. |
+| `transport-file` | string  | route-dependent | Literal contents of the NvNmos `transport_file` (MXL `flow_def` JSON today; SDP later) the daemon will register with the resource and re-publish into IS-05. Pass text, not a path. Convenient for programmatic callers; gst-launch users want `transport-file-path` instead. Mutually exclusive with `transport-file-path`. On `nmossink`, may be substituted by `caps`. |
 | `transport-file-path` | string | route-dependent | Filesystem path read at NULL→READY into `transport-file`. Convenience for `gst-launch-1.0`, whose pipeline parser doesn't cope with multi-line / quote-heavy property values. Mutually exclusive with `transport-file`. |
 | `caps`           | GstCaps | required when `transport-file*` is unset | Essence caps. Supported shapes (mirroring `mxlsink`'s pad template): `video/x-raw,format=v210,width=…,height=…,framerate=…[,interlace-mode=…]`; `audio/x-raw,format=F32LE,rate=…,channels=…`; `meta/x-st-2038,framerate=…` (the framerate must be present — set it upstream with a `capsfilter caps="meta/x-st-2038,framerate=30/1"` if needed). On `nmossink`, drives flow_def JSON synthesis when `transport-file*` is unset. On `nmossrc`, the media-type structure name (`video/x-raw` / `audio/x-raw` / `meta/x-st-2038`) decides which `mxlsrc.{video,audio,data}-flow-id=` slot receives `mxl-flow-id`. Cross-checked against the transport_file's `format` field when both are supplied. |
 | `transport-caps` | GstCaps | optional  | Typically empty for MXL. |
@@ -292,3 +220,75 @@ its ghost src pad; `nmossink` (deferred) peer-queries them through
 caps, and calls `AddSender`. The daemon log shows both
 `AddReceiver` (from `nmossrc`) and `AddSender` (from the deferred
 `nmossink`) on the same node.
+
+## Status
+
+- `nmossrc` and `nmossink` are registered with their current property
+  surface (visible via `gst-inspect-1.0 nmossink` and `gst-inspect-1.0 nmossrc`).
+- `NULL→READY` opens a session against `nvnmosd` via gRPC over UDS
+  and subscribes to activations; `READY→NULL` closes it.
+- When `transport-file` is set, the element also calls `AddSender`
+  (on `nmossink`) or `AddReceiver` (on `nmossrc`) so the resource is
+  published in IS-04 and reachable by IS-05 controllers. When
+  `transport-file` is unset the session is opened but no resource is
+  registered.
+- Activation events arriving on the subscription drive the inner
+  data path. The element re-runs the `mxl-domain-id` / flow id
+  cross-checks against the event's `transport_file` (for MXL
+  receivers this is the daemon-spliced internal `flow_def` carrying
+  the PATCHed `mxl_domain_id` / `mxl_flow_id`), then swaps the
+  inner element between `mxlsink` / `mxlsrc` and the placeholder.
+  Swaps run inline at state ≤ READY and via a single-shot IDLE pad
+  probe at state ≥ PAUSED, following the idiomatic gst-plugins-rs
+  pattern (`transcriberbin`, `fallbackswitch`). The activation is
+  acked back to the daemon as `success=true` when the inner
+  element was successfully brought up (or deactivation completed),
+  and `success=false` with a `failure_reason` when it could not —
+  most commonly because `mxl-domain-path` is unset on this host,
+  or the event's `transport_file` mismatches a user-pinned
+  `mxl-flow-id` / caps-derived flow format.
+- When the resolved configuration pins a Domain path *and* a Flow id
+  (plus a recognised essence shape on the receiver, supplied via
+  `caps` or read from the transport_file's `format`), the inner data
+  path is the real `mxlsink` / `mxlsrc` configured from those
+  values. Otherwise the bin keeps a placeholder `fakesink` /
+  `fakesrc` so the element remains valid in the pipeline.
+- On `nmossink` the `transport-file` may be omitted in favour of the
+  `caps` property: when the user supplies essence caps (`video/x-raw,format=v210,…`,
+  `audio/x-raw,format=F32LE,…`, or `meta/x-st-2038,framerate=…`) plus
+  `mxl-flow-id` and `sender-name`, the element synthesises a MXL
+  `flow_def` JSON document matching the SDK reference shapes in
+  [`mxl/lib/tests/data/`](https://github.com/dmf-mxl/mxl/tree/main/lib/tests/data)
+  and feeds it to `AddSender` as it would a user-supplied
+  transport-file. When both `transport-file*` and `caps` are set the
+  file wins and the caps are ignored.
+- `nmossink` also supports a *deferred mode*: when neither
+  `transport-file*` nor `caps` is supplied at NULL→READY the session
+  opens without a resource, and the actual `AddSender` is driven
+  from `READY→PAUSED`. The ghost sink pad's upstream peer is queried
+  for caps via `gst_pad_peer_query_caps()`, the result is fixated,
+  and the caps-driven flow_def builder runs against those caps; on
+  success the inner element swaps to `mxlsink` and the resource is
+  registered. `mxl-flow-id` / `mxl-domain-id` (or
+  `mxl-domain-path` with a `domain_def.json`) must still be set. If
+  the peer returned ANY/EMPTY caps or a shape the builder can't
+  accept (e.g. `video/x-raw,format=I420`), the state change fails
+  with a clear message telling the user to declare `caps=…` or insert
+  a `capsfilter` upstream. Receiver-side deferred mode is
+  intentionally out of scope — `nmossrc` has no peer to query.
+- `nmossrc` advertises essence caps on its ghost source pad whenever
+  a flow_def is in play. The transport_file (`transport-file*` at
+  NULL→READY, or the daemon-spliced internal one at activation) is
+  reverse-mapped to GStreamer caps (`video/x-raw,format=v210,…`,
+  `audio/x-raw,format=F32LE,…`, `meta/x-st-2038,framerate=…`) and
+  pinned by an internal `mxlsrc ! capsfilter` chain. Downstream caps
+  queries see the concrete shape the flow will carry — this is what
+  makes the canonical `nmossrc ! transform ! nmossink` pipeline work
+  end-to-end at READY→PAUSED, since the deferred `nmossink`'s
+  upstream peer query lands on those pinned caps and `AddSender`
+  runs against the right flow_def. When no transport_file is
+  available (development convenience with `mxl-domain-path` +
+  `mxl-flow-id` + `caps` set but no flow_def supplied), the bare
+  `mxlsrc` is used and its broad pad template propagates; the
+  `caps` media-type still decides which `mxlsrc.{video,audio,data}-flow-id=`
+  slot receives `mxl-flow-id`.
