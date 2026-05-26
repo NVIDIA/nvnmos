@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # NMOS Daemon and GStreamer Plugin
 
 A plan for a new way of supporting NMOS in GStreamer, replacing the bin-based `nvdsnmosbin` approach with an out-of-process NMOS daemon (`nvnmosd`) and a pair of single-pad GStreamer elements (`nmossrc`, `nmossink`). NvNmos provides the NMOS implementation inside the daemon; GStreamer plugins talk to the daemon over a small gRPC protocol.
