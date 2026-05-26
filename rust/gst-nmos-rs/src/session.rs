@@ -251,14 +251,16 @@ pub(crate) enum InnerConfig {
         /// Unspecified on `nmossink` — `mxlsink` has only one
         /// flow-id slot — and one of Video/Audio/Data on `nmossrc`.
         format: FlowFormat,
-        /// Resolved `flow_def` JSON (when one is in play). Receivers
-        /// reverse-map this into essence Caps and pin them on the
-        /// ghost source pad so downstream caps queries see the
-        /// concrete shape the flow will carry (rather than the broad
-        /// `mxlsrc` pad template). Senders ignore it. `None` when no
-        /// transport file is available, e.g. deferred-mode sender
-        /// registration or receiver dev convenience with properties
-        /// only.
+        /// Resolved `flow_def` JSON (when one is in play, whether
+        /// supplied via `transport-file*` or synthesised from `caps`).
+        /// Receivers reverse-map this into essence Caps and pin them
+        /// on the ghost source pad so downstream caps queries see
+        /// the concrete shape the flow will carry (rather than the
+        /// broad `mxlsrc` pad template). Senders ignore it. `None`
+        /// only when neither a transport file nor a synthesise-able
+        /// caps + `mxl-flow-id` pairing was supplied at NULL→READY
+        /// (e.g. deferred-mode Senders awaiting peer caps, or
+        /// Receivers whose `mxl-flow-id` will arrive via IS-05 PATCH).
         transport_file: Option<String>,
     },
     Placeholder {
@@ -425,16 +427,27 @@ pub(crate) fn validate_and_open(
 }
 
 /// If the user supplied a `transport-file` (literal or path), pass
-/// it through; otherwise, when `caps` is set on a Sender, synthesise
-/// a flow_def JSON document via [`flow_def::build_from_caps`]. When
-/// *both* are set, the file is passed through and the caps are
+/// it through; otherwise, when `caps` is set and `mxl-flow-id` is
+/// non-empty, synthesise a flow_def JSON document via
+/// [`flow_def::build_from_caps`]. When *both* a transport file and
+/// `caps` are set, the file is passed through and the caps are
 /// cross-checked against the file's `format` further down the
 /// validate path (a mismatch is a hard error, not silently dropped).
 ///
-/// Receiver-side caps→flow_def is intentionally not wired here: a
-/// Receiver's transport-file describes the *Sender's* flow (IS-05
-/// PATCH), not its own essence caps; the deferred-mode work will
-/// add upstream/IS-05 driven flow_def discovery.
+/// Senders and Receivers both go through synthesis: a Sender's
+/// `flow_def` describes the Flow it produces; a Receiver's *configuring*
+/// `flow_def` describes the essence shape this Receiver is configured
+/// to accept (BCP-004-01 narrow Receiver Caps), with the `urn:x-nvnmos:tag:caps`
+/// tag spliced in by `receiver-caps-mode` to indicate narrow vs wide.
+/// The live transport file that arrives via IS-05 PATCH replaces the
+/// subscription-relevant fields (mxl-flow-id, etc.) at activation time
+/// but the configuring file is what the daemon uses for IS-04
+/// advertisement at registration time.
+///
+/// Returns `Ok(None)` when nothing can be synthesised — neither a
+/// transport file nor enough property state to build one. The element
+/// then opens the session without a transport file and runs on the
+/// placeholder data path until an IS-05 activation arrives.
 fn synthesise_or_passthrough(
     cat: &gst::DebugCategory,
     element: &str,
@@ -451,35 +464,32 @@ fn synthesise_or_passthrough(
             Ok(Some(text))
         }
         (Some(text), None) => Ok(Some(text)),
-        (None, Some(caps)) => match settings.side {
-            Side::Sender => {
-                let json = flow_def::build_from_caps(&FlowDefBuildInput {
-                    flow_id: &settings.mxl_flow_id,
-                    name: &settings.name,
-                    mxl_domain_id: resolved_mxl_domain_id,
-                    label: &settings.label,
-                    description: &settings.description,
-                    caps,
-                })
-                .with_context(|| format!("{element}: synthesising flow_def from caps"))?;
-                gst::info!(cat, "{element}: synthesised flow_def from `caps`");
-                Ok(Some(json))
-            }
-            Side::Receiver => {
-                // On `nmossrc` the caps decide which `mxlsrc`
-                // flow-id slot to use (see [`caps_format`]) but the
-                // receiver does not synthesise a flow_def — the
-                // daemon ships the live transport file at IS-05
-                // activation time, and a receiver driven entirely
-                // by properties (development convenience) runs
-                // against `mxlsrc` directly without one.
+        (None, Some(caps)) => {
+            if settings.mxl_flow_id.is_empty() {
                 gst::debug!(
                     cat,
-                    "{element}: `caps` consumed by mxlsrc flow-format selection"
+                    "{element}: `caps` set but `mxl-flow-id` empty; deferring flow_def \
+                     synthesis (the placeholder data path will be in use until an IS-05 \
+                     activation supplies the flow id)"
                 );
-                Ok(None)
+                return Ok(None);
             }
-        },
+            let json = flow_def::build_from_caps(&FlowDefBuildInput {
+                flow_id: &settings.mxl_flow_id,
+                name: &settings.name,
+                mxl_domain_id: resolved_mxl_domain_id,
+                label: &settings.label,
+                description: &settings.description,
+                caps,
+            })
+            .with_context(|| format!("{element}: synthesising flow_def from caps"))?;
+            gst::info!(
+                cat,
+                "{element}: synthesised flow_def from `caps` (side={:?})",
+                settings.side,
+            );
+            Ok(Some(json))
+        }
         (None, None) => Ok(None),
     }
 }
@@ -1302,6 +1312,96 @@ mod tests {
             assert!(
                 format!("{err:#}").contains("no open session"),
                 "expected no-open-session reason: {err:#}"
+            );
+        }
+    }
+
+    mod synthesise_or_passthrough {
+        use super::*;
+
+        fn parse(json: &str) -> serde_json::Value {
+            serde_json::from_str(json).expect("synthesised JSON must parse")
+        }
+
+        /// Caps + `mxl-flow-id` on a Receiver synthesises a configuring
+        /// flow_def the daemon can use to advertise narrow Receiver
+        /// Caps on IS-04. The synthesised shape matches what the
+        /// equivalent Sender call would produce — `build_from_caps`
+        /// is symmetric.
+        #[test]
+        fn receiver_caps_and_flow_id_synthesise_flow_def() {
+            let s = CommonSettings {
+                mxl_flow_id: FLOW_ID_A.to_owned(),
+                name: "video-receiver".to_owned(),
+                label: "Studio A camera".to_owned(),
+                description: "v210 1080p50".to_owned(),
+                caps: Some(video_caps()),
+                ..settings(Side::Receiver)
+            };
+            let out = super::synthesise_or_passthrough(&cat(), "nmossrc", &s, DOMAIN_ID, None)
+                .expect("synthesis must succeed");
+            let text = out.expect("Receiver synthesis must yield Some(json) when caps + flow id are set");
+            let v = parse(&text);
+            assert_eq!(v["id"], FLOW_ID_A);
+            assert_eq!(v["format"], "urn:x-nmos:format:video");
+            assert_eq!(v["media_type"], "video/v210");
+            assert_eq!(v["label"], "Studio A camera");
+            assert_eq!(v["description"], "v210 1080p50");
+            assert_eq!(v["tags"]["urn:x-nvnmos:tag:name"][0], "video-receiver");
+            assert_eq!(v["tags"]["urn:x-nvnmos:tag:mxl-domain-id"][0], DOMAIN_ID);
+        }
+
+        /// Receiver synthesis is gated on `mxl-flow-id`: without it
+        /// we have nothing to subscribe to and no stable id for the
+        /// configuring flow_def. Returning `None` puts the element
+        /// on the placeholder path until an IS-05 activation supplies
+        /// the missing piece.
+        #[test]
+        fn receiver_caps_without_flow_id_returns_none() {
+            let s = CommonSettings {
+                caps: Some(video_caps()),
+                ..settings(Side::Receiver)
+            };
+            assert!(s.mxl_flow_id.is_empty(), "test precondition");
+            let out = super::synthesise_or_passthrough(&cat(), "nmossrc", &s, DOMAIN_ID, None)
+                .expect("absent flow id must not error");
+            assert!(out.is_none(), "Receiver without flow id must not synthesise");
+        }
+
+        /// Sender synthesis still works the same way. Sanity check
+        /// against future refactors of the shared arm.
+        #[test]
+        fn sender_caps_and_flow_id_synthesise_flow_def() {
+            let s = CommonSettings {
+                mxl_flow_id: FLOW_ID_A.to_owned(),
+                name: "video-sender".to_owned(),
+                caps: Some(video_caps()),
+                ..settings(Side::Sender)
+            };
+            let out = super::synthesise_or_passthrough(&cat(), "nmossink", &s, DOMAIN_ID, None)
+                .expect("Sender synthesis must succeed");
+            let v = parse(&out.expect("Sender synthesis yields Some(json)"));
+            assert_eq!(v["id"], FLOW_ID_A);
+            assert_eq!(v["tags"]["urn:x-nvnmos:tag:name"][0], "video-sender");
+        }
+
+        /// When the user supplies a literal transport file, it is
+        /// passed through verbatim regardless of side or whether
+        /// `caps` is also set (caps cross-check happens further down).
+        #[test]
+        fn passthrough_wins_over_caps_synthesis() {
+            let s = CommonSettings {
+                mxl_flow_id: FLOW_ID_B.to_owned(),
+                caps: Some(video_caps()),
+                ..settings(Side::Receiver)
+            };
+            let resolved = Some(video_flow_def(FLOW_ID_A));
+            let out = super::synthesise_or_passthrough(&cat(), "nmossrc", &s, DOMAIN_ID, resolved.clone())
+                .expect("passthrough must succeed");
+            assert_eq!(
+                out.as_deref(),
+                resolved.as_deref(),
+                "transport file must pass through unchanged when supplied"
             );
         }
     }

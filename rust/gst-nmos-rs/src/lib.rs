@@ -58,17 +58,29 @@
 //!
 //! `nmossrc` advertises essence caps on its ghost source pad
 //! whenever a flow_def is in play (`transport-file*` at NULL→READY,
-//! or the daemon-spliced internal transport file at activation).
-//! The flow_def is reverse-mapped via
-//! [`flow_def::caps_from_flow_def`] and pinned by an internal
-//! `mxlsrc ! capsfilter` chain so downstream caps queries see the
-//! concrete shape the flow will carry — the canonical
-//! `nmossrc ! transform ! nmossink` pipeline then resolves end-to-end
-//! at READY→PAUSED: the deferred `nmossink`'s peer_query_caps lands
-//! on the pinned caps and `AddSender` runs against the right
-//! flow_def. When no transport file is in play (development
-//! convenience with properties only) the bare `mxlsrc` is used and
-//! its broad pad template propagates.
+//! a flow_def synthesised from `caps + mxl-flow-id`, or the
+//! daemon-spliced internal transport file at activation). The
+//! flow_def is reverse-mapped via [`flow_def::caps_from_flow_def`]
+//! and pinned by an internal `mxlsrc ! capsfilter` chain so
+//! downstream caps queries see the concrete shape the flow will
+//! carry — the canonical `nmossrc ! transform ! nmossink` pipeline
+//! then resolves end-to-end at READY→PAUSED: the deferred
+//! `nmossink`'s peer_query_caps lands on the pinned caps and
+//! `AddSender` runs against the right flow_def.
+//!
+//! Receiver-side caps→flow_def synthesis is symmetric with the
+//! Sender path: `nmossrc` with `caps` + `mxl-flow-id` (no transport
+//! file) builds a configuring flow_def that the daemon then
+//! advertises as BCP-004-01 narrow Receiver Caps on IS-04, with the
+//! `urn:x-nvnmos:tag:caps` tag spliced by `receiver-caps-mode` to
+//! indicate narrow vs wide. The semantic distinction from a Sender's
+//! flow_def is that a Receiver's configuring file describes "what
+//! this Receiver expects to consume"; the live transport file
+//! arriving via IS-05 PATCH later replaces the subscription fields
+//! (mxl-flow-id, etc.) without overwriting the Receiver Caps
+//! advertisement. When `mxl-flow-id` is unset there is no stable
+//! subscription target yet, so the bare `mxlsrc` is used and its
+//! broad pad template propagates until IS-05 activation supplies one.
 
 use std::sync::LazyLock;
 

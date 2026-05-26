@@ -604,9 +604,10 @@ fn install_initial_placeholder(bin: &gst::Bin) -> Result<gst::GhostPad, glib::Bo
 
 /// Reverse-map a resolved transport file into essence caps that
 /// the bin should advertise on its ghost src pad. `None` is
-/// returned when no transport file is in play (development
-/// convenience path where only properties are set); the caller
-/// then builds a bare `mxlsrc` whose broad pad template propagates.
+/// returned when no transport file is in play (the placeholder
+/// data path is in use until an IS-05 activation supplies one);
+/// the caller then builds a bare `mxlsrc` whose broad pad template
+/// propagates.
 fn derive_advertise_caps(
     transport_file: Option<&str>,
 ) -> Result<Option<gst::Caps>, anyhow::Error> {
