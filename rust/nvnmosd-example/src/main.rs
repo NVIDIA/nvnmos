@@ -37,9 +37,11 @@
 //!     `success = true`. Stays alive for the rest of the resource phase
 //!     so IS-05 PATCHes against libnvnmos can drive the round-trip.
 //! 11. `AddSender` — register a sender, assert `resource_id` matches
-//!     `nvnmos::make_sender_id(seed, internal_id)`.
-//! 12. `AddReceiver` — register a receiver, assert `resource_id` matches
-//!     `nvnmos::make_receiver_id(seed, internal_id)`.
+//!     `nvnmos::make_sender_id(seed, name)`.
+//! 12. `AddReceiver` — register a receiver with the same `name` as the
+//!     sender in (11) to exercise the side-disambiguated namespace, and
+//!     assert `resource_id` matches `nvnmos::make_receiver_id(seed,
+//!     name)` (a distinct UUID from the sender's).
 //! 13. `SyncResourceState` on the sender with an updated transport_file
 //!     (bumped SDP session version) — exercises the (re)activate path.
 //!     (`SyncResourceState` deliberately does not fire the activation
@@ -55,7 +57,7 @@
 //!     `resource_handle` and `transport_file` presence match the
 //!     PATCH. Skipped via `--skip-is05` when libnvnmos's HTTP server
 //!     isn't reachable.
-//! 16. `AddSender` with `internal_id` ≠ SDP's `x-nvnmos-id` — expect
+//! 16. `AddSender` with `name` ≠ SDP's `x-nvnmos-name` — expect
 //!     `INVALID_ARGUMENT` (daemon-side mismatch detection).
 //! 17. `RemoveResource` — drop the sender; the receiver survives.
 //! 18. Optional hold: with `--hold-secs N>0`, sleep N seconds with the
@@ -83,7 +85,8 @@ use nvnmos_rpc::v1::{
     AckActivationRequest, ActivationEvent, AddNodeRequest, AddNodeResponse, AddReceiverRequest,
     AddResourceResponse, AddSenderRequest, AssetConfig, CloseSessionRequest, NodeConfig,
     OpenSessionRequest, OpenSessionResponse, RemoveNodeRequest, RemoveResourceRequest,
-    SubscribeActivationsRequest, SyncResourceStateRequest, Transport as ProtoTransport,
+    Side as ProtoSide, SubscribeActivationsRequest, SyncResourceStateRequest,
+    Transport as ProtoTransport,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
@@ -279,45 +282,62 @@ async fn main() -> anyhow::Result<()> {
         spawn_auto_ack_task(client.clone(), r.session_handle.clone()).await?;
 
     // (11) AddSender on the happy path. Cross-check the daemon's returned
-    // resource_id against the pure helper.
-    let sender_internal_id = "video-sender-a";
+    // resource_id against the pure helper. The sender and receiver
+    // deliberately share the same `name` ("video-a") to exercise the
+    // Node-scoped, side-disambiguated namespace: a Sender and a
+    // Receiver may share a name, and the daemon distinguishes them
+    // (in `by_name`, in `ActivationEvent.side`, and in
+    // `nmos_connection_activate(side, ...)`).
+    let sender_name = "video-a";
     let sender_resp = add_sender(
         &mut client,
         &r.session_handle,
-        sender_internal_id,
-        &build_video_sdp(sender_internal_id, true, &iface_ip),
+        sender_name,
+        &build_video_sdp(sender_name, true, &iface_ip),
     )
     .await?;
-    let expected_sender_id = nvnmos::make_sender_id(&resource_seed, sender_internal_id)
+    let expected_sender_id = nvnmos::make_sender_id(&resource_seed, sender_name)
         .context("make_sender_id")?;
     anyhow::ensure!(
         sender_resp.resource_id == expected_sender_id,
         "AddSender returned resource_id {} but make_sender_id({:?}, {:?}) says {}",
         sender_resp.resource_id,
         resource_seed,
-        sender_internal_id,
+        sender_name,
         expected_sender_id,
     );
 
-    // (12) AddReceiver, same cross-check.
-    let receiver_internal_id = "video-receiver-a";
+    // (12) AddReceiver with the same `name` as the sender above; the
+    // daemon must accept this because Sender and Receiver are separate
+    // namespaces. Cross-check the returned receiver id against
+    // `make_receiver_id` (which uses a different UUID salt than the
+    // sender variant, so the resulting ids must differ even though the
+    // names match).
+    let receiver_name = "video-a";
     let receiver_resp = add_receiver(
         &mut client,
         &r.session_handle,
-        receiver_internal_id,
-        &build_video_sdp(receiver_internal_id, false, &iface_ip),
+        receiver_name,
+        &build_video_sdp(receiver_name, false, &iface_ip),
     )
     .await?;
     let expected_receiver_id =
-        nvnmos::make_receiver_id(&resource_seed, receiver_internal_id)
+        nvnmos::make_receiver_id(&resource_seed, receiver_name)
             .context("make_receiver_id")?;
     anyhow::ensure!(
         receiver_resp.resource_id == expected_receiver_id,
         "AddReceiver returned resource_id {} but make_receiver_id({:?}, {:?}) says {}",
         receiver_resp.resource_id,
         resource_seed,
-        receiver_internal_id,
+        receiver_name,
         expected_receiver_id,
+    );
+    anyhow::ensure!(
+        sender_resp.resource_id != receiver_resp.resource_id,
+        "Sender and Receiver shared the same name {:?} but their NMOS \
+         UUIDs collided: {}",
+        sender_name,
+        sender_resp.resource_id,
     );
 
     // (13) SyncResourceState on the sender with a fresh transport_file.
@@ -325,7 +345,7 @@ async fn main() -> anyhow::Result<()> {
     // so libnvnmos sees a real change. The daemon maps this onto
     // `nmos_connection_activate(Some(_))`.
     let updated_sender_sdp =
-        build_video_sdp(sender_internal_id, true, &iface_ip).replacen("o=- 0 0", "o=- 0 1", 1);
+        build_video_sdp(sender_name, true, &iface_ip).replacen("o=- 0 0", "o=- 0 1", 1);
     sync_resource_state(
         &mut client,
         &r.session_handle,
@@ -382,24 +402,24 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("--skip-is05 set; skipping the in-band IS-05 PATCH round-trip");
     }
 
-    // (16) Mismatch: claim internal_id="claimed" but build the SDP with a
-    // different x-nvnmos-id ("real"). The daemon detects this by asking
-    // libnvnmos to look up the claimed id after the add and returns
-    // INVALID_ARGUMENT when the lookup misses.
+    // (16) Mismatch: claim name="claimed-id" but build the SDP with a
+    // different x-nvnmos-name ("real-id"). The daemon detects this by
+    // asking libnvnmos to look up the claimed name after the add and
+    // returns INVALID_ARGUMENT when the lookup misses.
     let mismatch_sdp = build_video_sdp("real-id", true, &iface_ip);
     let mismatch_resp = client
         .add_sender(AddSenderRequest {
             session_handle: r.session_handle.clone(),
             transport: ProtoTransport::Rtp as i32,
             transport_file: mismatch_sdp,
-            internal_id: "claimed-id".to_string(),
+            name: "claimed-id".to_string(),
         })
         .await;
     match mismatch_resp {
         Err(status) if status.code() == Code::InvalidArgument => {
             tracing::info!(
                 grpc_message = %status.message(),
-                "AddSender correctly rejected internal_id / x-nvnmos-id mismatch"
+                "AddSender correctly rejected name vs x-nvnmos-name mismatch"
             );
         }
         Err(status) => anyhow::bail!(
@@ -491,10 +511,13 @@ async fn spawn_auto_ack_task(
             match stream.message().await {
                 Ok(Some(event)) => {
                     let activated = event.transport_file.is_some();
+                    let side = ProtoSide::try_from(event.side)
+                        .unwrap_or(ProtoSide::Unspecified);
                     tracing::info!(
                         session_handle,
                         resource_handle = %event.resource_handle,
                         activation_handle = %event.activation_handle,
+                        side = ?side,
                         activated,
                         "received activation; auto-acking",
                     );
@@ -638,16 +661,16 @@ async fn remove_node(
 async fn add_sender(
     client: &mut NvnmosDaemonClient<Channel>,
     session_handle: &str,
-    internal_id: &str,
+    sender_name: &str,
     transport_file: &str,
 ) -> anyhow::Result<AddResourceResponse> {
-    tracing::info!(session_handle, internal_id, "AddSender");
+    tracing::info!(session_handle, sender_name, "AddSender");
     let resp = client
         .add_sender(AddSenderRequest {
             session_handle: session_handle.to_string(),
             transport: ProtoTransport::Rtp as i32,
             transport_file: transport_file.to_string(),
-            internal_id: internal_id.to_string(),
+            name: sender_name.to_string(),
         })
         .await
         .context("AddSender failed")?
@@ -663,16 +686,16 @@ async fn add_sender(
 async fn add_receiver(
     client: &mut NvnmosDaemonClient<Channel>,
     session_handle: &str,
-    internal_id: &str,
+    receiver_name: &str,
     transport_file: &str,
 ) -> anyhow::Result<AddResourceResponse> {
-    tracing::info!(session_handle, internal_id, "AddReceiver");
+    tracing::info!(session_handle, receiver_name, "AddReceiver");
     let resp = client
         .add_receiver(AddReceiverRequest {
             session_handle: session_handle.to_string(),
             transport: ProtoTransport::Rtp as i32,
             transport_file: transport_file.to_string(),
-            internal_id: internal_id.to_string(),
+            name: receiver_name.to_string(),
         })
         .await
         .context("AddReceiver failed")?
@@ -857,9 +880,16 @@ async fn drive_connection_sender_activation(
         event.transport_file.is_some(),
         expect_active,
     );
+    let event_side = ProtoSide::try_from(event.side).unwrap_or(ProtoSide::Unspecified);
+    anyhow::ensure!(
+        event_side == ProtoSide::Sender,
+        "ActivationEvent for a sender PATCH had wrong side: got {:?}",
+        event_side,
+    );
     tracing::info!(
         resource_handle = %event.resource_handle,
         activation_handle = %event.activation_handle,
+        side = ?event_side,
         expect_active,
         "IS-05 activation round-trip observed on activations stream",
     );
@@ -870,7 +900,7 @@ async fn drive_connection_sender_activation(
 /// `build_video_sdp` (same parameter set; same encoding parameters); the
 /// example client is intentionally self-contained, so duplication is
 /// preferable to a shared "test fixtures" crate.
-fn build_video_sdp(internal_id: &str, sender: bool, iface_ip: &str) -> String {
+fn build_video_sdp(name: &str, sender: bool, iface_ip: &str) -> String {
     const MULTICAST_IP: &str = "233.252.0.0";
     const SOURCE_IP: &str = "192.0.2.0";
     const DESTINATION_PORT: u16 = 5020;
@@ -885,9 +915,9 @@ fn build_video_sdp(internal_id: &str, sender: bool, iface_ip: &str) -> String {
     let mut out = format!(
         "v=0\r\n\
          o=- 0 0 IN IP4 {iface_ip}\r\n\
-         s=nvnmosd-example video {direction} {internal_id}\r\n\
+         s=nvnmosd-example video {direction} {name}\r\n\
          t=0 0\r\n\
-         a=x-nvnmos-id:{internal_id}\r\n\
+         a=x-nvnmos-name:{name}\r\n\
          m=video {DESTINATION_PORT} RTP/AVP {PAYLOAD_TYPE}\r\n\
          c=IN IP4 {MULTICAST_IP}/64\r\n\
          a=source-filter: incl IN IP4 {MULTICAST_IP} {filter_src}\r\n\

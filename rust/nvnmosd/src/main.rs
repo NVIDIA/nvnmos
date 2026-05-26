@@ -41,7 +41,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::{Request, Response, Status};
 
-use crate::state::{AckOutcome, ActivationDispatch, State};
+use crate::state::{AckOutcome, ActivationDispatch, Side, State};
 
 /// Bound on the per-session activations stream. Small because activations
 /// are rare (one per IS-05 PATCH) and the consumer is expected to ack
@@ -195,7 +195,7 @@ impl NvnmosDaemon for Daemon {
                 &req.session_handle,
                 transport,
                 &req.transport_file,
-                &req.internal_id,
+                &req.name,
             )?
         };
         tracing::info!(
@@ -203,8 +203,8 @@ impl NvnmosDaemon for Daemon {
             node_seed = %outcome.node_seed,
             resource_handle = %outcome.resource_handle,
             resource_id = %outcome.resource_id,
-            internal_id = %req.internal_id,
-            kind = outcome.kind.label(),
+            name = %req.name,
+            side = outcome.side.label(),
             "AddSender",
         );
         Ok(Response::new(AddResourceResponse {
@@ -225,7 +225,7 @@ impl NvnmosDaemon for Daemon {
                 &req.session_handle,
                 transport,
                 &req.transport_file,
-                &req.internal_id,
+                &req.name,
             )?
         };
         tracing::info!(
@@ -233,8 +233,8 @@ impl NvnmosDaemon for Daemon {
             node_seed = %outcome.node_seed,
             resource_handle = %outcome.resource_handle,
             resource_id = %outcome.resource_id,
-            internal_id = %req.internal_id,
-            kind = outcome.kind.label(),
+            name = %req.name,
+            side = outcome.side.label(),
             "AddReceiver",
         );
         Ok(Response::new(AddResourceResponse {
@@ -256,8 +256,8 @@ impl NvnmosDaemon for Daemon {
             session_handle = %req.session_handle,
             resource_handle = %req.resource_handle,
             node_seed = %outcome.node_seed,
-            internal_id = %outcome.internal_id,
-            kind = outcome.kind.label(),
+            name = %outcome.name,
+            side = outcome.side.label(),
             "RemoveResource",
         );
         Ok(Response::new(Empty {}))
@@ -324,8 +324,8 @@ impl NvnmosDaemon for Daemon {
             session_handle = %req.session_handle,
             resource_handle = %req.resource_handle,
             node_seed = %outcome.node_seed,
-            internal_id = %outcome.internal_id,
-            kind = outcome.kind.label(),
+            name = %outcome.name,
+            side = outcome.side.label(),
             activated = outcome.activated,
             "SyncResourceState",
         );
@@ -378,9 +378,10 @@ fn route_activation(
     node_seed: &str,
     act: &Activation<'_>,
 ) -> std::result::Result<(), String> {
+    let side = Side::from_wrapper(act.side);
     let dispatch = {
         let mut s = state.lock().expect("daemon state mutex poisoned");
-        s.dispatch_activation(node_seed, act.internal_id, act.transport_file)
+        s.dispatch_activation(node_seed, side, act.name, act.transport_file)
     };
     let (activation_handle, ack_rx) = match dispatch {
         ActivationDispatch::Routed {
@@ -390,17 +391,19 @@ fn route_activation(
         ActivationDispatch::NoResource => {
             tracing::warn!(
                 node_seed,
-                internal_id = act.internal_id,
+                side = side.label(),
+                name = act.name,
                 activated = act.transport_file.is_some(),
                 "activation for unknown resource (likely a stray from a \
-                 prior internal_id mismatch); NACKing",
+                 prior name mismatch); NACKing",
             );
             return Err("resource not registered with daemon".to_string());
         }
         ActivationDispatch::NoSubscriber => {
             tracing::warn!(
                 node_seed,
-                internal_id = act.internal_id,
+                side = side.label(),
+                name = act.name,
                 activated = act.transport_file.is_some(),
                 "activation for resource whose owning session has no \
                  SubscribeActivations stream; NACKing",
@@ -410,7 +413,8 @@ fn route_activation(
         ActivationDispatch::SubscriberBusy => {
             tracing::warn!(
                 node_seed,
-                internal_id = act.internal_id,
+                side = side.label(),
+                name = act.name,
                 activated = act.transport_file.is_some(),
                 "subscriber stream buffer full; NACKing",
             );

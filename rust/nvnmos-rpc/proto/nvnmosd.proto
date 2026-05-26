@@ -67,15 +67,18 @@ service NvnmosDaemon {
 
   // -------- Resource lifecycle --------
   //
-  // `internal_id` identifies the sender or receiver uniquely within the
-  // Node. Together with the Node's seed it determines the resource's
-  // NMOS `/senders/<id>` or `/receivers/<id>` UUID deterministically.
+  // `name` is the caller-chosen identifier for the sender or receiver,
+  // unique within the Node *per side*: a Sender and a Receiver are
+  // permitted to share a `name`, but two Senders or two Receivers may
+  // not. Together with the Node's seed and the resource side (Sender
+  // or Receiver), `name` deterministically identifies the NMOS
+  // `/senders/<id>` or `/receivers/<id>` UUID.
   //
   // `transport_file` carries the resource's transport definition: an
   // SDP for `TRANSPORT_RTP`, or an MXL `flow_def` JSON for
-  // `TRANSPORT_MXL`. It **must** embed `internal_id` as the
-  // session-level `x-nvnmos-id` attribute (SDP) or `x-nvnmos-id`
-  // property (MXL JSON). The daemon rejects a mismatch with
+  // `TRANSPORT_MXL`. It **must** embed `name` as the session-level
+  // `a=x-nvnmos-name` attribute (SDP) or the `urn:x-nvnmos:tag:name` tag
+  // (MXL `flow_def`). The daemon rejects a mismatch with
   // `INVALID_ARGUMENT`.
   //
   // The returned `resource_handle` is the daemon's local addressing
@@ -126,6 +129,18 @@ enum Transport {
   TRANSPORT_UNSPECIFIED = 0;
   TRANSPORT_RTP = 1;
   TRANSPORT_MXL = 2;
+}
+
+// Identifies a resource as either a Sender or a Receiver. Used on
+// `ActivationEvent` so the client knows which side of the connection
+// the activation applies to without having to consult its own
+// resource_handle table; the daemon already has the information.
+// `UNSPECIFIED` is the proto3 zero value and is never sent by the
+// daemon.
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_SENDER = 1;
+  SIDE_RECEIVER = 2;
 }
 
 // -------- Node config --------
@@ -264,10 +279,12 @@ message CloseSessionRequest {
 message AddSenderRequest {
   string session_handle = 1;
 
-  // Unique id of the sender within this Node. Must be non-empty and
-  // must equal the `x-nvnmos-id` embedded in `transport_file`. See the
-  // `Resource lifecycle` section above.
-  string internal_id = 2;
+  // Caller-chosen name for the sender, unique among Senders on this
+  // Node (a Receiver on the same Node may share the same name). Must
+  // be non-empty and must equal the `name` embedded in
+  // `transport_file` (`a=x-nvnmos-name` for SDP, `urn:x-nvnmos:tag:name`
+  // for MXL `flow_def`). See the `Resource lifecycle` section above.
+  string name = 2;
 
   Transport transport = 3;
 
@@ -278,10 +295,12 @@ message AddSenderRequest {
 message AddReceiverRequest {
   string session_handle = 1;
 
-  // Unique id of the receiver within this Node. Must be non-empty and
-  // must equal the `x-nvnmos-id` embedded in `transport_file`. See the
-  // `Resource lifecycle` section above.
-  string internal_id = 2;
+  // Caller-chosen name for the receiver, unique among Receivers on
+  // this Node (a Sender on the same Node may share the same name).
+  // Must be non-empty and must equal the `name` embedded in
+  // `transport_file` (`a=x-nvnmos-name` for SDP, `urn:x-nvnmos:tag:name`
+  // for MXL `flow_def`). See the `Resource lifecycle` section above.
+  string name = 2;
 
   Transport transport = 3;
 
@@ -296,7 +315,7 @@ message AddResourceResponse {
 
   // NMOS resource UUID (`/senders/<id>` or `/receivers/<id>`) — a
   // deterministic function of the Node's seed and the resource's
-  // `internal_id`.
+  // `name`.
   string resource_id = 2;
 }
 
@@ -323,6 +342,13 @@ message ActivationEvent {
   // `AddReceiver`. Absent means the resource is being deactivated.
   // Symmetric with `SyncResourceStateRequest.transport_file`.
   optional string transport_file = 3;
+
+  // Whether the resource is a Sender or a Receiver. Surfaces the same
+  // information the client supplied via the `AddSender` / `AddReceiver`
+  // RPC; redundant with the `resource_handle` mapping the client
+  // already holds, but lets the client dispatch on `(side, name)`
+  // without that lookup.
+  Side side = 4;
 }
 
 message AckActivationRequest {

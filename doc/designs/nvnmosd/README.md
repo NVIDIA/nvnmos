@@ -106,9 +106,10 @@ service NvnmosDaemon {
   rpc CloseSession(CloseSessionRequest) returns (Empty);
 
   // Resource lifecycle. transport_file = same string NvNmos takes today
-  // (SDP for RTP, flow_def JSON for MXL). The x-nvnmos-id inside is the
-  // NvNmos internal id (seed) of the sender/receiver; NvNmos generates
-  // the NMOS /senders/<id> or /receivers/<id> UUID from it.
+  // (SDP for RTP, flow_def JSON for MXL). The x-nvnmos-name attribute
+  // (SDP) or urn:x-nvnmos:tag:name tag (MXL flow_def) inside is the
+  // NvNmos name of the sender or receiver; NvNmos generates the NMOS
+  // /senders/<id> or /receivers/<id> UUID from it.
   // AddResourceResponse returns both the daemon-local resource_handle
   // (for subsequent RPCs) and the NMOS resource_id (informational).
   rpc AddSender(AddSenderRequest) returns (AddResourceResponse);
@@ -168,8 +169,8 @@ The daemon's runtime state lives entirely in a single `State` struct in [`rust/n
 |---|---|---|---|
 | `nodes` | `node_seed` | `NodeServer` handle, cached `node_id`, `Lifetime`, attached-session refcount | At most one libnvnmos node-server per seed; many sessions can attach to the same Node. |
 | `sessions` | `session_handle` (`sess-N`) | the `node_seed` the session is attached to, the set of `resource_handle`s the session owns | Per-client logical attachment to a Node. |
-| `resources` | `resource_handle` (`res-N`) | `internal_id`, owning `session_handle`, owning `node_seed`, `ResourceKind` | Live senders / receivers contributed by sessions. |
-| `by_internal_id` | `(node_seed, internal_id)` | `resource_handle` | Reverse index for (a) the duplicate-id check in `AddSender` / `AddReceiver`, and (b) the activation router's lookup from libnvnmos's IS-05 callback back to the owning session. |
+| `resources` | `resource_handle` (`res-N`) | `name`, owning `session_handle`, owning `node_seed`, `Side` (Sender or Receiver) | Live senders or receivers contributed by sessions. |
+| `by_name` | `(node_seed, Side, name)` | `resource_handle` | Reverse index for (a) the per-side duplicate-name check in `AddSender` or `AddReceiver`, and (b) the activation router's lookup from libnvnmos's IS-05 callback (which delivers `(side, name)`) back to the owning session. Keying on `Side` lets a Sender and a Receiver share the same `name` on the same Node — the daemon distinguishes them by side. |
 | `subscriptions` | `session_handle` | tokio mpsc `Sender<ActivationEvent>` half | At most one open `SubscribeActivations` stream per session; the receiver half is held by the streaming RPC handler. |
 | `pending_activations` | `activation_handle` (`act-N`) | owning `session_handle`, `std::sync::mpsc::SyncSender<AckOutcome>` | Activations the daemon has pushed to a subscriber and is now blocking the libnvnmos worker on, waiting for `AckActivation`. The worker is parked in `recv_timeout` with `ACTIVATION_ACK_TIMEOUT` (currently 5 s; the libnvnmos IS-05 PATCH stays open for the same duration). |
 
@@ -178,7 +179,7 @@ Three monotonic `AtomicU64` allocators inside `State` issue the daemon-local han
 #### Invariants
 
 - Every `resource_handle` in `sessions[s].resources` has a matching entry in `resources`, and `resources[h].session_handle == s`.
-- Every `(node_seed, internal_id)` in `by_internal_id` points at a `resource_handle` that exists in `resources`; the resource's `node_seed` and `internal_id` fields match the key. The activation router logs an error and NACKs if it ever finds this broken.
+- Every `(node_seed, side, name)` in `by_name` points at a `resource_handle` that exists in `resources`; the resource's `node_seed`, `side`, and `name` fields match the key. The activation router logs an error and NACKs if it ever finds this broken.
 - Every `session_handle` in `subscriptions` has a matching `sessions` entry. `CloseSession` removes both.
 - Every `activation_handle` in `pending_activations` belongs to a session that still has a `subscriptions` entry. `CloseSession` drains pending activations for the closing session; dropping the `SyncSender` wakes the libnvnmos worker with a `Disconnected` error and NACKs the IS-05 controller.
 - `nodes[seed].attached_sessions` equals the number of `sessions` entries whose `node_seed == seed`.
@@ -232,15 +233,15 @@ There are three ways to fully describe a sender or receiver. Each is sufficient 
 |---|---|---|---|
 | `caps` | essence pad caps (`video/x-raw,...`, `audio/x-raw,...`, `meta/x-st-2038,...`) | Required on `nmossrc`; on `nmossink` may be omitted in deferred mode (see below) | Both |
 | `transport-caps` | SDP `a=fmtp:`-equivalent extras as a GstCaps blob. Almost everything is synthesised by the element from essence caps + per-format defaults + per-transport defaults (see *Defaults the element synthesises* below); set this only to **override** a default or to carry an SDP extra the element doesn't know (e.g. non-default PT, `2110BPM` instead of `2110GPM`, audio `ptime`, `TCS`, …). Conventionally `application/x-rtp,...` but the element only consults fields, not the structure name. | Optional; typically empty even for RTP, usually empty for MXL. | Both |
-| `internal-id` | `x-nvnmos-id` — NvNmos seed for this sender / receiver | Required (either as a property, or carried in `transport-file`) | Both |
+| `sender-name` (on `nmossink`), `receiver-name` (on `nmossrc`) | `x-nvnmos-name` SDP attribute (RTP) or `urn:x-nvnmos:tag:name` flow-def tag (MXL) — NvNmos name for this sender or receiver. Names are unique within a side on the Node: a Sender and a Receiver may share the same name (the daemon's `by_name` is keyed on `(node_seed, side, name)` and `ActivationEvent.side` disambiguates the activation callback). | Required (either as a property, or carried in `transport-file`) | Per element (split to avoid collision with `GstObject.name`) |
 | `iface-ip` | `x-nvnmos-iface-ip` — interface IP for SDP `o=` / `c=` lines | Required for RTP, ignored for MXL | Both |
-| `mxl-domain-id` | `x-nvnmos-mxl-domain-id` | Required for MXL, ignored for RTP | Both |
-| `mxl-flow-id` | `x-nvnmos-mxl-flow-id` (sender side; receiver side comes from activation) | Optional; defaults to derived from `internal-id` | `nmossink` (MXL) |
+| `mxl-domain-id` | `urn:x-nvnmos:tag:mxl-domain-id` flow-def tag | Required for MXL, ignored for RTP | Both |
+| `mxl-flow-id` | flow_def top-level `id` (sender side; receiver side comes from activation) | Optional; defaults to derived from the sender's name | `nmossink` (MXL) |
 | `label` | NMOS label — SDP `s=` line for RTP, `label` for MXL flow_def | Optional | Both |
 | `description` | NMOS description — SDP `i=` line for RTP, `description` for MXL flow_def | Optional | Both |
 | `receiver-caps` | Whether IS-04 publishes narrow Receiver Caps derived from the transport_file. `true` (default) → narrow; `false` → wide (`x-nvnmos-caps` present, permissive). | Optional | `nmossrc` only |
 
-**Route C — `transport-file` + property overrides.** Provide a baseline `transport-file` and override specific fields with any of the Route B properties. Last-property-wins precedence. This is the natural "I have a template SDP / flow_def, but the per-instance bits (`internal-id`, `iface-ip`, port, label, ...) change" workflow, and nvdsnmosbin already worked this way.
+**Route C — `transport-file` + property overrides.** Provide a baseline `transport-file` and override specific fields with any of the Route B properties. Last-property-wins precedence. This is the natural "I have a template SDP or flow_def, but the per-instance bits (`sender-name` or `receiver-name`, `iface-ip`, port, label, ...) change" workflow, and nvdsnmosbin already worked this way.
 
 #### Defaults the element synthesises
 
@@ -259,7 +260,7 @@ For MXL the per-format mapping to `flow_def.json` is derivable from essence caps
 
 #### Deferred mode (`nmossink` only)
 
-If neither `transport-file` nor `caps` is provided, `nmossink` defers NMOS registration to **READY → PAUSED** and derives `caps` from a `gst_pad_peer_query_caps` against upstream. Standard GStreamer caps negotiation does the work; the user can constrain with `capsfilter ! nmossink` the way they would with any other sink. `internal-id` (and `iface-ip` / `mxl-domain-id` as relevant) are still required as properties because they're not derivable from the pipeline. `nmossrc` cannot use deferred mode — there is no peer to query.
+If neither `transport-file` nor `caps` is provided, `nmossink` defers NMOS registration to **READY → PAUSED** and derives `caps` from a `gst_pad_peer_query_caps` against upstream. Standard GStreamer caps negotiation does the work; the user can constrain with `capsfilter ! nmossink` the way they would with any other sink. `sender-name` (and `iface-ip` or `mxl-domain-id` as relevant) is still required as a property because it's not derivable from the pipeline. `nmossrc` cannot use deferred mode — there is no peer to query.
 
 **No data needs to flow for the sender to register.** Caps negotiation in GStreamer is a query-based mechanism (pad template caps + `peer_query_caps`), not a buffer-driven one. For a typical flow-transform pipeline `nmossrc ! transform ! nmossink`:
 
@@ -292,7 +293,7 @@ gst-launch-1.0 \
     transport=mxl \
     daemon-uri=unix:/var/run/nvnmosd.sock \
     node-seed=my-node \
-    internal-id=cam-1 \
+    sender-name=cam-1 \
     mxl-domain-id=8e2c1ab8-4bdd-46c2-9b8d-1d2a3c4e5f60 \
     label='Camera 1'
 ```
@@ -308,7 +309,7 @@ gst-launch-1.0 \
     transport=udp \
     daemon-uri=unix:/var/run/nvnmosd.sock \
     node-seed=my-node \
-    internal-id=cam-1 \
+    sender-name=cam-1 \
     iface-ip=10.0.0.1 \
     label='Camera 1'
 ```
@@ -322,13 +323,13 @@ gst-launch-1.0 \
     transport=nvdsudp \
     daemon-uri=unix:/var/run/nvnmosd.sock \
     node-seed=my-node \
-    internal-id=cam-1 \
+    sender-name=cam-1 \
     iface-ip=10.0.0.1 \
     label='Camera 1' \
     transport-caps='application/x-rtp, payload=99, PM=(string)2110BPM'
 ```
 
-An RTP receiver with a template SDP and per-instance overrides:
+An RTP receiver with a template SDP and per-instance overrides. Reusing the sender's name above for the receiver is fine — the daemon scopes names by side so a Sender and a Receiver named `cam-1` on the same Node are distinct resources:
 
 ```bash
 gst-launch-1.0 \
@@ -337,7 +338,7 @@ gst-launch-1.0 \
     daemon-uri=unix:/var/run/nvnmosd.sock \
     node-seed=my-node \
     transport-file="$(cat template.sdp)" \
-    internal-id=cam-rx-1 \
+    receiver-name=cam-rx-1 \
     iface-ip=10.0.0.1 \
     label='Receiver 1' ! \
   ...downstream...
@@ -345,7 +346,7 @@ gst-launch-1.0 \
 
 #### Per-transport properties (out of scope here)
 
-Timestamp mode (`timestamp-mode=passthrough|regenerate`), ST 2022-7 NIC selection, jitter-buffer overrides, etc. live as per-transport properties; they're documented in their own phases.
+ST 2022-7 NIC selection, jitter-buffer overrides, and similar per-transport knobs live as per-transport properties; they're documented in their own phases. Sender timestamp regeneration is deferred until UDP/MXL inner-element semantics are pinned down (see "Sender timestamp modes" below).
 
 ### Lifecycle
 
@@ -396,15 +397,9 @@ We don't take a position on isolation strategy in Phase 1 — MXL avoids (B) reg
 
 Per-format synthetic filler (e.g., black v210, silence) when an `nmossrc` is *inactive but should still produce something downstream* is a separate, opt-in concern via an `idle-mode` property. Available only for formats we can synthesize cheaply (raw audio, raw video); compressed essences (jxsv) don't get filler. Standard GStreamer gap mechanisms (`rtpjitterbuffer` GAP events, livesync, downstream `is-live` semantics) handle steady-state missing-data — they do **not** solve (A), (B), or (C) on their own.
 
-### Sender timestamp modes
+### Sender timestamp modes (deferred)
 
-- `timestamp-mode=passthrough` (default) — wire timestamps derived from buffer PTS.
-- `timestamp-mode=regenerate` — wire timestamps synthesised from a fresh clock.
-
-Inner-sink mapping:
-
-- `nvdsudpsink`: maps to existing properties.
-- `mxlsink`: passthrough only; regenerate deferred until upstream `mxlsink` grows the corresponding property. We'll raise an issue on the `mxl` repo when the design solidifies.
+A `timestamp-mode` property (passthrough vs. regenerated wire timestamps) was sketched here but has been pulled out of Phase 1. The semantics differ between `mxlsink` (no regenerate path until the upstream element grows one) and the `udpsink` family (where regenerate maps to existing properties), and committing to a GObject surface before those mappings are concrete risks shipping a knob whose `regenerate` value silently no-ops on MXL. Will return as a per-transport property once both inner elements expose the corresponding knobs; an issue on the `mxl` repo will be filed at that point.
 
 ## Phasing
 

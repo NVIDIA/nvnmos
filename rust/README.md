@@ -12,8 +12,11 @@ Rust components for the new GStreamer NMOS plugin family described in
 | `nvnmos-rpc`       | library     | gRPC protocol crate (`nvnmosd.proto` + `tonic`-generated stubs).     |
 | `nvnmosd`          | binary      | The NMOS daemon. Wraps `nvnmos-sys`, serves `nvnmos-rpc`.            |
 | `nvnmosd-example`  | binary      | Example/regression client modelled on the C `nvnmos-example`.        |
+| `gst-nmos-rs`      | GStreamer plugin (cdylib) | `nmos` plugin (`nmossrc` / `nmossink`); Phase 1 in progress (session lifecycle wired). |
 
-The `gst-nmos-rs` GStreamer plugin will join the workspace once the daemon's gRPC surface is stable enough to consume from a real GStreamer element.
+Phase 1 of `gst-nmos-rs` is in progress; see the crate's own
+[`gst-nmos-rs/README.md`](gst-nmos-rs/README.md) for status and load
+instructions.
 
 ## Building
 
@@ -42,7 +45,7 @@ cargo run --bin nvnmosd
 cargo run --bin nvnmosd-example
 ```
 
-The example exercises every RPC the daemon currently implements: both Node lifetimes (session-refcounted and persistent), session attachment/refcounting, resource registration with `internal_id` ↔ `x-nvnmos-id` mismatch detection, the activations stream (`SubscribeActivations` opened for the resource phase with a background auto-ack task for `AckActivation`), out-of-band `SyncResourceState` (activate with an updated transport file + deactivate), an in-band IS-05 PATCH activate/deactivate round-trip against libnvnmos's HTTP server, resource removal, and session-close-time resource cleanup. Successful output is visible in both terminals via the `tracing` log.
+The example exercises every RPC the daemon currently implements: both Node lifetimes (session-refcounted and persistent), session attachment/refcounting, resource registration with `name` ↔ `x-nvnmos-name` mismatch detection, the activations stream (`SubscribeActivations` opened for the resource phase with a background auto-ack task for `AckActivation`), out-of-band `SyncResourceState` (activate with an updated transport file + deactivate), an in-band IS-05 PATCH activate/deactivate round-trip against libnvnmos's HTTP server, resource removal, and session-close-time resource cleanup. The resource phase deliberately registers a Sender and a Receiver under the **same** `name` to exercise the side-disambiguated namespace: the daemon's `by_name` index is keyed on `(node_seed, side, name)` and `ActivationEvent.side` plus the safe wrapper's `Side` enum let the client tell apart activations that share a `name`. Successful output is visible in both terminals via the `tracing` log.
 
 By default the example autodetects a local interface IP via the routing table. Override with `--interface-ip <ip>` if the autodetect picks the wrong one (or fails on a sandboxed network).
 

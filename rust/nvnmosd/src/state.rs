@@ -17,12 +17,15 @@
 //!   call can drop them via libnvnmos before the Node itself goes away).
 //! * **Resources** (senders and receivers) are keyed by daemon-allocated
 //!   `resource_handle` strings. Each entry remembers the owning session,
-//!   the Node it lives on, the client-supplied `internal_id` (the
-//!   `x-nvnmos-id` inside the transport file), and the kind
-//!   (sender/receiver). A secondary `(node_seed, internal_id) →
-//!   resource_handle` index supports the daemon-level pre-add duplicate
-//!   check and the activation router's lookup back from libnvnmos's
-//!   `internal_id` to the owning session.
+//!   the Node it lives on, the client-supplied `name` (the
+//!   `x-nvnmos-name` SDP attribute or `urn:x-nvnmos:tag:name` flow-def
+//!   tag inside the transport file), and the side (sender or receiver).
+//!   A secondary `(node_seed, side, name) → resource_handle` index
+//!   supports the daemon-level pre-add duplicate check and the
+//!   activation router's lookup back from libnvnmos's (side, name) pair
+//!   to the owning session. `name` is unique only within a side: a
+//!   Sender and a Receiver are permitted to share a name on the same
+//!   Node.
 //! * **Activation subscriptions** are keyed by `session_handle`. Each
 //!   session may hold at most one subscriber stream at a time
 //!   ([`State::subscribe_activations`]); libnvnmos activation callbacks
@@ -46,13 +49,13 @@ use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use nvnmos::{
-    AssetConfig, NetworkServicesConfig, NodeConfig, NodeServer, ReceiverConfig, SenderConfig,
-    Transport,
+    AssetConfig, NetworkServicesConfig, NodeConfig, NodeServer, ReceiverConfig,
+    SenderConfig, Side as WrapperSide, Transport,
 };
 use nvnmos_rpc::v1::{
     ActivationEvent, AssetConfig as ProtoAssetConfig,
     NetworkServicesConfig as ProtoNetworkServicesConfig, NodeConfig as ProtoNodeConfig,
-    Transport as ProtoTransport,
+    Side as ProtoSide, Transport as ProtoTransport,
 };
 use tokio::sync::mpsc as tokio_mpsc;
 use tonic::Status;
@@ -93,15 +96,24 @@ impl Lifetime {
 
 /// Sender or receiver — selects which libnvnmos API the daemon dispatches
 /// to for the add / lookup / remove operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResourceKind {
+///
+/// Mirrors the C `NvNmosSide` enum surfaced by libnvnmos (via the
+/// [`nvnmos::Side`] wrapper, imported here as [`WrapperSide`]) and the
+/// [`ProtoSide`] gRPC enum. We carry our own copy here so the daemon's
+/// internal types don't bleed into either surface, and convert at the
+/// boundary via [`Self::to_proto`] / [`Self::to_wrapper`] /
+/// [`Self::from_wrapper`]. (There is no `from_proto` today because the
+/// proto carries `side` only outbound, in `ActivationEvent`; inbound
+/// RPCs pin the side by which one is called.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Side {
     /// IS-04 / IS-05 sender (`/senders/<id>`).
     Sender,
     /// IS-04 / IS-05 receiver (`/receivers/<id>`).
     Receiver,
 }
 
-impl ResourceKind {
+impl Side {
     /// Short label for log lines and gRPC error messages.
     pub fn label(self) -> &'static str {
         match self {
@@ -110,7 +122,34 @@ impl ResourceKind {
         }
     }
 
-    /// Dispatch the wrapper's `add_*` call for this resource kind.
+    /// Project to a wire-format [`ProtoSide`] for outbound
+    /// [`ActivationEvent`]s.
+    pub fn to_proto(self) -> ProtoSide {
+        match self {
+            Self::Sender => ProtoSide::Sender,
+            Self::Receiver => ProtoSide::Receiver,
+        }
+    }
+
+    /// Project to the safe-wrapper [`WrapperSide`] used by libnvnmos calls
+    /// (notably [`NodeServer::activate_connection`]).
+    pub fn to_wrapper(self) -> WrapperSide {
+        match self {
+            Self::Sender => WrapperSide::Sender,
+            Self::Receiver => WrapperSide::Receiver,
+        }
+    }
+
+    /// Translate the wrapper's [`WrapperSide`] (e.g. from an inbound
+    /// activation callback) into a daemon-local [`Side`].
+    pub fn from_wrapper(side: WrapperSide) -> Self {
+        match side {
+            WrapperSide::Sender => Self::Sender,
+            WrapperSide::Receiver => Self::Receiver,
+        }
+    }
+
+    /// Dispatch the wrapper's `add_*` call for this side.
     fn add_to_server(
         self,
         server: &NodeServer,
@@ -130,17 +169,17 @@ impl ResourceKind {
     }
 
     /// Dispatch the wrapper's `{sender,receiver}_id` lookup. Returns
-    /// `Ok(None)` when libnvnmos does not have a resource of this kind
-    /// with the given `internal_id`. Used as the post-add validation
+    /// `Ok(None)` when libnvnmos does not have a resource of this side
+    /// with the given `name`. Used as the post-add validation
     /// primitive by [`State::add_resource`].
     fn lookup_id(
         self,
         server: &NodeServer,
-        internal_id: &str,
+        name: &str,
     ) -> nvnmos::Result<Option<String>> {
         match self {
-            Self::Sender => server.sender_id(internal_id),
-            Self::Receiver => server.receiver_id(internal_id),
+            Self::Sender => server.sender_id(name),
+            Self::Receiver => server.receiver_id(name),
         }
     }
 
@@ -150,22 +189,23 @@ impl ResourceKind {
     fn remove_from_server(
         self,
         server: &NodeServer,
-        internal_id: &str,
+        name: &str,
     ) -> nvnmos::Result<()> {
         match self {
-            Self::Sender => server.remove_sender(internal_id),
-            Self::Receiver => server.remove_receiver(internal_id),
+            Self::Sender => server.remove_sender(name),
+            Self::Receiver => server.remove_receiver(name),
         }
     }
 }
 
 /// A live resource (sender or receiver) owned by a session.
 struct ResourceEntry {
-    /// The `x-nvnmos-id` carried by the resource's transport file. The
-    /// daemon validated at AddSender/AddReceiver time that this matched
-    /// what libnvnmos extracted; see the proto's "Resource lifecycle"
-    /// section for the validation contract.
-    internal_id: String,
+    /// The resource name carried by the transport file (`x-nvnmos-name`
+    /// SDP attribute or `urn:x-nvnmos:tag:name` flow-def tag). The daemon
+    /// validated at AddSender/AddReceiver time that this matched what
+    /// libnvnmos extracted; see the proto's "Resource lifecycle" section
+    /// for the validation contract.
+    name: String,
     /// Seed of the Node the resource lives on. Stored so
     /// [`State::close_session`] and the activation router
     /// ([`State::dispatch_activation`]) can find the right
@@ -177,7 +217,7 @@ struct ResourceEntry {
     /// right subscriber stream for an incoming libnvnmos activation.
     session_handle: String,
     /// Sender vs receiver — dispatches the libnvnmos API call.
-    kind: ResourceKind,
+    side: Side,
 }
 
 /// A live Node owned by the daemon.
@@ -260,10 +300,10 @@ pub struct RemoveNodeOutcome {
 pub struct AddResourceOutcome {
     pub resource_handle: String,
     /// NMOS UUID returned by libnvnmos for the resource. Equal to
-    /// `nvnmos::make_{sender,receiver}_id(node_seed, internal_id)` — we
+    /// `nvnmos::make_{sender,receiver}_id(node_seed, name)` — we
     /// pull it out of libnvnmos directly so we don't recompute.
     pub resource_id: String,
-    pub kind: ResourceKind,
+    pub side: Side,
     pub node_seed: String,
 }
 
@@ -271,16 +311,16 @@ pub struct AddResourceOutcome {
 #[derive(Debug)]
 pub struct RemoveResourceOutcome {
     pub node_seed: String,
-    pub internal_id: String,
-    pub kind: ResourceKind,
+    pub name: String,
+    pub side: Side,
 }
 
 /// Outcome of [`State::sync_resource_state`].
 #[derive(Debug)]
 pub struct SyncResourceStateOutcome {
     pub node_seed: String,
-    pub internal_id: String,
-    pub kind: ResourceKind,
+    pub name: String,
+    pub side: Side,
     /// `true` when the call was an (re)activation (`transport_file =
     /// Some`), `false` when it was a deactivation. Surfaces in the
     /// daemon's log line so operators can tell the two paths apart.
@@ -335,7 +375,7 @@ pub enum ActivationDispatch {
         activation_handle: String,
         ack_rx: std_mpsc::Receiver<AckOutcome>,
     },
-    /// No resource is registered for `(node_seed, internal_id)`. Either
+    /// No resource is registered for `(node_seed, name)`. Either
     /// the activation is for a stray (a resource that survived the
     /// `AddSender`/`AddReceiver` mismatch path) or for one that was
     /// removed between the IS-05 PATCH arriving and the callback firing.
@@ -356,10 +396,12 @@ pub struct State {
     sessions: HashMap<String, SessionEntry>,
     /// Live resources keyed by daemon-allocated `resource_handle`.
     resources: HashMap<String, ResourceEntry>,
-    /// Secondary index: `(node_seed, internal_id) → resource_handle`.
-    /// Used for the pre-add duplicate check and for routing activation
-    /// callbacks from libnvnmos back to the owning session.
-    by_internal_id: HashMap<(String, String), String>,
+    /// Secondary index: `(node_seed, side, name) → resource_handle`. The
+    /// `side` axis is what permits a Sender and a Receiver to share the
+    /// same `name` on the Node. Used for the pre-add duplicate check
+    /// and for routing activation callbacks from libnvnmos back to the
+    /// owning session.
+    by_name: HashMap<(String, Side, String), String>,
     /// At most one `SubscribeActivations` subscriber per session.
     subscriptions: HashMap<String, ActivationSubscriber>,
     /// Activations currently waiting on `AckActivation`, keyed by
@@ -376,7 +418,7 @@ impl State {
             nodes: HashMap::new(),
             sessions: HashMap::new(),
             resources: HashMap::new(),
-            by_internal_id: HashMap::new(),
+            by_name: HashMap::new(),
             subscriptions: HashMap::new(),
             pending_activations: HashMap::new(),
             next_session_id: AtomicU64::new(0),
@@ -506,16 +548,19 @@ impl State {
                 );
                 continue;
             };
-            self.by_internal_id
-                .remove(&(resource.node_seed.clone(), resource.internal_id.clone()));
+            self.by_name.remove(&(
+                resource.node_seed.clone(),
+                resource.side,
+                resource.name.clone(),
+            ));
             if let Err(e) =
-                resource.kind.remove_from_server(&node.server, &resource.internal_id)
+                resource.side.remove_from_server(&node.server, &resource.name)
             {
                 tracing::warn!(
                     %resource_handle,
                     session_handle,
-                    kind = resource.kind.label(),
-                    internal_id = %resource.internal_id,
+                    side = resource.side.label(),
+                    name = %resource.name,
                     error = %e,
                     "close_session: libnvnmos remove_sender/remove_receiver failed; \
                      continuing"
@@ -624,14 +669,14 @@ impl State {
         session_handle: &str,
         transport: Transport,
         transport_file: &str,
-        claimed_internal_id: &str,
+        claimed_name: &str,
     ) -> Result<AddResourceOutcome, Status> {
         self.add_resource(
-            ResourceKind::Sender,
+            Side::Sender,
             session_handle,
             transport,
             transport_file,
-            claimed_internal_id,
+            claimed_name,
         )
     }
 
@@ -641,29 +686,29 @@ impl State {
         session_handle: &str,
         transport: Transport,
         transport_file: &str,
-        claimed_internal_id: &str,
+        claimed_name: &str,
     ) -> Result<AddResourceOutcome, Status> {
         self.add_resource(
-            ResourceKind::Receiver,
+            Side::Receiver,
             session_handle,
             transport,
             transport_file,
-            claimed_internal_id,
+            claimed_name,
         )
     }
 
     /// Implementation shared by [`State::add_sender`] /
     /// [`State::add_receiver`]. The two only differ in which libnvnmos
-    /// add/lookup APIs `kind` dispatches to.
+    /// add/lookup APIs `side` dispatches to.
     ///
     /// The validation flow:
     ///
-    /// 1. Daemon-registry pre-check — refuses a duplicate `internal_id`
+    /// 1. Daemon-registry pre-check — refuses a duplicate `name`
     ///    on the same Node before any FFI happens.
     /// 2. `add_{sender,receiver}` into libnvnmos. libnvnmos parses the
     ///    transport file and registers the resource under its embedded
-    ///    `x-nvnmos-id`.
-    /// 3. `{sender,receiver}_id(claimed_internal_id)` — uses libnvnmos
+    ///    resource name.
+    /// 3. `{sender,receiver}_id(claimed_name)` — uses libnvnmos
     ///    itself as the oracle: success proves the transport file's id
     ///    equalled the claim. Failure means a mismatch.
     /// 4. On mismatch, error `INVALID_ARGUMENT` and log. The libnvnmos
@@ -672,14 +717,14 @@ impl State {
     ///    section.
     fn add_resource(
         &mut self,
-        kind: ResourceKind,
+        side: Side,
         session_handle: &str,
         transport: Transport,
         transport_file: &str,
-        claimed_internal_id: &str,
+        claimed_name: &str,
     ) -> Result<AddResourceOutcome, Status> {
-        if claimed_internal_id.is_empty() {
-            return Err(Status::invalid_argument("internal_id must be non-empty"));
+        if claimed_name.is_empty() {
+            return Err(Status::invalid_argument("name must be non-empty"));
         }
 
         let session = self.sessions.get(session_handle).ok_or_else(|| {
@@ -688,14 +733,14 @@ impl State {
             ))
         })?;
         let node_seed = session.node_seed.clone();
-        let key = (node_seed.clone(), claimed_internal_id.to_string());
+        let key = (node_seed.clone(), side, claimed_name.to_string());
 
-        if let Some(existing) = self.by_internal_id.get(&key) {
+        if let Some(existing) = self.by_name.get(&key) {
             return Err(Status::already_exists(format!(
-                "a {} with internal_id {claimed_internal_id:?} is already \
+                "a {} with name {claimed_name:?} is already \
                  registered on node_seed {node_seed:?} as resource_handle \
                  {existing:?}",
-                kind.label(),
+                side.label(),
             )));
         }
 
@@ -706,37 +751,37 @@ impl State {
             ))
         })?;
 
-        kind.add_to_server(&node.server, transport, transport_file)
+        side.add_to_server(&node.server, transport, transport_file)
             .map_err(|e| {
                 Status::invalid_argument(format!(
                     "libnvnmos add_{} failed (transport_file parse error or \
                      duplicate): {e}",
-                    kind.label(),
+                    side.label(),
                 ))
             })?;
 
-        let resource_id = match kind.lookup_id(&node.server, claimed_internal_id) {
+        let resource_id = match side.lookup_id(&node.server, claimed_name) {
             Ok(Some(id)) => id,
             Ok(None) => {
                 tracing::error!(
-                    kind = kind.label(),
-                    claimed_internal_id,
+                    side = side.label(),
+                    claimed_name,
                     %node_seed,
                     "AddSender/AddReceiver: libnvnmos accepted the transport \
-                     file but its x-nvnmos-id does not match the claimed \
-                     internal_id; left as stray, will be reaped at first \
-                     activation"
+                     file but its embedded name does not match the \
+                     claimed name; left as stray, will be reaped at \
+                     first activation"
                 );
                 return Err(Status::invalid_argument(format!(
-                    "{}'s transport_file embeds a different x-nvnmos-id than \
-                     internal_id {claimed_internal_id:?}",
-                    kind.label(),
+                    "{}'s transport_file embeds a different name than \
+                     {claimed_name:?}",
+                    side.label(),
                 )));
             }
             Err(e) => {
                 return Err(Status::internal(format!(
                     "querying {} id from libnvnmos failed after add: {e}",
-                    kind.label(),
+                    side.label(),
                 )));
             }
         };
@@ -745,13 +790,13 @@ impl State {
         self.resources.insert(
             resource_handle.clone(),
             ResourceEntry {
-                internal_id: claimed_internal_id.to_string(),
+                name: claimed_name.to_string(),
                 node_seed: node_seed.clone(),
                 session_handle: session_handle.to_string(),
-                kind,
+                side,
             },
         );
-        self.by_internal_id.insert(key, resource_handle.clone());
+        self.by_name.insert(key, resource_handle.clone());
         self.sessions
             .get_mut(session_handle)
             .expect("session existed at the start of this method")
@@ -761,7 +806,7 @@ impl State {
         Ok(AddResourceOutcome {
             resource_handle,
             resource_id,
-            kind,
+            side,
             node_seed,
         })
     }
@@ -792,8 +837,11 @@ impl State {
                  {resource_handle:?} but no resource entry exists"
             ))
         })?;
-        self.by_internal_id
-            .remove(&(resource.node_seed.clone(), resource.internal_id.clone()));
+        self.by_name.remove(&(
+            resource.node_seed.clone(),
+            resource.side,
+            resource.name.clone(),
+        ));
         self.sessions
             .get_mut(session_handle)
             .expect("checked above")
@@ -805,12 +853,12 @@ impl State {
         // in libnvnmos's IS-04 model, but our state stays clean.
         if let Some(node) = self.nodes.get(&resource.node_seed) {
             if let Err(e) =
-                resource.kind.remove_from_server(&node.server, &resource.internal_id)
+                resource.side.remove_from_server(&node.server, &resource.name)
             {
                 tracing::warn!(
                     resource_handle,
-                    kind = resource.kind.label(),
-                    internal_id = %resource.internal_id,
+                    side = resource.side.label(),
+                    name = %resource.name,
                     error = %e,
                     "remove_resource: libnvnmos remove_sender/remove_receiver failed; \
                      daemon registry already cleared"
@@ -820,8 +868,8 @@ impl State {
 
         Ok(RemoveResourceOutcome {
             node_seed: resource.node_seed,
-            internal_id: resource.internal_id,
-            kind: resource.kind,
+            name: resource.name,
+            side: resource.side,
         })
     }
 
@@ -868,7 +916,7 @@ impl State {
         })?;
 
         node.server
-            .activate_connection(&resource.internal_id, transport_file)
+            .activate_connection(resource.side.to_wrapper(), &resource.name, transport_file)
             .map_err(|e| {
                 let verb = if transport_file.is_some() {
                     "activate"
@@ -878,15 +926,15 @@ impl State {
                 Status::invalid_argument(format!(
                     "libnvnmos {verb} for {} {:?} failed (transport_file \
                      parse error or libnvnmos state mismatch): {e}",
-                    resource.kind.label(),
-                    resource.internal_id,
+                    resource.side.label(),
+                    resource.name,
                 ))
             })?;
 
         Ok(SyncResourceStateOutcome {
             node_seed: resource.node_seed.clone(),
-            internal_id: resource.internal_id.clone(),
-            kind: resource.kind,
+            name: resource.name.clone(),
+            side: resource.side,
             activated: transport_file.is_some(),
         })
     }
@@ -922,7 +970,7 @@ impl State {
 
     /// Activation router — called synchronously from a libnvnmos worker
     /// thread via the activation trampoline installed at NodeServer
-    /// creation. Looks up the resource by `(node_seed, internal_id)`,
+    /// creation. Looks up the resource by `(node_seed, side, name)`,
     /// finds its owning session's subscription, places the event on the
     /// subscriber's stream, and records a pending entry the caller
     /// blocks on for the ack.
@@ -933,25 +981,27 @@ impl State {
     pub fn dispatch_activation(
         &mut self,
         node_seed: &str,
-        internal_id: &str,
+        side: Side,
+        name: &str,
         transport_file: Option<&str>,
     ) -> ActivationDispatch {
-        let key = (node_seed.to_string(), internal_id.to_string());
-        let resource_handle = match self.by_internal_id.get(&key) {
+        let key = (node_seed.to_string(), side, name.to_string());
+        let resource_handle = match self.by_name.get(&key) {
             Some(h) => h.clone(),
             None => return ActivationDispatch::NoResource,
         };
         let resource = match self.resources.get(&resource_handle) {
             Some(r) => r,
             None => {
-                // by_internal_id is supposed to be in lockstep with
+                // by_name is supposed to be in lockstep with
                 // resources; surface the inconsistency in the log path
                 // and NACK rather than panic.
                 tracing::error!(
                     %node_seed,
-                    internal_id,
+                    side = side.label(),
+                    name,
                     %resource_handle,
-                    "dispatch_activation: by_internal_id pointed at a \
+                    "dispatch_activation: by_name pointed at a \
                      resource_handle with no entry; treating as stray",
                 );
                 return ActivationDispatch::NoResource;
@@ -983,6 +1033,7 @@ impl State {
             resource_handle: resource_handle.clone(),
             activation_handle: activation_handle.clone(),
             transport_file: transport_file.map(str::to_string),
+            side: side.to_proto() as i32,
         };
 
         // Non-blocking — we must not stall the libnvnmos worker thread
