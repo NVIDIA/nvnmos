@@ -156,9 +156,11 @@ impl Session {
     /// If the resource registration fails the partially-open session
     /// is rolled back via `CloseSession` so the daemon doesn't leak
     /// state.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn open(
         daemon_uri: &str,
         node_seed: &str,
+        http_port: u16,
         side: Side,
         name: &str,
         transport: ProtoTransport,
@@ -173,6 +175,7 @@ impl Session {
             .open_session(OpenSessionRequest {
                 node_config: Some(NodeConfig {
                     seed: node_seed.to_owned(),
+                    http_port: u32::from(http_port),
                     ..NodeConfig::default()
                 }),
             })

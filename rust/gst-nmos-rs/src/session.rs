@@ -73,6 +73,56 @@ pub(crate) fn transport_to_proto(t: Transport) -> ProtoTransport {
     }
 }
 
+// Shared `ParamSpec` blurbs for properties that exist on both
+// `nmossink` and `nmossrc` with byte-identical wording. Hoisted to
+// `session.rs` (next to `CommonSettings`) so the two elements can't
+// drift, and so `gst-inspect-1.0 nmossink` and `gst-inspect-1.0
+// nmossrc` print the same text for properties that aren't side-
+// specific. The narrative form lives in the README's property
+// table; properties whose blurb genuinely *does* differ between
+// sender and receiver (e.g. `mxl-domain-path`, `transport-file`,
+// `label`, `description`, `mxl-flow-id`, `caps`) keep their text
+// inline in the respective `imp.rs`.
+
+pub(crate) const DAEMON_URI_BLURB: &str =
+    "gRPC endpoint for nvnmosd. Only `unix:/path/to/sock` URIs are \
+     currently supported.";
+
+pub(crate) const NODE_SEED_BLURB: &str =
+    "NvNmos Node seed (node_config.seed). Required. Sessions sharing \
+     this seed contribute to the same NMOS Node.";
+
+pub(crate) const HTTP_PORT_BLURB: &str =
+    "TCP port libnvnmos serves the NMOS HTTP APIs on \
+     (node_config.http_port). 0 (the default) leaves libnvnmos on \
+     the nmos-cpp per-API defaults (Node API on 3212, Connection \
+     API on 3215). Non-zero collapses every HTTP API onto this \
+     single port. Honoured only by the OpenSession that actually \
+     creates the Node — when attaching to a pre-existing Node \
+     (e.g. another nmossink / nmossrc opened first with the same \
+     node-seed) this property is ignored, just like the rest of \
+     node_config.";
+
+pub(crate) const TRANSPORT_BLURB: &str =
+    "Inner data path family. Only `mxl` is currently supported; the \
+     other values exist for ABI stability and are rejected.";
+
+pub(crate) const MXL_DOMAIN_ID_BLURB: &str =
+    "MXL Domain identifier (UUID) advertised in NMOS as \
+     `urn:x-nvnmos:tag:mxl-domain-id` in the transport_file. \
+     Required when transport=mxl, but may be omitted if \
+     `mxl-domain-path` points at a directory containing a \
+     `domain_def.json` (AMWA BCP-007-03 WIP): the file's `id` is \
+     then used. When both are supplied they must agree.";
+
+pub(crate) const TRANSPORT_FILE_PATH_BLURB: &str =
+    "Filesystem path read at NULL\u{2192}READY into `transport-file`. \
+     Convenience for gst-launch; mutually exclusive with \
+     `transport-file`.";
+
+pub(crate) const TRANSPORT_CAPS_BLURB: &str =
+    "Per-transport overrides (SDP fmtp-style). Typically empty for MXL.";
+
 /// Snapshot of the properties needed to open a session, taken under
 /// the per-element settings lock so the lock isn't held over the
 /// blocking RPC.
@@ -80,6 +130,8 @@ pub(crate) fn transport_to_proto(t: Transport) -> ProtoTransport {
 pub(crate) struct CommonSettings {
     pub(crate) daemon_uri: String,
     pub(crate) node_seed: String,
+    /// See [`HTTP_PORT_BLURB`].
+    pub(crate) http_port: u16,
     pub(crate) transport: Transport,
     /// Whether this snapshot came from `nmossink` (Sender) or `nmossrc`
     /// (Receiver). Pinned by the element that built the snapshot.
@@ -304,6 +356,7 @@ pub(crate) fn validate_and_open(
                 Session::open(
                     &settings.daemon_uri,
                     &settings.node_seed,
+                    settings.http_port,
                     side,
                     &name,
                     transport,
@@ -791,6 +844,7 @@ mod tests {
         CommonSettings {
             daemon_uri: "unix:/dev/null".to_owned(),
             node_seed: NODE_SEED.to_owned(),
+            http_port: 0,
             transport: Transport::Mxl,
             side,
             name: "test-name".to_owned(),

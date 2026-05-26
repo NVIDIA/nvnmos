@@ -41,6 +41,7 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
 struct Settings {
     daemon_uri: String,
     node_seed: String,
+    http_port: u16,
     transport: Transport,
     sender_name: String,
     mxl_domain_id: String,
@@ -59,6 +60,7 @@ impl Default for Settings {
         Self {
             daemon_uri: DEFAULT_DAEMON_URI.to_owned(),
             node_seed: String::new(),
+            http_port: 0,
             transport: Transport::default(),
             sender_name: String::new(),
             mxl_domain_id: String::new(),
@@ -98,27 +100,26 @@ impl ObjectImpl for NmosSink {
             vec![
                 glib::ParamSpecString::builder("daemon-uri")
                     .nick("Daemon URI")
-                    .blurb(
-                        "gRPC endpoint for nvnmosd. Only `unix:/path/to/sock` URIs are \
-                         currently supported.",
-                    )
+                    .blurb(crate::session::DAEMON_URI_BLURB)
                     .default_value(Some(DEFAULT_DAEMON_URI))
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("node-seed")
                     .nick("Node seed")
-                    .blurb(
-                        "NvNmos Node seed (node_config.seed). Required. Sessions sharing \
-                         this seed contribute to the same NMOS Node.",
-                    )
+                    .blurb(crate::session::NODE_SEED_BLURB)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecUInt::builder("http-port")
+                    .nick("HTTP port")
+                    .blurb(crate::session::HTTP_PORT_BLURB)
+                    .minimum(0)
+                    .maximum(65535)
+                    .default_value(0)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecEnum::builder_with_default("transport", Transport::Mxl)
                     .nick("Transport")
-                    .blurb(
-                        "Inner data path family. Only `mxl` is currently supported; the \
-                         other values exist for ABI stability and are rejected.",
-                    )
+                    .blurb(crate::session::TRANSPORT_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("sender-name")
@@ -135,15 +136,7 @@ impl ObjectImpl for NmosSink {
                     .build(),
                 glib::ParamSpecString::builder("mxl-domain-id")
                     .nick("MXL Domain id")
-                    .blurb(
-                        "MXL Domain identifier (UUID) advertised in NMOS as \
-                         `urn:x-nvnmos:tag:mxl-domain-id` in the transport_file. \
-                         Required when transport=mxl, but may be omitted if \
-                         `mxl-domain-path` points at a directory containing a \
-                         `domain_def.json` (AMWA BCP-007-03 WIP): the file's \
-                         `id` is then used. When both are supplied they must \
-                         agree.",
-                    )
+                    .blurb(crate::session::MXL_DOMAIN_ID_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("mxl-domain-path")
@@ -191,11 +184,7 @@ impl ObjectImpl for NmosSink {
                     .build(),
                 glib::ParamSpecString::builder("transport-file-path")
                     .nick("Transport file path")
-                    .blurb(
-                        "Filesystem path read at NULL\u{2192}READY into `transport-file`. \
-                         Convenience for gst-launch; mutually exclusive with \
-                         `transport-file`.",
-                    )
+                    .blurb(crate::session::TRANSPORT_FILE_PATH_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Caps>("caps")
@@ -212,9 +201,7 @@ impl ObjectImpl for NmosSink {
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Caps>("transport-caps")
                     .nick("Transport caps")
-                    .blurb(
-                        "Per-transport overrides (SDP fmtp-style). Typically empty for MXL.",
-                    )
+                    .blurb(crate::session::TRANSPORT_CAPS_BLURB)
                     .mutable_ready()
                     .build(),
             ]
@@ -233,6 +220,11 @@ impl ObjectImpl for NmosSink {
             }
             "node-seed" => {
                 settings.node_seed = string_or_empty(value);
+            }
+            "http-port" => {
+                let v: u32 = value.get().expect("type checked upstream");
+                // ParamSpec range-checks against [0, 65535] upstream.
+                settings.http_port = u16::try_from(v).expect("range checked by ParamSpec");
             }
             "transport" => {
                 settings.transport = value.get().expect("type checked upstream");
@@ -276,6 +268,7 @@ impl ObjectImpl for NmosSink {
         match pspec.name() {
             "daemon-uri" => settings.daemon_uri.to_value(),
             "node-seed" => settings.node_seed.to_value(),
+            "http-port" => u32::from(settings.http_port).to_value(),
             "transport" => settings.transport.to_value(),
             "sender-name" => settings.sender_name.to_value(),
             "mxl-domain-id" => settings.mxl_domain_id.to_value(),
@@ -648,6 +641,7 @@ impl From<Settings> for crate::session::CommonSettings {
         crate::session::CommonSettings {
             daemon_uri: s.daemon_uri,
             node_seed: s.node_seed,
+            http_port: s.http_port,
             transport: s.transport,
             side: crate::session::Side::Sender,
             name: s.sender_name,
