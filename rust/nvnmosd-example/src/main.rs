@@ -55,8 +55,8 @@
 //!     `SubscribeActivations` stream; the auto-ack task acks and
 //!     relays the event to the main flow, which asserts the
 //!     `resource_handle` and `transport_file` presence match the
-//!     PATCH. Skipped via `--skip-is05` when libnvnmos's HTTP server
-//!     isn't reachable.
+//!     PATCH. Skipped via `--skip-connection` when libnvnmos's HTTP
+//!     server isn't reachable.
 //! 16. `AddSender` with `name` ≠ SDP's `x-nvnmos-name` — expect
 //!     `INVALID_ARGUMENT` (daemon-side mismatch detection).
 //! 17. `RemoveResource` — drop the sender; the receiver survives.
@@ -125,20 +125,20 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     hold_secs: u64,
 
-    /// TCP port libnvnmos listens on for the IS-05 Connection API.
-    /// Default 3215 matches the nmos-cpp default that libnvnmos uses
-    /// when `NodeConfig.http_port` is 0. Override if you've configured
-    /// a different port or are running the smoke against a remote
-    /// libnvnmos.
-    #[arg(long, default_value_t = 3215)]
-    is05_port: u16,
+    /// TCP port to serve the NMOS HTTP APIs on, propagated as
+    /// `NodeConfig.http_port`. libnvnmos collapses every HTTP API
+    /// (Node, Connection, ...) onto this single port, so the example's
+    /// Connection API PATCH round-trip targets this port too. Override
+    /// when 8010 is in use by something else on this host.
+    #[arg(long, default_value_t = 8010)]
+    http_port: u16,
 
-    /// Skip the IS-05 PATCH round-trip step. Useful in environments
-    /// where libnvnmos's HTTP server isn't reachable from the example
-    /// (e.g. sandboxed CI), or for narrowing down a regression to the
-    /// gRPC-only paths.
+    /// Skip the in-band Connection API (IS-05) PATCH round-trip step.
+    /// Useful in environments where libnvnmos's HTTP server isn't
+    /// reachable from the example (e.g. sandboxed CI), or for
+    /// narrowing down a regression to the gRPC-only paths.
     #[arg(long, default_value_t = false)]
-    skip_is05: bool,
+    skip_connection: bool,
 }
 
 /// Autodetect a routable local IP via the standard "connect a UDP socket
@@ -163,13 +163,18 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
+    tracing::info!(
+        http_port = args.http_port,
+        "NodeConfig.http_port (also the Connection API PATCH target)",
+    );
+
     let channel = connect_uds(&args.uds)
         .await
         .with_context(|| format!("connecting to nvnmosd at {}", args.uds.display()))?;
     let mut client = NvnmosDaemonClient::new(channel);
 
     // (1) First OpenSession: creates the Node.
-    let a = open(&mut client, &args.node_seed, "first session (creates Node)").await?;
+    let a = open(&mut client, &args.node_seed, args.http_port, "first session (creates Node)").await?;
     anyhow::ensure!(
         a.created_node,
         "first OpenSession on a fresh seed should have created_node=true; got {}",
@@ -181,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
     // ignored by the daemon when the Node already exists; we still
     // send a NodeConfig because the wire requires `node_config.seed`
     // to identify which Node to attach to.
-    let b = open(&mut client, &args.node_seed, "second session (refcount bump)").await?;
+    let b = open(&mut client, &args.node_seed, args.http_port, "second session (refcount bump)").await?;
     anyhow::ensure!(
         !b.created_node,
         "second OpenSession on the same seed should have created_node=false; got {}",
@@ -210,14 +215,14 @@ async fn main() -> anyhow::Result<()> {
     let persistent_seed = format!("{}-persistent", args.node_seed);
 
     // (5) AddNode: create a persistent Node.
-    let added = add_node(&mut client, &persistent_seed).await?;
+    let added = add_node(&mut client, &persistent_seed, args.http_port).await?;
 
     // (6) Two OpenSessions on the persistent seed: attach to it without
     // affecting its lifetime. Both must return the persistent Node's id
     // *and* report `created_node=false` (the persistent Node was
     // created by AddNode in step 5).
-    let c = open(&mut client, &persistent_seed, "first session on persistent Node").await?;
-    let d = open(&mut client, &persistent_seed, "second session on persistent Node").await?;
+    let c = open(&mut client, &persistent_seed, args.http_port, "first session on persistent Node").await?;
+    let d = open(&mut client, &persistent_seed, args.http_port, "second session on persistent Node").await?;
     anyhow::ensure!(
         c.node_id == added.node_id && d.node_id == added.node_id,
         "OpenSession on the persistent seed returned the wrong node_id: \
@@ -259,6 +264,7 @@ async fn main() -> anyhow::Result<()> {
     let r = open(
         &mut client,
         &resource_seed,
+        args.http_port,
         "resource phase session (creates Node)",
     )
     .await?;
@@ -375,31 +381,31 @@ async fn main() -> anyhow::Result<()> {
     // acks, libnvnmos's PATCH returns 200. We assert every step
     // observed end-to-end via the relay channel.
     //
-    // Skipped when `--skip-is05` is set, since the round-trip needs
-    // libnvnmos's HTTP server to be reachable from this process.
-    if !args.skip_is05 {
+    // Skipped when `--skip-connection` is set, since the round-trip
+    // needs libnvnmos's HTTP server to be reachable from this process.
+    if !args.skip_connection {
         drive_connection_sender_activation(
             &mut activations_rx,
             &sender_resp.resource_handle,
             &iface_ip,
-            args.is05_port,
+            args.http_port,
             &sender_resp.resource_id,
             true,
         )
         .await
-        .context("IS-05 PATCH activate round-trip")?;
+        .context("Connection API PATCH activate round-trip")?;
         drive_connection_sender_activation(
             &mut activations_rx,
             &sender_resp.resource_handle,
             &iface_ip,
-            args.is05_port,
+            args.http_port,
             &sender_resp.resource_id,
             false,
         )
         .await
-        .context("IS-05 PATCH deactivate round-trip")?;
+        .context("Connection API PATCH deactivate round-trip")?;
     } else {
-        tracing::info!("--skip-is05 set; skipping the in-band IS-05 PATCH round-trip");
+        tracing::info!("--skip-connection set; skipping the in-band Connection API PATCH round-trip");
     }
 
     // (16) Mismatch: claim name="claimed-id" but build the SDP with a
@@ -569,12 +575,13 @@ async fn spawn_auto_ack_task(
 async fn open(
     client: &mut NvnmosDaemonClient<Channel>,
     node_seed: &str,
+    http_port: u16,
     label: &str,
 ) -> anyhow::Result<OpenSessionResponse> {
-    tracing::info!(node_seed = %node_seed, "OpenSession ({label})");
+    tracing::info!(node_seed = %node_seed, http_port, "OpenSession ({label})");
     let resp = client
         .open_session(OpenSessionRequest {
-            node_config: Some(default_node_config(node_seed)),
+            node_config: Some(default_node_config(node_seed, http_port)),
         })
         .await
         .with_context(|| format!("OpenSession ({label}) failed"))?
@@ -600,9 +607,10 @@ async fn open(
 /// every UUID we expose, so reusing it keeps the asset distinguishing
 /// info aligned with the rest of the Node's identity (and gives each
 /// of the three Nodes the example creates a distinct `instance_id`).
-fn default_node_config(node_seed: &str) -> NodeConfig {
+fn default_node_config(node_seed: &str, http_port: u16) -> NodeConfig {
     NodeConfig {
         seed: node_seed.to_string(),
+        http_port: u32::from(http_port),
         asset_tags: Some(AssetConfig {
             manufacturer: "NVIDIA".to_string(),
             product: "nvnmosd-example".to_string(),
@@ -631,11 +639,12 @@ async fn close(
 async fn add_node(
     client: &mut NvnmosDaemonClient<Channel>,
     node_seed: &str,
+    http_port: u16,
 ) -> anyhow::Result<AddNodeResponse> {
-    tracing::info!(node_seed = %node_seed, "AddNode (create persistent Node)");
+    tracing::info!(node_seed = %node_seed, http_port, "AddNode (create persistent Node)");
     let resp = client
         .add_node(AddNodeRequest {
-            node_config: Some(default_node_config(node_seed)),
+            node_config: Some(default_node_config(node_seed, http_port)),
         })
         .await
         .context("AddNode failed")?

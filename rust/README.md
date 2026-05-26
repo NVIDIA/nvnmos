@@ -49,6 +49,6 @@ The example exercises every RPC the daemon currently implements: both Node lifet
 
 By default the example autodetects a local interface IP via the routing table. Override with `--interface-ip <ip>` if the autodetect picks the wrong one (or fails on a sandboxed network).
 
-The IS-05 round-trip targets `http://127.0.0.1:3215/x-nmos/connection/v1.1/single/senders/<sender_resource_id>/staged` (libnvnmos's default IS-05 port, configurable via `--is05-port`). Pass `--skip-is05` to disable the step when libnvnmos's HTTP server isn't reachable from the example.
+The example sets `NodeConfig.http_port` to a fixed value (8010 by default, configurable via `--http-port`); libnvnmos collapses every HTTP API (Node, Connection, ...) onto that single port, so the in-band Connection API PATCH round-trip also targets it: `http://<interface-ip>:8010/x-nmos/connection/v1.1/single/senders/<sender_resource_id>/staged`. Pass `--skip-connection` to disable the round-trip step when libnvnmos's HTTP server isn't reachable from the example.
 
 To poke libnvnmos manually after the automated flow finishes, run with `--hold-secs N` (e.g. `--hold-secs 30`); the example will hold the resource-phase session open for N seconds with the receiver still registered and the activations stream still attached, so a `curl -X PATCH` against the receiver's IS-05 endpoint will round-trip through `SubscribeActivations` / `AckActivation` exactly like the automated step did for the sender.
