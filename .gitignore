@@ -20,5 +20,5 @@
 CMakeUserPresets.json
 
 # Local Conan + CMake output (README layout)
-build/
-src/conan/
+build*/
+src/conan*/

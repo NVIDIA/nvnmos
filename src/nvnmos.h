@@ -124,16 +124,36 @@ typedef enum _NvNmosTransport
 } NvNmosTransport;
 
 /**
+ * Identifies a resource as either a Sender or a Receiver. Used by
+ * @ref nmos_connection_activate and @ref nmos_connection_activation_callback
+ * to disambiguate a name that may be shared between a Sender and a
+ * Receiver on the same Node (caller-chosen names are unique within a
+ * given side on a Node, but a Sender and a Receiver are permitted to
+ * use the same name).
+ */
+typedef enum _NvNmosSide
+{
+    /** An NMOS Sender. */
+    NVNMOS_SIDE_SENDER = 0,
+    /** An NMOS Receiver. */
+    NVNMOS_SIDE_RECEIVER = 1
+} NvNmosSide;
+
+/**
  * Type for a callback from NvNmos library when an IS-05 Connection API
  * activation occurs.
  *
  * @param[in] server         A pointer to the server issuing the callback.
- * @param[in] id             The unique identifier for the sender or receiver
- *                           to be activated or deactivated. This is the
- *                           same id originally supplied via the
- *                           configuration's transport file (see
+ * @param[in] side           Whether the activation is for a Sender or a
+ *                           Receiver.
+ * @param[in] name           The caller-chosen name for the sender or
+ *                           receiver to be activated or deactivated.
+ *                           This is the same name originally supplied
+ *                           via the configuration's transport file (see
  *                           @ref NvNmosSenderConfig::transport_file and
  *                           @ref NvNmosReceiverConfig::transport_file).
+ *                           Unique for the given @p side on the
+ *                           Node.
  * @param[in] transport_file The updated transport file data for the
  *                           sender or receiver, or a null pointer when
  *                           the sender or receiver is being deactivated.
@@ -141,33 +161,34 @@ typedef enum _NvNmosTransport
  *                           For an RTP sender or receiver this is an SDP
  *                           file. The 'inactive' media-level attribute is
  *                           used to indicate a disabled leg. The
- *                           'x-nvnmos-id' session-level attribute specifies
- *                           the unique identifier for the sender or
- *                           receiver, @p id. For a receiver, the
- *                           'x-nvnmos-iface-ip' media-level attribute is
- *                           used to specify the interface IP address on
- *                           which the stream is received. For a sender,
- *                           the 'x-nvnmos-src-port' media-level attribute
- *                           is used to specify the source port from which
- *                           the stream is transmitted.
+ *                           'x-nvnmos-name' session-level attribute specifies
+ *                           the name of the sender or receiver, @p name.
+ *                           For a receiver, the 'x-nvnmos-iface-ip'
+ *                           media-level attribute is used to specify the
+ *                           interface IP address on which the stream is
+ *                           received. For a sender, the 'x-nvnmos-src-port'
+ *                           media-level attribute is used to specify the
+ *                           source port from which the stream is
+ *                           transmitted.
  *
  *                           For an MXL sender or receiver this is an MXL
- *                           flow definition (JSON). The 'urn:x-nvnmos:tag:id'
- *                           tag in the 'tags' property specifies the unique
- *                           identifier for the sender or receiver, @p id;
+ *                           flow definition (JSON). The 'urn:x-nvnmos:tag:name'
+ *                           tag in the 'tags' property specifies the name
+ *                           of the sender or receiver, @p name;
  *                           the 'mxl_domain_id' and 'mxl_flow_id' IS-05
  *                           transport parameters are reflected in the
  *                           'urn:x-nvnmos:tag:mxl-domain-id' tag (also in
  *                           'tags') and the JSON document's top-level 'id'
  *                           field respectively.
  *                           The application is expected to dispatch on
- *                           @p id (which it specified) to determine the
- *                           transport, if needed.
+ *                           (@p side, @p name) (both of which it specified)
+ *                           to determine the transport, if needed.
  * @return Whether the activation could be applied.
  */
 typedef bool (* nmos_connection_activation_callback)(
     NvNmosNodeServer *server,
-    const char *id,
+    NvNmosSide side,
+    const char *name,
     const char *transport_file);
 
 /**
@@ -315,8 +336,8 @@ typedef struct _NvNmosReceiverConfig
         For ::NVNMOS_TRANSPORT_RTP, this is Session Description Protocol
         (SDP) data, which must be valid as per the relevant IETF RFC
         and SMPTE standards for the media format and transport.
-        The 'x-nvnmos-id' session-level attribute specifies the unique
-        identifier for the receiver.
+        The 'x-nvnmos-name' session-level attribute specifies the
+        caller-chosen name for the receiver, unique within the Node.
         The 'x-nvnmos-group-hint' session-level attribute may be used to
         specify a group hint tag for the receiver.
         The 'x-nvnmos-iface-ip' media-level attribute is used to specify
@@ -331,8 +352,9 @@ typedef struct _NvNmosReceiverConfig
         For ::NVNMOS_TRANSPORT_MXL, this is an MXL flow definition (JSON)
         of the form consumed by the MXL library, with NvNmos extensions
         carried as entries in the 'tags' property.
-        The 'urn:x-nvnmos:tag:id' tag (single-string array, required)
-        specifies the unique identifier for the receiver.
+        The 'urn:x-nvnmos:tag:name' tag (single-string array, required)
+        specifies the caller-chosen name for the receiver, unique within
+        the Node.
         A group hint tag may be specified via the standard
         'urn:x-nmos:tag:grouphint/v1.0' tag.
         The 'urn:x-nvnmos:tag:caps' tag may be used (presence-only) to
@@ -365,8 +387,8 @@ typedef struct _NvNmosSenderConfig
         (SDP) data, which must be valid as per the relevant IETF RFC
         and SMPTE standards for the media format and transport.
         The 'ts-refclk' attributes are used to specify the node clock.
-        The 'x-nvnmos-id' session-level attribute specifies the unique
-        identifier for the sender.
+        The 'x-nvnmos-name' session-level attribute specifies the
+        caller-chosen name for the sender, unique within the Node.
         The 'x-nvnmos-group-hint' session-level attribute may be used to
         specify a group hint tag for the sender.
         The 'x-nvnmos-src-port' media-level attribute is used to specify
@@ -376,8 +398,9 @@ typedef struct _NvNmosSenderConfig
         of the form consumed by the MXL library, with NvNmos extensions
         carried as entries in the 'tags' property (following the same
         URN convention as the standard 'urn:x-nmos:tag:grouphint/v1.0').
-        The 'urn:x-nvnmos:tag:id' tag (single-string array, required)
-        specifies the unique identifier for the sender.
+        The 'urn:x-nvnmos:tag:name' tag (single-string array, required)
+        specifies the caller-chosen name for the sender, unique within
+        the Node.
         A group hint tag may be specified via the standard
         'urn:x-nmos:tag:grouphint/v1.0' tag.
         The 'urn:x-nvnmos:tag:mxl-domain-id' tag (single-string array of
@@ -388,7 +411,7 @@ typedef struct _NvNmosSenderConfig
         if present, is used as the MXL flow identity for the sender's
         IS-05 transport parameter 'mxl_flow_id'; if absent, the NMOS
         Flow id (derived from @ref NvNmosNodeConfig::seed and the
-        'urn:x-nvnmos:tag:id' value) is used in its place. */
+        'urn:x-nvnmos:tag:name' value) is used in its place. */
     const char *transport_file;
 } NvNmosSenderConfig;
 
@@ -497,14 +520,15 @@ bool add_nmos_receiver_to_node_server(
  * The receiver may have been adding using @ref create_nmos_node_server
  * or @ref add_nmos_receiver_to_node_server.
  *
- * @param[in] server Pointer to the server to update.
- * @param[in] id     The unique identifier for the receiver to be removed.
+ * @param[in] server        Pointer to the server to update.
+ * @param[in] receiver_name The caller-chosen name of the receiver to be
+ *                          removed (see @ref NvNmosReceiverConfig::transport_file).
  * @return Whether the receiver has been successfully removed.
  */
 NVNMOS_API
 bool remove_nmos_receiver_from_node_server(
     NvNmosNodeServer *server,
-    const char* id);
+    const char* receiver_name);
 
 /**
  * Add an NMOS Sender to an NMOS Node server according to the
@@ -527,14 +551,15 @@ bool add_nmos_sender_to_node_server(
  * The sender may have been adding using @ref create_nmos_node_server
  * or @ref add_nmos_sender_to_node_server.
  *
- * @param[in] server Pointer to the server to update.
- * @param[in] id     The unique identifier for the sender to be removed.
- * @return Whether the receiver has been successfully removed.
+ * @param[in] server        Pointer to the server to update.
+ * @param[in] sender_name   The caller-chosen name of the sender to be
+ *                          removed (see @ref NvNmosSenderConfig::transport_file).
+ * @return Whether the sender has been successfully removed.
  */
 NVNMOS_API
 bool remove_nmos_sender_from_node_server(
     NvNmosNodeServer *server,
-    const char* id);
+    const char* sender_name);
 
 /**
  * Report that a sender or receiver has been activated or deactivated
@@ -550,10 +575,12 @@ bool remove_nmos_sender_from_node_server(
  * invoked as a result of this call.
  *
  * @param[in] server         A pointer to the server to be updated.
- * @param[in] id             The unique identifier for the sender or
+ * @param[in] side           Whether the sender or receiver is a Sender
+ *                           or a Receiver.
+ * @param[in] name           The caller-chosen name of the sender or
  *                           receiver whose state has changed. The
  *                           transport is inferred from the existing
- *                           sender or receiver with this id.
+ *                           sender or receiver of @p side with this name.
  * @param[in] transport_file The new transport file data reflecting the
  *                           active state of the sender or receiver, or
  *                           a null pointer when the sender or receiver
@@ -571,7 +598,8 @@ bool remove_nmos_sender_from_node_server(
 NVNMOS_API
 bool nmos_connection_activate(
     NvNmosNodeServer *server,
-    const char *id,
+    NvNmosSide side,
+    const char *name,
     const char *transport_file);
 
 /**
@@ -601,13 +629,13 @@ bool nmos_make_node_id(
 /**
  * Compute the NMOS Sender resource id that an
  * @ref NvNmosNodeServer created with the given @p seed will use for
- * the sender identified by the given @p internal_id.
+ * the sender with the given @p sender_name.
  *
- * Pure function of (@p seed, @p internal_id). See
+ * Pure function of (@p seed, @p sender_name). See
  * @ref nmos_make_node_id for the contract; the same notes apply.
  *
  * @param[in]  seed        Seed string. Must not be null.
- * @param[in]  internal_id The internal id of the sender (see
+ * @param[in]  sender_name The caller-chosen name of the sender (see
  *                         @ref NvNmosSenderConfig::transport_file).
  *                         Must not be null.
  * @param[out] out         Buffer to receive the id.
@@ -617,30 +645,30 @@ bool nmos_make_node_id(
 NVNMOS_API
 bool nmos_make_sender_id(
     const char *seed,
-    const char *internal_id,
+    const char *sender_name,
     char *out,
     size_t out_len);
 
 /**
  * Compute the NMOS Receiver resource id that an
  * @ref NvNmosNodeServer created with the given @p seed will use for
- * the receiver identified by the given @p internal_id.
+ * the receiver with the given @p receiver_name.
  *
- * Pure function of (@p seed, @p internal_id). See
+ * Pure function of (@p seed, @p receiver_name). See
  * @ref nmos_make_node_id for the contract.
  *
- * @param[in]  seed        Seed string. Must not be null.
- * @param[in]  internal_id The internal id of the receiver (see
- *                         @ref NvNmosReceiverConfig::transport_file).
- *                         Must not be null.
- * @param[out] out         Buffer to receive the id.
- * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @param[in]  seed          Seed string. Must not be null.
+ * @param[in]  receiver_name The caller-chosen name of the receiver (see
+ *                           @ref NvNmosReceiverConfig::transport_file).
+ *                           Must not be null.
+ * @param[out] out           Buffer to receive the id.
+ * @param[in]  out_len       Size of @p out, at least @ref NVNMOS_ID_LEN.
  * @return Whether the id has been written to @p out.
  */
 NVNMOS_API
 bool nmos_make_receiver_id(
     const char *seed,
-    const char *internal_id,
+    const char *receiver_name,
     char *out,
     size_t out_len);
 
@@ -664,12 +692,12 @@ bool nmos_get_node_id(
  * Get the NMOS Sender resource id of a sender currently registered
  * with the specified server.
  *
- * Looks the sender up by its internal id. Returns false (without
- * writing to @p out) if no sender with the given @p internal_id has
- * been added to the server.
+ * Looks the sender up by its name. Returns false (without writing to
+ * @p out) if no sender with the given @p sender_name has been added
+ * to the server.
  *
  * @param[in]  server      Pointer to the server.
- * @param[in]  internal_id The internal id of the sender (see
+ * @param[in]  sender_name The caller-chosen name of the sender (see
  *                         @ref NvNmosSenderConfig::transport_file).
  *                         Must not be null.
  * @param[out] out         Buffer to receive the id.
@@ -679,7 +707,7 @@ bool nmos_get_node_id(
 NVNMOS_API
 bool nmos_get_sender_id(
     const NvNmosNodeServer *server,
-    const char *internal_id,
+    const char *sender_name,
     char *out,
     size_t out_len);
 
@@ -687,22 +715,22 @@ bool nmos_get_sender_id(
  * Get the NMOS Receiver resource id of a receiver currently
  * registered with the specified server.
  *
- * Looks the receiver up by its internal id. Returns false (without
- * writing to @p out) if no receiver with the given @p internal_id
- * has been added to the server.
+ * Looks the receiver up by its name. Returns false (without writing
+ * to @p out) if no receiver with the given @p receiver_name has been
+ * added to the server.
  *
- * @param[in]  server      Pointer to the server.
- * @param[in]  internal_id The internal id of the receiver (see
- *                         @ref NvNmosReceiverConfig::transport_file).
- *                         Must not be null.
- * @param[out] out         Buffer to receive the id.
- * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @param[in]  server        Pointer to the server.
+ * @param[in]  receiver_name The caller-chosen name of the receiver (see
+ *                           @ref NvNmosReceiverConfig::transport_file).
+ *                           Must not be null.
+ * @param[out] out           Buffer to receive the id.
+ * @param[in]  out_len       Size of @p out, at least @ref NVNMOS_ID_LEN.
  * @return Whether the id has been written to @p out.
  */
 NVNMOS_API
 bool nmos_get_receiver_id(
     const NvNmosNodeServer *server,
-    const char *internal_id,
+    const char *receiver_name,
     char *out,
     size_t out_len);
 

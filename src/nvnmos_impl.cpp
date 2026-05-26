@@ -82,7 +82,7 @@ namespace nvnmos
 
         // like nmos::make_session_description for 'internal' use
         // with support for the custom SDP attributes in nvnmos::attributes for senders as well as receivers
-        web::json::value make_session_description(const nmos::type& type, const utility::string_t& internal_id, const utility::string_t& group_hint, const utility::string_t& session_info, const nmos::sdp_parameters& sdp_params, const web::json::value& transport_params);
+        web::json::value make_session_description(const nmos::type& type, const utility::string_t& name, const utility::string_t& group_hint, const utility::string_t& session_info, const nmos::sdp_parameters& sdp_params, const web::json::value& transport_params);
 
         // like nmos::get_session_description_sdp_parameters
         // with support for multiple ts-refclk attributes in each media description
@@ -92,8 +92,8 @@ namespace nvnmos
         // with support for the custom SDP attributes in nvnmos::attributes for senders as well as receivers
         web::json::value get_session_description_transport_params(const nmos::type& type, const web::json::value& session_description);
 
-        // get the (required) internal id from the custom attribute; throws std::invalid_argument if absent or empty
-        utility::string_t get_session_description_internal_id(const web::json::value& session_description);
+        // get the (required) NvNmos resource name from the `x-nvnmos-name` custom attribute (not the SDP `s=` session-name line); throws std::invalid_argument if absent or empty
+        utility::string_t get_session_description_resource_name(const web::json::value& session_description);
 
         // get the optional group hint from the custom attribute
         utility::string_t get_session_description_group_hint(const web::json::value& session_description);
@@ -115,10 +115,10 @@ namespace nvnmos
         // generate a repeatable source-specific multicast address for each leg of a sender
         utility::string_t make_source_specific_multicast_address_v4(const nmos::id& id, int leg);
 
-        // set the internal id for the sender or receiver as a resource tag
-        void set_internal_id(nmos::resource& resource, const utility::string_t& internal_id);
-        // get the internal id for the sender or receiver from a resource tag
-        utility::string_t get_internal_id(const nmos::resource& resource);
+        // set the name for the sender or receiver as a resource tag
+        void set_name(nmos::resource& resource, const utility::string_t& name);
+        // get the name for the sender or receiver from a resource tag
+        utility::string_t get_name(const nmos::resource& resource);
 
         // set the group hint for the sender or receiver as a resource tag
         void set_group_hint(nmos::resource& resource, const utility::string_t& group_hint);
@@ -150,9 +150,9 @@ namespace nvnmos
         // extract the first string from the named tag in the flow definition's
         // `tags` property (or empty if absent)
         utility::string_t get_mxl_flow_def_tag(const web::json::value& flow_def, const web::json::field_as_value_or& tag_field);
-        // extract the (required) internal id from the urn:x-nvnmos:tag:id tag;
+        // extract the (required) name from the urn:x-nvnmos:tag:name tag;
         // throws std::invalid_argument if absent or empty
-        utility::string_t get_mxl_flow_def_internal_id(const web::json::value& flow_def);
+        utility::string_t get_mxl_flow_def_name(const web::json::value& flow_def);
         // extract an optional group hint from the urn:x-nmos:tag:grouphint/v1.0 tag (or empty)
         utility::string_t get_mxl_flow_def_group_hint(const web::json::value& flow_def);
         // returns true if the urn:x-nvnmos:tag:caps tag asks for a fully-flexible
@@ -214,17 +214,17 @@ namespace nvnmos
         const auto sdp_params = nmos::get_session_description_sdp_parameters(sdp);
         const auto ts_refclks = impl::get_session_description_ts_refclks(sdp);
         const auto transport_params = impl::get_session_description_transport_params(nmos::types::sender, sdp);
-        const auto internal_id = impl::get_session_description_internal_id(sdp);
-        // hm, could check the internal id is unique across all senders and receivers
+        const auto name = impl::get_session_description_resource_name(sdp);
+        // hm, could check the name is unique across all senders and receivers
         const auto group_hint = impl::get_session_description_group_hint(sdp);
         const auto session_info = impl::get_session_description_session_info(sdp);
 
         const auto seed_id = nmos::experimental::fields::seed_id(settings);
         const auto node_id = impl::make_id(seed_id, nmos::types::node);
         const auto device_id = impl::make_id(seed_id, nmos::types::device);
-        const auto source_id = impl::make_id(seed_id, nmos::types::source, internal_id);
-        const auto flow_id = impl::make_id(seed_id, nmos::types::flow, internal_id);
-        const auto sender_id = impl::make_id(seed_id, nmos::types::sender, internal_id);
+        const auto source_id = impl::make_id(seed_id, nmos::types::source, name);
+        const auto flow_id = impl::make_id(seed_id, nmos::types::flow, name);
+        const auto sender_id = impl::make_id(seed_id, nmos::types::sender, name);
 
         // for now, only manage a single clock
         const auto clock = nmos::clock_names::clk0;
@@ -240,7 +240,7 @@ namespace nvnmos
             if (host_interfaces.end() == interface)
             {
                 slog::log<slog::severities::severe>(gate, SLOG_FLF)
-                    << "No network interface corresponding to the connection address: " << address << " for: " << internal_id;
+                    << "No network interface corresponding to the connection address: " << address << " for: " << name;
                 throw node_implementation_exception();
             }
             return interface->name;
@@ -367,8 +367,8 @@ namespace nvnmos
         // override default label and description from model.settings
         sender.data[nmos::fields::label] = value::string(sdp_params.session_name);
         sender.data[nmos::fields::description] = value::string(session_info);
-        // set the internal id as a resource tag
-        impl::set_internal_id(sender, internal_id);
+        // set the name as a resource tag
+        impl::set_name(sender, name);
         // set the group hint as a resource tag
         if (!group_hint.empty()) impl::set_group_hint(sender, group_hint);
 
@@ -412,15 +412,15 @@ namespace nvnmos
         const auto sdp = sdp::parse_session_description(sdp_);
         const auto sdp_params = nmos::get_session_description_sdp_parameters(sdp);
         const auto transport_params = impl::get_session_description_transport_params(nmos::types::receiver, sdp);
-        const auto internal_id = impl::get_session_description_internal_id(sdp);
-        // hm, could check the internal id is unique across all senders and receivers
+        const auto name = impl::get_session_description_resource_name(sdp);
+        // hm, could check the name is unique across all senders and receivers
         const auto group_hint = impl::get_session_description_group_hint(sdp);
         const auto session_info = impl::get_session_description_session_info(sdp);
 
         const auto seed_id = nmos::experimental::fields::seed_id(settings);
         const auto node_id = impl::make_id(seed_id, nmos::types::node);
         const auto device_id = impl::make_id(seed_id, nmos::types::device);
-        const auto receiver_id = impl::make_id(seed_id, nmos::types::receiver, internal_id);
+        const auto receiver_id = impl::make_id(seed_id, nmos::types::receiver, name);
 
         const auto media_type = nmos::get_media_type(sdp_params);
         const auto format = impl::get_format(media_type);
@@ -434,7 +434,7 @@ namespace nvnmos
             if (host_interfaces.end() == interface)
             {
                 slog::log<slog::severities::severe>(gate, SLOG_FLF)
-                    << "No network interface corresponding to the connection address: " << address << " for: " << internal_id;
+                    << "No network interface corresponding to the connection address: " << address << " for: " << name;
                 throw node_implementation_exception();
             }
             return interface->name;
@@ -554,8 +554,8 @@ namespace nvnmos
         // override default label and description from settings
         receiver.data[nmos::fields::label] = value::string(sdp_params.session_name);
         receiver.data[nmos::fields::description] = value::string(session_info);
-        // set the internal id as a resource tag
-        impl::set_internal_id(receiver, internal_id);
+        // set the name as a resource tag
+        impl::set_name(receiver, name);
         // set the group hint as a resource tag
         if (!group_hint.empty()) impl::set_group_hint(receiver, group_hint);
 
@@ -587,16 +587,16 @@ namespace nvnmos
         using web::json::value_of;
 
         const auto flow_def = impl::parse_mxl_flow_def(flow_def_);
-        const auto internal_id = impl::get_mxl_flow_def_internal_id(flow_def);
+        const auto name = impl::get_mxl_flow_def_name(flow_def);
         const auto group_hint = impl::get_mxl_flow_def_group_hint(flow_def);
         const auto mxl_domain_id = impl::get_mxl_flow_def_domain_id(flow_def);
 
         const auto seed_id = nmos::experimental::fields::seed_id(settings);
         const auto node_id = impl::make_id(seed_id, nmos::types::node);
         const auto device_id = impl::make_id(seed_id, nmos::types::device);
-        const auto source_id = impl::make_id(seed_id, nmos::types::source, internal_id);
-        const auto flow_id = impl::make_id(seed_id, nmos::types::flow, internal_id);
-        const auto sender_id = impl::make_id(seed_id, nmos::types::sender, internal_id);
+        const auto source_id = impl::make_id(seed_id, nmos::types::source, name);
+        const auto flow_id = impl::make_id(seed_id, nmos::types::flow, name);
+        const auto sender_id = impl::make_id(seed_id, nmos::types::sender, name);
 
         // the NMOS Flow id is always generated (flow_id, above); the MXL flow id is taken from the flow
         // definition's 'id' property if present, otherwise it falls back to the NMOS Flow id
@@ -686,7 +686,7 @@ namespace nvnmos
         // json_exception if absent
         sender.data[nmos::fields::label] = value::string(nmos::fields::label(flow_def));
         sender.data[nmos::fields::description] = value::string(nmos::fields::description(flow_def));
-        impl::set_internal_id(sender, internal_id);
+        impl::set_name(sender, name);
         if (!group_hint.empty()) impl::set_group_hint(sender, group_hint);
 
         if (!insert_resource(node_resources, std::move(source)).second) throw node_implementation_exception();
@@ -715,14 +715,14 @@ namespace nvnmos
         using web::json::value_of;
 
         const auto flow_def = impl::parse_mxl_flow_def(flow_def_);
-        const auto internal_id = impl::get_mxl_flow_def_internal_id(flow_def);
+        const auto name = impl::get_mxl_flow_def_name(flow_def);
         const auto group_hint = impl::get_mxl_flow_def_group_hint(flow_def);
         const auto mxl_domain_id = impl::get_mxl_flow_def_domain_id(flow_def);
         const auto want_caps = !impl::has_mxl_flow_def_caps(flow_def);
 
         const auto seed_id = nmos::experimental::fields::seed_id(settings);
         const auto device_id = impl::make_id(seed_id, nmos::types::device);
-        const auto receiver_id = impl::make_id(seed_id, nmos::types::receiver, internal_id);
+        const auto receiver_id = impl::make_id(seed_id, nmos::types::receiver, name);
 
         const nmos::media_type media_type{ nmos::fields::media_type(flow_def) };
         const auto format = impl::get_format(media_type);
@@ -814,7 +814,7 @@ namespace nvnmos
         // json_exception if absent
         receiver.data[nmos::fields::label] = value::string(nmos::fields::label(flow_def));
         receiver.data[nmos::fields::description] = value::string(nmos::fields::description(flow_def));
-        impl::set_internal_id(receiver, internal_id);
+        impl::set_name(receiver, name);
         if (!group_hint.empty()) impl::set_group_hint(receiver, group_hint);
 
         if (!insert_resource(node_resources, std::move(receiver)).second) throw node_implementation_exception();
@@ -835,16 +835,16 @@ namespace nvnmos
         });
     }
 
-    void node_implementation_remove_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const nmos::type& type, const utility::string_t& internal_id, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
+    void node_implementation_remove_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const nmos::type& type, const utility::string_t& name, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
     {
         using web::json::value;
         using web::json::value_of;
 
-        // find sender or receiver with specified internal id
+        // find sender or receiver with specified name
 
         const auto seed_id = nmos::experimental::fields::seed_id(settings);
         const auto node_id = impl::make_id(seed_id, nmos::types::node);
-        const auto id = impl::make_id(seed_id, type, internal_id);
+        const auto id = impl::make_id(seed_id, type, name);
         auto resource = nmos::find_resource(node_resources, { id, type });
 
         if (node_resources.end() != resource)
@@ -908,7 +908,7 @@ namespace nvnmos
         }
         else
         {
-            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Could not find " << type.name << " with internal id: " << internal_id;
+            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Could not find " << type.name << " with name: " << name;
             throw node_implementation_exception();
         }
     }
@@ -973,26 +973,26 @@ namespace nvnmos
         model.notify();
     }
 
-    // This removes sources/flows/senders from the model corresponding to the specified id.
-    void node_implementation_remove_sender(nmos::node_model& model, const utility::string_t& internal_id, slog::base_gate& gate)
+    // This removes sources/flows/senders from the model corresponding to the specified name.
+    void node_implementation_remove_sender(nmos::node_model& model, const utility::string_t& sender_name, slog::base_gate& gate)
     {
         auto lock = model.write_lock(); // in order to update the resources
 
         const auto host_interfaces = web::hosts::experimental::host_interfaces();
 
-        node_implementation_remove_connection_(model.node_resources, model.connection_resources, nmos::types::sender, internal_id, host_interfaces, model.settings, gate);
+        node_implementation_remove_connection_(model.node_resources, model.connection_resources, nmos::types::sender, sender_name, host_interfaces, model.settings, gate);
 
         model.notify();
     }
 
-    // This removes the receiver from the model corresponding to the specified id.
-    void node_implementation_remove_receiver(nmos::node_model& model, const utility::string_t& internal_id, slog::base_gate& gate)
+    // This removes the receiver from the model corresponding to the specified name.
+    void node_implementation_remove_receiver(nmos::node_model& model, const utility::string_t& receiver_name, slog::base_gate& gate)
     {
         auto lock = model.write_lock(); // in order to update the resources
 
         const auto host_interfaces = web::hosts::experimental::host_interfaces();
 
-        node_implementation_remove_connection_(model.node_resources, model.connection_resources, nmos::types::receiver, internal_id, host_interfaces, model.settings, gate);
+        node_implementation_remove_connection_(model.node_resources, model.connection_resources, nmos::types::receiver, receiver_name, host_interfaces, model.settings, gate);
 
         model.notify();
     }
@@ -1205,7 +1205,7 @@ namespace nvnmos
 
             if (!is_rtp && !is_mxl) return;
 
-            const auto internal_id = impl::get_internal_id(resource);
+            const auto name = impl::get_name(resource);
 
             const auto& endpoint_active = nmos::fields::endpoint_active(connection_resource.data);
 
@@ -1267,10 +1267,10 @@ namespace nvnmos
 
                     const auto group_hint = impl::get_group_hint(resource);
                     const auto& session_info = nmos::fields::description(resource.data);
-                    const auto merged_sdp = impl::make_session_description(id_type.second, internal_id, group_hint, session_info, sdp_params, transport_params);
+                    const auto merged_sdp = impl::make_session_description(id_type.second, name, group_hint, session_info, sdp_params, transport_params);
                     const auto sdp_data = sdp::make_session_description(merged_sdp);
 
-                    connection_activated(utility::us2s(internal_id), sdp_data);
+                    connection_activated(id_type.second, utility::us2s(name), sdp_data);
                 }
                 else if (is_mxl)
                 {
@@ -1284,7 +1284,7 @@ namespace nvnmos
                     // concrete flow id, so translate this to a deactivation callback.
                     if (mxl_flow_id_or_null.is_null())
                     {
-                        connection_activated(utility::us2s(internal_id), {});
+                        connection_activated(id_type.second, utility::us2s(name), {});
                         return;
                     }
 
@@ -1298,13 +1298,13 @@ namespace nvnmos
                     auto config_flow_def = web::json::value::parse(config_flow_def_data);
                     const auto flow_def_data = impl::make_mxl_flow_def(std::move(config_flow_def), mxl_domain_id, mxl_flow_id);
 
-                    connection_activated(utility::us2s(internal_id), flow_def_data);
+                    connection_activated(id_type.second, utility::us2s(name), flow_def_data);
                 }
             }
             else
             {
                 // deactivate sender or receiver
-                connection_activated(utility::us2s(internal_id), {});
+                connection_activated(id_type.second, utility::us2s(name), {});
             }
         };
     }
@@ -1437,23 +1437,19 @@ namespace nvnmos
         });
     }
 
-    void node_implementation_activate_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const utility::string_t& internal_id, const std::string& transport_file, nmos::settings& settings, slog::base_gate& gate)
+    void node_implementation_activate_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const nmos::type& type, const utility::string_t& name, const std::string& transport_file, nmos::settings& settings, slog::base_gate& gate)
     {
-        // find sender or receiver with specified internal id
+        // find the sender or receiver with the specified name; a Sender and a
+        // Receiver are permitted to share a name, so we pick by `type`.
 
         const auto seed_id = nmos::experimental::fields::seed_id(settings);
-        const auto sender_id = impl::make_id(seed_id, nmos::types::sender, internal_id);
-        const auto receiver_id = impl::make_id(seed_id, nmos::types::receiver, internal_id);
+        const auto resource_id = impl::make_id(seed_id, type, name);
 
-        auto resource = nmos::find_resource(node_resources, { sender_id, nmos::types::sender });
-        if (node_resources.end() == resource)
-        {
-            resource = nmos::find_resource(node_resources, { receiver_id, nmos::types::receiver });
-        }
+        auto resource = nmos::find_resource(node_resources, { resource_id, type });
 
         if (node_resources.end() == resource)
         {
-            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Could not find sender or receiver with internal id: " << internal_id;
+            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Could not find " << type.name << " with name: " << name;
             return;
         }
 
@@ -1462,7 +1458,7 @@ namespace nvnmos
         // * alternatively, by setting or patching /staged with an immediate or scheduled activation
 
         const std::pair<nmos::id, nmos::type> id_type{ resource->id, resource->type };
-        slog::log<slog::severities::info>(gate, SLOG_FLF) << "Updating " << id_type << " with internal id: " << internal_id;
+        slog::log<slog::severities::info>(gate, SLOG_FLF) << "Updating " << id_type << " with name: " << name;
 
         const auto transport_base = nmos::transport_base(nmos::transport{ nmos::fields::transport(resource->data) });
 
@@ -1481,13 +1477,13 @@ namespace nvnmos
     }
 
     // This updates the transport parameters and transport file for the specified sender or receiver based on the specified transport file.
-    // The transport is inferred from the existing sender or receiver with the specified internal id.
+    // `type` selects between a sender and a receiver with the same name on the Node.
     // For now, the transport file is not validated against the existing sender or receiver capabilities and constraints.
-    void node_implementation_activate_connection(nmos::node_model& model, const utility::string_t& internal_id, const std::string& transport_file, slog::base_gate& gate)
+    void node_implementation_activate_connection(nmos::node_model& model, const nmos::type& type, const utility::string_t& name, const std::string& transport_file, slog::base_gate& gate)
     {
         auto lock = model.write_lock(); // in order to update the resources
 
-        node_implementation_activate_connection_(model.node_resources, model.connection_resources, internal_id, transport_file, model.settings, gate);
+        node_implementation_activate_connection_(model.node_resources, model.connection_resources, type, name, transport_file, model.settings, gate);
 
         model.notify();
     }
@@ -1496,7 +1492,7 @@ namespace nvnmos
     {
         // like nmos::make_session_description for 'internal' use
         // with support for the custom SDP attributes in nvnmos::attributes for senders as well as receivers
-        web::json::value make_session_description(const nmos::type& type, const utility::string_t& internal_id, const utility::string_t& group_hint, const utility::string_t& session_info, const nmos::sdp_parameters& sdp_params, const web::json::value& transport_params)
+        web::json::value make_session_description(const nmos::type& type, const utility::string_t& name, const utility::string_t& group_hint, const utility::string_t& session_info, const nmos::sdp_parameters& sdp_params, const web::json::value& transport_params)
         {
             using web::json::value;
 
@@ -1505,7 +1501,7 @@ namespace nvnmos
             {
                 // using op[] rather than at because there can be no session-level attributes
                 auto& session_attributes = session_description[sdp::fields::attributes];
-                web::json::push_back(session_attributes, sdp::named_value(nvnmos::attributes::internal_id, internal_id));
+                web::json::push_back(session_attributes, sdp::named_value(nvnmos::attributes::name, name));
                 if (!group_hint.empty()) web::json::push_back(session_attributes, sdp::named_value(nvnmos::attributes::group_hint, group_hint));
 
                 if (!session_info.empty())
@@ -1655,22 +1651,22 @@ namespace nvnmos
             return transport_params;
         }
 
-        // get the (required) internal id from the custom attribute; throws std::invalid_argument if absent or empty
-        utility::string_t get_session_description_internal_id(const web::json::value& session_description)
+        // get the (required) NvNmos resource name from the `x-nvnmos-name` custom attribute (not the SDP `s=` session-name line); throws std::invalid_argument if absent or empty
+        utility::string_t get_session_description_resource_name(const web::json::value& session_description)
         {
             const auto& session_attributes = sdp::fields::attributes(session_description);
             {
                 const auto& sa = session_attributes.as_array();
 
-                auto internal_id = sdp::find_name(sa, nvnmos::attributes::internal_id);
-                if (sa.end() != internal_id)
+                auto name = sdp::find_name(sa, nvnmos::attributes::name);
+                if (sa.end() != name)
                 {
-                    const auto& value = sdp::fields::value(*internal_id).as_string();
+                    const auto& value = sdp::fields::value(*name).as_string();
                     if (!value.empty()) return value;
                 }
             }
 
-            throw std::invalid_argument("Missing or empty x-nvnmos-id attribute in SDP");
+            throw std::invalid_argument("Missing or empty x-nvnmos-name attribute in SDP");
         }
 
         // get the optional group hint from the custom attribute
@@ -1789,9 +1785,9 @@ namespace nvnmos
         }
 
         // generate repeatable ids for the node's resources
-        nmos::id make_id(const nmos::id& seed_id, const nmos::type& type, const utility::string_t& internal_id)
+        nmos::id make_id(const nmos::id& seed_id, const nmos::type& type, const utility::string_t& name)
         {
-            return nmos::make_repeatable_id(seed_id, U("/x-nmos/node/") + type.name + U('/') + internal_id);
+            return nmos::make_repeatable_id(seed_id, U("/x-nmos/node/") + type.name + U('/') + name);
         }
 
         // generate a repeatable source-specific multicast address for each leg of a sender
@@ -1808,20 +1804,20 @@ namespace nvnmos
             return utility::s2us(boost::asio::ip::address_v4(a).to_string());
         }
 
-        // set the internal id for the sender or receiver as a resource tag
-        void set_internal_id(nmos::resource& resource, const utility::string_t& internal_id)
+        // set the name for the sender or receiver as a resource tag
+        void set_name(nmos::resource& resource, const utility::string_t& name)
         {
             using web::json::value_of;
 
-            resource.data[nmos::fields::tags][nvnmos::fields::internal_id] = value_of({ internal_id });
+            resource.data[nmos::fields::tags][nvnmos::fields::name] = value_of({ name });
         }
 
-        // get the internal id for the sender or receiver from a resource tag
-        utility::string_t get_internal_id(const nmos::resource& resource)
+        // get the name for the sender or receiver from a resource tag
+        utility::string_t get_name(const nmos::resource& resource)
         {
-            const auto& internal_ids = nvnmos::fields::internal_id(resource.data.at(nmos::fields::tags)).as_array();
-            return !web::json::empty(internal_ids)
-                ? web::json::front(internal_ids).as_string()
+            const auto& names = nvnmos::fields::name(resource.data.at(nmos::fields::tags)).as_array();
+            return !web::json::empty(names)
+                ? web::json::front(names).as_string()
                 : U("");
         }
 
@@ -2005,12 +2001,12 @@ namespace nvnmos
             return web::json::front(values).as_string();
         }
 
-        // extract the (required) internal id from the urn:x-nvnmos:tag:id tag;
+        // extract the (required) name from the urn:x-nvnmos:tag:name tag;
         // throws std::invalid_argument if absent or empty
-        utility::string_t get_mxl_flow_def_internal_id(const web::json::value& flow_def)
+        utility::string_t get_mxl_flow_def_name(const web::json::value& flow_def)
         {
-            const auto value = get_mxl_flow_def_tag(flow_def, nvnmos::fields::internal_id);
-            if (value.empty()) throw std::invalid_argument("Missing or empty urn:x-nvnmos:tag:id tag in MXL flow definition");
+            const auto value = get_mxl_flow_def_tag(flow_def, nvnmos::fields::name);
+            if (value.empty()) throw std::invalid_argument("Missing or empty urn:x-nvnmos:tag:name tag in MXL flow definition");
             return value;
         }
 

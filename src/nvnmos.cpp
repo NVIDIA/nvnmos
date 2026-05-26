@@ -80,6 +80,23 @@ namespace nvnmos
         nmos::experimental::log_model& model;
     };
 
+    inline nmos::type parse_side(NvNmosSide side)
+    {
+        switch (side)
+        {
+        case NVNMOS_SIDE_SENDER: return nmos::types::sender;
+        case NVNMOS_SIDE_RECEIVER: return nmos::types::receiver;
+        }
+        throw std::logic_error("invalid NvNmosSide");
+    }
+
+    inline NvNmosSide make_side(const nmos::type& type)
+    {
+        if (nmos::types::sender == type) return NVNMOS_SIDE_SENDER;
+        if (nmos::types::receiver == type) return NVNMOS_SIDE_RECEIVER;
+        throw std::logic_error("nmos::type is neither sender nor receiver");
+    }
+
     class server
     {
     public:
@@ -87,15 +104,15 @@ namespace nvnmos
         ~server();
 
         void add_receiver(const NvNmosReceiverConfig& config);
-        void remove_receiver(const std::string& id);
+        void remove_receiver(const std::string& receiver_name);
         void add_sender(const NvNmosSenderConfig& config);
-        void remove_sender(const std::string& id);
+        void remove_sender(const std::string& sender_name);
 
-        void activate_connection(const std::string& id, const std::string& transport_file);
+        void activate_connection(const nmos::type& type, const std::string& name, const std::string& transport_file);
 
         nmos::id node_id() const;
-        nmos::id sender_id(const std::string& internal_id) const;
-        nmos::id receiver_id(const std::string& internal_id) const;
+        nmos::id sender_id(const std::string& sender_name) const;
+        nmos::id receiver_id(const std::string& receiver_name) const;
 
     private:
         static nmos::transport to_transport(NvNmosTransport transport);
@@ -136,13 +153,14 @@ namespace nvnmos
 
             const auto& activated = config.connection_activated;
             auto& gate_ = gate;
-            auto connection_activated = [activated, server, &gate_](const std::string& id, const std::string& transport_file)
+            auto connection_activated = [activated, server, &gate_](const nmos::type& type, const std::string& name, const std::string& transport_file)
             {
                 if (!activated) return;
-                const bool success = activated(server, id.c_str(), !transport_file.empty() ? transport_file.c_str() : 0);
+                const auto side = nvnmos::make_side(type);
+                const bool success = activated(server, side, name.c_str(), !transport_file.empty() ? transport_file.c_str() : 0);
                 if (!success)
                 {
-                    slog::log<slog::severities::warning>(gate_, SLOG_FLF) << "Activation failed for internal id: " << id;
+                    slog::log<slog::severities::warning>(gate_, SLOG_FLF) << "Activation failed for " << type.name << ": " << name;
                 }
             };
             node_implementation = make_node_implementation(node_model, connection_activated, gate);
@@ -432,11 +450,11 @@ namespace nvnmos
         }
     }
 
-    void server::remove_receiver(const std::string& id)
+    void server::remove_receiver(const std::string& receiver_name)
     {
         try
         {
-            node_implementation_remove_receiver(node_model, utility::s2us(id), gate);
+            node_implementation_remove_receiver(node_model, utility::s2us(receiver_name), gate);
         }
         catch (...)
         {
@@ -461,11 +479,11 @@ namespace nvnmos
         }
     }
 
-    void server::remove_sender(const std::string& id)
+    void server::remove_sender(const std::string& sender_name)
     {
         try
         {
-            node_implementation_remove_sender(node_model, utility::s2us(id), gate);
+            node_implementation_remove_sender(node_model, utility::s2us(sender_name), gate);
         }
         catch (...)
         {
@@ -474,11 +492,11 @@ namespace nvnmos
         }
     }
 
-    void server::activate_connection(const std::string& id, const std::string& transport_file)
+    void server::activate_connection(const nmos::type& type, const std::string& name, const std::string& transport_file)
     {
         try
         {
-            node_implementation_activate_connection(node_model, utility::s2us(id), transport_file, gate);
+            node_implementation_activate_connection(node_model, type, utility::s2us(name), transport_file, gate);
         }
         catch (...)
         {
@@ -493,18 +511,18 @@ namespace nvnmos
         return impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::node);
     }
 
-    nmos::id server::sender_id(const std::string& internal_id) const
+    nmos::id server::sender_id(const std::string& sender_name) const
     {
         auto lock = node_model.read_lock();
-        const auto candidate = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::sender, utility::s2us(internal_id.c_str()));
+        const auto candidate = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::sender, utility::s2us(sender_name.c_str()));
         if (node_model.node_resources.end() == nmos::find_resource(node_model.node_resources, { candidate, nmos::types::sender })) return {};
         return candidate;
     }
 
-    nmos::id server::receiver_id(const std::string& internal_id) const
+    nmos::id server::receiver_id(const std::string& receiver_name) const
     {
         auto lock = node_model.read_lock();
-        const auto candidate = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::receiver, utility::s2us(internal_id.c_str()));
+        const auto candidate = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::receiver, utility::s2us(receiver_name.c_str()));
         if (node_model.node_resources.end() == nmos::find_resource(node_model.node_resources, { candidate, nmos::types::receiver })) return {};
         return candidate;
     }
@@ -565,16 +583,16 @@ bool add_nmos_receiver_to_node_server(
 NVNMOS_API
 bool remove_nmos_receiver_from_node_server(
     NvNmosNodeServer* server,
-    const char* id)
+    const char* receiver_name)
 {
     if (!server) return false;
     auto impl = (nvnmos::server*)server->impl;
     if (!impl) return false;
-    if (!id) return false;
+    if (!receiver_name) return false;
 
     try
     {
-        impl->remove_receiver(id);
+        impl->remove_receiver(receiver_name);
         return true;
     }
     catch (...)
@@ -607,16 +625,16 @@ bool add_nmos_sender_to_node_server(
 NVNMOS_API
 bool remove_nmos_sender_from_node_server(
     NvNmosNodeServer* server,
-    const char* id)
+    const char* sender_name)
 {
     if (!server) return false;
     auto impl = (nvnmos::server*)server->impl;
     if (!impl) return false;
-    if (!id) return false;
+    if (!sender_name) return false;
 
     try
     {
-        impl->remove_sender(id);
+        impl->remove_sender(sender_name);
         return true;
     }
     catch (...)
@@ -628,18 +646,20 @@ bool remove_nmos_sender_from_node_server(
 NVNMOS_API
 bool nmos_connection_activate(
     NvNmosNodeServer* server,
-    const char* id,
+    NvNmosSide side,
+    const char* name,
     const char* transport_file)
 {
     if (!server) return false;
     auto impl = (nvnmos::server*)server->impl;
     if (!impl) return false;
-    if (!id) return false;
+    if (!name) return false;
     if (!transport_file) transport_file = "";
 
     try
     {
-        impl->activate_connection(id, transport_file);
+        const auto type = nvnmos::parse_side(side);
+        impl->activate_connection(type, name, transport_file);
         return true;
     }
     catch (...)
@@ -683,15 +703,15 @@ bool nmos_make_node_id(
 NVNMOS_API
 bool nmos_make_sender_id(
     const char* seed,
-    const char* internal_id,
+    const char* sender_name,
     char* out,
     size_t out_len)
 {
-    if (!seed || !internal_id) return false;
+    if (!seed || !sender_name) return false;
     try
     {
         const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
-        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::sender, utility::s2us(internal_id)), out, out_len);
+        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::sender, utility::s2us(sender_name)), out, out_len);
     }
     catch (...)
     {
@@ -702,15 +722,15 @@ bool nmos_make_sender_id(
 NVNMOS_API
 bool nmos_make_receiver_id(
     const char* seed,
-    const char* internal_id,
+    const char* receiver_name,
     char* out,
     size_t out_len)
 {
-    if (!seed || !internal_id) return false;
+    if (!seed || !receiver_name) return false;
     try
     {
         const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
-        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::receiver, utility::s2us(internal_id)), out, out_len);
+        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::receiver, utility::s2us(receiver_name)), out, out_len);
     }
     catch (...)
     {
@@ -740,16 +760,16 @@ bool nmos_get_node_id(
 NVNMOS_API
 bool nmos_get_sender_id(
     const NvNmosNodeServer* server,
-    const char* internal_id,
+    const char* sender_name,
     char* out,
     size_t out_len)
 {
-    if (!server || !internal_id) return false;
+    if (!server || !sender_name) return false;
     auto impl = (nvnmos::server*)server->impl;
     if (!impl) return false;
     try
     {
-        return nvnmos::copy_id_to_buffer(impl->sender_id(internal_id), out, out_len);
+        return nvnmos::copy_id_to_buffer(impl->sender_id(sender_name), out, out_len);
     }
     catch (...)
     {
@@ -760,16 +780,16 @@ bool nmos_get_sender_id(
 NVNMOS_API
 bool nmos_get_receiver_id(
     const NvNmosNodeServer* server,
-    const char* internal_id,
+    const char* receiver_name,
     char* out,
     size_t out_len)
 {
-    if (!server || !internal_id) return false;
+    if (!server || !receiver_name) return false;
     auto impl = (nvnmos::server*)server->impl;
     if (!impl) return false;
     try
     {
-        return nvnmos::copy_id_to_buffer(impl->receiver_id(internal_id), out, out_len);
+        return nvnmos::copy_id_to_buffer(impl->receiver_id(receiver_name), out, out_len);
     }
     catch (...)
     {

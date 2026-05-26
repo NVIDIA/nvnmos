@@ -76,7 +76,7 @@ NvNmos uses a small set of extensions in the transport file to convey configurat
 
 | Concept                  | SDP attribute (RTP)        | MXL flow_def tag key (MXL)              | Applies to                                | Description                                                                                                                |
 | ---                      | ---                        | ---                                     | ---                                       | ---                                                                                                                        |
-| Internal id              | `a=x-nvnmos-id:<v>`        | `urn:x-nvnmos:tag:id`                   | Senders and Receivers (required)          | The application's unique identifier for the Sender or Receiver, used in all NvNmos API callbacks                           |
+| Name                     | `a=x-nvnmos-name:<v>`      | `urn:x-nvnmos:tag:name`                 | Senders and Receivers (required)          | The application's caller-chosen name for the Sender or Receiver, unique within the Node for the given side (Sender or Receiver). A Sender and a Receiver may share the same name. Used in all NvNmos API callbacks (paired with the `NvNmosSide`) |
 | Group hint               | `a=x-nvnmos-group-hint:<v>`| standard `urn:x-nmos:tag:grouphint/v1.0`| Senders and Receivers (optional)          | A group hint tag advertised via `urn:x-nmos:tag:grouphint/v1.0` on the NMOS resource                                       |
 | Suppress narrow Receiver Caps | `a=x-nvnmos-caps:<v>` (media-level) | `urn:x-nvnmos:tag:caps` | Receivers (optional) | An empty string value selects a fully-flexible Receiver, with format-derived Capabilities omitted. Non-empty strings are reserved for future capability; today any value is treated the same.                                                                                                                                  |
 | Interface IP             | `a=x-nvnmos-iface-ip:<v>`  | n/a                                     | Receivers (RTP only)                      | The interface IP address on which the stream is received                                                                   |
@@ -88,18 +88,18 @@ For an MXL flow definition, the tag entries are stored alongside (and follow the
 ```json
 "tags": {
   "urn:x-nmos:tag:grouphint/v1.0": [ "video-sender-1:Video" ],
-  "urn:x-nvnmos:tag:id": [ "video-sender-1" ],
+  "urn:x-nvnmos:tag:name": [ "video-sender-1" ],
   "urn:x-nvnmos:tag:mxl-domain-id": [ "1ac254d9-c9be-475a-93a7-f80b9c1063a8" ]
 }
 ```
 
-NvNmos also publishes the `urn:x-nvnmos:tag:id` tag on the corresponding NMOS resources (visible to controllers via IS-04), so the URN is shared between the two artifacts.
+NvNmos also publishes the `urn:x-nvnmos:tag:name` tag on the corresponding NMOS resources (visible to controllers via IS-04), so the URN is shared between the two artifacts.
 
-For MXL Senders, the top-level `id` field of the flow definition (if present, a UUID) is used as the MXL flow identity (i.e. the `mxl_flow_id` IS-05 transport parameter); if absent, the generated NMOS Flow id is used in its place. The NMOS Flow id itself is always derived from the `seed` and the internal id (`urn:x-nvnmos:tag:id` value) and is independent of the flow definition's `id` field. For MXL Receivers, the MXL flow identity is supplied dynamically through IS-05 Connection Management, so the `id` field of the flow definition is ignored.
+For MXL Senders, the top-level `id` field of the flow definition (if present, a UUID) is used as the MXL flow identity (i.e. the `mxl_flow_id` IS-05 transport parameter); if absent, the generated NMOS Flow id is used in its place. The NMOS Flow id itself is always derived from the `seed` and the name (`urn:x-nvnmos:tag:name` value) and is independent of the flow definition's `id` field. For MXL Receivers, the MXL flow identity is supplied dynamically through IS-05 Connection Management, so the `id` field of the flow definition is ignored.
 
 ### Connection activations
 
-When an IS-05 Connection API activation occurs, the library invokes the application's `connection_activated` callback with the application's `id` and an updated `transport_file` reflecting the new active transport parameters. For an RTP Sender or Receiver, the callback receives an SDP file; for an MXL Sender or Receiver, the callback receives an MXL flow definition (JSON) with the new active `mxl_domain_id` and `mxl_flow_id` spliced in (as the `urn:x-nvnmos:tag:mxl-domain-id` tag value and the top-level `id` field, respectively). The application is expected to dispatch on `id` to identify the Sender or Receiver and react accordingly (for example, by reconfiguring its data plane). Conversely, if an activation (or deactivation) has already occurred in the application's data plane by some other means, outside the NMOS API, the application calls `nmos_connection_activate` to update the IS-04 and IS-05 model to reflect it. The library does not initiate any activation on the application's behalf.
+When an IS-05 Connection API activation occurs, the library invokes the application's `connection_activated` callback with an `NvNmosSide` (Sender or Receiver), the application's `name`, and an updated `transport_file` reflecting the new active transport parameters. For an RTP Sender or Receiver, the callback receives an SDP file; for an MXL Sender or Receiver, the callback receives an MXL flow definition (JSON) with the new active `mxl_domain_id` and `mxl_flow_id` spliced in (as the `urn:x-nvnmos:tag:mxl-domain-id` tag value and the top-level `id` field, respectively). The application is expected to dispatch on `(side, name)` to identify the Sender or Receiver and react accordingly (for example, by reconfiguring its data plane). Conversely, if an activation (or deactivation) has already occurred in the application's data plane by some other means, outside the NMOS API, the application calls `nmos_connection_activate` (also passing the `side`) to update the IS-04 and IS-05 model to reflect it. The library does not initiate any activation on the application's behalf.
 
 ## Docker-Based Build
 
