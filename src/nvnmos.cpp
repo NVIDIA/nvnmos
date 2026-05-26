@@ -180,6 +180,11 @@ namespace nvnmos
 
             node_implementation_init(node_model, gate);
 
+            {
+                const auto urls = impl::make_api_base_urls(node_model.settings);
+                slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(node_id(), nmos::types::node) << ": " << urls.first << " " << urls.second;
+            }
+
             for (auto& receiver : boost::make_iterator_range_n(config.receivers, config.num_receivers))
             {
                 if (!receiver.transport_file) throw std::logic_error("invalid receiver config");
@@ -220,6 +225,12 @@ namespace nvnmos
         {
             log_current_exception();
         }
+
+        try
+        {
+            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Destroyed " << std::make_pair(node_id(), nmos::types::node);
+        }
+        catch (...) {}
 
         slog::log<slog::severities::info>(gate, SLOG_FLF) << "Stopping NvNmos node";
     }

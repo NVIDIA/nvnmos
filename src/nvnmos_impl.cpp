@@ -34,8 +34,10 @@
 #include <boost/range/algorithm/find_if.hpp>
 #include <boost/range/irange.hpp>
 #include "cpprest/host_utils.h"
+#include "cpprest/uri_builder.h"
 #include "nmos/activation_mode.h"
 #include "nmos/activation_utils.h"
+#include "nmos/api_utils.h"
 #include "nmos/capabilities.h"
 #include "nmos/channels.h"
 #include "nmos/clock_name.h"
@@ -45,6 +47,8 @@
 #include "nmos/format.h"
 #include "nmos/group_hint.h"
 #include "nmos/interlace_mode.h"
+#include "nmos/is04_versions.h"
+#include "nmos/is05_versions.h"
 #include "nmos/media_type.h"
 #include "nmos/model.h"
 #include "nmos/node_interfaces.h"
@@ -114,6 +118,9 @@ namespace nvnmos
 
         // generate a repeatable source-specific multicast address for each leg of a sender
         utility::string_t make_source_specific_multicast_address_v4(const nmos::id& id, int leg);
+
+        // generate URLs for a sender or receiver in the Node API and Connection API
+        std::pair<utility::string_t, utility::string_t> make_resource_api_urls(const nmos::settings& settings, const nmos::id& id, const nmos::type& type);
 
         // set the name for the sender or receiver as a resource tag
         void set_name(nmos::resource& resource, const utility::string_t& name);
@@ -377,6 +384,11 @@ namespace nvnmos
         if (!insert_resource(node_resources, std::move(sender)).second) throw node_implementation_exception();
         if (!insert_resource(connection_resources, std::move(connection_sender)).second) throw node_implementation_exception();
 
+        {
+            const auto urls = impl::make_resource_api_urls(settings, sender_id, nmos::types::sender);
+            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(sender_id, nmos::types::sender) << ": " << urls.first << " " << urls.second;
+        }
+
         // update device's deprecated senders array
 
         nmos::modify_resource(node_resources, device_id, [&](nmos::resource& device)
@@ -562,6 +574,11 @@ namespace nvnmos
         if (!insert_resource(node_resources, std::move(receiver)).second) throw node_implementation_exception();
         if (!insert_resource(connection_resources, std::move(connection_receiver)).second) throw node_implementation_exception();
 
+        {
+            const auto urls = impl::make_resource_api_urls(settings, receiver_id, nmos::types::receiver);
+            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(receiver_id, nmos::types::receiver) << ": " << urls.first << " " << urls.second;
+        }
+
         // update device's deprecated receivers array
 
         nmos::modify_resource(node_resources, device_id, [&](nmos::resource& device)
@@ -694,6 +711,11 @@ namespace nvnmos
         if (!insert_resource(node_resources, std::move(sender)).second) throw node_implementation_exception();
         if (!insert_resource(connection_resources, std::move(connection_sender)).second) throw node_implementation_exception();
 
+        {
+            const auto urls = impl::make_resource_api_urls(settings, sender_id, nmos::types::sender);
+            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(sender_id, nmos::types::sender) << ": " << urls.first << " " << urls.second;
+        }
+
         // update device's deprecated senders array
 
         nmos::modify_resource(node_resources, device_id, [&](nmos::resource& device)
@@ -820,6 +842,11 @@ namespace nvnmos
         if (!insert_resource(node_resources, std::move(receiver)).second) throw node_implementation_exception();
         if (!insert_resource(connection_resources, std::move(connection_receiver)).second) throw node_implementation_exception();
 
+        {
+            const auto urls = impl::make_resource_api_urls(settings, receiver_id, nmos::types::receiver);
+            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(receiver_id, nmos::types::receiver) << ": " << urls.first << " " << urls.second;
+        }
+
         // update device's deprecated receivers array
 
         nmos::modify_resource(node_resources, device_id, [&](nmos::resource& device)
@@ -905,6 +932,9 @@ namespace nvnmos
             {
                 configs.erase(id);
             }
+
+            slog::log<slog::severities::info>(gate, SLOG_FLF)
+                << "Destroyed " << std::make_pair(id, type);
         }
         else
         {
@@ -1788,6 +1818,33 @@ namespace nvnmos
         nmos::id make_id(const nmos::id& seed_id, const nmos::type& type, const utility::string_t& name)
         {
             return nmos::make_repeatable_id(seed_id, U("/x-nmos/node/") + type.name + U('/') + name);
+        }
+
+        // generate URLs for the Node API and Connection API
+        std::pair<utility::string_t, utility::string_t> make_api_base_urls(const nmos::settings& settings)
+        {
+            auto build = [&](int port, const utility::string_t& api, const nmos::api_version& version)
+            {
+                return web::uri_builder()
+                    .set_scheme(nmos::http_scheme(settings))
+                    .set_host(nmos::get_host(settings))
+                    .set_port(port)
+                    .set_path(U("/x-nmos/") + api + U('/') + nmos::make_api_version(version))
+                    .to_uri()
+                    .to_string();
+            };
+            return {
+                build(nmos::fields::node_port(settings), U("node"), *nmos::is04_versions::from_settings(settings).rbegin()),
+                build(nmos::fields::connection_port(settings), U("connection"), *nmos::is05_versions::from_settings(settings).rbegin())
+            };
+        }
+
+        // generate URLs for a sender or receiver in the Node API and Connection API
+        std::pair<utility::string_t, utility::string_t> make_resource_api_urls(const nmos::settings& settings, const nmos::id& id, const nmos::type& type)
+        {
+            const auto urls = make_api_base_urls(settings);
+            const auto path = U('/') + type.name + U("s/") + id;
+            return { urls.first + path, urls.second + U("/single") + path };
         }
 
         // generate a repeatable source-specific multicast address for each leg of a sender
