@@ -5,6 +5,7 @@
 resolver = "2"
 members = [
     "nvnmos-sys",
+    "nvnmos",
     "nvnmos-rpc",
     "nvnmosd",
     "nvnmosd-example",

@@ -8,6 +8,7 @@ Rust components for the new GStreamer NMOS plugin family described in
 | Crate              | Kind        | Purpose                                                              |
 | ------------------ | ----------- | -------------------------------------------------------------------- |
 | `nvnmos-sys`       | library     | `bindgen`-generated FFI to the C `libnvnmos` API in `../src/nvnmos.h`. |
+| `nvnmos`           | library     | Safe Rust wrapper over `nvnmos-sys`: RAII `NodeServer`, `Result` errors, deterministic id accessors. |
 | `nvnmos-rpc`       | library     | gRPC protocol crate (`nvnmosd.proto` + `tonic`-generated stubs).     |
 | `nvnmosd`          | binary      | The NMOS daemon. Wraps `nvnmos-sys`, serves `nvnmos-rpc`.            |
 | `nvnmosd-example`  | binary      | Example/regression client modelled on the C `nvnmos-example`.        |
