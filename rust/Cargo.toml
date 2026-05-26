@@ -9,6 +9,7 @@ members = [
     "nvnmos-rpc",
     "nvnmosd",
     "nvnmosd-example",
+    "gst-nmos-rs",
 ]
 
 [workspace.package]
