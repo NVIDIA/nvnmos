@@ -21,7 +21,7 @@ use crate::daemon::{ActivationHandler, ActivationRequest, Session};
 use crate::domain::{self, DomainIdOrigin};
 use crate::flow_def::{self, FlowDefBuildInput, ValueOrigin};
 use crate::runtime::SHARED_RUNTIME;
-use crate::types::{FlowFormat, Transport};
+use crate::types::{CapsMode, FlowFormat, Transport};
 
 /// Open-session timeout. Aligned with the daemon's activation ack
 /// timeout — same order of magnitude, no special meaning.
@@ -186,6 +186,14 @@ pub(crate) struct CommonSettings {
     /// ignored; for `nmossrc` the caps-derived format is
     /// cross-checked against the file's `format` field.
     pub(crate) caps: Option<gst::Caps>,
+    /// Controls whether the resource advertises narrow or wide caps
+    /// in IS-04. See [`CapsMode`] for the full semantics. Honoured
+    /// only when `side` is `Receiver` (driven by the
+    /// `receiver-caps-mode` property on `nmossrc`); `nmossink` leaves
+    /// it at [`CapsMode::Auto`].
+    // Read once the override path consumes it; see follow-on commit.
+    #[allow(dead_code)]
+    pub(crate) caps_mode: CapsMode,
 }
 
 /// Outcome of resolving `transport_file` / `transport_file_path`.
@@ -856,6 +864,7 @@ mod tests {
             label: String::new(),
             description: String::new(),
             caps: None,
+            caps_mode: CapsMode::Auto,
         }
     }
 

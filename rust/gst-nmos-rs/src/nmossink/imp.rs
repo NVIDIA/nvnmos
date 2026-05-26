@@ -654,6 +654,7 @@ impl From<Settings> for crate::session::CommonSettings {
             label: s.label,
             description: s.description,
             caps: s.caps,
+            caps_mode: crate::types::CapsMode::Auto,
         }
     }
 }

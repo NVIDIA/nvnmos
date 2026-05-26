@@ -48,7 +48,7 @@ Both elements:
 | ----------------- | ------ | --------- | ----- |
 | `receiver-name`   | string | required  | NMOS Receiver name within the Node (`x-nvnmos-name` SDP attribute or `urn:x-nvnmos:tag:name` flow-def tag). Unique among Receivers on the Node; a Sender on the same Node may share the same name. |
 | `mxl-flow-id`     | string | required to instantiate inner `mxlsrc` (else placeholder) | MXL flow id (UUID) the inner `mxlsrc` should pull. Cross-checked against the transport_file's top-level `id` when both are supplied. Normally an NMOS Receiver learns this from IS-05 PATCH activation; setting it as a property is a development convenience. |
-| `receiver-caps`   | bool   | optional  | Default `true`; narrow-mode rejection wired later. |
+| `receiver-caps-mode` | enum (`auto`/`narrow`/`wide`) | optional | Controls whether the Receiver published to IS-04 advertises narrow or wide Receiver Caps, via the presence of the `urn:x-nvnmos:tag:caps` flow-def tag (presence = wide, absence = narrow). `auto` (default) trusts the transport_file (or defaults to narrow when no transport_file is supplied). `narrow` strips the tag if present; `wide` ensures it is present with an empty value. Override wires up in a follow-on change. |
 
 ## Building
 

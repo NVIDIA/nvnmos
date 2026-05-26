@@ -4,9 +4,10 @@
 //! Shared enum types and defaults used by `nmossrc` and `nmossink`.
 //!
 //! [`Transport`] is exposed as a GObject enum property (`transport`
-//! on both elements). [`FlowFormat`] is an internal-only helper used
-//! to bridge between caps media-type names and `flow_def.format`
-//! URNs — it isn't exposed as a property.
+//! on both elements). [`CapsMode`] is exposed as a GObject enum
+//! property on `nmossrc` as `receiver-caps-mode`. [`FlowFormat`] is
+//! an internal-only helper used to bridge between caps media-type
+//! names and `flow_def.format` URNs — it isn't exposed as a property.
 
 use gstreamer::glib;
 
@@ -23,6 +24,44 @@ pub enum Transport {
     #[default]
     #[enum_value(name = "MXL shared-memory transport", nick = "mxl")]
     Mxl = 0,
+}
+
+/// How a resource should advertise its capabilities in NMOS.
+///
+/// NMOS BCP-004-01 ("Receiver Capabilities") distinguishes "narrow"
+/// Receivers — which advertise a finite set of formats they will
+/// accept — from "wide" Receivers — which advertise no constraints
+/// and accept anything compatible with their declared media type.
+/// NvNmos encodes the wide/narrow split with the
+/// `urn:x-nvnmos:tag:caps` flow-def tag: presence (even with an
+/// empty value) means wide, absence means narrow. Today only
+/// `nmossrc` exposes this enum, as `receiver-caps-mode`.
+///
+/// [`CapsMode::Auto`] is the default and trusts whatever the
+/// transport_file says: if it carries the `caps` tag the resource is
+/// wide, otherwise narrow. When no transport_file is supplied (caps
+/// synthesis path) Auto means narrow. [`CapsMode::Narrow`] and
+/// [`CapsMode::Wide`] force the corresponding shape even when the
+/// transport_file would have said the opposite, i.e. they override
+/// the file's `urn:x-nvnmos:tag:caps` tag presence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, glib::Enum)]
+#[repr(i32)]
+#[enum_type(name = "GstNmosCapsMode")]
+pub enum CapsMode {
+    /// Trust the transport_file (presence of `urn:x-nvnmos:tag:caps`
+    /// means wide, absence means narrow). When no transport_file is
+    /// supplied, defaults to narrow.
+    #[default]
+    #[enum_value(name = "Trust the transport_file (narrow without one)", nick = "auto")]
+    Auto = 0,
+    /// Force narrow caps (strip `urn:x-nvnmos:tag:caps` from the
+    /// transport_file if present).
+    #[enum_value(name = "Narrow caps", nick = "narrow")]
+    Narrow = 1,
+    /// Force wide caps (ensure `urn:x-nvnmos:tag:caps` is present on
+    /// the transport_file with an empty value).
+    #[enum_value(name = "Wide caps", nick = "wide")]
+    Wide = 2,
 }
 
 /// NMOS Flow format family carried in `flow_def.format`.

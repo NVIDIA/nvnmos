@@ -28,7 +28,7 @@ use tokio::sync::oneshot;
 use crate::daemon::{ActivationHandler, ActivationOutcome, ActivationRequest, Session};
 use crate::inner;
 use crate::session::{ActivationAck, ActivationPlan, InnerConfig};
-use crate::types::{DEFAULT_DAEMON_URI, Transport};
+use crate::types::{CapsMode, DEFAULT_DAEMON_URI, Transport};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -54,7 +54,7 @@ struct Settings {
     transport_file_path: String,
     caps: Option<gst::Caps>,
     transport_caps: Option<gst::Caps>,
-    receiver_caps: bool,
+    receiver_caps_mode: CapsMode,
 }
 
 impl Default for Settings {
@@ -74,7 +74,7 @@ impl Default for Settings {
             transport_file_path: String::new(),
             caps: None,
             transport_caps: None,
-            receiver_caps: true,
+            receiver_caps_mode: CapsMode::Auto,
         }
     }
 }
@@ -211,16 +211,19 @@ impl ObjectImpl for NmosSrc {
                     .blurb(crate::session::TRANSPORT_CAPS_BLURB)
                     .mutable_ready()
                     .build(),
-                glib::ParamSpecBoolean::builder("receiver-caps")
+                glib::ParamSpecEnum::builder::<CapsMode>("receiver-caps-mode")
                     .nick("Receiver caps mode")
                     .blurb(
-                        "When true (default), IS-04 publishes narrow Receiver Caps \
-                         derived from the transport_file and activations carrying a \
-                         structurally different transport_file are rejected. \
-                         When false, IS-04 publishes wide Receiver Caps. Narrow-mode \
-                         rejection is not yet wired up; the property is accepted today.",
+                        "Selects whether the published NMOS Receiver advertises narrow \
+                         or wide Receiver Caps in IS-04, via the presence of the \
+                         `urn:x-nvnmos:tag:caps` tag on the flow_def. `auto` (default) \
+                         trusts the transport_file (tag present = wide, absent = narrow; \
+                         narrow if no transport_file). `narrow` strips the tag from the \
+                         transport_file if present. `wide` ensures the tag is present \
+                         with an empty value. Override behaviour wires up in a follow-on \
+                         change; the property is accepted today.",
                     )
-                    .default_value(true)
+                    .default_value(CapsMode::Auto)
                     .mutable_ready()
                     .build(),
             ]
@@ -277,8 +280,8 @@ impl ObjectImpl for NmosSrc {
             "transport-caps" => {
                 settings.transport_caps = value.get().expect("type checked upstream");
             }
-            "receiver-caps" => {
-                settings.receiver_caps = value.get().expect("type checked upstream");
+            "receiver-caps-mode" => {
+                settings.receiver_caps_mode = value.get().expect("type checked upstream");
             }
             _ => unimplemented!("unknown property {}", pspec.name()),
         }
@@ -301,7 +304,7 @@ impl ObjectImpl for NmosSrc {
             "transport-file-path" => settings.transport_file_path.to_value(),
             "caps" => settings.caps.to_value(),
             "transport-caps" => settings.transport_caps.to_value(),
-            "receiver-caps" => settings.receiver_caps.to_value(),
+            "receiver-caps-mode" => settings.receiver_caps_mode.to_value(),
             _ => unimplemented!("unknown property {}", pspec.name()),
         }
     }
@@ -628,6 +631,7 @@ impl From<Settings> for crate::session::CommonSettings {
             label: s.label,
             description: s.description,
             caps: s.caps,
+            caps_mode: s.receiver_caps_mode,
         }
     }
 }
