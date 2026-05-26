@@ -3,7 +3,7 @@
 
 //! MXL `flow_def` JSON helpers.
 //!
-//! The NvNmos `transport_file` for transport=mxl is a JSON document
+//! The NvNmos transport file for transport=mxl is a JSON document
 //! whose top-level `id` is the MXL flow id and whose `format` is the
 //! NMOS format URN (`urn:x-nmos:format:video|audio|data`). The
 //! element needs both to configure the inner `mxlsink` / `mxlsrc`
@@ -23,11 +23,11 @@
 //!
 //! At NULL→READY the element-level rule is "property overrides
 //! file", not "cross-check, error on mismatch". The caller therefore
-//! splices the user's properties into the transport_file with
+//! splices the user's properties into the transport file with
 //! [`splice_overrides`] before invoking [`resolve_mxl_flow_meta`],
 //! at which point only the `Both`-agree and `File`-only branches can
 //! be reached. The `Property`-only branch is reachable when the user
-//! supplies no transport_file at all (deferred/synthesised path).
+//! supplies no transport file at all (deferred/synthesised path).
 //! Activations from the daemon are *not* re-spliced — the IS-05
 //! PATCH is authoritative, and the activation path passes an empty
 //! `property_id` to [`resolve_mxl_flow_meta`] so the file always
@@ -80,27 +80,27 @@ struct RawFlowDefForCaps {
 
 #[derive(Debug, Error)]
 pub(crate) enum FlowDefError {
-    #[error("failed to parse transport_file as JSON: {source}")]
+    #[error("failed to parse transport file as JSON: {source}")]
     Parse {
         #[source]
         source: serde_json::Error,
     },
-    #[error("transport_file `format` `{0}` is not a recognised NMOS format URN")]
+    #[error("transport file `format` `{0}` is not a recognised NMOS format URN")]
     UnknownFormat(String),
     #[error(
-        "mxl-flow-id mismatch: property `{property}` != transport_file top-level `id` `{file}`"
+        "mxl-flow-id mismatch: property `{property}` != transport file top-level `id` `{file}`"
     )]
     IdMismatch { property: String, file: String },
     #[error(
-        "flow format mismatch: caps-derived `{property:?}` != transport_file `format` `{file:?}`"
+        "flow format mismatch: caps-derived `{property:?}` != transport file `format` `{file:?}`"
     )]
     FormatMismatch {
         property: FlowFormat,
         file: FlowFormat,
     },
-    #[error("transport_file top-level JSON is not an object")]
+    #[error("transport file top-level JSON is not an object")]
     NotAnObject,
-    #[error("transport_file `tags` is not a JSON object")]
+    #[error("transport file `tags` is not a JSON object")]
     TagsNotAnObject,
 }
 
@@ -112,13 +112,13 @@ pub(crate) struct FlowDefMeta {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ValueOrigin {
-    /// User supplied the property; no transport_file consulted (or
+    /// User supplied the property; no transport file consulted (or
     /// the file did not carry the field).
     Property,
-    /// Read from the transport_file; user did not supply a property
+    /// Read from the transport file; user did not supply a property
     /// override.
     File,
-    /// User supplied the property and the transport_file agreed.
+    /// User supplied the property and the transport file agreed.
     Both,
     /// Neither source supplied a value.
     None,
@@ -133,7 +133,7 @@ pub(crate) struct FlowResolution {
 }
 
 /// Parse `id` and `format` out of a `flow_def` JSON document.
-/// `Ok(None)` is **not** returned — a transport_file we can't parse
+/// `Ok(None)` is **not** returned — a transport file we can't parse
 /// at all is an error; missing individual fields surface as empty
 /// `id` / [`FlowFormat::Unspecified`] in the returned struct.
 pub(crate) fn read_flow_def_meta(text: &str) -> Result<FlowDefMeta, FlowDefError> {
@@ -151,7 +151,7 @@ pub(crate) fn read_flow_def_meta(text: &str) -> Result<FlowDefMeta, FlowDefError
 }
 
 /// Combine the user's `mxl-flow-id` property and the caps-derived
-/// [`FlowFormat`] with `id` / `format` read from the transport_file.
+/// [`FlowFormat`] with `id` / `format` read from the transport file.
 /// See the module docs for the truth table. `property_format` is
 /// derived from `caps` via [`FlowFormat::from_caps`] (both elements
 /// route their caps through the same helper); when `caps` is unset
@@ -209,7 +209,7 @@ fn resolve_format(
 }
 
 /// User-set properties that, when present, are spliced into a
-/// transport_file before it reaches the daemon. The element-level
+/// transport file before it reaches the daemon. The element-level
 /// rule is "property overrides file" — each `Option` field that is
 /// `Some` replaces the corresponding field/tag in the JSON; `None`
 /// leaves the file's value untouched.
@@ -233,7 +233,7 @@ pub(crate) struct FlowDefOverrides<'a> {
     pub(crate) caps_mode: CapsMode,
 }
 
-/// Splice user-set property values into a transport_file before
+/// Splice user-set property values into a transport file before
 /// handing it to the daemon. Empty-string `Option`s are treated as
 /// "unset" by the caller convention used throughout the element
 /// code (see [`crate::session::CommonSettings`]) so this function
@@ -270,7 +270,7 @@ pub(crate) fn splice_overrides(
 
     // We only need a mutable `tags` if at least one tag-affecting
     // override is active. Bypass the tag fix-ups (and the type check)
-    // when there's nothing to do, so a transport_file without a
+    // when there's nothing to do, so a transport file without a
     // `tags` object still round-trips cleanly.
     let touches_tags = overrides.name.is_some()
         || overrides.mxl_domain_id.is_some()
@@ -564,20 +564,20 @@ fn build_data_body(
 /// Errors from [`caps_from_flow_def`].
 #[derive(Debug, Error)]
 pub(crate) enum FlowDefCapsError {
-    #[error("failed to parse transport_file as JSON: {source}")]
+    #[error("failed to parse transport file as JSON: {source}")]
     Parse {
         #[source]
         source: serde_json::Error,
     },
     #[error(
-        "transport_file is missing required field `{0}` (cannot derive essence caps without it)"
+        "transport file is missing required field `{0}` (cannot derive essence caps without it)"
     )]
     MissingField(&'static str),
     #[error(
-        "transport_file `media_type` `{0}` is not supported by the caps reverse mapping; supported: `video/v210`, `audio/float32`, `video/smpte291`"
+        "transport file `media_type` `{0}` is not supported by the caps reverse mapping; supported: `video/v210`, `audio/float32`, `video/smpte291`"
     )]
     UnsupportedMediaType(String),
-    #[error("transport_file `{field}` has an out-of-range value `{value}` (must fit in i32)")]
+    #[error("transport file `{field}` has an out-of-range value `{value}` (must fit in i32)")]
     OutOfRangeField {
         field: &'static str,
         value: i64,
@@ -597,7 +597,7 @@ pub(crate) enum FlowDefCapsError {
 /// Other media types produce [`FlowDefCapsError::UnsupportedMediaType`];
 /// missing required fields produce [`FlowDefCapsError::MissingField`].
 /// The receiver treats both as a hard NULL→READY (or activation)
-/// failure — if the user supplied a transport_file (or the daemon
+/// failure — if the user supplied a transport file (or the daemon
 /// spliced one), the file is expected to be complete.
 pub(crate) fn caps_from_flow_def(text: &str) -> Result<gst::Caps, FlowDefCapsError> {
     let raw: RawFlowDefForCaps =

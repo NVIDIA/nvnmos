@@ -109,14 +109,14 @@ pub(crate) const TRANSPORT_BLURB: &str =
 
 pub(crate) const MXL_DOMAIN_ID_BLURB: &str =
     "MXL Domain identifier (UUID) advertised in NMOS as \
-     `urn:x-nvnmos:tag:mxl-domain-id` in the transport_file. \
+     `urn:x-nvnmos:tag:mxl-domain-id` in the transport file. \
      Required when transport=mxl, but may be omitted if \
      `mxl-domain-path` points at a directory containing a \
      `domain_def.json` (AMWA BCP-007-03 WIP): the file's `id` is \
-     then used. Property-overrides-transport_file: a value set here \
-     splices into the transport_file's tag. Cross-checked against \
-     `domain_def.json` when both are supplied (mismatch is an \
-     error — this is host-level identity, not just labelling).";
+     then used. Overrides the transport file's tag when both are \
+     supplied. Cross-checked against `domain_def.json` when both \
+     are supplied (mismatch is an error — this is host-level \
+     identity, not just labelling).";
 
 pub(crate) const TRANSPORT_FILE_PATH_BLURB: &str =
     "Filesystem path read at NULL\u{2192}READY into `transport-file`. \
@@ -159,7 +159,7 @@ pub(crate) struct CommonSettings {
     pub(crate) mxl_domain_path: String,
     /// MXL flow id (UUID) to bind the inner `mxlsink.flow-id=` or the
     /// matching `mxlsrc.{video,audio,data}-flow-id=`. Cross-checked
-    /// against the transport_file's top-level `id` when both are
+    /// against the transport file's top-level `id` when both are
     /// supplied; either source alone is enough.
     pub(crate) mxl_flow_id: String,
     /// Literal transport file contents (MXL `flow_def` JSON today).
@@ -256,7 +256,7 @@ pub(crate) enum InnerConfig {
         /// ghost source pad so downstream caps queries see the
         /// concrete shape the flow will carry (rather than the broad
         /// `mxlsrc` pad template). Senders ignore it. `None` when no
-        /// transport_file is available, e.g. deferred-mode sender
+        /// transport file is available, e.g. deferred-mode sender
         /// registration or receiver dev convenience with properties
         /// only.
         transport_file: Option<String>,
@@ -329,14 +329,14 @@ pub(crate) fn validate_and_open(
 
     // Property-overrides-file: splice any user-set identity/cosmetic
     // properties (name, flow_id, mxl-domain-id, label, description,
-    // receiver-caps-mode) into the transport_file before the daemon
+    // receiver-caps-mode) into the transport file before the daemon
     // sees it. `caps` and `transport-caps` remain cross-checked by
     // `resolve_mxl_flow_meta` below — they describe the essence
     // shape and a mismatch is a real error.
     let transport_file = match transport_file {
         Some(text) => Some(
             flow_def::splice_overrides(&text, &property_overrides(settings, &domain_resolution.id))
-                .with_context(|| format!("{element}: splicing property overrides into transport_file"))?,
+                .with_context(|| format!("{element}: splicing property overrides into transport file"))?,
         ),
         None => None,
     };
@@ -427,8 +427,9 @@ pub(crate) fn validate_and_open(
 /// If the user supplied a `transport-file` (literal or path), pass
 /// it through; otherwise, when `caps` is set on a Sender, synthesise
 /// a flow_def JSON document via [`flow_def::build_from_caps`]. When
-/// *both* are set, the file wins and the caps are logged as ignored
-/// — same precedence rule the file/property cross-checks use.
+/// *both* are set, the file is passed through and the caps are
+/// cross-checked against the file's `format` further down the
+/// validate path (a mismatch is a hard error, not silently dropped).
 ///
 /// Receiver-side caps→flow_def is intentionally not wired here: a
 /// Receiver's transport-file describes the *Sender's* flow (IS-05
@@ -468,7 +469,7 @@ fn synthesise_or_passthrough(
                 // On `nmossrc` the caps decide which `mxlsrc`
                 // flow-id slot to use (see [`caps_format`]) but the
                 // receiver does not synthesise a flow_def — the
-                // daemon ships the live transport_file at IS-05
+                // daemon ships the live transport file at IS-05
                 // activation time, and a receiver driven entirely
                 // by properties (development convenience) runs
                 // against `mxlsrc` directly without one.
@@ -486,7 +487,7 @@ fn synthesise_or_passthrough(
 /// Best-effort [`FlowFormat`] derived from the `caps` property.
 /// Returns [`FlowFormat::Unspecified`] when `caps` is unset or the
 /// first structure's media type isn't one of the recognised essence
-/// shapes — the caller then falls through to the transport_file's
+/// shapes — the caller then falls through to the transport file's
 /// `format` (if present) or to the placeholder data path.
 fn caps_format(settings: &CommonSettings) -> FlowFormat {
     settings
@@ -521,9 +522,9 @@ fn property_overrides<'a>(
 
 fn log_flow_origin(cat: &gst::DebugCategory, field: &str, origin: ValueOrigin) {
     match origin {
-        ValueOrigin::Property => gst::debug!(cat, "{field} from property; no transport_file constraint"),
-        ValueOrigin::File => gst::info!(cat, "{field} taken from transport_file"),
-        ValueOrigin::Both => gst::debug!(cat, "{field} cross-checked against transport_file"),
+        ValueOrigin::Property => gst::debug!(cat, "{field} from property; no transport file constraint"),
+        ValueOrigin::File => gst::info!(cat, "{field} taken from transport file"),
+        ValueOrigin::Both => gst::debug!(cat, "{field} cross-checked against transport file"),
         ValueOrigin::None => gst::debug!(cat, "{field} not supplied by either source"),
     }
 }
@@ -546,14 +547,14 @@ fn decide_inner_config(
     }
     if flow.id.is_empty() {
         return InnerConfig::Placeholder {
-            reason: "`mxl-flow-id` unset (neither property nor transport_file supplied it)".to_owned(),
+            reason: "`mxl-flow-id` unset (neither property nor transport file supplied it)".to_owned(),
         };
     }
     if settings.side == Side::Receiver && flow.format == FlowFormat::Unspecified {
         return InnerConfig::Placeholder {
             reason:
                 "`caps` media-type unrecognised or unset on nmossrc \
-                 (neither caps nor transport_file pinned a flow format)"
+                 (neither caps nor transport file pinned a flow format)"
                     .to_owned(),
         };
     }
@@ -752,7 +753,7 @@ pub(crate) enum ActivationAck {
 ///
 /// * Run `decide_inner_config`: if it returns `InnerConfig::Mxl`,
 ///   ack success; if it returns `InnerConfig::Placeholder` we have
-///   a live transport_file but can't bring up the inner element
+///   a live transport file but can't bring up the inner element
 ///   (typically `mxl-domain-path` is unset on this host) — swap to
 ///   placeholder but ack **failure** so the controller surfaces the
 ///   misconfiguration.
@@ -830,7 +831,7 @@ pub(crate) fn plan_activation(
         DomainIdOrigin::None => unreachable!("empty id handled above"),
     }
 
-    // Activation: the daemon's transport_file is authoritative. Pass
+    // Activation: the daemon's transport file is authoritative. Pass
     // an empty `property_id` so the file always wins silently (the
     // element's `mxl-flow-id` property is just a NULL→READY default;
     // an IS-05 PATCH legitimately replaces it). The `caps` format
@@ -851,7 +852,7 @@ pub(crate) fn plan_activation(
                 ack: ActivationAck::Failure {
                     reason: format!(
                         "{element}: resolving MXL flow id / format from activation \
-                         transport_file: {e:#}"
+                         transport file: {e:#}"
                     ),
                 },
             };
@@ -861,7 +862,7 @@ pub(crate) fn plan_activation(
     let inner = decide_inner_config(settings, &flow, Some(transport_file));
     let ack = match &inner {
         InnerConfig::Mxl { .. } => ActivationAck::Success,
-        // Per design: if the activation supplies a live transport_file
+        // Per design: if the activation supplies a live transport file
         // but the element can't bring up mxlsink/mxlsrc (typically
         // `mxl-domain-path` is unset), ack failure so the controller
         // sees the resource as misconfigured rather than silently
@@ -937,7 +938,7 @@ mod tests {
 
     /// Property-overrides-file at NULL→READY: when the user sets
     /// `mxl-flow-id` on the element and also supplies a
-    /// transport_file with a different id, the property wins and the
+    /// transport file with a different id, the property wins and the
     /// file is rewritten to match (rather than rejecting the
     /// mismatch as a hard error, which is what we did before the
     /// splice layer existed).
@@ -1017,7 +1018,7 @@ mod tests {
 
     #[test]
     fn nmossrc_caps_unset_falls_back_to_placeholder() {
-        // Receiver with neither `caps` nor a transport_file `format`
+        // Receiver with neither `caps` nor a transport file `format`
         // can't pick a `mxlsrc` slot, so it stays on the placeholder.
         let s = CommonSettings {
             mxl_flow_id: FLOW_ID_A.to_owned(),
@@ -1071,7 +1072,7 @@ mod tests {
 
     /// IS-05 PATCHes legitimately replace the flow id the element
     /// was configured with at NULL→READY. The activation's
-    /// transport_file is authoritative, so the activation must
+    /// transport file is authoritative, so the activation must
     /// silently succeed and the inner be reconfigured against the
     /// new flow id.
     #[test]
@@ -1096,7 +1097,7 @@ mod tests {
 
     #[test]
     fn domain_path_unset_is_failure_with_live_transport_file() {
-        // Activation supplies the spliced transport_file, but this
+        // Activation supplies the spliced transport file, but this
         // host has no `mxl-domain-path` so the element can't bring
         // up mxlsink/mxlsrc. Per design: placeholder + failure ack.
         let s = CommonSettings {

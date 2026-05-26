@@ -17,11 +17,11 @@ Rust components for the new GStreamer NMOS plugin family described in
 | `nvnmos-rpc`       | library     | gRPC protocol crate (`nvnmosd.proto` + `tonic`-generated stubs).     |
 | `nvnmosd`          | binary      | The NMOS daemon. Wraps `nvnmos-sys`, serves `nvnmos-rpc`.            |
 | `nvnmosd-example`  | binary      | Example/regression client modelled on the C `nvnmos-example`.        |
-| `gst-nmos-rs`      | GStreamer plugin (cdylib) | `nmos` plugin (`nmossrc` / `nmossink`); Phase 1 in progress (session lifecycle wired). |
+| `gst-nmos-rs`      | GStreamer plugin (cdylib) | `nmos` plugin (`nmossrc` / `nmossink`); session lifecycle, inner `mxlsink`/`mxlsrc`, IS-05 activation handling, deferred `nmossink` AddSender (peer-query at READY→PAUSED), `nmossrc` essence-caps advertisement, and property-override-vs-cross-check semantics are all wired. See [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md). |
 
-Phase 1 of `gst-nmos-rs` is in progress; see the crate's own
-[`gst-nmos-rs/README.md`](gst-nmos-rs/README.md) for status and load
-instructions.
+See `gst-nmos-rs`'s own
+[`gst-nmos-rs/README.md`](gst-nmos-rs/README.md) for the per-element
+property matrix, load instructions, and status.
 
 ## Building
 

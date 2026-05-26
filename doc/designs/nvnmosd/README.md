@@ -226,13 +226,13 @@ Each value names the inner GStreamer element family the user is signing up for, 
 
 Required property on both `nmossrc` and `nmossink`. The element refuses an unsupported value with a clear error at element-construction time (i.e. when the build doesn't include that transport, or the user picks a Phase that hasn't shipped yet). The `transport` value also gates which per-transport defaults the element applies (notably `TP=2110TPN` for `nvdsudp` vs `TP=2110TPW` for `udp`, per *Defaults the element synthesises*).
 
-#### Routes to a complete transport_file
+#### Routes to a complete transport file
 
-There are three ways to fully describe a sender or receiver. Each is sufficient on its own; they can be combined, with the property route overriding matching fields in `transport-file`.
+There are three ways to fully describe a sender or receiver. Each is sufficient on its own; they can be combined, with the property route either overriding or cross-checking matching fields in `transport-file` depending on the property (see Route C and the property-interaction matrix in the gst-nmos-rs crate README).
 
-**Route A — `transport-file` only.** Provide a complete SDP (RTP) or MXL flow_def JSON. Self-sufficient; the element derives the essence caps from it (using a port of `nvds_nmos_bin/src/helpers/sdp_caps_to_raw_caps.{cpp,h}` for SDP, and an MXL equivalent). Required-route for users who already have an authoritative transport_file or who need precise control over fields the property route doesn't surface.
+**Route A — `transport-file` only.** Provide a complete SDP (RTP) or MXL flow_def JSON. Self-sufficient; the element derives the essence caps from it (using a port of `nvds_nmos_bin/src/helpers/sdp_caps_to_raw_caps.{cpp,h}` for SDP, and an MXL equivalent). Required-route for users who already have an authoritative transport file or who need precise control over fields the property route doesn't surface.
 
-**Route B — property route.** Build up the transport_file from typed properties on the element:
+**Route B — property route.** Build up the transport file from typed properties on the element:
 
 | Property | Carries | Required? | Applies to |
 |---|---|---|---|
@@ -244,9 +244,14 @@ There are three ways to fully describe a sender or receiver. Each is sufficient 
 | `mxl-flow-id` | flow_def top-level `id` (sender side; receiver side comes from activation) | Optional; defaults to derived from the sender's name | `nmossink` (MXL) |
 | `label` | NMOS label — SDP `s=` line for RTP, `label` for MXL flow_def | Optional | Both |
 | `description` | NMOS description — SDP `i=` line for RTP, `description` for MXL flow_def | Optional | Both |
-| `receiver-caps` | Whether IS-04 publishes narrow Receiver Caps derived from the transport_file. `true` (default) → narrow; `false` → wide (`x-nvnmos-caps` present, permissive). | Optional | `nmossrc` only |
+| `receiver-caps-mode` | `auto` (default) / `narrow` / `wide` — controls whether IS-04 publishes narrow Receiver Caps derived from the transport file, or wide caps (`x-nvnmos-caps` present, permissive). `auto` leaves the `urn:x-nvnmos:tag:caps` tag untouched, so the result is narrow when the transport file is present and doesn't carry that tag, and wide when the tag is already present; `narrow` and `wide` force the tag in (or out of) the spliced transport file. | Optional | `nmossrc` only |
 
-**Route C — `transport-file` + property overrides.** Provide a baseline `transport-file` and override specific fields with any of the Route B properties. Last-property-wins precedence. This is the natural "I have a template SDP or flow_def, but the per-instance bits (`sender-name` or `receiver-name`, `iface-ip`, port, label, ...) change" workflow, and nvdsnmosbin already worked this way.
+**Route C — `transport-file` + property overrides / cross-checks.** Provide a baseline `transport-file` and combine it with any of the Route B properties. The rule depends on the property:
+
+- **Identity / cosmetic properties** (`sender-name` / `receiver-name`, `mxl-flow-id`, `mxl-domain-id`, `label`, `description`, `receiver-caps-mode`) — **override** the matching field/tag in the file. This is the natural "I have a template SDP or flow_def, but the per-instance bits (`sender-name` or `receiver-name`, `iface-ip`, port, label, ...) change" workflow, and nvdsnmosbin already worked this way.
+- **Essence-shape properties** (`caps`, `transport-caps`) — **cross-check** against the file's shape. Mismatch is a hard error at NULL→READY; the application is asked to align the two rather than have one silently win over the other.
+
+The full matrix (including which properties have no transport file interaction at all) lives in the gst-nmos-rs crate README under "Property interaction with `transport-file`".
 
 #### Defaults the element synthesises
 
@@ -280,12 +285,13 @@ Both endpoints are at IS-04 by the time the pipeline is up, and there is no Catc
 
 **Timing subtlety to be aware of.** In deferred mode the sender registers one state transition after the receiver (PAUSED vs READY). A controller polling IS-04 during the narrow window between NULL→READY and READY→PAUSED will see the receiver listed but not the sender. Harmless in practice (the window is tens to hundreds of milliseconds for a normal pipeline startup), but if a deployment cares — for instance because a discovery scan is running in parallel with pipeline startup — declare `caps` explicitly and registration moves to READY for both.
 
-#### Narrow vs wide caps (`receiver-caps`)
+#### Narrow vs wide caps (`receiver-caps-mode`)
 
-In both modes, the GStreamer pad caps are fixed at the format derived from the transport_file (or declared via `caps`). The `receiver-caps` property only controls what's advertised in IS-04:
+In all three modes, the GStreamer pad caps are fixed at the format derived from the transport file (or declared via `caps`). The `receiver-caps-mode` property only controls what's advertised in IS-04:
 
-- `receiver-caps=true` (default): IS-04 publishes narrow Receiver Caps matching the transport_file. The element rejects any activation carrying a structurally different transport_file.
-- `receiver-caps=false`: IS-04 publishes wide Receiver Caps (`x-nvnmos-caps` present, content per NvNmos's existing semantics). The element accepts a wider set of incoming transport_files; a structurally divergent one triggers a CAPS event renegotiation downstream (Phase 2+ work — see Phasing).
+- `receiver-caps-mode=auto` (default): the element leaves the `urn:x-nvnmos:tag:caps` tag untouched in the spliced transport file. The outcome therefore depends on the file: narrow when the transport file is present and the tag is absent, wide when the tag is already in the file.
+- `receiver-caps-mode=narrow`: IS-04 publishes narrow Receiver Caps matching the transport file. The element forces the narrow path by removing any `urn:x-nvnmos:tag:caps` from the spliced transport file and rejects any activation carrying a structurally different transport file.
+- `receiver-caps-mode=wide`: IS-04 publishes wide Receiver Caps (`x-nvnmos-caps` present, content per NvNmos's existing semantics). The element splices `urn:x-nvnmos:tag:caps = [""]` (the libnvnmos "present + non-empty" wide marker) into the transport file and accepts a wider set of incoming transport files; a structurally divergent one triggers a CAPS event renegotiation downstream (Phase 2+ work — see Phasing).
 
 #### gst-launch examples
 
@@ -410,7 +416,7 @@ A `timestamp-mode` property (passthrough vs. regenerated wire timestamps) was sk
 
 - **Phase 0 — Daemon + test client**. Build the foundation: `nvnmos-sys` (FFI bindings to `libnvnmos`), `nvnmos-rpc` (proto + generated stubs), and `nvnmosd` itself. The Phase 0 daemon is **Linux-first**, supports **multi-Node**, uses **UDS for local IPC (plain TCP `localhost` as a portable fallback)**, and implements **`SyncResourceState`** from the start — real (non-gst-launch) clients will need the out-of-band data-plane sync path, and bolting it on later complicates the daemon's threading model. Alongside the daemon, build a **Rust test client modelled on the existing `nvnmos-example`** (the C app in `src/main.c`): opens a session, registers a few MXL and RTP senders/receivers, drives through the same interactive stages (remove some, add back, observe activations, deactivate, destroy session), and exercises `OpenSession` / `AddSender` / `AddReceiver` / `SubscribeActivations` / `AckActivation` / `SyncResourceState` end-to-end. This proves the daemon works without GStreamer in the loop, and gives us a regression harness for every subsequent phase. (A C++ test client could be added later but isn't part of Phase 0. Cross-host TCP + TLS and Windows/macOS daemon targets are deferred to Phase N.)
 - **Phase 1 — MXL (all essences)**: `nmossrc` + `nmossink` for the full set of MXL flows `gst-mxl-rs` already supports — `video/x-raw` v210, `audio/x-raw` F32LE, and `meta/x-st-2038` ANC (what MXL flow_def.json calls `video/smpte291`). Single Node, gst-launch demoable. No nvdsudp involvement (so no Rivermax requirement). All three routes from the Pad config section are live (`transport-file`, property route, deferred mode on `nmossink`); `transport-caps` is typically empty for MXL.
-- **Phase 2 — ST 2110 via nvdsudp**: ST 2110-20 video, ST 2110-30 audio, and ST 2110-40 ANC together. ANC support in nvdsudp lands in the next DeepStream release (also mapped to `meta/x-st-2038` in GStreamer), so Phase 2 is designed ready for all three. Reuse the activation→property translation patterns identified by the lessons review. Extends the property-route synthesis to emit SDP from `caps` + `transport-caps` + top-level props, defaulting RTP-side fields when absent (PT 96, `encoding-name` from essence lookup). Ports `nvds_nmos_bin/src/helpers/sdp_helpers.{cpp,h}` and `sdp_caps_to_raw_caps.{cpp,h}` to drive both directions of the caps ↔ SDP conversion. Enables `receiver-caps=false` (wide-mode renegotiation) end-to-end.
+- **Phase 2 — ST 2110 via nvdsudp**: ST 2110-20 video, ST 2110-30 audio, and ST 2110-40 ANC together. ANC support in nvdsudp lands in the next DeepStream release (also mapped to `meta/x-st-2038` in GStreamer), so Phase 2 is designed ready for all three. Reuse the activation→property translation patterns identified by the lessons review. Extends the property-route synthesis to emit SDP from `caps` + `transport-caps` + top-level props, defaulting RTP-side fields when absent (PT 96, `encoding-name` from essence lookup). Ports `nvds_nmos_bin/src/helpers/sdp_helpers.{cpp,h}` and `sdp_caps_to_raw_caps.{cpp,h}` to drive both directions of the caps ↔ SDP conversion. Enables `receiver-caps-mode=wide` (wide-mode renegotiation) end-to-end.
 - **Phase 3 — OSS `udpsrc`/`udpsink`** with payloaders. Same NMOS surface, different inner chain.
 - **Phase 4 — `video/x-jxsv` (ST 2110-22)** once nvdsudp changes merge.
 - **Phase 5 — ST 2022-7** redundancy (transport-flavour property surface; `nvdsudp` already supports it that way) - can't be implemented with OSS `udpsrc`/`udpsink`. **`video/v210a`** stub if GStreamer support is still missing.

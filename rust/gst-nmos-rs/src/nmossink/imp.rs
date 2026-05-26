@@ -131,8 +131,8 @@ impl ObjectImpl for NmosSink {
                          transport file). Unique across Senders on the \
                          Node; a Receiver on the same Node may share the \
                          same name (the daemon scopes names by side). \
-                         Property-overrides-transport_file: a value set \
-                         here splices into the transport_file's tag.",
+                         Overrides the transport file's tag when both \
+                         are supplied.",
                     )
                     .mutable_ready()
                     .build(),
@@ -158,18 +158,17 @@ impl ObjectImpl for NmosSink {
                     .nick("MXL flow id")
                     .blurb(
                         "MXL flow id (UUID) the inner `mxlsink` should push into. \
-                         Property-overrides-transport_file: a value set here splices \
-                         into the transport_file's top-level `id`.",
+                         Overrides the transport file's top-level `id` when both \
+                         are supplied.",
                     )
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("label")
                     .nick("Label")
                     .blurb(
-                        "NMOS label for the Sender. Optional. \
-                         Property-overrides-transport_file: a value set \
-                         here splices into the transport_file's top-level \
-                         `label`.",
+                        "NMOS label for the Sender. Optional. Overrides \
+                         the transport file's top-level `label` when both \
+                         are supplied.",
                     )
                     .mutable_ready()
                     .build(),
@@ -177,16 +176,15 @@ impl ObjectImpl for NmosSink {
                     .nick("Description")
                     .blurb(
                         "NMOS description for the Sender. Optional. \
-                         Property-overrides-transport_file: a value set \
-                         here splices into the transport_file's top-level \
-                         `description`.",
+                         Overrides the transport file's top-level \
+                         `description` when both are supplied.",
                     )
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("transport-file")
                     .nick("Transport file")
                     .blurb(
-                        "Literal contents of the NvNmos `transport_file`: MXL flow_def \
+                        "Literal contents of the NvNmos transport file: MXL flow_def \
                          JSON today; SDP later. The daemon registers it with the \
                          resource and re-publishes it via IS-05. Pass the text, not a \
                          path. Convenient for programmatic callers; from gst-launch \
@@ -209,7 +207,7 @@ impl ObjectImpl for NmosSink {
                          shapes match `mxlsink`'s pad template: `video/x-raw,format=v210,…`, \
                          `audio/x-raw,format=F32LE,…`, and `meta/x-st-2038,framerate=…`. \
                          Requires `mxl-flow-id` to be set. Cross-checked against the \
-                         transport_file's `format` field when both are supplied — \
+                         transport file's `format` field when both are supplied — \
                          mismatch is a hard error.",
                     )
                     .mutable_ready()

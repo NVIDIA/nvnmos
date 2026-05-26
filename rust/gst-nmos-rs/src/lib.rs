@@ -14,14 +14,28 @@
 //! Each `ActivationEvent` arriving on the subscription is routed
 //! through the element: the daemon's activation task hands the event
 //! to an element-supplied handler, the handler hops onto the
-//! GStreamer thread via `Element::call_async`, re-runs the same
-//! domain/flow cross-checks `validate_and_open` did at NULL→READY
-//! (with the event's `transport_file` substituted in), and swaps the
-//! inner element accordingly. Swaps at state ≥ PAUSED are gated on a
-//! single-shot IDLE pad probe so the streaming thread is not inside
-//! the inner element during the swap. The outcome (Applied / Failed)
-//! is reported back to the daemon as the `AckActivation` `success` /
+//! GStreamer thread via `Element::call_async`, derives the new inner
+//! configuration from the event's transport file (the daemon's
+//! post-IS-05-PATCH view is authoritative — element-level identity
+//! properties are not consulted at activation time; the essence-shape
+//! cross-check on `caps` vs the file's `format` still applies and an
+//! incompatible shape is ack-failed), and swaps the inner element
+//! accordingly. Swaps at state ≥ PAUSED are gated on a single-shot
+//! IDLE pad probe so the streaming thread is not inside the inner
+//! element during the swap. The outcome (Applied / Failed) is
+//! reported back to the daemon as the `AckActivation` `success` /
 //! `failure_reason`.
+//!
+//! Property override / cross-check at NULL→READY: identity and
+//! cosmetic properties (`sender-name` / `receiver-name`, `mxl-flow-id`,
+//! `mxl-domain-id`, `label`, `description`, `receiver-caps-mode`)
+//! that overlap with the transport file's content **override** the
+//! file — the element rewrites the matching field/tag before handing
+//! it to the daemon. Essence-shape properties (`caps`,
+//! `transport-caps`) are **cross-checked** against the file and
+//! mismatch is a hard error. See `flow_def::splice_overrides` for the
+//! splice mechanics and `rust/gst-nmos-rs/README.md` ("Property
+//! interaction with `transport-file`") for the full property matrix.
 //!
 //! Inner data path: when the resolved configuration pins a Domain
 //! path and a Flow id (plus a Flow format on the receiver), the bin
@@ -44,7 +58,7 @@
 //!
 //! `nmossrc` advertises essence caps on its ghost source pad
 //! whenever a flow_def is in play (`transport-file*` at NULL→READY,
-//! or the daemon-spliced internal transport_file at activation).
+//! or the daemon-spliced internal transport file at activation).
 //! The flow_def is reverse-mapped via
 //! [`flow_def::caps_from_flow_def`] and pinned by an internal
 //! `mxlsrc ! capsfilter` chain so downstream caps queries see the
@@ -52,7 +66,7 @@
 //! `nmossrc ! transform ! nmossink` pipeline then resolves end-to-end
 //! at READY→PAUSED: the deferred `nmossink`'s peer_query_caps lands
 //! on the pinned caps and `AddSender` runs against the right
-//! flow_def. When no transport_file is in play (development
+//! flow_def. When no transport file is in play (development
 //! convenience with properties only) the bare `mxlsrc` is used and
 //! its broad pad template propagates.
 

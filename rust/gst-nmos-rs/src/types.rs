@@ -37,29 +37,32 @@ pub enum Transport {
 /// empty value) means wide, absence means narrow. Today only
 /// `nmossrc` exposes this enum, as `receiver-caps-mode`.
 ///
-/// [`CapsMode::Auto`] is the default and trusts whatever the
-/// transport_file says: if it carries the `caps` tag the resource is
-/// wide, otherwise narrow. When no transport_file is supplied (caps
-/// synthesis path) Auto means narrow. [`CapsMode::Narrow`] and
-/// [`CapsMode::Wide`] force the corresponding shape even when the
-/// transport_file would have said the opposite, i.e. they override
-/// the file's `urn:x-nvnmos:tag:caps` tag presence.
+/// [`CapsMode::Auto`] is the default: it leaves the
+/// `urn:x-nvnmos:tag:caps` tag untouched in the spliced transport
+/// file. The result is therefore narrow when the transport file is
+/// present and doesn't carry the tag (and similarly narrow when no
+/// transport file is in play, e.g. the caps-synthesis path), and
+/// wide when the file already carries the tag. [`CapsMode::Narrow`]
+/// and [`CapsMode::Wide`] force the corresponding shape regardless,
+/// i.e. they override the file's `urn:x-nvnmos:tag:caps` tag
+/// presence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, glib::Enum)]
 #[repr(i32)]
 #[enum_type(name = "GstNmosCapsMode")]
 pub enum CapsMode {
-    /// Trust the transport_file (presence of `urn:x-nvnmos:tag:caps`
-    /// means wide, absence means narrow). When no transport_file is
-    /// supplied, defaults to narrow.
+    /// Leave the `urn:x-nvnmos:tag:caps` tag presence untouched —
+    /// narrow when the transport file is present and the tag is
+    /// absent (or no transport file is in play), wide when the tag
+    /// is already there.
     #[default]
-    #[enum_value(name = "Trust the transport_file (narrow without one)", nick = "auto")]
+    #[enum_value(name = "Leave the transport file's caps tag untouched", nick = "auto")]
     Auto = 0,
     /// Force narrow caps (strip `urn:x-nvnmos:tag:caps` from the
-    /// transport_file if present).
+    /// transport file if present).
     #[enum_value(name = "Narrow caps", nick = "narrow")]
     Narrow = 1,
     /// Force wide caps (ensure `urn:x-nvnmos:tag:caps` is present on
-    /// the transport_file with an empty value).
+    /// the transport file with an empty value).
     #[enum_value(name = "Wide caps", nick = "wide")]
     Wide = 2,
 }

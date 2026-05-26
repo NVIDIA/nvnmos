@@ -5,7 +5,7 @@
 //! `nvnmosd` at NULL→READY and closes it at READY→NULL. The inner
 //! data path is a `mxlsrc` when the resolved configuration pins a
 //! Domain path + Flow id + a recognised essence shape (from `caps`
-//! or the transport_file's `format`); otherwise the bin keeps a
+//! or the transport file's `format`); otherwise the bin keeps a
 //! placeholder `fakesrc` so the element looks valid in the pipeline
 //! until an IS-05 activation (or a later configuration update)
 //! supplies the missing pieces.
@@ -134,8 +134,8 @@ impl ObjectImpl for NmosSrc {
                          transport file). Unique across Receivers on the \
                          Node; a Sender on the same Node may share the \
                          same name (the daemon scopes names by side). \
-                         Property-overrides-transport_file: a value set \
-                         here splices into the transport_file's tag.",
+                         Overrides the transport file's tag when both \
+                         are supplied.",
                     )
                     .mutable_ready()
                     .build(),
@@ -165,20 +165,18 @@ impl ObjectImpl for NmosSrc {
                          PATCH activation, so this is mainly a development \
                          convenience: setting it (plus `caps` and \
                          `mxl-domain-path`) lets the receiver start up \
-                         pre-bound to a known flow. \
-                         Property-overrides-transport_file: a value set \
-                         here splices into the transport_file's top-level \
-                         `id`.",
+                         pre-bound to a known flow. Overrides the \
+                         transport file's top-level `id` when both are \
+                         supplied.",
                     )
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("label")
                     .nick("Label")
                     .blurb(
-                        "NMOS label for the Receiver. Optional. \
-                         Property-overrides-transport_file: a value set \
-                         here splices into the transport_file's top-level \
-                         `label`.",
+                        "NMOS label for the Receiver. Optional. Overrides \
+                         the transport file's top-level `label` when both \
+                         are supplied.",
                     )
                     .mutable_ready()
                     .build(),
@@ -186,16 +184,15 @@ impl ObjectImpl for NmosSrc {
                     .nick("Description")
                     .blurb(
                         "NMOS description for the Receiver. Optional. \
-                         Property-overrides-transport_file: a value set \
-                         here splices into the transport_file's top-level \
-                         `description`.",
+                         Overrides the transport file's top-level \
+                         `description` when both are supplied.",
                     )
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("transport-file")
                     .nick("Transport file")
                     .blurb(
-                        "Literal contents of the NvNmos `transport_file`: MXL flow_def \
+                        "Literal contents of the NvNmos transport file: MXL flow_def \
                          JSON today; SDP later. The daemon registers it with the \
                          resource and re-publishes it via IS-05. Pass the text, not a \
                          path. Convenient for programmatic callers; from gst-launch \
@@ -216,7 +213,7 @@ impl ObjectImpl for NmosSrc {
                          provided: the media-type structure name (`video/x-raw` / \
                          `audio/x-raw` / `meta/x-st-2038`) decides which `mxlsrc` flow-id \
                          slot receives `mxl-flow-id`. Cross-checked against the \
-                         transport_file's `format` field when both are supplied — \
+                         transport file's `format` field when both are supplied — \
                          mismatch is a hard error (the caps and the flow's essence shape \
                          must describe the same thing).",
                     )
@@ -233,11 +230,13 @@ impl ObjectImpl for NmosSrc {
                         "Selects whether the published NMOS Receiver advertises narrow \
                          or wide Receiver Caps in IS-04, via the presence of the \
                          `urn:x-nvnmos:tag:caps` tag on the flow_def. `auto` (default) \
-                         trusts the transport_file (tag present = wide, absent = narrow; \
-                         narrow if no transport_file). `narrow` strips the tag from the \
-                         transport_file if present. `wide` ensures the tag is present \
-                         with a non-empty marker (libnvnmos's rule for wide is \
-                         \"present + non-empty\").",
+                         leaves the tag untouched in the spliced transport file: the \
+                         result is narrow when the transport file is present and the \
+                         tag is absent (or no transport file is in play), and wide \
+                         when the tag is already there. `narrow` strips the tag from \
+                         the transport file if present. `wide` ensures the tag is \
+                         present with a non-empty marker (libnvnmos's rule for wide \
+                         is \"present + non-empty\").",
                     )
                     .default_value(CapsMode::Auto)
                     .mutable_ready()
@@ -520,7 +519,7 @@ impl NmosSrc {
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!(
-                                "nmossrc: deriving caps from activation transport_file: {e:#}"
+                                "nmossrc: deriving caps from activation transport file: {e:#}"
                             ),
                         };
                     }
@@ -603,9 +602,9 @@ fn install_initial_placeholder(bin: &gst::Bin) -> Result<gst::GhostPad, glib::Bo
     Ok(ghost)
 }
 
-/// Reverse-map a resolved transport_file into essence caps that
+/// Reverse-map a resolved transport file into essence caps that
 /// the bin should advertise on its ghost src pad. `None` is
-/// returned when no transport_file is in play (development
+/// returned when no transport file is in play (development
 /// convenience path where only properties are set); the caller
 /// then builds a bare `mxlsrc` whose broad pad template propagates.
 fn derive_advertise_caps(
@@ -616,10 +615,10 @@ fn derive_advertise_caps(
     };
     let caps = crate::flow_def::caps_from_flow_def(text).map_err(|e| {
         anyhow::anyhow!(
-            "deriving essence caps from transport_file for ghost-pad advertisement: {e}",
+            "deriving essence caps from transport file for ghost-pad advertisement: {e}",
         )
     })?;
-    gst::info!(CAT, "nmossrc: advertising caps `{caps}` from transport_file");
+    gst::info!(CAT, "nmossrc: advertising caps `{caps}` from transport file");
     Ok(Some(caps))
 }
 
