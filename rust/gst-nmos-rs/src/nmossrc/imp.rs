@@ -55,6 +55,7 @@ struct Settings {
     caps: Option<gst::Caps>,
     transport_caps: Option<gst::Caps>,
     receiver_caps_mode: CapsMode,
+    auto_activate: bool,
 }
 
 impl Default for Settings {
@@ -75,6 +76,7 @@ impl Default for Settings {
             caps: None,
             transport_caps: None,
             receiver_caps_mode: CapsMode::Auto,
+            auto_activate: false,
         }
     }
 }
@@ -163,12 +165,18 @@ impl ObjectImpl for NmosSrc {
                         "MXL flow id (UUID) the inner `mxlsrc` should pull. \
                          An NMOS Receiver is normally configured by IS-05 \
                          PATCH activation, so this is mainly a development \
-                         convenience: setting it (plus `caps` and \
-                         `mxl-domain-path`) lets the receiver start up \
-                         pre-bound to a known flow. Overrides the \
-                         transport file's top-level `id` when both are \
-                         supplied.",
+                         convenience: combined with `auto-activate=true` \
+                         (plus `caps` and `mxl-domain-path`) the receiver \
+                         starts up pre-bound to a known flow without an \
+                         external controller. Overrides the transport \
+                         file's top-level `id` when both are supplied.",
                     )
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecBoolean::builder("auto-activate")
+                    .nick("Auto-activate")
+                    .blurb(crate::session::AUTO_ACTIVATE_BLURB)
+                    .default_value(false)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("label")
@@ -277,6 +285,9 @@ impl ObjectImpl for NmosSrc {
             "mxl-flow-id" => {
                 settings.mxl_flow_id = string_or_empty(value);
             }
+            "auto-activate" => {
+                settings.auto_activate = value.get().expect("type checked upstream");
+            }
             "label" => {
                 settings.label = string_or_empty(value);
             }
@@ -313,6 +324,7 @@ impl ObjectImpl for NmosSrc {
             "mxl-domain-id" => settings.mxl_domain_id.to_value(),
             "mxl-domain-path" => settings.mxl_domain_path.to_value(),
             "mxl-flow-id" => settings.mxl_flow_id.to_value(),
+            "auto-activate" => settings.auto_activate.to_value(),
             "label" => settings.label.to_value(),
             "description" => settings.description.to_value(),
             "transport-file" => settings.transport_file.to_value(),
@@ -430,6 +442,22 @@ impl NmosSrc {
                 advertise_caps.as_ref(),
             )?;
             self.swap_inner(bin, &mxlsrc)?;
+            // Reaching the `Mxl` branch at NULL→READY implies
+            // `auto-activate=true` (the `validate_and_open` gate
+            // downgrades to `Placeholder` otherwise). Tell the
+            // daemon to bring the resource's IS-04/IS-05 view up
+            // to match the live data path so the
+            // `/single/receivers/{id}/active` endpoint reflects
+            // `master_enable: true` without an external IS-05
+            // PATCH.
+            if let Err(e) = crate::session::sync_active(
+                &CAT,
+                "nmossrc",
+                &self.session,
+                transport_file.as_deref(),
+            ) {
+                gst::warning!(CAT, "nmossrc auto-activate sync failed: {e:#}");
+            }
         }
         Ok(())
     }
@@ -648,6 +676,7 @@ impl From<Settings> for crate::session::CommonSettings {
             description: s.description,
             caps: s.caps,
             caps_mode: s.receiver_caps_mode,
+            auto_activate: s.auto_activate,
         }
     }
 }

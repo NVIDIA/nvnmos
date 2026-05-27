@@ -39,10 +39,35 @@
 //!
 //! Inner data path: when the resolved configuration pins a Domain
 //! path and a Flow id (plus a Flow format on the receiver), the bin
-//! instantiates the real `mxlsink` / `mxlsrc` and ghosts its pad
-//! through the bin's external pad. Otherwise it keeps a placeholder
-//! `fakesink` / `fakesrc` so the element remains valid in the
-//! pipeline until an IS-05 activation supplies the missing pieces.
+//! is *capable* of running the real `mxlsink` / `mxlsrc`. Whether it
+//! does so eagerly is controlled by the `auto-activate` boolean
+//! property:
+//!
+//! - `auto-activate=false` (default, canonical NMOS): the element
+//!   registers the resource so it appears on IS-04 but leaves the
+//!   inner on the placeholder. The daemon's
+//!   `/single/{senders,receivers}/{id}/active` reports
+//!   `master_enable: false` until an IS-05 PATCH activates it; the
+//!   activation event then flows through `apply_activation` and
+//!   swaps the inner.
+//! - `auto-activate=true`: the element brings the inner up
+//!   immediately from the resolved configuring flow_def and calls
+//!   [`session::sync_active`] (which dispatches the daemon's
+//!   `SyncResourceState` RPC) so the daemon's IS-04/IS-05 view of
+//!   the resource flips to active without requiring an IS-05
+//!   controller. This is a development / no-controller shortcut.
+//!
+//! The toggle is orthogonal to where the configuring flow_def came
+//! from. The flow id may have been supplied by `mxl-flow-id` as a
+//! plain property override, taken from the transport file's
+//! top-level `id`, or produced by caps→flow_def synthesis — all
+//! three routes funnel into the same gate.
+//!
+//! If the resolved configuration is incomplete (no Domain path, no
+//! flow id, or no Flow format on the receiver), the element stays
+//! on the placeholder regardless of `auto-activate` — the gate only
+//! upgrades configurations that *could* run; it never invents
+//! missing pieces.
 //!
 //! On `nmossink` there is also a *deferred mode*: if NULL→READY runs
 //! with neither `transport-file*` nor `caps` set, the session is

@@ -30,20 +30,20 @@ Both elements:
 | `transport-caps` | GstCaps | optional  | Typically empty for MXL. |
 | `mxl-domain-path` | string | required for MXL | Local filesystem path identifying the MXL Domain on this host; fed into the inner `mxlsink` / `mxlsrc` `domain=` property. If a `domain_def.json` is present in the directory its `id` is used to populate or cross-check `mxl-domain-id` (see below). |
 | `mxl-domain-id`  | string  | required for MXL (may be omitted if `mxl-domain-path` supplies it) | MXL Domain id (UUID) advertised in NMOS as `urn:x-nvnmos:tag:mxl-domain-id`. If `mxl-domain-path` points at a directory containing a `domain_def.json` (AMWA BCP-007-03 WIP) the file's `id` is used to populate this property when unset, or cross-checked against it when both are supplied (mismatch is an error — this is host-level identity). Overrides the transport file's tag when both are supplied. |
+| `mxl-flow-id`    | string  | optional  | MXL flow id (UUID) — on `nmossink` fed into `mxlsink.flow-id=`, on `nmossrc` into the matching `mxlsrc.{video,audio,data}-flow-id=` slot picked from `caps`. Overrides the transport file's top-level `id` when both are supplied — same property-override rule as `label` / `description`. |
+| `auto-activate`  | boolean | optional, default `false` | When `false` the element registers the resource so it appears on IS-04 and IS-05 but leaves the inner data path on the placeholder until an IS-05 PATCH activates it (`master_enable: true` on `/single/{senders,receivers}/{id}/active`). When `true` the element brings the inner `mxlsink` / `mxlsrc` up immediately once the configuring flow_def has been resolved at NULL→READY (or, for a deferred-mode sender, at READY→PAUSED) *and* calls `SyncResourceState` to push the daemon's IS-04/IS-05 view to active — i.e. it's a no-controller shortcut for development pipelines and for setups where flow identity comes entirely from properties / `transport-file*`. Orthogonal to how the flow_def itself becomes available: property override of `mxl-flow-id`, supplied `transport-file*`, and caps→flow_def synthesis all feed the same gate. |
 
 `nmossink`-only:
 
 | Property      | Type   | Required? | Notes |
 | ------------- | ------ | --------- | ----- |
 | `sender-name` | string | required  | NMOS Sender name within the Node (`x-nvnmos-name` SDP attribute or `urn:x-nvnmos:tag:name` flow-def tag). Unique among Senders on the Node; a Receiver on the same Node may share the same name (the daemon's `by_name` index is keyed on `(node_seed, side, name)`). Overrides the transport file's name tag when both are supplied. |
-| `mxl-flow-id` | string | required to instantiate inner `mxlsink` (else placeholder) | MXL flow id (UUID) fed into `mxlsink.flow-id=`. Overrides the transport file's top-level `id` when both are supplied. |
 
 `nmossrc`-only:
 
 | Property          | Type   | Required? | Notes |
 | ----------------- | ------ | --------- | ----- |
 | `receiver-name`   | string | required  | NMOS Receiver name within the Node (`x-nvnmos-name` SDP attribute or `urn:x-nvnmos:tag:name` flow-def tag). Unique among Receivers on the Node; a Sender on the same Node may share the same name. Overrides the transport file's name tag when both are supplied. |
-| `mxl-flow-id`     | string | required to instantiate inner `mxlsrc` (else placeholder) | MXL flow id (UUID) the inner `mxlsrc` should pull. Overrides the transport file's top-level `id` when both are supplied. Normally an NMOS Receiver learns this from IS-05 PATCH activation; setting it as a property is a development convenience. |
 | `receiver-caps-mode` | enum (`auto`/`narrow`/`wide`) | optional | Controls whether the Receiver published to IS-04 advertises narrow or wide Receiver Caps, via the presence of the `urn:x-nvnmos:tag:caps` flow-def tag (libnvnmos's rule: present + non-empty array means wide; absent or empty means narrow). `auto` (default) leaves the tag untouched in the spliced transport file: narrow when the transport file is present and the tag is absent, wide when the tag is already there. `narrow` strips the tag if present; `wide` ensures it is present with a non-empty marker. |
 
 ### Property interaction with `transport-file`
@@ -56,6 +56,7 @@ built with these rules:
 | ------------- | ---------- | ------------------ |
 | Identity / cosmetic | `sender-name` / `receiver-name`, `mxl-flow-id`, `mxl-domain-id`, `label`, `description`, `receiver-caps-mode` | **Property overrides file.** The element rewrites the file's matching field/tag to the property value before the daemon sees it. |
 | Essence shape | `caps`, `transport-caps` | **Cross-check.** Property must agree with the file's shape (today: `caps` first structure name vs `format`). Mismatch is a hard error at NULL→READY. |
+| Activation gate | `auto-activate` | Doesn't appear in the transport file; it gates whether the data path goes live eagerly at NULL→READY (and tells the daemon to flip `/active` to `master_enable: true` via `SyncResourceState`) or waits for an IS-05 PATCH. Orthogonal to where the flow_def came from. |
 | No interaction | `daemon-uri`, `node-seed`, `http-port`, `transport`, `mxl-domain-path` | These don't appear in the transport file at all. |
 
 `mxl-domain-id` is in the override group for the file tag, but is
@@ -69,6 +70,31 @@ for the identity/cosmetic group (an IS-05 PATCH legitimately replaces
 the configured-at-startup flow id); the essence-shape cross-check
 still applies, so an activation that asks an `nmossrc` configured for
 v210 video to receive an audio flow is ack-failed.
+
+### Activation: `auto-activate` vs IS-05 PATCH
+
+The element separates "is the resource visible to NMOS controllers?"
+from "is the data path live?":
+
+- **Resource registration** (`AddSender` / `AddReceiver`) happens
+  at NULL→READY whenever a configuring flow_def is in play —
+  supplied via `transport-file*`, synthesised from `caps` (+
+  `mxl-flow-id`), or for the deferred-mode sender, synthesised
+  from peer caps at READY→PAUSED. With no flow_def in play the
+  session opens with no resource and the data path stays on the
+  placeholder until an IS-05 activation supplies one.
+
+- **Inner data path** (real `mxlsink` / `mxlsrc`) only goes live
+  when `auto-activate=true` *or* when an IS-05 activation arrives.
+  With the default `auto-activate=false` the element registers the
+  resource but leaves the inner on the placeholder; the daemon's
+  `/single/{senders,receivers}/{id}/active` shows
+  `master_enable: false` until an external controller PATCHes the
+  resource. Setting `auto-activate=true` is the no-controller
+  shortcut: the element brings the inner up eagerly from its
+  resolved configuring flow_def and calls `SyncResourceState` on
+  the daemon to bring `/active` into sync — no IS-05 PATCH
+  required.
 
 ## Building
 
@@ -116,8 +142,10 @@ matching `OpenSession`, `SubscribeActivations`, and `CloseSession`
 calls.
 
 Add `transport-file-path=...` (or `mxl-flow-id=` directly) plus
-`mxl-domain-path=` to register the Sender via `AddSender` *and*
-instantiate a real `mxlsink`:
+`mxl-domain-path=` to register the Sender via `AddSender`, then add
+`auto-activate=true` to also instantiate a real `mxlsink` and have
+the element call `SyncResourceState` so the daemon's
+`/single/senders/{id}/active` is in sync without an IS-05 PATCH:
 
 ```sh
 GST_DEBUG=nmossink:5 gst-launch-1.0 -e \
@@ -125,7 +153,8 @@ GST_DEBUG=nmossink:5 gst-launch-1.0 -e \
     nmossink transport=mxl node-seed=demo sender-name=sender1 \
              mxl-domain-id=1ac254d9-c9be-475a-93a7-f80b9c1063a8 \
              mxl-domain-path=/var/lib/mxl/domain-a \
-             transport-file-path=/tmp/sender1.flow_def.json
+             transport-file-path=/tmp/sender1.flow_def.json \
+             auto-activate=true
 ```
 
 Expected: the element additionally logs `resource registered:
@@ -163,7 +192,8 @@ form is much easier to type because the pipeline parser doesn't have
 to cope with newlines and embedded quotes.
 
 For a sender driven entirely by properties (no `transport-file*`) the
-essence caps can be supplied directly:
+essence caps can be supplied directly; add `auto-activate=true` to
+let the element activate without an IS-05 controller:
 
 ```sh
 GST_DEBUG=nmossink:5 gst-launch-1.0 -e \
@@ -174,7 +204,8 @@ GST_DEBUG=nmossink:5 gst-launch-1.0 -e \
              mxl-domain-path=/var/lib/mxl/domain-a \
              mxl-flow-id=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
              label="Studio A v210" \
-             caps="video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001"
+             caps="video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001" \
+             auto-activate=true
 ```
 
 Expected: `nmossink: synthesised flow_def from caps` then the usual
@@ -209,7 +240,8 @@ GST_DEBUG=nmossink:5 gst-launch-1.0 -e \
     nmossink transport=mxl node-seed=demo sender-name=sender1 \
              mxl-domain-id=1ac254d9-c9be-475a-93a7-f80b9c1063a8 \
              mxl-domain-path=/var/lib/mxl/domain-a \
-             mxl-flow-id=5fbec3b1-1b0f-417d-9059-8b94a47197ed
+             mxl-flow-id=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
+             auto-activate=true
 ```
 
 Expected: at NULL→READY the element logs `session opened … no
@@ -230,12 +262,14 @@ GST_DEBUG=nmossrc:5,nmossink:5 gst-launch-1.0 -e \
     nmossrc transport=mxl node-seed=demo receiver-name=recv1 \
             mxl-domain-id=1ac254d9-c9be-475a-93a7-f80b9c1063a8 \
             mxl-domain-path=/var/lib/mxl/domain-a \
-            transport-file-path=/tmp/recv1.flow_def.json ! \
+            transport-file-path=/tmp/recv1.flow_def.json \
+            auto-activate=true ! \
     identity ! \
     nmossink transport=mxl node-seed=demo sender-name=send1 \
              mxl-domain-id=1ac254d9-c9be-475a-93a7-f80b9c1063a8 \
              mxl-domain-path=/var/lib/mxl/domain-a \
-             mxl-flow-id=00000000-0000-0000-0000-00000000abcd
+             mxl-flow-id=00000000-0000-0000-0000-00000000abcd \
+             auto-activate=true
 ```
 
 Expected: `nmossrc` advertises caps from `recv1.flow_def.json` on
@@ -326,6 +360,21 @@ across the steady-state window.
   is opened but no resource is registered; the element awaits an
   IS-05 activation (or, for `nmossink` only, READY→PAUSED peer-caps
   resolution — see the deferred-mode note below).
+- The `auto-activate` boolean property (default `false`) controls
+  whether the data path goes live eagerly at NULL→READY or waits for
+  an IS-05 PATCH. Default `false` gives canonical NMOS semantics:
+  the resource is registered (visible on IS-04) but the inner
+  data path stays on the placeholder until an external controller
+  PATCHes `master_enable: true` against the
+  `/single/{senders,receivers}/{id}/staged` endpoint. `true` is the
+  no-controller shortcut: once the configuring flow_def has been
+  resolved the element brings the inner `mxlsink` / `mxlsrc` up
+  and calls `SyncResourceState` on the daemon so
+  `/single/{senders,receivers}/{id}/active` reflects
+  `master_enable: true` without the IS-05 stream being involved.
+  The gate is orthogonal to how the flow_def became available —
+  property override of `mxl-flow-id`, supplied `transport-file*`,
+  and caps→flow_def synthesis all feed the same toggle.
 - Activation events arriving on the subscription drive the inner
   data path. The element reads the event's transport file (for MXL
   receivers this is the daemon-spliced internal `flow_def` carrying

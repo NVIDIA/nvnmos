@@ -53,6 +53,7 @@ struct Settings {
     transport_file_path: String,
     caps: Option<gst::Caps>,
     transport_caps: Option<gst::Caps>,
+    auto_activate: bool,
 }
 
 impl Default for Settings {
@@ -72,6 +73,7 @@ impl Default for Settings {
             transport_file_path: String::new(),
             caps: None,
             transport_caps: None,
+            auto_activate: false,
         }
     }
 }
@@ -161,6 +163,12 @@ impl ObjectImpl for NmosSink {
                          Overrides the transport file's top-level `id` when both \
                          are supplied.",
                     )
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecBoolean::builder("auto-activate")
+                    .nick("Auto-activate")
+                    .blurb(crate::session::AUTO_ACTIVATE_BLURB)
+                    .default_value(false)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("label")
@@ -254,6 +262,9 @@ impl ObjectImpl for NmosSink {
             "mxl-flow-id" => {
                 settings.mxl_flow_id = string_or_empty(value);
             }
+            "auto-activate" => {
+                settings.auto_activate = value.get().expect("type checked upstream");
+            }
             "label" => {
                 settings.label = string_or_empty(value);
             }
@@ -287,6 +298,7 @@ impl ObjectImpl for NmosSink {
             "mxl-domain-id" => settings.mxl_domain_id.to_value(),
             "mxl-domain-path" => settings.mxl_domain_path.to_value(),
             "mxl-flow-id" => settings.mxl_flow_id.to_value(),
+            "auto-activate" => settings.auto_activate.to_value(),
             "label" => settings.label.to_value(),
             "description" => settings.description.to_value(),
             "transport-file" => settings.transport_file.to_value(),
@@ -411,9 +423,33 @@ impl NmosSink {
         bin: &gst::Bin,
         outcome: &InnerConfig,
     ) -> Result<(), anyhow::Error> {
-        if let InnerConfig::Mxl { domain_path, flow_id, .. } = outcome {
+        if let InnerConfig::Mxl {
+            domain_path,
+            flow_id,
+            transport_file,
+            ..
+        } = outcome
+        {
             let mxlsink = inner::build_mxlsink(domain_path, flow_id)?;
             self.swap_inner(bin, &mxlsink)?;
+            // Reaching the `Mxl` branch at NULL→READY / READY→PAUSED
+            // implies `auto-activate=true` (the `validate_and_open`
+            // and `register_deferred` gates downgrade to
+            // `Placeholder` otherwise). Tell the daemon to bring
+            // the resource's IS-04/IS-05 view up to match the live
+            // data path so external state stays consistent without
+            // an external IS-05 PATCH.
+            if let Err(e) = crate::session::sync_active(
+                &CAT,
+                "nmossink",
+                &self.session,
+                transport_file.as_deref(),
+            ) {
+                // Inner is up and pushing already; don't tear it
+                // down for a SyncResourceState glitch, but surface
+                // the failure as a warning so it shows up in logs.
+                gst::warning!(CAT, "nmossink auto-activate sync failed: {e:#}");
+            }
         }
         Ok(())
     }
@@ -667,6 +703,7 @@ impl From<Settings> for crate::session::CommonSettings {
             description: s.description,
             caps: s.caps,
             caps_mode: crate::types::CapsMode::Auto,
+            auto_activate: s.auto_activate,
         }
     }
 }

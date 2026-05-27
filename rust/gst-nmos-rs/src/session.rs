@@ -126,6 +126,16 @@ pub(crate) const TRANSPORT_FILE_PATH_BLURB: &str =
 pub(crate) const TRANSPORT_CAPS_BLURB: &str =
     "Per-transport overrides (SDP fmtp-style). Typically empty for MXL.";
 
+pub(crate) const AUTO_ACTIVATE_BLURB: &str =
+    "Bring the inner `mxlsink` / `mxlsrc` up immediately at \
+     NULL\u{2192}READY (or, for deferred-mode senders, READY\u{2192}PAUSED) \
+     once the configuring flow_def has been resolved, and call \
+     `SyncResourceState` on the daemon to advertise the resource as \
+     active on IS-04/IS-05 without waiting for an IS-05 PATCH. \
+     Default `false` gives canonical NMOS behaviour: the resource is \
+     registered (so it appears on IS-04) but the data path stays on \
+     the placeholder until an external IS-05 controller activates it.";
+
 /// Snapshot of the properties needed to open a session, taken under
 /// the per-element settings lock so the lock isn't held over the
 /// blocking RPC.
@@ -195,6 +205,28 @@ pub(crate) struct CommonSettings {
     /// `receiver-caps-mode` property on `nmossrc`); `nmossink` leaves
     /// it at [`CapsMode::Auto`].
     pub(crate) caps_mode: CapsMode,
+    /// Whether the element brings its inner `mxlsink` / `mxlsrc` up
+    /// immediately at NULL→READY (or, for a deferred-mode sender,
+    /// READY→PAUSED) once the configuring transport file has been
+    /// resolved, and synchronises the daemon's IS-04/IS-05 state to
+    /// match via `SyncResourceState`.
+    ///
+    /// `false` (default) gives canonical NMOS behaviour: the
+    /// element registers the resource (so it appears on IS-04) but
+    /// leaves the data path on the placeholder until an IS-05 PATCH
+    /// against `/single/{senders,receivers}/{id}/staged` activates
+    /// it. `true` is the "no-controller" shortcut for development
+    /// and for pipelines whose flow identity is entirely property /
+    /// transport-file driven.
+    ///
+    /// The toggle is orthogonal to how the configuring flow_def
+    /// itself was obtained (property override of `mxl-flow-id`,
+    /// supplied `transport-file*`, or caps→flow_def synthesis): as
+    /// long as one of those routes produces a usable flow_def at
+    /// NULL→READY (or READY→PAUSED for a deferred sender),
+    /// `auto-activate=true` brings the inner up and informs the
+    /// daemon; `auto-activate=false` leaves it for the controller.
+    pub(crate) auto_activate: bool,
 }
 
 /// Outcome of resolving `transport_file` / `transport_file_path`.
@@ -369,6 +401,7 @@ pub(crate) fn validate_and_open(
                 .to_owned(),
         };
     }
+    inner = apply_auto_activate_gate(inner, settings.auto_activate);
 
     let transport = transport_to_proto(settings.transport);
     let side = settings.side;
@@ -576,6 +609,25 @@ fn decide_inner_config(
     }
 }
 
+/// Honour `auto-activate` at setup time. When `auto_activate` is
+/// `false` and `decide_inner_config` would have produced a real
+/// `mxlsink` / `mxlsrc`, downgrade to a `Placeholder` so the data
+/// path stays inactive until an IS-05 PATCH activates the resource
+/// (the canonical NMOS path).
+///
+/// The resource registration itself isn't affected — that's driven
+/// by whether a configuring transport file is in play, not by the
+/// gate — so a resource opened with `auto-activate=false` still
+/// appears on IS-04 immediately, ready to be PATCHed.
+fn apply_auto_activate_gate(inner: InnerConfig, auto_activate: bool) -> InnerConfig {
+    if !auto_activate && matches!(inner, InnerConfig::Mxl { .. }) {
+        return InnerConfig::Placeholder {
+            reason: "auto-activate=false; waiting for IS-05 PATCH to activate".to_owned(),
+        };
+    }
+    inner
+}
+
 /// Register a Sender via the deferred-mode path: synthesise a
 /// flow_def from upstream peer caps and call `AddSender` against a
 /// session that was opened without one. Used by `nmossink` from
@@ -667,7 +719,10 @@ pub(crate) fn register_deferred(
     .with_context(|| {
         format!("{element}: resolving MXL flow id / format for deferred registration")
     })?;
-    let inner = decide_inner_config(settings, &flow, Some(&json));
+    let inner = apply_auto_activate_gate(
+        decide_inner_config(settings, &flow, Some(&json)),
+        settings.auto_activate,
+    );
 
     let transport = transport_to_proto(settings.transport);
     let side = settings.side;
@@ -704,6 +759,67 @@ pub(crate) fn register_deferred(
         inner,
     );
     Ok(inner)
+}
+
+/// Tell the daemon to sync its IS-04/IS-05 view of the registered
+/// resource to "active" (`master_enable: true`) with `transport_file`
+/// as the live configuration. Used by the `auto-activate=true` path
+/// after the element has already swapped its inner `mxlsink` /
+/// `mxlsrc` directly from the resolved configuring flow_def.
+///
+/// Pass `None` for `transport_file` to sync to "inactive" (the
+/// reverse direction, for symmetry — currently unused; the element
+/// closes the session at READY→NULL which the daemon treats as a
+/// full resource teardown, so explicit deactivation hasn't been
+/// needed yet).
+///
+/// Logs and returns without an error on `DaemonError::NoResource`
+/// (caller bug guard — the inner was somehow swapped to `mxlsink` /
+/// `mxlsrc` without `AddSender` / `AddReceiver` having succeeded
+/// first; in practice unreachable since `decide_inner_config` plus
+/// the `auto-activate` gate only let that happen after a successful
+/// registration). Other RPC failures are returned so the caller can
+/// log them without forcing the inner swap itself to roll back.
+pub(crate) fn sync_active(
+    cat: &gst::DebugCategory,
+    element: &str,
+    session: &Mutex<Option<Session>>,
+    transport_file: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    let mut taken = session.lock().unwrap().take().ok_or_else(|| {
+        anyhow::anyhow!("{element}: SyncResourceState but no open session")
+    })?;
+    let rpc_result = SHARED_RUNTIME.block_on(async {
+        tokio::time::timeout(OPEN_TIMEOUT, taken.sync_resource_state(transport_file)).await
+    });
+    let resource_summary = taken
+        .resource_id()
+        .map(|(h, id)| format!("resource_handle={h} resource_id={id}"))
+        .unwrap_or_else(|| "<no resource id>".to_owned());
+    *session.lock().unwrap() = Some(taken);
+    match rpc_result {
+        Ok(Ok(())) => {
+            gst::info!(
+                cat,
+                "{element}: auto-activate sync complete (active={}, {resource_summary})",
+                transport_file.is_some(),
+            );
+            Ok(())
+        }
+        Ok(Err(crate::daemon::DaemonError::NoResource)) => {
+            gst::warning!(
+                cat,
+                "{element}: auto-activate sync skipped — session has no resource yet ({resource_summary})",
+            );
+            Ok(())
+        }
+        Ok(Err(e)) => Err(anyhow::Error::new(e).context(format!(
+            "{element}: SyncResourceState against the daemon ({resource_summary})"
+        ))),
+        Err(_elapsed) => Err(anyhow::anyhow!(
+            "{element}: SyncResourceState against the daemon timed out ({resource_summary})"
+        )),
+    }
 }
 
 /// Drop the session and tell the daemon to close it. Logged-only on
@@ -921,6 +1037,11 @@ mod tests {
             description: String::new(),
             caps: None,
             caps_mode: CapsMode::Auto,
+            // Defaults to false (matching CommonSettings's
+            // documented default and the canonical NMOS flow).
+            // Tests that exercise the eager-activation path
+            // override this explicitly.
+            auto_activate: false,
         }
     }
 
@@ -1403,6 +1524,168 @@ mod tests {
                 resolved.as_deref(),
                 "transport file must pass through unchanged when supplied"
             );
+        }
+    }
+
+    /// Setup-time `auto-activate` gate covers the
+    /// "data path live without IS-05 PATCH" toggle. The gate is
+    /// orthogonal to how the configuring flow_def is supplied — a
+    /// flow id from `mxl-flow-id`, from a transport file's
+    /// top-level `id`, or from caps→flow_def synthesis all reach
+    /// the same `apply_auto_activate_gate` call.
+    mod auto_activate {
+        use super::*;
+
+        fn mxl_inner() -> InnerConfig {
+            InnerConfig::Mxl {
+                domain_path: "/var/lib/mxl/domain-a".to_owned(),
+                flow_id: FLOW_ID_A.to_owned(),
+                format: FlowFormat::Video,
+                transport_file: Some(video_flow_def(FLOW_ID_A)),
+            }
+        }
+
+        fn placeholder_inner() -> InnerConfig {
+            InnerConfig::Placeholder {
+                reason: "test fixture placeholder".to_owned(),
+            }
+        }
+
+        #[test]
+        fn gate_passes_mxl_through_when_auto_activate_true() {
+            let after = super::super::apply_auto_activate_gate(mxl_inner(), true);
+            match after {
+                InnerConfig::Mxl { flow_id, format, .. } => {
+                    assert_eq!(flow_id, FLOW_ID_A);
+                    assert_eq!(format, FlowFormat::Video);
+                }
+                InnerConfig::Placeholder { reason } => {
+                    panic!("auto-activate=true must not downgrade Mxl: {reason}")
+                }
+            }
+        }
+
+        #[test]
+        fn gate_downgrades_mxl_to_placeholder_when_auto_activate_false() {
+            let after = super::super::apply_auto_activate_gate(mxl_inner(), false);
+            match after {
+                InnerConfig::Mxl { .. } => {
+                    panic!("auto-activate=false must downgrade Mxl to Placeholder")
+                }
+                InnerConfig::Placeholder { reason } => {
+                    assert!(
+                        reason.contains("auto-activate=false"),
+                        "expected gate-attributed reason, got: {reason}"
+                    );
+                    assert!(
+                        reason.contains("IS-05"),
+                        "expected reason to point at IS-05 path, got: {reason}"
+                    );
+                }
+            }
+        }
+
+        /// The gate never *upgrades* a placeholder. If
+        /// `decide_inner_config` already produced a placeholder
+        /// (e.g. receiver with no caps), the gate must leave it
+        /// alone regardless of `auto-activate`.
+        #[test]
+        fn gate_leaves_placeholder_alone_under_both_settings() {
+            let after_true = super::super::apply_auto_activate_gate(placeholder_inner(), true);
+            assert!(matches!(after_true, InnerConfig::Placeholder { .. }));
+            let after_false = super::super::apply_auto_activate_gate(placeholder_inner(), false);
+            assert!(matches!(after_false, InnerConfig::Placeholder { .. }));
+        }
+
+        /// IS-05 activations (`plan_activation`) are
+        /// controller-driven and must not be gated by
+        /// `auto-activate`: that property is the *setup-time*
+        /// switch for "start without a controller", not a runtime
+        /// admission policy. An IS-05 PATCH activating a Sender
+        /// against a Sender-side session must still apply
+        /// `master_enable: true` no matter what `auto-activate`
+        /// was set to at NULL→READY.
+        #[test]
+        fn is05_activation_path_ignores_auto_activate() {
+            let s = CommonSettings {
+                mxl_flow_id: FLOW_ID_A.to_owned(),
+                caps: Some(video_caps()),
+                // The element was started with the controller-driven
+                // path (auto-activate=false), so the inner sat on the
+                // placeholder at NULL→READY. An IS-05 PATCH then
+                // arrives — `plan_activation` must produce a real
+                // Mxl plan regardless of this flag.
+                auto_activate: false,
+                ..settings(Side::Sender)
+            };
+            let plan = plan_activation(
+                &cat(),
+                "nmossink",
+                &s,
+                &req(Side::Sender, Some(&video_flow_def(FLOW_ID_A))),
+            );
+            match plan.inner {
+                InnerConfig::Mxl { flow_id, .. } => assert_eq!(flow_id, FLOW_ID_A),
+                InnerConfig::Placeholder { reason } => {
+                    panic!("IS-05 activation must reach Mxl regardless of auto-activate: {reason}")
+                }
+            }
+            assert!(matches!(plan.ack, ActivationAck::Success));
+        }
+
+        /// The point of the property is that the route by which the
+        /// flow id became available doesn't change the gate's
+        /// decision. Run the gate over a `decide_inner_config`
+        /// result that was produced via the caps→flow_def
+        /// synthesis route (no transport file, just `caps` +
+        /// `mxl-flow-id` property) and confirm both branches.
+        #[test]
+        fn gate_works_for_caps_synthesised_flow_id() {
+            let s = CommonSettings {
+                mxl_flow_id: FLOW_ID_A.to_owned(),
+                caps: Some(video_caps()),
+                ..settings(Side::Sender)
+            };
+            // Mimic the validate_and_open chain up to the gate:
+            // synthesise the flow_def, resolve flow meta, decide
+            // inner config — then apply the gate twice.
+            let synth = super::super::synthesise_or_passthrough(
+                &cat(),
+                "nmossink",
+                &s,
+                DOMAIN_ID,
+                None,
+            )
+            .expect("synthesis must succeed")
+            .expect("caps + flow id must synthesise");
+            let flow = flow_def::resolve_mxl_flow_meta(
+                &s.mxl_flow_id,
+                FlowFormat::Video,
+                Some(&synth),
+            )
+            .expect("resolve_mxl_flow_meta");
+            let inner = super::super::decide_inner_config(&s, &flow, Some(&synth));
+            assert!(
+                matches!(inner, InnerConfig::Mxl { .. }),
+                "fixture must produce Mxl before the gate"
+            );
+
+            // Same inner, but pass through the gate with both
+            // toggle values:
+            let eager = super::super::apply_auto_activate_gate(inner.clone(), true);
+            assert!(
+                matches!(eager, InnerConfig::Mxl { .. }),
+                "auto-activate=true: caps-synthesised flow_id must keep the Mxl path"
+            );
+            let lazy = super::super::apply_auto_activate_gate(inner, false);
+            match lazy {
+                InnerConfig::Placeholder { reason } => {
+                    assert!(reason.contains("auto-activate=false"))
+                }
+                InnerConfig::Mxl { .. } => {
+                    panic!("auto-activate=false: caps-synthesised flow_id must defer to IS-05")
+                }
+            }
         }
     }
 }

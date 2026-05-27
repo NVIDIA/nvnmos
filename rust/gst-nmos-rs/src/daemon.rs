@@ -34,7 +34,8 @@ use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
     AckActivationRequest, AddReceiverRequest, AddSenderRequest, CloseSessionRequest, NodeConfig,
-    OpenSessionRequest, Side as ProtoSide, SubscribeActivationsRequest, Transport as ProtoTransport,
+    OpenSessionRequest, Side as ProtoSide, SubscribeActivationsRequest, SyncResourceStateRequest,
+    Transport as ProtoTransport,
 };
 use thiserror::Error;
 use tokio::net::UnixStream;
@@ -124,6 +125,10 @@ pub(crate) enum DaemonError {
         "session already has a resource registered; deferred registration is a one-shot operation"
     )]
     AlreadyRegistered,
+    #[error(
+        "session has no resource registered yet; auto-activate sync cannot run before AddSender / AddReceiver"
+    )]
+    NoResource,
 }
 
 impl From<tonic::transport::Error> for DaemonError {
@@ -262,6 +267,45 @@ impl Session {
         )
         .await?;
         self.resource = Some(resource);
+        Ok(())
+    }
+
+    /// Tell the daemon to update its IS-04/IS-05 view of this
+    /// session's resource without going through the IS-05 activation
+    /// stream. Used by the `auto-activate=true` path: the element
+    /// has already brought its inner `mxlsink` / `mxlsrc` up directly
+    /// from the configured / resolved transport file, so the daemon's
+    /// `/single/{senders,receivers}/{id}/active` endpoint needs to be
+    /// brought into sync (`master_enable: true`) without first having
+    /// to be PATCHed by an external IS-05 controller.
+    ///
+    /// `transport_file: Some(_)` means "(re)activate with this
+    /// transport file"; `transport_file: None` means "deactivate".
+    /// This is the same wire shape as `SubscribeActivations`'s
+    /// `ActivationEvent` carries, but the daemon does *not* fire a
+    /// callback back to subscribers (the element initiating the sync
+    /// already knows; other subscribers learn via IS-04 / IS-05
+    /// state).
+    ///
+    /// Errors when called on a session with no registered resource
+    /// (caller bug — `auto-activate` paths only call this after
+    /// `add_resource` succeeded).
+    pub(crate) async fn sync_resource_state(
+        &mut self,
+        transport_file: Option<&str>,
+    ) -> Result<(), DaemonError> {
+        let resource_handle = self
+            .resource
+            .as_ref()
+            .map(|r| r.handle.clone())
+            .ok_or(DaemonError::NoResource)?;
+        self.client
+            .sync_resource_state(SyncResourceStateRequest {
+                session_handle: self.session_handle.clone(),
+                resource_handle,
+                transport_file: transport_file.map(str::to_owned),
+            })
+            .await?;
         Ok(())
     }
 
