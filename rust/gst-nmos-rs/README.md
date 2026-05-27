@@ -399,8 +399,21 @@ across the steady-state window.
   (plus a recognised essence shape on the receiver, supplied via
   `caps` or read from the transport file's `format`), the inner data
   path is the real `mxlsink` / `mxlsrc` configured from those
-  values. Otherwise the bin keeps a placeholder `fakesink` /
-  `fakesrc` so the element remains valid in the pipeline.
+  values. Otherwise the bin keeps a placeholder so the element
+  remains valid in the pipeline: `fakesink` on `nmossink` (sinks
+  accept ANY caps), and an `appsrc` configured with the
+  best-available essence caps on `nmossrc` (the `caps` property, or
+  caps synthesised from `transport-file*`). The `nmossrc`
+  placeholder is held idle — we never push buffers into the
+  `appsrc`, so its basesrc loop blocks in `create()`, but downstream
+  caps queries are answered against the concrete essence shape so
+  negotiation can complete and the pipeline can reach PLAYING while
+  the bin waits for an IS-05 activation to swap the inner to
+  `mxlsrc`. A `fakesrc` placeholder is used only as a last-resort
+  fallback (constructed-time, before any properties have been set);
+  it cannot satisfy caps negotiation and the NULL→READY transition
+  always replaces it with the `appsrc` form once a caps source is
+  available.
 - Both elements support a `caps`-driven flow_def synthesis path:
   when the user supplies essence caps (`video/x-raw,format=v210,…`,
   `audio/x-raw,format=F32LE,…`, or `meta/x-st-2038,framerate=…`)

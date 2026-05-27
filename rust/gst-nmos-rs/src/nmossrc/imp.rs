@@ -6,9 +6,13 @@
 //! data path is a `mxlsrc` when the resolved configuration pins a
 //! Domain path + Flow id + a recognised essence shape (from `caps`
 //! or the transport file's `format`); otherwise the bin keeps a
-//! placeholder `fakesrc` so the element looks valid in the pipeline
-//! until an IS-05 activation (or a later configuration update)
-//! supplies the missing pieces.
+//! placeholder so the element looks valid in the pipeline until an
+//! IS-05 activation (or a later configuration update) supplies the
+//! missing pieces. The placeholder is an `appsrc` configured with
+//! the best-available essence caps (user `caps` property,
+//! synthesised from `transport-file`*) — never a `fakesrc`, which
+//! can't satisfy downstream caps negotiation. See [`inner`] for the
+//! details.
 //!
 //! Activations arriving on the daemon subscription are dispatched to
 //! [`NmosSrc::apply_activation`], which marshals the work onto the
@@ -433,30 +437,64 @@ impl NmosSrc {
         bin: &gst::Bin,
         outcome: &InnerConfig,
     ) -> Result<(), anyhow::Error> {
-        if let InnerConfig::Mxl { domain_path, flow_id, format, transport_file } = outcome {
-            let advertise_caps = derive_advertise_caps(transport_file.as_deref())?;
-            let mxlsrc = inner::build_mxlsrc(
+        match outcome {
+            InnerConfig::Mxl {
                 domain_path,
                 flow_id,
-                *format,
-                advertise_caps.as_ref(),
-            )?;
-            self.swap_inner(bin, &mxlsrc)?;
-            // Reaching the `Mxl` branch at NULL→READY implies
-            // `auto-activate=true` (the `validate_and_open` gate
-            // downgrades to `Placeholder` otherwise). Tell the
-            // daemon to bring the resource's IS-04/IS-05 view up
-            // to match the live data path so the
-            // `/single/receivers/{id}/active` endpoint reflects
-            // `master_enable: true` without an external IS-05
-            // PATCH.
-            if let Err(e) = crate::session::sync_active(
-                &CAT,
-                "nmossrc",
-                &self.session,
-                transport_file.as_deref(),
-            ) {
-                gst::warning!(CAT, "nmossrc auto-activate sync failed: {e:#}");
+                format,
+                transport_file,
+            } => {
+                let advertise_caps = derive_advertise_caps(transport_file.as_deref())?;
+                let mxlsrc = inner::build_mxlsrc(
+                    domain_path,
+                    flow_id,
+                    *format,
+                    advertise_caps.as_ref(),
+                )?;
+                self.swap_inner(bin, &mxlsrc)?;
+                // Reaching the `Mxl` branch at NULL→READY implies
+                // `auto-activate=true` (the `validate_and_open` gate
+                // downgrades to `Placeholder` otherwise). Tell the
+                // daemon to bring the resource's IS-04/IS-05 view up
+                // to match the live data path so the
+                // `/single/receivers/{id}/active` endpoint reflects
+                // `master_enable: true` without an external IS-05
+                // PATCH.
+                if let Err(e) = crate::session::sync_active(
+                    &CAT,
+                    "nmossrc",
+                    &self.session,
+                    transport_file.as_deref(),
+                ) {
+                    gst::warning!(CAT, "nmossrc auto-activate sync failed: {e:#}");
+                }
+            }
+            InnerConfig::Placeholder { .. } => {
+                // The constructed-time placeholder is a bare
+                // `fakesrc` (no settings were available yet).
+                // Whenever we have caps to advertise — from the
+                // user-set `caps` property or synthesised from
+                // `transport-file*` — swap it for an `appsrc` so
+                // downstream negotiation can complete and the
+                // pipeline can reach PLAYING while the bin waits
+                // for an IS-05 activation. Without a caps source
+                // we have no choice but to leave the `fakesrc` in
+                // place; the pipeline will then fail caps
+                // negotiation on its way to PLAYING and the user
+                // must supply `caps` (or `transport-file*`).
+                let snapshot = self.settings.lock().unwrap().clone();
+                let caps = placeholder_caps_from_settings(&snapshot)?;
+                if let Some(caps) = caps {
+                    let placeholder = inner::build_placeholder_src(Some(&caps))?;
+                    self.swap_inner(bin, &placeholder)?;
+                } else {
+                    gst::warning!(
+                        CAT,
+                        "nmossrc placeholder has no caps to advertise; \
+                         downstream caps negotiation will fail until \
+                         `caps` or `transport-file*` is set",
+                    );
+                }
             }
         }
         Ok(())
@@ -466,7 +504,13 @@ impl NmosSrc {
         crate::session::close(&CAT, "nmossrc", &self.session);
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
-        match inner::build_placeholder_src() {
+        // The bin is heading back to NULL, so caps aren't strictly
+        // required to flow data, but we still hand the best-known
+        // caps to the placeholder so a subsequent NULL→READY (or
+        // simple state-query) doesn't see a regression to ANY.
+        let snapshot = self.settings.lock().unwrap().clone();
+        let caps = placeholder_caps_from_settings(&snapshot).ok().flatten();
+        match inner::build_placeholder_src(caps.as_ref()) {
             Ok(placeholder) => {
                 if let Err(e) = self.swap_inner(bin_ref, &placeholder) {
                     gst::warning!(CAT, "restoring nmossrc placeholder: {e:#}");
@@ -561,17 +605,40 @@ impl NmosSrc {
                     }
                 }
             }
-            InnerConfig::Placeholder { .. } => match inner::build_placeholder_src() {
-                Ok(e) => e,
-                Err(e) => {
-                    return ActivationOutcome::Failed {
-                        reason: format!("nmossrc: building placeholder: {e:#}"),
-                    };
+            InnerConfig::Placeholder { .. } => {
+                // Deactivation, side mismatch, missing config, etc.
+                // The bin may be in PLAYING when this happens, so
+                // we still need caps on the placeholder so
+                // downstream stays negotiated across the swap.
+                let snapshot = self.settings.lock().unwrap().clone();
+                let caps = match placeholder_caps_from_settings(&snapshot) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return ActivationOutcome::Failed {
+                            reason: format!(
+                                "nmossrc: resolving placeholder caps for activation: {e:#}"
+                            ),
+                        };
+                    }
+                };
+                match inner::build_placeholder_src(caps.as_ref()) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return ActivationOutcome::Failed {
+                            reason: format!("nmossrc: building placeholder: {e:#}"),
+                        };
+                    }
                 }
-            },
+            }
         };
         if let Err(e) = self.swap_inner(bin_ref, &new_inner) {
-            if let Ok(p) = inner::build_placeholder_src() {
+            // Best-effort: try to restore a caps-aware placeholder
+            // so the bin doesn't end up with a fakesrc that can't
+            // negotiate. If caps resolution fails here we fall back
+            // to the bare placeholder rather than failing twice.
+            let snapshot = self.settings.lock().unwrap().clone();
+            let fallback_caps = placeholder_caps_from_settings(&snapshot).ok().flatten();
+            if let Ok(p) = inner::build_placeholder_src(fallback_caps.as_ref()) {
                 let _ = self.swap_inner(bin_ref, &p);
             }
             return ActivationOutcome::Failed {
@@ -622,7 +689,11 @@ impl NmosSrc {
 }
 
 fn install_initial_placeholder(bin: &gst::Bin) -> Result<gst::GhostPad, glib::BoolError> {
-    let placeholder = inner::build_placeholder_src()
+    // Constructed-time placeholder: no properties have been set yet,
+    // so we have no caps source. Fall back to `fakesrc`; it'll be
+    // replaced at NULL→READY (`activate_inner`) once `caps` /
+    // `transport-file*` are known.
+    let placeholder = inner::build_placeholder_src(None)
         .map_err(|e| glib::bool_error!("{e}"))?;
     let ghost = inner::build_initial(bin, placeholder, "src", gst::PadDirection::Src)?;
     bin.add_pad(&ghost)
@@ -649,6 +720,40 @@ fn derive_advertise_caps(
     })?;
     gst::info!(CAT, "nmossrc: advertising caps `{caps}` from transport file");
     Ok(Some(caps))
+}
+
+/// Best-available caps for the bin's placeholder data path,
+/// resolved from current `Settings` in priority order:
+///   1. `caps` property (user-supplied; authoritative).
+///   2. Caps synthesised from the literal `transport-file` JSON.
+///   3. Caps synthesised from the JSON loaded from
+///      `transport-file-path`.
+///
+/// Returns `Ok(None)` only when none of the three sources is
+/// available (e.g. neither `caps` nor `transport-file*` has been
+/// set yet); callers then fall back to a bare `fakesrc` and the
+/// pipeline will fail caps negotiation if it tries to reach
+/// PLAYING in that state. Filesystem / parse errors when a source
+/// is set are propagated as `Err`.
+fn placeholder_caps_from_settings(
+    settings: &Settings,
+) -> Result<Option<gst::Caps>, anyhow::Error> {
+    if let Some(caps) = settings.caps.as_ref() {
+        return Ok(Some(caps.clone()));
+    }
+    if !settings.transport_file.is_empty() {
+        return derive_advertise_caps(Some(&settings.transport_file));
+    }
+    if !settings.transport_file_path.is_empty() {
+        let text = std::fs::read_to_string(&settings.transport_file_path).map_err(|e| {
+            anyhow::anyhow!(
+                "nmossrc: re-reading `transport-file-path` = `{}` for placeholder caps: {e}",
+                settings.transport_file_path
+            )
+        })?;
+        return derive_advertise_caps(Some(&text));
+    }
+    Ok(None)
 }
 
 fn string_or_empty(value: &glib::Value) -> String {

@@ -69,6 +69,23 @@
 //! upgrades configurations that *could* run; it never invents
 //! missing pieces.
 //!
+//! Placeholder data path: while the inner is on the placeholder, the
+//! bin still has to look like a valid GStreamer element to the rest
+//! of the pipeline — the ghost pad needs to answer caps queries and
+//! the bin needs to reach PLAYING. `nmossink`'s placeholder is a
+//! plain `fakesink`: sinks accept ANY caps, so no extra work is
+//! needed. `nmossrc`'s placeholder is an `appsrc` configured with
+//! the best-available essence caps (the user-supplied `caps`
+//! property, or caps synthesised from `transport-file*`) and
+//! `is-live=true`; we never push buffers into it, so its basesrc
+//! loop blocks idle in `create()` and the bin holds at PLAYING
+//! waiting for an IS-05 activation to swap in a real `mxlsrc`. A
+//! `fakesrc` placeholder cannot satisfy downstream caps negotiation
+//! (no `caps` property, advertises ANY) so it's only used as a
+//! last-resort fallback at constructed-time, before any properties
+//! have been set; the NULL→READY transition replaces it with a
+//! caps-aware `appsrc` as soon as a caps source is available.
+//!
 //! On `nmossink` there is also a *deferred mode*: if NULL→READY runs
 //! with neither `transport-file*` nor `caps` set, the session is
 //! opened without a resource and the actual `AddSender` is driven

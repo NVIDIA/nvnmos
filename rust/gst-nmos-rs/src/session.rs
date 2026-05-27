@@ -272,9 +272,11 @@ fn resolve_transport_file(
 /// instantiate a `mxlsink` or `mxlsrc` (Domain path + Flow id, plus
 /// the flow format for the receiver). [`InnerConfig::Placeholder`]
 /// means the resolved configuration didn't pin a Domain path and/or a
-/// Flow id; the element keeps its placeholder `fakesink` / `fakesrc`
-/// in place and a later step (caps→flow_def, IS-05 activation) will
-/// supply the missing pieces.
+/// Flow id; the element keeps its placeholder data path in place
+/// (`fakesink` on the sink side, `appsrc` configured with the
+/// resolved essence caps on the source side — see [`crate::inner`])
+/// and a later step (caps→flow_def, IS-05 activation) will supply
+/// the missing pieces.
 #[derive(Debug, Clone)]
 pub(crate) enum InnerConfig {
     Mxl {

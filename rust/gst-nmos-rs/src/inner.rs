@@ -4,10 +4,24 @@
 //! Helpers for the inner data path of `nmossink` / `nmossrc`.
 //!
 //! Each element is a `GstBin` with a single ghost pad re-targeted at
-//! whichever inner element is currently in use: a placeholder
-//! `fakesink` / `fakesrc` while the configuration is incomplete, or
-//! a real `mxlsink` / `mxlsrc` once a Domain path and a Flow id are
-//! pinned.
+//! whichever inner element is currently in use: a placeholder while
+//! the configuration is incomplete, or a real `mxlsink` / `mxlsrc`
+//! once a Domain path and a Flow id are pinned.
+//!
+//! On the sink side the placeholder is a plain `fakesink` — sinks
+//! accept ANY caps from upstream, so no caps advertisement is
+//! needed. On the source side it's an `appsrc` configured with the
+//! resolved essence caps and `is-live=true`; we never push buffers
+//! into it, so the basesrc loop blocks in `create()` and the bin
+//! sits idle on the data path while still satisfying downstream caps
+//! negotiation. (A `fakesrc` placeholder cannot satisfy caps
+//! negotiation — it advertises ANY caps and has no `caps` property —
+//! so it's used only as a last-resort fallback when no caps source
+//! is yet available, e.g. at constructed time before any properties
+//! are set.) When caps eventually arrive (NULL→READY resolution, or
+//! an IS-05 PATCH), the placeholder is swapped for a real `mxlsrc`
+//! (or a caps-aware placeholder if the configuration is still
+//! incomplete) via the same ghost-pad retargeting flow.
 //!
 //! This module owns the swap mechanics (remove the previous inner,
 //! add the new one, re-target the ghost pad, sync state with parent)
@@ -75,16 +89,47 @@ pub(crate) fn build_placeholder_sink() -> Result<gst::Element, anyhow::Error> {
         .map_err(|e| anyhow!("creating fakesink placeholder: {e}"))
 }
 
-/// Build the `nmossrc` placeholder data path: an infinite live
-/// `fakesrc`.
-pub(crate) fn build_placeholder_src() -> Result<gst::Element, anyhow::Error> {
-    let elem = gst::ElementFactory::make("fakesrc")
+/// Build the `nmossrc` placeholder data path.
+///
+/// When `caps` is `Some`, returns an `appsrc` configured with those
+/// caps, `is-live=true` and `format=Time`. We never feed it buffers
+/// (no `push-buffer`, no `need-data` handler), so its basesrc loop
+/// blocks in `create()` and the bin sits idle on the data path
+/// while still answering downstream caps queries with a concrete
+/// essence shape. Downstream negotiation therefore completes, the
+/// pipeline reaches PLAYING, and data only starts flowing when the
+/// placeholder is swapped for a real `mxlsrc` (typically driven by
+/// an IS-05 activation).
+///
+/// When `caps` is `None`, falls back to a live `fakesrc`. This
+/// can't satisfy downstream caps negotiation (no `caps` property,
+/// advertises ANY caps) and so the bin will fail to reach PLAYING
+/// if the pipeline tries to start with the placeholder still in
+/// play; the fallback exists only for the constructed-time
+/// placeholder (where no properties have been set yet) and similar
+/// edge cases. The caller is expected to resolve caps from settings
+/// (`caps` property, `transport-file`, `transport-file-path`) and
+/// pass them in via `Some` whenever any of those sources is
+/// available.
+pub(crate) fn build_placeholder_src(
+    caps: Option<&gst::Caps>,
+) -> Result<gst::Element, anyhow::Error> {
+    let Some(caps) = caps else {
+        let elem = gst::ElementFactory::make("fakesrc")
+            .name("nmossrc-placeholder")
+            .property("is-live", true)
+            .build()
+            .map_err(|e| anyhow!("creating fakesrc placeholder: {e}"))?;
+        elem.set_property_from_str("num-buffers", "-1");
+        return Ok(elem);
+    };
+    gst::ElementFactory::make("appsrc")
         .name("nmossrc-placeholder")
+        .property("caps", caps)
         .property("is-live", true)
+        .property("format", gst::Format::Time)
         .build()
-        .map_err(|e| anyhow!("creating fakesrc placeholder: {e}"))?;
-    elem.set_property_from_str("num-buffers", "-1");
-    Ok(elem)
+        .map_err(|e| anyhow!("creating appsrc placeholder with caps `{caps}`: {e}"))
 }
 
 /// Build the inner `mxlsink` for `nmossink`. Fails with a clear
