@@ -91,11 +91,14 @@ jobs:
           name: libnvnmos-linux
           path: build
 
-      # bindgen (nvnmos-sys) needs libclang.
+      # bindgen (nvnmos-sys) needs libclang; gst-nmos-rs links GStreamer 1.x.
       - name: Install Rust system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y clang
+          sudo apt-get install --no-install-recommends -y \
+            clang \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
 
       # For now, use whatever Rust toolchain ships with the ubuntu-24.04 runner
       - name: Print Rust toolchain
@@ -110,6 +113,8 @@ jobs:
           NVNMOS_LIB_DIR: ${{ github.workspace }}/build
         run: cargo clippy --workspace --locked --all-targets -- -D warnings
 
+      # The multi-flow integration test that needs `/dev/shm` and a real
+      # MXL setup is `#[ignore]`d and skipped by default.
       - name: Cargo test (workspace)
         working-directory: rust
         env:
