@@ -313,6 +313,7 @@ namespace nvnmos
         web::json::insert(settings, std::make_pair(nmos::fields::events_port, -1));
         web::json::insert(settings, std::make_pair(nmos::fields::events_ws_port, -1));
         web::json::insert(settings, std::make_pair(nmos::fields::channelmapping_port, -1));
+        web::json::insert(settings, std::make_pair(nmos::fields::control_protocol_ws_port, -1));
 
         if (0 != config.asset_tags)
         {
