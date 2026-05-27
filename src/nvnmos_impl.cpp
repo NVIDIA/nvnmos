@@ -222,7 +222,7 @@ namespace nvnmos
         const auto ts_refclks = impl::get_session_description_ts_refclks(sdp);
         const auto transport_params = impl::get_session_description_transport_params(nmos::types::sender, sdp);
         const auto name = impl::get_session_description_resource_name(sdp);
-        // hm, could check the name is unique across all senders and receivers
+        // hm, could check the name is unique across all senders
         const auto group_hint = impl::get_session_description_group_hint(sdp);
         const auto session_info = impl::get_session_description_session_info(sdp);
 
@@ -425,7 +425,7 @@ namespace nvnmos
         const auto sdp_params = nmos::get_session_description_sdp_parameters(sdp);
         const auto transport_params = impl::get_session_description_transport_params(nmos::types::receiver, sdp);
         const auto name = impl::get_session_description_resource_name(sdp);
-        // hm, could check the name is unique across all senders and receivers
+        // hm, could check the name is unique across all receivers
         const auto group_hint = impl::get_session_description_group_hint(sdp);
         const auto session_info = impl::get_session_description_session_info(sdp);
 
@@ -605,6 +605,7 @@ namespace nvnmos
 
         const auto flow_def = impl::parse_mxl_flow_def(flow_def_);
         const auto name = impl::get_mxl_flow_def_name(flow_def);
+        // hm, could check the name is unique across all senders
         const auto group_hint = impl::get_mxl_flow_def_group_hint(flow_def);
         const auto mxl_domain_id = impl::get_mxl_flow_def_domain_id(flow_def);
 
@@ -738,6 +739,7 @@ namespace nvnmos
 
         const auto flow_def = impl::parse_mxl_flow_def(flow_def_);
         const auto name = impl::get_mxl_flow_def_name(flow_def);
+        // hm, could check the name is unique across all receivers
         const auto group_hint = impl::get_mxl_flow_def_group_hint(flow_def);
         const auto mxl_domain_id = impl::get_mxl_flow_def_domain_id(flow_def);
         const auto want_caps = !impl::has_mxl_flow_def_caps(flow_def);

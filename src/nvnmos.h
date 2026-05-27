@@ -39,8 +39,9 @@
  * used to update running DeepStream pipelines with new transport parameters,
  * for example.
  *
- * NvNmos currently supports Senders and Receivers for video, audio, and ancillary data flows over RTP
- * (i.e., SMPTE ST 2110-20, -22, -30, and -40 streams) and over the Media eXchange Layer (MXL).
+ * NvNmos currently supports Senders and Receivers for video, audio, and
+ * ancillary data flows over RTP (i.e., SMPTE ST 2110-20, -22, -30, and -40
+ * streams) and over the Media eXchange Layer (MXL).
  *
  * The NvNmos library supports the following specifications, using the <a href="https://github.com/sony/nmos-cpp">Sony nmos-cpp</a> implementation:
  * - <a href="https://specs.amwa.tv/is-04/">AMWA IS-04 NMOS Discovery and Registration Specification</a> v1.3
