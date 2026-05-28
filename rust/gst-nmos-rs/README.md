@@ -121,6 +121,14 @@ property surface above.
 Drive an element through `NULL`→`PLAYING`→`NULL` against a live
 daemon to exercise the session lifecycle.
 
+For a more thorough end-to-end demo — three NMOS Nodes (producer,
+consumer, processor) sharing one MXL Domain, with an interactive
+menu for IS-05 enable / disable / rewire — run
+`scripts/gst-nmos-rs-demo.sh`. The script builds `nvnmosd` + the
+plugin, spawns the daemon and three gst-launch pipelines, then
+drops into a menu that PATCHes the IS-05 endpoints so you can
+exercise activation paths against a live pipeline.
+
 Without `mxl-domain-path` (and `mxl-flow-id`) the element opens a
 session but its data path stays on the fake chain:
 
