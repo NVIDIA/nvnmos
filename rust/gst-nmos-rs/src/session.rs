@@ -21,6 +21,7 @@ use crate::daemon::{ActivationHandler, ActivationRequest, Session};
 use crate::domain::{self, DomainIdOrigin};
 use crate::flow_def::{self, FlowDefBuildInput, FlowDefOverrides, ValueOrigin};
 use crate::runtime::SHARED_RUNTIME;
+use crate::sdp;
 use crate::types::{CapsMode, FlowFormat, Transport};
 
 /// Open-session timeout. Aligned with the daemon's activation ack
@@ -64,11 +65,13 @@ impl Side {
 
 /// Translate the GObject `Transport` enum to the wire enum.
 ///
-/// `Transport::Mxl` is the only variant fully wired today; the
-/// others exist for ABI stability and never reach this helper at
-/// runtime because `validate_and_open` rejects them first. The
-/// mapping is provided eagerly so the helper stays exhaustive as
-/// the new variants come online.
+/// `Mxl` is the only variant whose data path is fully wired
+/// today. `Udp` and `Udp2` reach this helper once `validate_and_open`
+/// resolves an SDP into a [`TransportConfig::Udp`] but the
+/// inner chain factories still bail with "not yet implemented".
+/// `NvDsUdp` is rejected up-front (Phase 2). The mapping is
+/// provided eagerly so the helper stays exhaustive as the new
+/// variants come online.
 pub(crate) fn transport_to_proto(t: Transport) -> ProtoTransport {
     match t {
         Transport::Mxl => ProtoTransport::Mxl,
@@ -321,16 +324,14 @@ pub(crate) enum TransportConfig {
     /// for receivers. The exact element factory names dispatch on
     /// [`UdpVariant`].
     ///
-    /// **Currently not constructed at runtime** — the SDP parsing
-    /// and synthesis that produces this variant lands in a follow-up
-    /// commit. The variant is present here so the chain-factory
-    /// dispatch in `nmossrc` / `nmossink` is wired and the type
-    /// surface is stable as that work lands. Tests do construct it
-    /// (see `session::tests::transport_config`), so the
-    /// `dead_code` suppression below is scoped to non-test builds
-    /// and will fire — and need removing — the moment production
-    /// code starts producing the variant.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Constructed at runtime by `resolve_inner_config_udp` (in
+    /// `validate_and_open`) and `decide_inner_config_udp` (in
+    /// `make_activation_plan`) once the SDP transport file has
+    /// been parsed by [`crate::sdp::parse_sdp`]. The chain
+    /// factories (`crate::inner::build_udpsink` /
+    /// `build_udpsrc`) currently bail with "not yet implemented";
+    /// they're replaced with real factories in a follow-up
+    /// commit.
     Udp {
         variant: UdpVariant,
         media: UdpMedia,
@@ -367,7 +368,6 @@ impl TransportConfig {
 /// the v1 factory for any element that doesn't have a v2 form yet
 /// (notably `udpsink` — no `udpsink2` exists at time of writing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum UdpVariant {
     V1,
     V2,
@@ -466,14 +466,6 @@ pub(crate) fn validate_and_open(
     session: &Mutex<Option<Session>>,
     activation_handler: ActivationHandler,
 ) -> Result<InnerConfig, anyhow::Error> {
-    if settings.transport != Transport::Mxl {
-        bail!(
-            "{element}: unsupported transport `{:?}`; only `mxl` is currently \
-             implemented (`udp`, `udp2` and `nvdsudp` are reserved enum values \
-             and will be available once the SDP parsing and chain factories land)",
-            settings.transport
-        );
-    }
     if settings.node_seed.is_empty() {
         bail!("{element}: `node-seed` is required");
     }
@@ -484,82 +476,26 @@ pub(crate) fn validate_and_open(
         );
     }
 
-    let domain_resolution =
-        domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path)
-            .with_context(|| format!("{element}: resolving MXL Domain identity"))?;
-    if domain_resolution.id.is_empty() {
-        bail!(
-            "{element}: `mxl-domain-id` is required when transport=mxl \
-             (set the property directly or supply an `mxl-domain-path` whose `domain_def.json` provides the id)"
-        );
-    }
-    match domain_resolution.origin {
-        DomainIdOrigin::Property => gst::debug!(
-            cat,
-            "mxl-domain-id from property; no `domain_def.json` consulted",
-        ),
-        DomainIdOrigin::DomainDef => gst::info!(
-            cat,
-            "mxl-domain-id taken from `domain_def.json` at `{}`",
-            settings.mxl_domain_path,
-        ),
-        DomainIdOrigin::Both => gst::debug!(
-            cat,
-            "mxl-domain-id cross-checked against `domain_def.json` at `{}`",
-            settings.mxl_domain_path,
-        ),
-        DomainIdOrigin::None => unreachable!("empty id rejected above"),
-    }
-
     let resolved_transport_file = resolve_transport_file(element, settings)?;
-    let transport_file = synthesise_or_passthrough_mxl(
-        cat,
-        element,
-        settings,
-        &domain_resolution.id,
-        resolved_transport_file,
-    )?;
 
-    // Property-overrides-file: splice any user-set identity/cosmetic
-    // properties (name, flow_id, mxl-domain-id, label, description,
-    // receiver-caps-mode) into the transport file before the daemon
-    // sees it. `caps` and `transport-caps` remain cross-checked by
-    // `resolve_mxl_flow_meta` below — they describe the essence
-    // shape and a mismatch is a real error.
-    let transport_file = match transport_file {
-        Some(text) => Some(
-            flow_def::splice_overrides(&text, &property_overrides_mxl(settings, &domain_resolution.id))
-                .with_context(|| format!("{element}: splicing property overrides into transport file"))?,
+    let (mut inner, transport_file) = match settings.transport {
+        Transport::Mxl => {
+            resolve_inner_config_mxl(cat, element, settings, resolved_transport_file)?
+        }
+        Transport::Udp => {
+            resolve_inner_config_udp(element, settings, UdpVariant::V1, resolved_transport_file)?
+        }
+        Transport::Udp2 => {
+            resolve_inner_config_udp(element, settings, UdpVariant::V2, resolved_transport_file)?
+        }
+        Transport::NvDsUdp => bail!(
+            "{element}: transport=nvdsudp is not yet implemented (Phase 2 — \
+             ST 2110 via DeepStream's nvdsudp elements, gated on \
+             ConnectX/Rivermax hardware); only `mxl`, `udp` and `udp2` are \
+             implemented today"
         ),
-        None => None,
     };
 
-    let caps_format = caps_format(settings);
-    let flow = flow_def::resolve_mxl_flow_meta(
-        &settings.mxl_flow_id,
-        caps_format,
-        transport_file.as_deref(),
-    )
-    .with_context(|| format!("{element}: resolving MXL flow id / format"))?;
-    log_flow_origin(cat, "mxl-flow-id", flow.id_origin);
-    log_flow_origin(cat, "caps format", flow.format_origin);
-
-    let mut inner = decide_inner_config(settings, &flow, transport_file.as_deref());
-    // Deferred-mode case (sender only): no resource is going to be
-    // registered at NULL→READY because neither `transport-file*` nor
-    // `caps` was supplied. Keep the fake chain so we don't bring
-    // `mxlsink` up against an unregistered Flow (which would fail to
-    // preroll); the inner is swapped to `mxlsink` only after
-    // `register_deferred` registers the Sender at READY→PAUSED.
-    if transport_file.is_none()
-        && settings.side == Side::Sender
-        && matches!(inner, InnerConfig::Real(_))
-    {
-        inner = InnerConfig::Fake {
-            reason: "deferred — peer caps will drive registration at READY\u{2192}PAUSED"
-                .to_owned(),
-        };
-    }
     inner = apply_auto_activate_gate(inner, settings.auto_activate);
 
     let transport = transport_to_proto(settings.transport);
@@ -590,6 +526,10 @@ pub(crate) fn validate_and_open(
         Some((handle, id)) => format!("resource registered: resource_handle={handle} resource_id={id}"),
         None => "no resource registered (transport-file unset)".to_owned(),
     };
+    // For MXL, `mxl-domain-id` is already logged at resolution time
+    // by `resolve_inner_config_mxl`; for UDP there's no equivalent
+    // session-level identifier — the network params live on
+    // `UdpMedia` and are summarised below.
     let inner_summary = match &inner {
         InnerConfig::Real(TransportConfig::Mxl { domain_path, flow_id, format, .. }) => {
             format!("inner data path: mxl (domain_path={domain_path:?}, flow_id={flow_id}, format={format:?})")
@@ -623,15 +563,14 @@ pub(crate) fn validate_and_open(
     gst::info!(
         cat,
         "session opened: handle={} node_id={} created_node={} \
-         (node_seed={}, side={:?}, name={}, \
-         mxl-domain-id={}); {}; {}",
+         (node_seed={}, side={:?}, name={}, transport={:?}); {}; {}",
         new_session.session_handle,
         new_session.node_id,
         new_session.created_node,
         settings.node_seed,
         side,
         settings.name,
-        domain_resolution.id,
+        settings.transport,
         resource_summary,
         inner_summary,
     );
@@ -759,7 +698,7 @@ fn log_flow_origin(cat: &gst::DebugCategory, field: &str, origin: ValueOrigin) {
 /// additionally needs a specific [`FlowFormat`] (because `mxlsrc`
 /// has separate `video-flow-id` / `audio-flow-id` / `data-flow-id`
 /// properties).
-fn decide_inner_config(
+fn decide_inner_config_mxl(
     settings: &CommonSettings,
     flow: &flow_def::FlowResolution,
     transport_file: Option<&str>,
@@ -790,11 +729,170 @@ fn decide_inner_config(
     })
 }
 
+/// UDP sibling of [`decide_inner_config_mxl`]. Returns
+/// [`InnerConfig::Fake`] when there's no SDP to parse (deferred
+/// mode awaiting IS-05 PATCH); otherwise parses the SDP via
+/// [`sdp::parse_sdp`] and packages the resulting [`UdpMedia`] into
+/// a [`TransportConfig::Udp`]. SDP parse errors propagate as
+/// `Err` so the caller can ack-fail with attribution rather than
+/// silently downgrading to the fake chain (a malformed SDP is a
+/// real misconfiguration, not a "wait for more state to arrive"
+/// case).
+fn decide_inner_config_udp(
+    element: &str,
+    settings: &CommonSettings,
+    variant: UdpVariant,
+    transport_file: Option<&str>,
+) -> Result<InnerConfig, anyhow::Error> {
+    let Some(text) = transport_file else {
+        let reason = match settings.side {
+            Side::Sender => {
+                "no SDP transport file; waiting for IS-05 PATCH to supply the destination address"
+                    .to_owned()
+            }
+            Side::Receiver => {
+                "no SDP transport file; waiting for IS-05 PATCH to supply the listen address"
+                    .to_owned()
+            }
+        };
+        return Ok(InnerConfig::Fake { reason });
+    };
+    let media = sdp::parse_sdp(text).with_context(|| {
+        format!(
+            "{element}: parsing SDP transport file for transport={:?}",
+            settings.transport
+        )
+    })?;
+    Ok(InnerConfig::Real(TransportConfig::Udp {
+        variant,
+        media,
+        transport_file: Some(text.to_owned()),
+    }))
+}
+
+/// Transport-specific setup-time work for [`Transport::Mxl`]:
+/// domain-id resolution, transport-file synthesis from `caps`,
+/// property-overrides splice, and flow_def cross-checking. Extracted
+/// from [`validate_and_open`] so the top-level function reads as a
+/// clean transport dispatch.
+///
+/// Returns the resolved [`InnerConfig`] plus the transport-file
+/// text the daemon will be handed at `OpenSession` time (the
+/// post-synthesis, post-splice version of the input). The
+/// caller applies [`apply_auto_activate_gate`] separately.
+fn resolve_inner_config_mxl(
+    cat: &gst::DebugCategory,
+    element: &str,
+    settings: &CommonSettings,
+    resolved_transport_file: Option<String>,
+) -> Result<(InnerConfig, Option<String>), anyhow::Error> {
+    let domain_resolution =
+        domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path)
+            .with_context(|| format!("{element}: resolving MXL Domain identity"))?;
+    if domain_resolution.id.is_empty() {
+        bail!(
+            "{element}: `mxl-domain-id` is required when transport=mxl \
+             (set the property directly or supply an `mxl-domain-path` whose `domain_def.json` provides the id)"
+        );
+    }
+    match domain_resolution.origin {
+        DomainIdOrigin::Property => gst::debug!(
+            cat,
+            "mxl-domain-id from property; no `domain_def.json` consulted",
+        ),
+        DomainIdOrigin::DomainDef => gst::info!(
+            cat,
+            "mxl-domain-id taken from `domain_def.json` at `{}`",
+            settings.mxl_domain_path,
+        ),
+        DomainIdOrigin::Both => gst::debug!(
+            cat,
+            "mxl-domain-id cross-checked against `domain_def.json` at `{}`",
+            settings.mxl_domain_path,
+        ),
+        DomainIdOrigin::None => unreachable!("empty id rejected above"),
+    }
+
+    let transport_file = synthesise_or_passthrough_mxl(
+        cat,
+        element,
+        settings,
+        &domain_resolution.id,
+        resolved_transport_file,
+    )?;
+
+    // Property-overrides-file: splice any user-set identity/cosmetic
+    // properties (name, flow_id, mxl-domain-id, label, description,
+    // receiver-caps-mode) into the transport file before the daemon
+    // sees it. `caps` and `transport-caps` remain cross-checked by
+    // `resolve_mxl_flow_meta` below — they describe the essence
+    // shape and a mismatch is a real error.
+    let transport_file = match transport_file {
+        Some(text) => Some(
+            flow_def::splice_overrides(&text, &property_overrides_mxl(settings, &domain_resolution.id))
+                .with_context(|| format!("{element}: splicing property overrides into transport file"))?,
+        ),
+        None => None,
+    };
+
+    let caps_format = caps_format(settings);
+    let flow = flow_def::resolve_mxl_flow_meta(
+        &settings.mxl_flow_id,
+        caps_format,
+        transport_file.as_deref(),
+    )
+    .with_context(|| format!("{element}: resolving MXL flow id / format"))?;
+    log_flow_origin(cat, "mxl-flow-id", flow.id_origin);
+    log_flow_origin(cat, "caps format", flow.format_origin);
+
+    let mut inner = decide_inner_config_mxl(settings, &flow, transport_file.as_deref());
+    // Deferred-mode case (sender only): no resource is going to be
+    // registered at NULL→READY because neither `transport-file*` nor
+    // `caps` was supplied. Keep the fake chain so we don't bring
+    // `mxlsink` up against an unregistered Flow (which would fail to
+    // preroll); the inner is swapped to `mxlsink` only after
+    // `register_deferred` registers the Sender at READY→PAUSED.
+    if transport_file.is_none()
+        && settings.side == Side::Sender
+        && matches!(inner, InnerConfig::Real(_))
+    {
+        inner = InnerConfig::Fake {
+            reason: "deferred — peer caps will drive registration at READY\u{2192}PAUSED"
+                .to_owned(),
+        };
+    }
+
+    Ok((inner, transport_file))
+}
+
+/// Transport-specific setup-time work for [`Transport::Udp`] /
+/// [`Transport::Udp2`]: parse the SDP transport file (if any) and
+/// package the resulting [`UdpMedia`] into a
+/// [`TransportConfig::Udp`].
+///
+/// Unlike the MXL path, no transport-file synthesis from `caps` is
+/// attempted here — SDP synthesis for UDP senders is a separate
+/// feature (BCP-006-02-style transmitter-side SDP generation) that
+/// lands when the chain factories do. With no transport file the
+/// resolved config is [`InnerConfig::Fake`] for both sides,
+/// deferring real chain construction until an IS-05 PATCH supplies
+/// the SDP.
+fn resolve_inner_config_udp(
+    element: &str,
+    settings: &CommonSettings,
+    variant: UdpVariant,
+    resolved_transport_file: Option<String>,
+) -> Result<(InnerConfig, Option<String>), anyhow::Error> {
+    let inner =
+        decide_inner_config_udp(element, settings, variant, resolved_transport_file.as_deref())?;
+    Ok((inner, resolved_transport_file))
+}
+
 /// Honour `auto-activate` at setup time. When `auto_activate` is
-/// `false` and `decide_inner_config` would have produced a real
-/// transport chain, downgrade to [`InnerConfig::Fake`] so the data
-/// path stays inactive until an IS-05 PATCH activates the resource
-/// (the canonical NMOS path).
+/// `false` and `decide_inner_config_mxl` / `decide_inner_config_udp`
+/// would have produced a real transport chain, downgrade to
+/// [`InnerConfig::Fake`] so the data path stays inactive until an
+/// IS-05 PATCH activates the resource (the canonical NMOS path).
 ///
 /// The resource registration itself isn't affected — that's driven
 /// by whether a configuring transport file is in play, not by the
@@ -907,7 +1005,7 @@ pub(crate) fn register_deferred(
         format!("{element}: resolving MXL flow id / format for deferred registration")
     })?;
     let inner = apply_auto_activate_gate(
-        decide_inner_config(settings, &flow, Some(&json)),
+        decide_inner_config_mxl(settings, &flow, Some(&json)),
         settings.auto_activate,
     );
 
@@ -1058,18 +1156,24 @@ pub(crate) enum ActivationAck {
 /// * `req.transport_file.is_none()` is a deactivation: swap to the
 ///   fake chain and ack **success**.
 ///
-/// * Otherwise re-resolve `mxl-domain-id` (re-runs the
-///   `domain_def.json` cross-check) and the flow id/format
-///   (`flow_def::resolve_mxl_flow_meta` against the new
-///   `transport_file`). Either resolver failing → fake chain +
-///   failure ack.
+/// * Otherwise dispatch on [`settings.transport`]:
 ///
-/// * Run `decide_inner_config`: if it returns [`InnerConfig::Real`],
-///   ack success; if it returns [`InnerConfig::Fake`] we have a
-///   live transport file but can't bring up the real chain
-///   (typically `mxl-domain-path` is unset on this host) — swap to
-///   the fake chain but ack **failure** so the controller surfaces
-///   the misconfiguration.
+///   - `Mxl`: re-resolve `mxl-domain-id` (re-runs the
+///     `domain_def.json` cross-check) and the flow id/format
+///     (`flow_def::resolve_mxl_flow_meta` against the new
+///     `transport_file`), then run [`decide_inner_config_mxl`].
+///   - `Udp` / `Udp2`: parse the SDP via [`sdp::parse_sdp`] and
+///     run [`decide_inner_config_udp`]. SDP parse errors → fake
+///     chain + failure ack with attribution.
+///   - `NvDsUdp`: not implemented; fake chain + failure ack.
+///
+/// * If the chosen `decide_inner_config_*` returns
+///   [`InnerConfig::Real`], ack success; if it returns
+///   [`InnerConfig::Fake`] we have a live transport file but
+///   can't bring up the real chain (typically `mxl-domain-path` is
+///   unset on this host, or — for UDP — IS-05 PATCH delivered an
+///   empty SDP) — swap to the fake chain but ack **failure** so
+///   the controller surfaces the misconfiguration.
 pub(crate) fn make_activation_plan(
     cat: &gst::DebugCategory,
     element: &str,
@@ -1105,11 +1209,101 @@ pub(crate) fn make_activation_plan(
         };
     };
 
+    let inner = match settings.transport {
+        Transport::Mxl => match resolve_activation_inner_mxl(cat, element, settings, transport_file) {
+            Ok(inner) => inner,
+            Err(plan) => return *plan,
+        },
+        Transport::Udp => match decide_inner_config_udp(
+            element,
+            settings,
+            UdpVariant::V1,
+            Some(transport_file),
+        ) {
+            Ok(inner) => inner,
+            Err(e) => {
+                return ActivationPlan {
+                    inner: InnerConfig::Fake {
+                        reason: "SDP transport file rejected".to_owned(),
+                    },
+                    ack: ActivationAck::Failure {
+                        reason: format!("{element}: parsing activation SDP: {e:#}"),
+                    },
+                };
+            }
+        },
+        Transport::Udp2 => match decide_inner_config_udp(
+            element,
+            settings,
+            UdpVariant::V2,
+            Some(transport_file),
+        ) {
+            Ok(inner) => inner,
+            Err(e) => {
+                return ActivationPlan {
+                    inner: InnerConfig::Fake {
+                        reason: "SDP transport file rejected".to_owned(),
+                    },
+                    ack: ActivationAck::Failure {
+                        reason: format!("{element}: parsing activation SDP: {e:#}"),
+                    },
+                };
+            }
+        },
+        Transport::NvDsUdp => {
+            return ActivationPlan {
+                inner: InnerConfig::Fake {
+                    reason: "transport=nvdsudp not implemented".to_owned(),
+                },
+                ack: ActivationAck::Failure {
+                    reason: format!(
+                        "{element}: activation rejected — transport=nvdsudp is not yet \
+                         implemented (Phase 2 — ST 2110 via DeepStream's nvdsudp \
+                         elements, gated on ConnectX/Rivermax hardware)",
+                    ),
+                },
+            };
+        }
+    };
+
+    let ack = match &inner {
+        InnerConfig::Real(_) => ActivationAck::Success,
+        // Per design: if the activation supplies a live transport file
+        // but the element can't bring up the real chain (typically
+        // `mxl-domain-path` is unset), ack failure so the controller
+        // sees the resource as misconfigured rather than silently
+        // deactivated.
+        InnerConfig::Fake { reason } => ActivationAck::Failure {
+            reason: format!(
+                "{element}: activation cannot bring up inner data path: {reason}"
+            ),
+        },
+    };
+
+    ActivationPlan { inner, ack }
+}
+
+/// MXL branch of [`make_activation_plan`]: re-resolve domain id +
+/// flow meta against the activation's transport file, then run
+/// [`decide_inner_config_mxl`]. Returns `Ok(InnerConfig)` on
+/// success; on failure returns a fully-formed [`ActivationPlan`]
+/// (fake inner + failure ack) so the caller can short-circuit with
+/// the right error attribution.
+///
+/// The `Err` variant is boxed because the rare failure path's
+/// `ActivationPlan` (~240 B) would otherwise dominate the
+/// `Result`'s stack footprint on the common `Ok` path.
+fn resolve_activation_inner_mxl(
+    cat: &gst::DebugCategory,
+    element: &str,
+    settings: &CommonSettings,
+    transport_file: &str,
+) -> Result<InnerConfig, Box<ActivationPlan>> {
     let domain_resolution =
         match domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path) {
             Ok(r) => r,
             Err(e) => {
-                return ActivationPlan {
+                return Err(Box::new(ActivationPlan {
                     inner: InnerConfig::Fake {
                         reason: "mxl-domain-id resolution failed".to_owned(),
                     },
@@ -1118,11 +1312,11 @@ pub(crate) fn make_activation_plan(
                             "{element}: resolving MXL Domain identity for activation: {e:#}"
                         ),
                     },
-                };
+                }));
             }
         };
     if domain_resolution.id.is_empty() {
-        return ActivationPlan {
+        return Err(Box::new(ActivationPlan {
             inner: InnerConfig::Fake {
                 reason: "mxl-domain-id unresolved".to_owned(),
             },
@@ -1133,7 +1327,7 @@ pub(crate) fn make_activation_plan(
                      supplied an id)",
                 ),
             },
-        };
+        }));
     }
     match domain_resolution.origin {
         DomainIdOrigin::Property | DomainIdOrigin::DomainDef | DomainIdOrigin::Both => gst::debug!(
@@ -1158,7 +1352,7 @@ pub(crate) fn make_activation_plan(
     ) {
         Ok(r) => r,
         Err(e) => {
-            return ActivationPlan {
+            return Err(Box::new(ActivationPlan {
                 inner: InnerConfig::Fake {
                     reason: "flow_def resolution failed".to_owned(),
                 },
@@ -1168,26 +1362,11 @@ pub(crate) fn make_activation_plan(
                          transport file: {e:#}"
                     ),
                 },
-            };
+            }));
         }
     };
 
-    let inner = decide_inner_config(settings, &flow, Some(transport_file));
-    let ack = match &inner {
-        InnerConfig::Real(_) => ActivationAck::Success,
-        // Per design: if the activation supplies a live transport file
-        // but the element can't bring up the real chain (typically
-        // `mxl-domain-path` is unset), ack failure so the controller
-        // sees the resource as misconfigured rather than silently
-        // deactivated.
-        InnerConfig::Fake { reason } => ActivationAck::Failure {
-            reason: format!(
-                "{element}: activation cannot bring up inner data path: {reason}"
-            ),
-        },
-    };
-
-    ActivationPlan { inner, ack }
+    Ok(decide_inner_config_mxl(settings, &flow, Some(transport_file)))
 }
 
 #[cfg(test)]
@@ -1378,6 +1557,197 @@ mod tests {
                 transport_file: None,
             };
             assert_eq!(tc.transport_file(), None);
+        }
+    }
+
+    /// Phase-3 UDP dispatch surfaces in [`decide_inner_config_udp`]
+    /// and [`make_activation_plan`] (for `Transport::Udp` /
+    /// `Transport::Udp2` / `Transport::NvDsUdp`). The chain factories
+    /// (`crate::inner::build_udpsink` / `build_udpsrc`) still bail
+    /// with "not yet implemented", but the SDP module is reachable
+    /// at runtime: the resolved `TransportConfig::Udp` carries a
+    /// real `UdpMedia` produced by [`crate::sdp::parse_sdp`].
+    mod udp_dispatch {
+        use super::*;
+
+        /// Minimal valid UDP-RTP SDP for the dispatch tests. The
+        /// detailed coverage of `parse_sdp`'s essence-mapping lives
+        /// in `crate::sdp::tests`; here we just need *something*
+        /// the SDP module accepts so the dispatch returns
+        /// `InnerConfig::Real(TransportConfig::Udp)`.
+        const VIDEO_UDP_SDP: &str = concat!(
+            "v=0\r\n",
+            "o=- 1 0 IN IP4 192.0.2.10\r\n",
+            "s=test\r\n",
+            "t=0 0\r\n",
+            "m=video 5004 RTP/AVP 96\r\n",
+            "c=IN IP4 239.1.1.1/64\r\n",
+            "a=rtpmap:96 raw/90000\r\n",
+            "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080;",
+            " exactframerate=50; depth=10\r\n",
+        );
+
+        fn udp_settings(side: Side, transport: Transport) -> CommonSettings {
+            cat(); // ensures gst::init() ran for parse_sdp
+            CommonSettings {
+                transport,
+                ..settings(side)
+            }
+        }
+
+        #[test]
+        fn decide_udp_v1_with_valid_sdp_is_real() {
+            let s = udp_settings(Side::Receiver, Transport::Udp);
+            let inner =
+                decide_inner_config_udp("nmossrc", &s, UdpVariant::V1, Some(VIDEO_UDP_SDP))
+                    .expect("valid SDP parses");
+            match inner {
+                InnerConfig::Real(TransportConfig::Udp {
+                    variant,
+                    media,
+                    transport_file,
+                }) => {
+                    assert_eq!(variant, UdpVariant::V1);
+                    assert_eq!(media.format, FlowFormat::Video);
+                    assert_eq!(media.primary.destination_ip, "239.1.1.1");
+                    assert_eq!(media.primary.destination_port, 5004);
+                    assert_eq!(
+                        transport_file.as_deref(),
+                        Some(VIDEO_UDP_SDP),
+                        "transport_file must be threaded into the resolved config",
+                    );
+                }
+                other => panic!("expected Real(Udp), got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn decide_udp_v2_picks_udp2_variant() {
+            let s = udp_settings(Side::Sender, Transport::Udp2);
+            let inner =
+                decide_inner_config_udp("nmossink", &s, UdpVariant::V2, Some(VIDEO_UDP_SDP))
+                    .expect("valid SDP parses");
+            match inner {
+                InnerConfig::Real(TransportConfig::Udp { variant, .. }) => {
+                    assert_eq!(variant, UdpVariant::V2);
+                }
+                other => panic!("expected Real(Udp, V2), got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn decide_udp_without_transport_file_is_fake_deferred() {
+            for side in [Side::Sender, Side::Receiver] {
+                let s = udp_settings(side, Transport::Udp);
+                let inner =
+                    decide_inner_config_udp("nmossrc", &s, UdpVariant::V1, None)
+                        .expect("None transport_file is not an error");
+                match inner {
+                    InnerConfig::Fake { reason } => {
+                        assert!(
+                            reason.contains("no SDP transport file"),
+                            "expected no-SDP reason for {side:?}: {reason}",
+                        );
+                        assert!(
+                            reason.contains("IS-05 PATCH"),
+                            "expected IS-05 PATCH hint for {side:?}: {reason}",
+                        );
+                    }
+                    other => panic!("expected Fake for {side:?}, got {other:?}"),
+                }
+            }
+        }
+
+        #[test]
+        fn decide_udp_with_malformed_sdp_attributes_error() {
+            let s = udp_settings(Side::Receiver, Transport::Udp);
+            let err =
+                decide_inner_config_udp("nmossrc", &s, UdpVariant::V1, Some("garbage"))
+                    .expect_err("malformed SDP must error");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("nmossrc"),
+                "error must attribute the element name: {msg}",
+            );
+            assert!(
+                msg.contains("parsing SDP transport file"),
+                "error must mention SDP parsing: {msg}",
+            );
+        }
+
+        #[test]
+        fn activation_udp_happy_path_is_real_success() {
+            let s = udp_settings(Side::Receiver, Transport::Udp);
+            let plan = make_activation_plan(
+                &cat(),
+                "nmossrc",
+                &s,
+                &req(Side::Receiver, Some(VIDEO_UDP_SDP)),
+            );
+            match plan.inner {
+                InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
+                    assert_eq!(variant, UdpVariant::V1);
+                    assert_eq!(media.format, FlowFormat::Video);
+                }
+                other => panic!("expected Real(Udp), got {other:?}"),
+            }
+            assert!(matches!(plan.ack, ActivationAck::Success));
+        }
+
+        #[test]
+        fn activation_udp2_happy_path_is_real_success() {
+            let s = udp_settings(Side::Sender, Transport::Udp2);
+            let plan = make_activation_plan(
+                &cat(),
+                "nmossink",
+                &s,
+                &req(Side::Sender, Some(VIDEO_UDP_SDP)),
+            );
+            match plan.inner {
+                InnerConfig::Real(TransportConfig::Udp { variant, .. }) => {
+                    assert_eq!(variant, UdpVariant::V2);
+                }
+                other => panic!("expected Real(Udp, V2), got {other:?}"),
+            }
+            assert!(matches!(plan.ack, ActivationAck::Success));
+        }
+
+        #[test]
+        fn activation_udp_malformed_sdp_is_failure() {
+            let s = udp_settings(Side::Receiver, Transport::Udp);
+            let plan = make_activation_plan(
+                &cat(),
+                "nmossrc",
+                &s,
+                &req(Side::Receiver, Some("garbage")),
+            );
+            assert!(matches!(plan.inner, InnerConfig::Fake { .. }));
+            match plan.ack {
+                ActivationAck::Failure { reason } => assert!(
+                    reason.contains("parsing activation SDP"),
+                    "expected SDP-parse attribution: {reason}",
+                ),
+                ActivationAck::Success => panic!("expected Failure ack on malformed SDP"),
+            }
+        }
+
+        #[test]
+        fn activation_nvdsudp_is_not_implemented_failure() {
+            let s = udp_settings(Side::Sender, Transport::NvDsUdp);
+            let plan = make_activation_plan(
+                &cat(),
+                "nmossink",
+                &s,
+                &req(Side::Sender, Some(VIDEO_UDP_SDP)),
+            );
+            assert!(matches!(plan.inner, InnerConfig::Fake { .. }));
+            match plan.ack {
+                ActivationAck::Failure { reason } => assert!(
+                    reason.contains("nvdsudp") && reason.contains("not yet implemented"),
+                    "expected nvdsudp not-implemented attribution: {reason}",
+                ),
+                ActivationAck::Success => panic!("expected Failure ack for nvdsudp"),
+            }
         }
     }
 
@@ -2025,7 +2395,7 @@ mod tests {
                 Some(&synth),
             )
             .expect("resolve_mxl_flow_meta");
-            let inner = super::super::decide_inner_config(&s, &flow, Some(&synth));
+            let inner = super::super::decide_inner_config_mxl(&s, &flow, Some(&synth));
             assert!(
                 matches!(inner, InnerConfig::Real(_)),
                 "fixture must produce Real before the gate"

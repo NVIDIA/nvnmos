@@ -125,7 +125,6 @@ pub(crate) struct SdpSession<'a> {
 ///
 /// Single-media SDPs only today; multi-media SDPs (ST 2022-7
 /// redundancy) return [`SdpError::MultipleMedia`].
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
     let msg = SDPMessage::parse_buffer(text.as_bytes())
         .map_err(|e| SdpError::Parse(e.to_string()))?;
