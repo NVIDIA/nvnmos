@@ -3,23 +3,28 @@
 
 //! `nmossrc` impl: GstBin subclass that opens a session against
 //! `nvnmosd` at NULL→READY and closes it at READY→NULL. The inner
-//! data path is a `mxlsrc` when the resolved configuration pins a
-//! Domain path + Flow id + a recognised essence shape (from `caps`
-//! or the transport file's `format`); otherwise the bin keeps a
-//! placeholder so the element looks valid in the pipeline until an
-//! IS-05 activation (or a later configuration update) supplies the
-//! missing pieces. The placeholder is an `appsrc` configured with
-//! the best-available essence caps (user `caps` property,
-//! synthesised from `transport-file`*) — never a `fakesrc`, which
-//! can't satisfy downstream caps negotiation. See [`inner`] for the
-//! details.
+//! data path is a *real* chain — today a `mxlsrc` — when the
+//! resolved configuration pins a Domain path + Flow id + a
+//! recognised essence shape (from `caps` or the transport file's
+//! `format`); otherwise the bin keeps a *fake* chain so the element
+//! looks valid in the pipeline until an IS-05 activation (or a
+//! later configuration update) supplies the missing pieces. The
+//! fake chain is an `appsrc` configured with the best-available
+//! essence caps (user `caps` property, synthesised from
+//! `transport-file`*); if no caps source is yet available, the
+//! appsrc is built without caps and downstream negotiation will
+//! fail until one is supplied. See [`inner`] for the details.
 //!
 //! Activations arriving on the daemon subscription are dispatched to
-//! [`NmosSrc::apply_activation`], which marshals the work onto the
-//! GStreamer thread via `Element::call_async`. At state ≤ READY the
-//! swap happens inline; at state ≥ PAUSED we gate it on a single-shot
-//! IDLE pad probe on the bin's external ghost pad so the streaming
-//! thread isn't inside the inner element when we tear it down.
+//! [`NmosSrc::apply_activation`], which marshals the work onto a
+//! GStreamer worker thread via `Element::call_async`. The swap itself
+//! is gated by the anchor + block-probe pattern in
+//! [`crate::inner::rebuild_chain`] (an `IDLE | BLOCK_DOWNSTREAM`
+//! probe on the anchor's chain-side pad); doing the gating from
+//! inside the `call_async` worker keeps the swap off the streaming
+//! thread, so `set_state(Null)` on the old inner safely joins its
+//! streaming task cross-thread rather than recursively trying to
+//! join the very thread the activation handler is running on.
 
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -31,7 +36,7 @@ use tokio::sync::oneshot;
 
 use crate::daemon::{ActivationHandler, ActivationOutcome, ActivationRequest, Session};
 use crate::inner;
-use crate::session::{ActivationAck, ActivationPlan, InnerConfig};
+use crate::session::{ActivationAck, ActivationPlan, InnerConfig, TransportConfig};
 use crate::types::{CapsMode, DEFAULT_DAEMON_URI, Transport};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
@@ -89,10 +94,10 @@ impl Default for Settings {
 pub struct NmosSrc {
     settings: Mutex<Settings>,
     session: Mutex<Option<Session>>,
-    /// Ghost pad that hides the current inner element behind the bin.
-    /// Created at `constructed`, re-targeted at NULL↔READY transitions
-    /// as the inner element swaps between the placeholder and a real
-    /// `mxlsrc`.
+    /// Ghost pad that hides the current inner chain behind the bin.
+    /// Created at `constructed`; the chain behind it swaps between
+    /// the fake chain and a real `mxlsrc` sub-bin as configuration
+    /// / activations land.
     ghost: Mutex<Option<gst::GhostPad>>,
 }
 
@@ -344,11 +349,11 @@ impl ObjectImpl for NmosSrc {
         self.parent_constructed();
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
-        match install_initial_placeholder(bin_ref) {
+        match install_initial_fake_chain(bin_ref) {
             Ok(ghost) => {
                 *self.ghost.lock().unwrap() = Some(ghost);
             }
-            Err(e) => gst::error!(CAT, "failed to build nmossrc placeholder data path: {e}"),
+            Err(e) => gst::error!(CAT, "failed to build nmossrc fake chain: {e}"),
         }
     }
 }
@@ -424,8 +429,9 @@ impl NmosSrc {
             handler,
         )?;
         if let Err(e) = self.activate_inner(bin_ref, &outcome) {
-            // Close the daemon session and restore the placeholder so the
-            // bin is left as if NULL→READY had never been attempted.
+            // Close the daemon session and restore the fake chain so
+            // the bin is left as if NULL→READY had never been
+            // attempted.
             self.close_session();
             return Err(e);
         }
@@ -438,12 +444,12 @@ impl NmosSrc {
         outcome: &InnerConfig,
     ) -> Result<(), anyhow::Error> {
         match outcome {
-            InnerConfig::Mxl {
+            InnerConfig::Real(TransportConfig::Mxl {
                 domain_path,
                 flow_id,
                 format,
                 transport_file,
-            } => {
+            }) => {
                 let advertise_caps = derive_advertise_caps(transport_file.as_deref())?;
                 let mxlsrc = inner::build_mxlsrc(
                     domain_path,
@@ -452,9 +458,9 @@ impl NmosSrc {
                     advertise_caps.as_ref(),
                 )?;
                 self.swap_inner(bin, &mxlsrc)?;
-                // Reaching the `Mxl` branch at NULL→READY implies
+                // Reaching the `Real` branch at NULL→READY implies
                 // `auto-activate=true` (the `validate_and_open` gate
-                // downgrades to `Placeholder` otherwise). Tell the
+                // downgrades to a fake chain otherwise). Tell the
                 // daemon to bring the resource's IS-04/IS-05 view up
                 // to match the live data path so the
                 // `/single/receivers/{id}/active` endpoint reflects
@@ -469,28 +475,28 @@ impl NmosSrc {
                     gst::warning!(CAT, "nmossrc auto-activate sync failed: {e:#}");
                 }
             }
-            InnerConfig::Placeholder { .. } => {
-                // The constructed-time placeholder is a bare
-                // `fakesrc` (no settings were available yet).
+            InnerConfig::Fake { .. } => {
+                // The constructed-time fake chain is a bare `appsrc`
+                // with no caps (no settings were available yet).
                 // Whenever we have caps to advertise — from the
                 // user-set `caps` property or synthesised from
-                // `transport-file*` — swap it for an `appsrc` so
-                // downstream negotiation can complete and the
-                // pipeline can reach PLAYING while the bin waits
-                // for an IS-05 activation. Without a caps source
-                // we have no choice but to leave the `fakesrc` in
-                // place; the pipeline will then fail caps
-                // negotiation on its way to PLAYING and the user
-                // must supply `caps` (or `transport-file*`).
+                // `transport-file*` — swap it for a caps-aware
+                // `appsrc` so downstream negotiation can complete
+                // and the pipeline can reach PLAYING while the bin
+                // waits for an IS-05 activation. Without a caps
+                // source we leave the bare `appsrc` in place; the
+                // pipeline will then fail caps negotiation on its
+                // way to PLAYING and the user must supply `caps`
+                // (or `transport-file*`).
                 let snapshot = self.settings.lock().unwrap().clone();
-                let caps = placeholder_caps_from_settings(&snapshot)?;
+                let caps = fake_caps_from_settings(&snapshot)?;
                 if let Some(caps) = caps {
-                    let placeholder = inner::build_placeholder_src(Some(&caps))?;
-                    self.swap_inner(bin, &placeholder)?;
+                    let fake = inner::build_fake_src(Some(&caps))?;
+                    self.swap_inner(bin, &fake)?;
                 } else {
                     gst::warning!(
                         CAT,
-                        "nmossrc placeholder has no caps to advertise; \
+                        "nmossrc fake chain has no caps to advertise; \
                          downstream caps negotiation will fail until \
                          `caps` or `transport-file*` is set",
                     );
@@ -506,17 +512,17 @@ impl NmosSrc {
         let bin_ref: &gst::Bin = bin.upcast_ref();
         // The bin is heading back to NULL, so caps aren't strictly
         // required to flow data, but we still hand the best-known
-        // caps to the placeholder so a subsequent NULL→READY (or
+        // caps to the fake chain so a subsequent NULL→READY (or
         // simple state-query) doesn't see a regression to ANY.
         let snapshot = self.settings.lock().unwrap().clone();
-        let caps = placeholder_caps_from_settings(&snapshot).ok().flatten();
-        match inner::build_placeholder_src(caps.as_ref()) {
-            Ok(placeholder) => {
-                if let Err(e) = self.swap_inner(bin_ref, &placeholder) {
-                    gst::warning!(CAT, "restoring nmossrc placeholder: {e:#}");
+        let caps = fake_caps_from_settings(&snapshot).ok().flatten();
+        match inner::build_fake_src(caps.as_ref()) {
+            Ok(fake) => {
+                if let Err(e) = self.swap_inner(bin_ref, &fake) {
+                    gst::warning!(CAT, "restoring nmossrc fake chain: {e:#}");
                 }
             }
-            Err(e) => gst::warning!(CAT, "rebuilding nmossrc placeholder: {e:#}"),
+            Err(e) => gst::warning!(CAT, "rebuilding nmossrc fake chain: {e:#}"),
         }
     }
 
@@ -525,7 +531,19 @@ impl NmosSrc {
         let ghost = ghost_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("nmossrc ghost pad missing"))?;
-        inner::swap_inner(bin, ghost, new_inner, "src")
+        inner::rebuild_chain(&CAT, bin, ghost, new_inner, "src")
+    }
+
+    /// True iff the bin's current inner chain is a real chain
+    /// (today only the `mxlsrc` sub-bin) — not the fake `appsrc`.
+    /// Used by [`execute_activation_plan`] to insert a fake hop on
+    /// real → real re-activations.
+    fn current_chain_is_real(&self) -> bool {
+        self.ghost
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(inner::current_chain_is_real)
     }
 
     /// Build the [`ActivationHandler`] passed to
@@ -549,13 +567,19 @@ impl NmosSrc {
     }
 
     /// Apply an activation. Runs on a GStreamer worker thread (via
-    /// `call_async`). The state-≤-READY branch swaps inline; the
-    /// state-≥-PAUSED branch gates the swap on a single-shot IDLE
-    /// pad probe and reports back asynchronously when the probe
-    /// fires.
+    /// `call_async` from the daemon subscription task). The swap
+    /// itself is gated by the anchor + block-probe pattern in
+    /// [`crate::inner::rebuild_chain`], which installs an
+    /// `IDLE | BLOCK_DOWNSTREAM` probe on the anchor's chain-side
+    /// pad and waits for the pad to drain before mutating the bin's
+    /// child set. Doing the gating from the `call_async` worker
+    /// (rather than from a probe on the bin's external ghost pad)
+    /// keeps the swap off the streaming thread, so
+    /// `set_state(Null)` on the old inner can cleanly join its
+    /// streaming task cross-thread.
     fn apply_activation(&self, req: ActivationRequest, tx: oneshot::Sender<ActivationOutcome>) {
         let snapshot = self.settings.lock().unwrap().clone();
-        let plan = crate::session::plan_activation(&CAT, "nmossrc", &snapshot.into(), &req);
+        let plan = crate::session::make_activation_plan(&CAT, "nmossrc", &snapshot.into(), &req);
         gst::info!(
             CAT,
             "nmossrc applying activation (activation_handle={}, resource_handle={}, side={:?}): \
@@ -567,25 +591,59 @@ impl NmosSrc {
             plan.ack,
         );
 
-        let current = self.obj().current_state();
-        if current <= gst::State::Ready {
-            let outcome = self.apply_plan_inline(&plan);
-            let _ = tx.send(outcome);
-        } else {
-            self.schedule_apply_via_probe(plan, tx);
-        }
+        let outcome = self.execute_activation_plan(&plan);
+        let _ = tx.send(outcome);
     }
 
     /// Perform the inner swap and translate the result into an
-    /// [`ActivationOutcome`]. Called either directly (state ≤ READY)
-    /// or from the IDLE probe (state ≥ PAUSED). On swap failure the
-    /// element is left on the placeholder and the outcome is
-    /// `Failed`.
-    fn apply_plan_inline(&self, plan: &ActivationPlan) -> ActivationOutcome {
+    /// [`ActivationOutcome`]. Always called on a `call_async`
+    /// worker thread, so [`crate::inner::rebuild_chain`]'s
+    /// `set_state(Null)` on the old chain joins the streaming task
+    /// cross-thread. On swap failure the element is left on the
+    /// fake chain and the outcome is `Failed`.
+    ///
+    /// For real → real re-activations (idempotent re-enable or
+    /// flow-id change) we drop to the fake chain between the two
+    /// real instances so any transport-side per-process state (e.g.
+    /// libmxl's `FlowReader`) is fully released before the new
+    /// instance tries to attach. A direct real → real swap
+    /// intermittently fails the new chain's start-up for reasons
+    /// internal to the transport; the intermediate fake hop is one
+    /// extra `rebuild_chain` cycle and reliably avoids the failure.
+    fn execute_activation_plan(&self, plan: &ActivationPlan) -> ActivationOutcome {
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
+
+        if matches!(plan.inner, InnerConfig::Real(_))
+            && self.current_chain_is_real()
+        {
+            gst::debug!(
+                CAT,
+                "nmossrc activation is real\u{2192}real; inserting fake hop \
+                 to fully release the old transport state before re-attaching",
+            );
+            let snapshot = self.settings.lock().unwrap().clone();
+            let caps = fake_caps_from_settings(&snapshot).ok().flatten();
+            match inner::build_fake_src(caps.as_ref()) {
+                Ok(p) => {
+                    if let Err(e) = self.swap_inner(bin_ref, &p) {
+                        gst::warning!(
+                            CAT,
+                            "nmossrc intermediate fake-chain swap failed: {e:#}",
+                        );
+                    }
+                }
+                Err(e) => gst::warning!(
+                    CAT,
+                    "nmossrc: building intermediate fake chain: {e:#}",
+                ),
+            }
+        }
+
         let new_inner = match &plan.inner {
-            InnerConfig::Mxl { domain_path, flow_id, format, transport_file } => {
+            InnerConfig::Real(TransportConfig::Mxl {
+                domain_path, flow_id, format, transport_file,
+            }) => {
                 let advertise_caps = match derive_advertise_caps(transport_file.as_deref()) {
                     Ok(c) => c,
                     Err(e) => {
@@ -605,41 +663,54 @@ impl NmosSrc {
                     }
                 }
             }
-            InnerConfig::Placeholder { .. } => {
+            InnerConfig::Fake { .. } => {
                 // Deactivation, side mismatch, missing config, etc.
                 // The bin may be in PLAYING when this happens, so
-                // we still need caps on the placeholder so
+                // we still need caps on the fake chain so
                 // downstream stays negotiated across the swap.
                 let snapshot = self.settings.lock().unwrap().clone();
-                let caps = match placeholder_caps_from_settings(&snapshot) {
+                let caps = match fake_caps_from_settings(&snapshot) {
                     Ok(c) => c,
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!(
-                                "nmossrc: resolving placeholder caps for activation: {e:#}"
+                                "nmossrc: resolving fake-chain caps for activation: {e:#}"
                             ),
                         };
                     }
                 };
-                match inner::build_placeholder_src(caps.as_ref()) {
+                match inner::build_fake_src(caps.as_ref()) {
                     Ok(e) => e,
                     Err(e) => {
                         return ActivationOutcome::Failed {
-                            reason: format!("nmossrc: building placeholder: {e:#}"),
+                            reason: format!("nmossrc: building fake chain: {e:#}"),
                         };
                     }
                 }
             }
         };
         if let Err(e) = self.swap_inner(bin_ref, &new_inner) {
-            // Best-effort: try to restore a caps-aware placeholder
-            // so the bin doesn't end up with a fakesrc that can't
-            // negotiate. If caps resolution fails here we fall back
-            // to the bare placeholder rather than failing twice.
+            // Loud-log the swap failure so the cause shows up in
+            // the consumer log, not just stuffed into the daemon's
+            // (currently-discarded) `AckActivation` reason.
+            gst::warning!(
+                CAT,
+                "nmossrc activation swap failed; restoring fake chain: {e:#}",
+            );
+            // Best-effort: try to restore a caps-aware fake chain
+            // so the bin doesn't end up with a bare appsrc that
+            // can't negotiate. If caps resolution fails here we
+            // fall back to the bare fake chain rather than failing
+            // twice.
             let snapshot = self.settings.lock().unwrap().clone();
-            let fallback_caps = placeholder_caps_from_settings(&snapshot).ok().flatten();
-            if let Ok(p) = inner::build_placeholder_src(fallback_caps.as_ref()) {
-                let _ = self.swap_inner(bin_ref, &p);
+            let fallback_caps = fake_caps_from_settings(&snapshot).ok().flatten();
+            if let Ok(p) = inner::build_fake_src(fallback_caps.as_ref()) {
+                if let Err(e2) = self.swap_inner(bin_ref, &p) {
+                    gst::warning!(
+                        CAT,
+                        "nmossrc fake-chain restore also failed: {e2:#}",
+                    );
+                }
             }
             return ActivationOutcome::Failed {
                 reason: format!("nmossrc: swapping inner element: {e:#}"),
@@ -652,50 +723,16 @@ impl NmosSrc {
             },
         }
     }
-
-    /// Install a single-shot IDLE pad probe on the bin's external
-    /// ghost pad; when it fires, run [`apply_plan_inline`] and
-    /// forward the outcome via `tx`.
-    fn schedule_apply_via_probe(
-        &self,
-        plan: ActivationPlan,
-        tx: oneshot::Sender<ActivationOutcome>,
-    ) {
-        let ghost = self.ghost.lock().unwrap().clone();
-        let Some(ghost) = ghost else {
-            let _ = tx.send(ActivationOutcome::Failed {
-                reason: "nmossrc ghost pad missing when scheduling activation probe".to_owned(),
-            });
-            return;
-        };
-        let weak: glib::WeakRef<super::NmosSrc> = self.obj().downgrade();
-        let plan_cell = Arc::new(Mutex::new(Some(plan)));
-        let tx_cell = Arc::new(Mutex::new(Some(tx)));
-        ghost.add_probe(gst::PadProbeType::IDLE, move |_pad, _info| {
-            let plan = plan_cell.lock().unwrap().take();
-            let tx = tx_cell.lock().unwrap().take();
-            if let (Some(plan), Some(tx)) = (plan, tx) {
-                let outcome = match weak.upgrade() {
-                    Some(bin) => bin.imp().apply_plan_inline(&plan),
-                    None => ActivationOutcome::Failed {
-                        reason: "nmossrc dropped before activation probe fired".to_owned(),
-                    },
-                };
-                let _ = tx.send(outcome);
-            }
-            gst::PadProbeReturn::Remove
-        });
-    }
 }
 
-fn install_initial_placeholder(bin: &gst::Bin) -> Result<gst::GhostPad, glib::BoolError> {
-    // Constructed-time placeholder: no properties have been set yet,
-    // so we have no caps source. Fall back to `fakesrc`; it'll be
-    // replaced at NULL→READY (`activate_inner`) once `caps` /
-    // `transport-file*` are known.
-    let placeholder = inner::build_placeholder_src(None)
+fn install_initial_fake_chain(bin: &gst::Bin) -> Result<gst::GhostPad, glib::BoolError> {
+    // Constructed-time fake chain: no properties have been set yet,
+    // so we have no caps source. Build a bare `appsrc` without caps;
+    // it'll be replaced at NULL→READY (`activate_inner`) once `caps`
+    // / `transport-file*` are known.
+    let fake = inner::build_fake_src(None)
         .map_err(|e| glib::bool_error!("{e}"))?;
-    let ghost = inner::build_initial(bin, placeholder, "src", gst::PadDirection::Src)?;
+    let ghost = inner::build_initial(bin, fake, "src", gst::PadDirection::Src)?;
     bin.add_pad(&ghost)
         .map_err(|e| glib::bool_error!("adding ghost pad to nmossrc: {e}"))?;
     Ok(ghost)
@@ -703,10 +740,9 @@ fn install_initial_placeholder(bin: &gst::Bin) -> Result<gst::GhostPad, glib::Bo
 
 /// Reverse-map a resolved transport file into essence caps that
 /// the bin should advertise on its ghost src pad. `None` is
-/// returned when no transport file is in play (the placeholder
-/// data path is in use until an IS-05 activation supplies one);
-/// the caller then builds a bare `mxlsrc` whose broad pad template
-/// propagates.
+/// returned when no transport file is in play (the fake chain is
+/// in use until an IS-05 activation supplies one); the caller then
+/// builds a bare `mxlsrc` whose broad pad template propagates.
 fn derive_advertise_caps(
     transport_file: Option<&str>,
 ) -> Result<Option<gst::Caps>, anyhow::Error> {
@@ -722,8 +758,8 @@ fn derive_advertise_caps(
     Ok(Some(caps))
 }
 
-/// Best-available caps for the bin's placeholder data path,
-/// resolved from current `Settings` in priority order:
+/// Best-available caps for the bin's fake chain, resolved from
+/// current `Settings` in priority order:
 ///   1. `caps` property (user-supplied; authoritative).
 ///   2. Caps synthesised from the literal `transport-file` JSON.
 ///   3. Caps synthesised from the JSON loaded from
@@ -731,11 +767,11 @@ fn derive_advertise_caps(
 ///
 /// Returns `Ok(None)` only when none of the three sources is
 /// available (e.g. neither `caps` nor `transport-file*` has been
-/// set yet); callers then fall back to a bare `fakesrc` and the
-/// pipeline will fail caps negotiation if it tries to reach
-/// PLAYING in that state. Filesystem / parse errors when a source
-/// is set are propagated as `Err`.
-fn placeholder_caps_from_settings(
+/// set yet); callers then build the fake-chain appsrc without
+/// caps and the pipeline will fail caps negotiation if it tries
+/// to reach PLAYING in that state. Filesystem / parse errors when
+/// a source is set are propagated as `Err`.
+fn fake_caps_from_settings(
     settings: &Settings,
 ) -> Result<Option<gst::Caps>, anyhow::Error> {
     if let Some(caps) = settings.caps.as_ref() {
@@ -747,7 +783,7 @@ fn placeholder_caps_from_settings(
     if !settings.transport_file_path.is_empty() {
         let text = std::fs::read_to_string(&settings.transport_file_path).map_err(|e| {
             anyhow::anyhow!(
-                "nmossrc: re-reading `transport-file-path` = `{}` for placeholder caps: {e}",
+                "nmossrc: re-reading `transport-file-path` = `{}` for fake-chain caps: {e}",
                 settings.transport_file_path
             )
         })?;

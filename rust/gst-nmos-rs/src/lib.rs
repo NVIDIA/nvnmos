@@ -45,7 +45,7 @@
 //!
 //! - `auto-activate=false` (default, canonical NMOS): the element
 //!   registers the resource so it appears on IS-04 but leaves the
-//!   inner on the placeholder. The daemon's
+//!   inner on the fake chain. The daemon's
 //!   `/single/{senders,receivers}/{id}/active` reports
 //!   `master_enable: false` until an IS-05 PATCH activates it; the
 //!   activation event then flows through `apply_activation` and
@@ -65,26 +65,26 @@
 //!
 //! If the resolved configuration is incomplete (no Domain path, no
 //! flow id, or no Flow format on the receiver), the element stays
-//! on the placeholder regardless of `auto-activate` — the gate only
+//! on the fake chain regardless of `auto-activate` — the gate only
 //! upgrades configurations that *could* run; it never invents
 //! missing pieces.
 //!
-//! Placeholder data path: while the inner is on the placeholder, the
-//! bin still has to look like a valid GStreamer element to the rest
-//! of the pipeline — the ghost pad needs to answer caps queries and
-//! the bin needs to reach PLAYING. `nmossink`'s placeholder is a
-//! plain `fakesink`: sinks accept ANY caps, so no extra work is
-//! needed. `nmossrc`'s placeholder is an `appsrc` configured with
-//! the best-available essence caps (the user-supplied `caps`
-//! property, or caps synthesised from `transport-file*`) and
-//! `is-live=true`; we never push buffers into it, so its basesrc
-//! loop blocks idle in `create()` and the bin holds at PLAYING
-//! waiting for an IS-05 activation to swap in a real `mxlsrc`. A
-//! `fakesrc` placeholder cannot satisfy downstream caps negotiation
-//! (no `caps` property, advertises ANY) so it's only used as a
-//! last-resort fallback at constructed-time, before any properties
-//! have been set; the NULL→READY transition replaces it with a
-//! caps-aware `appsrc` as soon as a caps source is available.
+//! Fake chain: while the inner is on the fake chain, the bin still
+//! has to look like a valid GStreamer element to the rest of the
+//! pipeline — the ghost pad needs to answer caps queries and the
+//! bin needs to reach PLAYING. `nmossink`'s fake chain is a plain
+//! `fakesink`: sinks accept ANY caps, so no extra work is needed.
+//! `nmossrc`'s fake chain is an `appsrc` configured with the
+//! best-available essence caps (the user-supplied `caps` property,
+//! or caps synthesised from `transport-file*`) and `is-live=true`;
+//! we never push buffers into it, so its basesrc loop blocks idle
+//! in `create()` and the bin holds at PLAYING waiting for an IS-05
+//! activation to swap in a real `mxlsrc`. When no caps source is
+//! yet available (constructed-time, before any properties have
+//! been set) the appsrc is built without caps and downstream caps
+//! negotiation will fail; the NULL→READY transition replaces it
+//! with a caps-aware `appsrc` as soon as a caps source is
+//! available.
 //!
 //! On `nmossink` there is also a *deferred mode*: if NULL→READY runs
 //! with neither `transport-file*` nor `caps` set, the session is

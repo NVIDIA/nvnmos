@@ -3,18 +3,22 @@
 
 //! `nmossink` impl: GstBin subclass that opens a session against
 //! `nvnmosd` at NULL→READY and closes it at READY→NULL. The inner
-//! data path is a `mxlsink` when the resolved configuration pins a
-//! Domain path + Flow id; otherwise the bin keeps a placeholder
-//! `fakesink` so the element looks valid in the pipeline until an
-//! IS-05 activation (or a later configuration update) supplies the
-//! missing pieces.
+//! data path is a *real* chain — today a `mxlsink` — when the
+//! resolved configuration pins a Domain path + Flow id; otherwise
+//! the bin keeps a *fake* chain (`fakesink`) so the element looks
+//! valid in the pipeline until an IS-05 activation (or a later
+//! configuration update) supplies the missing pieces.
 //!
 //! Activations arriving on the daemon subscription are dispatched to
-//! [`NmosSink::apply_activation`], which marshals the work onto the
-//! GStreamer thread via `Element::call_async`. At state ≤ READY the
-//! swap happens inline; at state ≥ PAUSED we gate it on a single-shot
-//! IDLE pad probe on the bin's external ghost pad so the streaming
-//! thread isn't inside the inner element when we tear it down.
+//! [`NmosSink::apply_activation`], which marshals the work onto a
+//! GStreamer worker thread via `Element::call_async`. The swap itself
+//! is gated by the anchor + block-probe pattern in
+//! [`crate::inner::rebuild_chain`] (an `IDLE | BLOCK_DOWNSTREAM`
+//! probe on the anchor's chain-side pad); doing the gating from
+//! inside the `call_async` worker keeps the swap off the streaming
+//! thread, so `set_state(Null)` on the old inner safely joins its
+//! streaming task cross-thread rather than recursively trying to
+//! join the very thread the activation handler is running on.
 
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -26,7 +30,7 @@ use tokio::sync::oneshot;
 
 use crate::daemon::{ActivationHandler, ActivationOutcome, ActivationRequest, Session};
 use crate::inner;
-use crate::session::{ActivationAck, ActivationPlan, InnerConfig};
+use crate::session::{ActivationAck, ActivationPlan, InnerConfig, TransportConfig};
 use crate::types::{DEFAULT_DAEMON_URI, Transport};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
@@ -82,10 +86,10 @@ impl Default for Settings {
 pub struct NmosSink {
     settings: Mutex<Settings>,
     session: Mutex<Option<Session>>,
-    /// Ghost pad that hides the current inner element behind the bin.
-    /// Created at `constructed`, re-targeted at NULL↔READY transitions
-    /// as the inner element swaps between the placeholder and a real
-    /// `mxlsink`.
+    /// Ghost pad that hides the current inner chain behind the bin.
+    /// Created at `constructed`; the chain behind it swaps between
+    /// the fake chain and a real `mxlsink` as configuration /
+    /// activations land.
     ghost: Mutex<Option<gst::GhostPad>>,
 }
 
@@ -313,11 +317,11 @@ impl ObjectImpl for NmosSink {
         self.parent_constructed();
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
-        match install_initial_placeholder(bin_ref) {
+        match install_initial_fake_chain(bin_ref) {
             Ok(ghost) => {
                 *self.ghost.lock().unwrap() = Some(ghost);
             }
-            Err(e) => gst::error!(CAT, "failed to build nmossink placeholder data path: {e}"),
+            Err(e) => gst::error!(CAT, "failed to build nmossink fake chain: {e}"),
         }
     }
 }
@@ -373,7 +377,7 @@ impl ElementImpl for NmosSink {
             }
             gst::StateChange::ReadyToPaused => {
                 // Children transition up first so caps negotiate
-                // (the placeholder fakesink accepts whatever upstream
+                // (the fake-chain fakesink accepts whatever upstream
                 // proposes); we then query the negotiated peer caps
                 // and, if no resource is yet registered, drive the
                 // deferred AddSender.
@@ -410,8 +414,9 @@ impl NmosSink {
             handler,
         )?;
         if let Err(e) = self.activate_inner(bin_ref, &outcome) {
-            // Close the daemon session and restore the placeholder so the
-            // bin is left as if NULL→READY had never been attempted.
+            // Close the daemon session and restore the fake chain so
+            // the bin is left as if NULL→READY had never been
+            // attempted.
             self.close_session();
             return Err(e);
         }
@@ -423,20 +428,20 @@ impl NmosSink {
         bin: &gst::Bin,
         outcome: &InnerConfig,
     ) -> Result<(), anyhow::Error> {
-        if let InnerConfig::Mxl {
+        if let InnerConfig::Real(TransportConfig::Mxl {
             domain_path,
             flow_id,
             transport_file,
             ..
-        } = outcome
+        }) = outcome
         {
             let mxlsink = inner::build_mxlsink(domain_path, flow_id)?;
             self.swap_inner(bin, &mxlsink)?;
-            // Reaching the `Mxl` branch at NULL→READY / READY→PAUSED
+            // Reaching the `Real` branch at NULL→READY / READY→PAUSED
             // implies `auto-activate=true` (the `validate_and_open`
-            // and `register_deferred` gates downgrade to
-            // `Placeholder` otherwise). Tell the daemon to bring
-            // the resource's IS-04/IS-05 view up to match the live
+            // and `register_deferred` gates downgrade to a fake
+            // chain otherwise). Tell the daemon to bring the
+            // resource's IS-04/IS-05 view up to match the live
             // data path so external state stays consistent without
             // an external IS-05 PATCH.
             if let Err(e) = crate::session::sync_active(
@@ -458,13 +463,13 @@ impl NmosSink {
         crate::session::close(&CAT, "nmossink", &self.session);
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
-        match inner::build_placeholder_sink() {
-            Ok(placeholder) => {
-                if let Err(e) = self.swap_inner(bin_ref, &placeholder) {
-                    gst::warning!(CAT, "restoring nmossink placeholder: {e:#}");
+        match inner::build_fake_sink() {
+            Ok(fake) => {
+                if let Err(e) = self.swap_inner(bin_ref, &fake) {
+                    gst::warning!(CAT, "restoring nmossink fake chain: {e:#}");
                 }
             }
-            Err(e) => gst::warning!(CAT, "rebuilding nmossink placeholder: {e:#}"),
+            Err(e) => gst::warning!(CAT, "rebuilding nmossink fake chain: {e:#}"),
         }
     }
 
@@ -473,7 +478,19 @@ impl NmosSink {
         let ghost = ghost_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("nmossink ghost pad missing"))?;
-        inner::swap_inner(bin, ghost, new_inner, "sink")
+        inner::rebuild_chain(&CAT, bin, ghost, new_inner, "sink")
+    }
+
+    /// True iff the bin's current inner chain is a real chain
+    /// (today only `mxlsink`) — not the fake `fakesink`. Used by
+    /// [`execute_activation_plan`] to insert a fake hop on real → real
+    /// re-activations.
+    fn current_chain_is_real(&self) -> bool {
+        self.ghost
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(inner::current_chain_is_real)
     }
 
     /// Drive a deferred `AddSender` from inside
@@ -554,13 +571,19 @@ impl NmosSink {
     }
 
     /// Apply an activation. Runs on a GStreamer worker thread (via
-    /// `call_async`). The state-≤-READY branch swaps inline; the
-    /// state-≥-PAUSED branch gates the swap on a single-shot IDLE
-    /// pad probe and reports back asynchronously when the probe
-    /// fires.
+    /// `call_async` from the daemon subscription task). The swap
+    /// itself is gated by the anchor + block-probe pattern in
+    /// [`crate::inner::rebuild_chain`], which installs an
+    /// `IDLE | BLOCK_DOWNSTREAM` probe on the anchor's chain-side
+    /// pad and waits for the pad to drain before mutating the bin's
+    /// child set. Doing the gating from the `call_async` worker
+    /// (rather than from a probe on the bin's external ghost pad)
+    /// keeps the swap off the streaming thread, so
+    /// `set_state(Null)` on the old inner can cleanly join its
+    /// streaming task cross-thread.
     fn apply_activation(&self, req: ActivationRequest, tx: oneshot::Sender<ActivationOutcome>) {
         let snapshot = self.settings.lock().unwrap().clone();
-        let plan = crate::session::plan_activation(&CAT, "nmossink", &snapshot.into(), &req);
+        let plan = crate::session::make_activation_plan(&CAT, "nmossink", &snapshot.into(), &req);
         gst::info!(
             CAT,
             "nmossink applying activation (activation_handle={}, resource_handle={}, side={:?}): \
@@ -572,25 +595,55 @@ impl NmosSink {
             plan.ack,
         );
 
-        let current = self.obj().current_state();
-        if current <= gst::State::Ready {
-            let outcome = self.apply_plan_inline(&plan);
-            let _ = tx.send(outcome);
-        } else {
-            self.schedule_apply_via_probe(plan, tx);
-        }
+        let outcome = self.execute_activation_plan(&plan);
+        let _ = tx.send(outcome);
     }
 
     /// Perform the inner swap and translate the result into an
-    /// [`ActivationOutcome`]. Called either directly (state ≤ READY)
-    /// or from the IDLE probe (state ≥ PAUSED). On swap failure the
-    /// element is left on the placeholder and the outcome is
-    /// `Failed`.
-    fn apply_plan_inline(&self, plan: &ActivationPlan) -> ActivationOutcome {
+    /// [`ActivationOutcome`]. Always called on a `call_async`
+    /// worker thread, so [`crate::inner::rebuild_chain`]'s
+    /// `set_state(Null)` on the old chain joins the streaming task
+    /// cross-thread. On swap failure the element is left on the
+    /// fake chain and the outcome is `Failed`.
+    ///
+    /// For real → real re-activations (idempotent re-enable or
+    /// flow-id change) we drop to the fake chain between the two
+    /// real instances so any transport-side per-process state (e.g.
+    /// libmxl's `FlowWriter`) is fully released before the new
+    /// instance tries to allocate it. A direct real → real swap
+    /// intermittently fails the new chain's start-up for reasons
+    /// internal to the transport; the intermediate fake hop is one
+    /// extra `rebuild_chain` cycle and reliably avoids the failure.
+    fn execute_activation_plan(&self, plan: &ActivationPlan) -> ActivationOutcome {
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
+
+        if matches!(plan.inner, InnerConfig::Real(_))
+            && self.current_chain_is_real()
+        {
+            gst::debug!(
+                CAT,
+                "nmossink activation is real\u{2192}real; inserting fake hop \
+                 to fully release the old transport state before re-allocating",
+            );
+            match inner::build_fake_sink() {
+                Ok(p) => {
+                    if let Err(e) = self.swap_inner(bin_ref, &p) {
+                        gst::warning!(
+                            CAT,
+                            "nmossink intermediate fake-chain swap failed: {e:#}",
+                        );
+                    }
+                }
+                Err(e) => gst::warning!(
+                    CAT,
+                    "nmossink: building intermediate fake chain: {e:#}",
+                ),
+            }
+        }
+
         let new_inner = match &plan.inner {
-            InnerConfig::Mxl { domain_path, flow_id, .. } => {
+            InnerConfig::Real(TransportConfig::Mxl { domain_path, flow_id, .. }) => {
                 match inner::build_mxlsink(domain_path, flow_id) {
                     Ok(e) => e,
                     Err(e) => {
@@ -600,20 +653,32 @@ impl NmosSink {
                     }
                 }
             }
-            InnerConfig::Placeholder { .. } => match inner::build_placeholder_sink() {
+            InnerConfig::Fake { .. } => match inner::build_fake_sink() {
                 Ok(e) => e,
                 Err(e) => {
                     return ActivationOutcome::Failed {
-                        reason: format!("nmossink: building placeholder: {e:#}"),
+                        reason: format!("nmossink: building fake chain: {e:#}"),
                     };
                 }
             },
         };
         if let Err(e) = self.swap_inner(bin_ref, &new_inner) {
-            // Try one more time with a fresh placeholder so the bin
+            // Loud-log the swap failure so the cause shows up in
+            // the producer log, not just stuffed into the daemon's
+            // (currently-discarded) `AckActivation` reason.
+            gst::warning!(
+                CAT,
+                "nmossink activation swap failed; restoring fake chain: {e:#}",
+            );
+            // Try one more time with a fresh fake chain so the bin
             // is left in a known state even on the failure path.
-            if let Ok(p) = inner::build_placeholder_sink() {
-                let _ = self.swap_inner(bin_ref, &p);
+            if let Ok(p) = inner::build_fake_sink() {
+                if let Err(e2) = self.swap_inner(bin_ref, &p) {
+                    gst::warning!(
+                        CAT,
+                        "nmossink fake-chain restore also failed: {e2:#}",
+                    );
+                }
             }
             return ActivationOutcome::Failed {
                 reason: format!("nmossink: swapping inner element: {e:#}"),
@@ -626,53 +691,12 @@ impl NmosSink {
             },
         }
     }
-
-    /// Install a single-shot IDLE pad probe on the bin's external
-    /// ghost pad; when it fires (i.e. no buffer is in flight through
-    /// the bin's data path), run [`apply_plan_inline`] and forward
-    /// the outcome via `tx`. Logged-only if the ghost pad is gone
-    /// (the bin is being torn down).
-    fn schedule_apply_via_probe(
-        &self,
-        plan: ActivationPlan,
-        tx: oneshot::Sender<ActivationOutcome>,
-    ) {
-        let ghost = self.ghost.lock().unwrap().clone();
-        let Some(ghost) = ghost else {
-            let _ = tx.send(ActivationOutcome::Failed {
-                reason: "nmossink ghost pad missing when scheduling activation probe".to_owned(),
-            });
-            return;
-        };
-        // Probe callbacks are `Fn` so they may run multiple times;
-        // the take()-once pattern guarantees we only do the swap +
-        // ack on the first invocation. `Remove` afterwards prevents
-        // it from being called again, but we belt-and-brace the
-        // bookkeeping anyway.
-        let weak: glib::WeakRef<super::NmosSink> = self.obj().downgrade();
-        let plan_cell = Arc::new(Mutex::new(Some(plan)));
-        let tx_cell = Arc::new(Mutex::new(Some(tx)));
-        ghost.add_probe(gst::PadProbeType::IDLE, move |_pad, _info| {
-            let plan = plan_cell.lock().unwrap().take();
-            let tx = tx_cell.lock().unwrap().take();
-            if let (Some(plan), Some(tx)) = (plan, tx) {
-                let outcome = match weak.upgrade() {
-                    Some(bin) => bin.imp().apply_plan_inline(&plan),
-                    None => ActivationOutcome::Failed {
-                        reason: "nmossink dropped before activation probe fired".to_owned(),
-                    },
-                };
-                let _ = tx.send(outcome);
-            }
-            gst::PadProbeReturn::Remove
-        });
-    }
 }
 
-fn install_initial_placeholder(bin: &gst::Bin) -> Result<gst::GhostPad, glib::BoolError> {
-    let placeholder = inner::build_placeholder_sink()
+fn install_initial_fake_chain(bin: &gst::Bin) -> Result<gst::GhostPad, glib::BoolError> {
+    let fake = inner::build_fake_sink()
         .map_err(|e| glib::bool_error!("{e}"))?;
-    let ghost = inner::build_initial(bin, placeholder, "sink", gst::PadDirection::Sink)?;
+    let ghost = inner::build_initial(bin, fake, "sink", gst::PadDirection::Sink)?;
     bin.add_pad(&ghost)
         .map_err(|e| glib::bool_error!("adding ghost pad to nmossink: {e}"))?;
     Ok(ghost)

@@ -134,7 +134,7 @@ pub(crate) const AUTO_ACTIVATE_BLURB: &str =
      active on IS-04/IS-05 without waiting for an IS-05 PATCH. \
      Default `false` gives canonical NMOS behaviour: the resource is \
      registered (so it appears on IS-04) but the data path stays on \
-     the placeholder until an external IS-05 controller activates it.";
+     the fake chain until an external IS-05 controller activates it.";
 
 /// Snapshot of the properties needed to open a session, taken under
 /// the per-element settings lock so the lock isn't held over the
@@ -213,7 +213,7 @@ pub(crate) struct CommonSettings {
     ///
     /// `false` (default) gives canonical NMOS behaviour: the
     /// element registers the resource (so it appears on IS-04) but
-    /// leaves the data path on the placeholder until an IS-05 PATCH
+    /// leaves the data path on the fake chain until an IS-05 PATCH
     /// against `/single/{senders,receivers}/{id}/staged` activates
     /// it. `true` is the "no-controller" shortcut for development
     /// and for pipelines whose flow identity is entirely property /
@@ -268,17 +268,32 @@ fn resolve_transport_file(
 /// What the element should build on its data path after a successful
 /// `validate_and_open`.
 ///
-/// [`InnerConfig::Mxl`] carries everything the element needs to
-/// instantiate a `mxlsink` or `mxlsrc` (Domain path + Flow id, plus
-/// the flow format for the receiver). [`InnerConfig::Placeholder`]
-/// means the resolved configuration didn't pin a Domain path and/or a
-/// Flow id; the element keeps its placeholder data path in place
-/// (`fakesink` on the sink side, `appsrc` configured with the
-/// resolved essence caps on the source side — see [`crate::inner`])
-/// and a later step (caps→flow_def, IS-05 activation) will supply
-/// the missing pieces.
+/// [`InnerConfig::Real`] carries everything the element needs to
+/// instantiate a real transport chain (today only MXL, captured in
+/// [`TransportConfig::Mxl`]). [`InnerConfig::Fake`] means the
+/// resolved configuration didn't pin enough state to build a real
+/// chain (e.g. no Flow id, no Domain path) and the element keeps
+/// its fake data path in place (`fakesink` on the sink side, an
+/// `appsrc` configured with the resolved essence caps on the
+/// source side — see [`crate::inner`]). A later step
+/// (caps→flow_def, IS-05 activation) will supply the missing pieces
+/// and the bin will swap from fake to real.
 #[derive(Debug, Clone)]
 pub(crate) enum InnerConfig {
+    Real(TransportConfig),
+    Fake {
+        /// One-line summary of which piece of state was missing.
+        /// Logged at INFO so it's clear why the fake chain is in
+        /// use.
+        reason: String,
+    },
+}
+
+/// Per-transport state needed to build a real chain. New transports
+/// (NVDS-UDP, plain UDP/RTP, ...) get their own variants alongside
+/// [`TransportConfig::Mxl`].
+#[derive(Debug, Clone)]
+pub(crate) enum TransportConfig {
     Mxl {
         domain_path: String,
         flow_id: String,
@@ -296,12 +311,6 @@ pub(crate) enum InnerConfig {
         /// (e.g. deferred-mode Senders awaiting peer caps, or
         /// Receivers whose `mxl-flow-id` will arrive via IS-05 PATCH).
         transport_file: Option<String>,
-    },
-    Placeholder {
-        /// One-line summary of which piece of state was missing.
-        /// Logged at INFO so it's clear why the placeholder path is
-        /// in use.
-        reason: String,
     },
 }
 
@@ -390,15 +399,15 @@ pub(crate) fn validate_and_open(
     let mut inner = decide_inner_config(settings, &flow, transport_file.as_deref());
     // Deferred-mode case (sender only): no resource is going to be
     // registered at NULL→READY because neither `transport-file*` nor
-    // `caps` was supplied. Keep the placeholder so we don't bring
+    // `caps` was supplied. Keep the fake chain so we don't bring
     // `mxlsink` up against an unregistered Flow (which would fail to
     // preroll); the inner is swapped to `mxlsink` only after
     // `register_deferred` registers the Sender at READY→PAUSED.
     if transport_file.is_none()
         && settings.side == Side::Sender
-        && matches!(inner, InnerConfig::Mxl { .. })
+        && matches!(inner, InnerConfig::Real(_))
     {
-        inner = InnerConfig::Placeholder {
+        inner = InnerConfig::Fake {
             reason: "deferred — peer caps will drive registration at READY\u{2192}PAUSED"
                 .to_owned(),
         };
@@ -434,11 +443,11 @@ pub(crate) fn validate_and_open(
         None => "no resource registered (transport-file unset)".to_owned(),
     };
     let inner_summary = match &inner {
-        InnerConfig::Mxl { domain_path, flow_id, format, .. } => {
+        InnerConfig::Real(TransportConfig::Mxl { domain_path, flow_id, format, .. }) => {
             format!("inner data path: mxl (domain_path={domain_path:?}, flow_id={flow_id}, format={format:?})")
         }
-        InnerConfig::Placeholder { reason } => {
-            format!("inner data path: placeholder ({reason})")
+        InnerConfig::Fake { reason } => {
+            format!("inner data path: fake ({reason})")
         }
     };
     gst::info!(
@@ -482,7 +491,7 @@ pub(crate) fn validate_and_open(
 /// Returns `Ok(None)` when nothing can be synthesised — neither a
 /// transport file nor enough property state to build one. The element
 /// then opens the session without a transport file and runs on the
-/// placeholder data path until an IS-05 activation arrives.
+/// fake chain until an IS-05 activation arrives.
 fn synthesise_or_passthrough(
     cat: &gst::DebugCategory,
     element: &str,
@@ -504,7 +513,7 @@ fn synthesise_or_passthrough(
                 gst::debug!(
                     cat,
                     "{element}: `caps` set but `mxl-flow-id` empty; deferring flow_def \
-                     synthesis (the placeholder data path will be in use until an IS-05 \
+                     synthesis (the fake chain will be in use until an IS-05 \
                      activation supplies the flow id)"
                 );
                 return Ok(None);
@@ -533,7 +542,7 @@ fn synthesise_or_passthrough(
 /// Returns [`FlowFormat::Unspecified`] when `caps` is unset or the
 /// first structure's media type isn't one of the recognised essence
 /// shapes — the caller then falls through to the transport file's
-/// `format` (if present) or to the placeholder data path.
+/// `format` (if present) or to the fake chain.
 fn caps_format(settings: &CommonSettings) -> FlowFormat {
     settings
         .caps
@@ -575,7 +584,7 @@ fn log_flow_origin(cat: &gst::DebugCategory, field: &str, origin: ValueOrigin) {
 }
 
 /// Decide whether the element can build a real `mxlsink` / `mxlsrc`
-/// or has to fall back to its placeholder. Both sides need a
+/// chain or has to fall back to its fake chain. Both sides need a
 /// non-empty Domain path and a non-empty flow id; the receiver
 /// additionally needs a specific [`FlowFormat`] (because `mxlsrc`
 /// has separate `video-flow-id` / `audio-flow-id` / `data-flow-id`
@@ -586,34 +595,34 @@ fn decide_inner_config(
     transport_file: Option<&str>,
 ) -> InnerConfig {
     if settings.mxl_domain_path.is_empty() {
-        return InnerConfig::Placeholder {
+        return InnerConfig::Fake {
             reason: "`mxl-domain-path` unset".to_owned(),
         };
     }
     if flow.id.is_empty() {
-        return InnerConfig::Placeholder {
+        return InnerConfig::Fake {
             reason: "`mxl-flow-id` unset (neither property nor transport file supplied it)".to_owned(),
         };
     }
     if settings.side == Side::Receiver && flow.format == FlowFormat::Unspecified {
-        return InnerConfig::Placeholder {
+        return InnerConfig::Fake {
             reason:
                 "`caps` media-type unrecognised or unset on nmossrc \
                  (neither caps nor transport file pinned a flow format)"
                     .to_owned(),
         };
     }
-    InnerConfig::Mxl {
+    InnerConfig::Real(TransportConfig::Mxl {
         domain_path: settings.mxl_domain_path.clone(),
         flow_id: flow.id.clone(),
         format: flow.format,
         transport_file: transport_file.map(str::to_owned),
-    }
+    })
 }
 
 /// Honour `auto-activate` at setup time. When `auto_activate` is
 /// `false` and `decide_inner_config` would have produced a real
-/// `mxlsink` / `mxlsrc`, downgrade to a `Placeholder` so the data
+/// transport chain, downgrade to [`InnerConfig::Fake`] so the data
 /// path stays inactive until an IS-05 PATCH activates the resource
 /// (the canonical NMOS path).
 ///
@@ -622,8 +631,8 @@ fn decide_inner_config(
 /// gate — so a resource opened with `auto-activate=false` still
 /// appears on IS-04 immediately, ready to be PATCHed.
 fn apply_auto_activate_gate(inner: InnerConfig, auto_activate: bool) -> InnerConfig {
-    if !auto_activate && matches!(inner, InnerConfig::Mxl { .. }) {
-        return InnerConfig::Placeholder {
+    if !auto_activate && matches!(inner, InnerConfig::Real(_)) {
+        return InnerConfig::Fake {
             reason: "auto-activate=false; waiting for IS-05 PATCH to activate".to_owned(),
         };
     }
@@ -644,10 +653,10 @@ fn apply_auto_activate_gate(inner: InnerConfig, auto_activate: bool) -> InnerCon
 /// query can't fix caps (h264parse pre-data, etc.).
 ///
 /// Returns the [`InnerConfig`] the element should install on the
-/// data path; today always [`InnerConfig::Mxl`] on success because
+/// data path; today always [`InnerConfig::Real`] on success because
 /// deferred-mode registration is only attempted when `mxl-domain-path`
-/// is set (the placeholder path is the alternative the caller picks
-/// when this helper isn't called).
+/// is set (the fake chain is the alternative the caller picks when
+/// this helper isn't called).
 pub(crate) fn register_deferred(
     cat: &gst::DebugCategory,
     element: &str,
@@ -845,7 +854,7 @@ pub(crate) fn close(cat: &gst::DebugCategory, element: &str, session: &Mutex<Opt
 /// `inner` is what the element should install on the data path;
 /// `ack` is what the element should report to the daemon via
 /// `AckActivation` once the swap completes. Deactivations always
-/// ack success; failed activations swap to the placeholder but ack
+/// ack success; failed activations swap to the fake chain but ack
 /// failure so the IS-05 controller knows the resource is not live.
 #[derive(Debug)]
 pub(crate) struct ActivationPlan {
@@ -867,25 +876,25 @@ pub(crate) enum ActivationAck {
 /// Logic:
 ///
 /// * `req.side` must match the element's own [`Side`]. Mismatches
-///   indicate a daemon-routing bug; we swap to placeholder and ack
-///   failure.
+///   indicate a daemon-routing bug; we swap to the fake chain and
+///   ack failure.
 ///
-/// * `req.transport_file.is_none()` is a deactivation: swap to
-///   placeholder and ack **success**.
+/// * `req.transport_file.is_none()` is a deactivation: swap to the
+///   fake chain and ack **success**.
 ///
 /// * Otherwise re-resolve `mxl-domain-id` (re-runs the
 ///   `domain_def.json` cross-check) and the flow id/format
 ///   (`flow_def::resolve_mxl_flow_meta` against the new
-///   `transport_file`). Either resolver failing → placeholder +
+///   `transport_file`). Either resolver failing → fake chain +
 ///   failure ack.
 ///
-/// * Run `decide_inner_config`: if it returns `InnerConfig::Mxl`,
-///   ack success; if it returns `InnerConfig::Placeholder` we have
-///   a live transport file but can't bring up the inner element
+/// * Run `decide_inner_config`: if it returns [`InnerConfig::Real`],
+///   ack success; if it returns [`InnerConfig::Fake`] we have a
+///   live transport file but can't bring up the real chain
 ///   (typically `mxl-domain-path` is unset on this host) — swap to
-///   placeholder but ack **failure** so the controller surfaces the
-///   misconfiguration.
-pub(crate) fn plan_activation(
+///   the fake chain but ack **failure** so the controller surfaces
+///   the misconfiguration.
+pub(crate) fn make_activation_plan(
     cat: &gst::DebugCategory,
     element: &str,
     settings: &CommonSettings,
@@ -893,7 +902,7 @@ pub(crate) fn plan_activation(
 ) -> ActivationPlan {
     if req.side != settings.side {
         return ActivationPlan {
-            inner: InnerConfig::Placeholder {
+            inner: InnerConfig::Fake {
                 reason: "activation side mismatch".to_owned(),
             },
             ack: ActivationAck::Failure {
@@ -909,11 +918,11 @@ pub(crate) fn plan_activation(
         gst::info!(
             cat,
             "{element}: activation is a deactivation (resource_handle={}); \
-             swapping to placeholder",
+             swapping to fake chain",
             req.resource_handle,
         );
         return ActivationPlan {
-            inner: InnerConfig::Placeholder {
+            inner: InnerConfig::Fake {
                 reason: "deactivation".to_owned(),
             },
             ack: ActivationAck::Success,
@@ -925,7 +934,7 @@ pub(crate) fn plan_activation(
             Ok(r) => r,
             Err(e) => {
                 return ActivationPlan {
-                    inner: InnerConfig::Placeholder {
+                    inner: InnerConfig::Fake {
                         reason: "mxl-domain-id resolution failed".to_owned(),
                     },
                     ack: ActivationAck::Failure {
@@ -938,7 +947,7 @@ pub(crate) fn plan_activation(
         };
     if domain_resolution.id.is_empty() {
         return ActivationPlan {
-            inner: InnerConfig::Placeholder {
+            inner: InnerConfig::Fake {
                 reason: "mxl-domain-id unresolved".to_owned(),
             },
             ack: ActivationAck::Failure {
@@ -974,7 +983,7 @@ pub(crate) fn plan_activation(
         Ok(r) => r,
         Err(e) => {
             return ActivationPlan {
-                inner: InnerConfig::Placeholder {
+                inner: InnerConfig::Fake {
                     reason: "flow_def resolution failed".to_owned(),
                 },
                 ack: ActivationAck::Failure {
@@ -989,13 +998,13 @@ pub(crate) fn plan_activation(
 
     let inner = decide_inner_config(settings, &flow, Some(transport_file));
     let ack = match &inner {
-        InnerConfig::Mxl { .. } => ActivationAck::Success,
+        InnerConfig::Real(_) => ActivationAck::Success,
         // Per design: if the activation supplies a live transport file
-        // but the element can't bring up mxlsink/mxlsrc (typically
+        // but the element can't bring up the real chain (typically
         // `mxl-domain-path` is unset), ack failure so the controller
         // sees the resource as misconfigured rather than silently
         // deactivated.
-        InnerConfig::Placeholder { reason } => ActivationAck::Failure {
+        InnerConfig::Fake { reason } => ActivationAck::Failure {
             reason: format!(
                 "{element}: activation cannot bring up inner data path: {reason}"
             ),
@@ -1097,21 +1106,21 @@ mod tests {
     }
 
     #[test]
-    fn deactivation_is_placeholder_success() {
-        let plan = plan_activation(&cat(), "nmossink", &settings(Side::Sender), &req(Side::Sender, None));
-        assert!(matches!(plan.inner, InnerConfig::Placeholder { .. }));
+    fn deactivation_is_fake_success() {
+        let plan = make_activation_plan(&cat(), "nmossink", &settings(Side::Sender), &req(Side::Sender, None));
+        assert!(matches!(plan.inner, InnerConfig::Fake { .. }));
         assert!(matches!(plan.ack, ActivationAck::Success));
     }
 
     #[test]
     fn side_mismatch_is_failure() {
-        let plan = plan_activation(
+        let plan = make_activation_plan(
             &cat(),
             "nmossink",
             &settings(Side::Sender),
             &req(Side::Receiver, Some(&video_flow_def(FLOW_ID_A))),
         );
-        assert!(matches!(plan.inner, InnerConfig::Placeholder { .. }));
+        assert!(matches!(plan.inner, InnerConfig::Fake { .. }));
         match plan.ack {
             ActivationAck::Failure { reason } => assert!(
                 reason.contains("side mismatch") || reason.contains("does not match"),
@@ -1131,7 +1140,7 @@ mod tests {
             caps: Some(caps),
             ..settings(Side::Receiver)
         };
-        let plan = plan_activation(
+        let plan = make_activation_plan(
             &cat(),
             "nmossrc",
             &s,
@@ -1141,23 +1150,25 @@ mod tests {
             ),
         );
         match plan.inner {
-            InnerConfig::Mxl { format, .. } => assert_eq!(format, FlowFormat::Data),
-            InnerConfig::Placeholder { reason } => {
-                panic!("expected Mxl(data), got Placeholder({reason})")
+            InnerConfig::Real(TransportConfig::Mxl { format, .. }) => {
+                assert_eq!(format, FlowFormat::Data)
+            }
+            InnerConfig::Fake { reason } => {
+                panic!("expected Real(Mxl(data)), got Fake({reason})")
             }
         }
         assert!(matches!(plan.ack, ActivationAck::Success));
     }
 
     #[test]
-    fn nmossrc_caps_unset_falls_back_to_placeholder() {
+    fn nmossrc_caps_unset_falls_back_to_fake() {
         // Receiver with neither `caps` nor a transport file `format`
-        // can't pick a `mxlsrc` slot, so it stays on the placeholder.
+        // can't pick a `mxlsrc` slot, so it stays on the fake chain.
         let s = CommonSettings {
             mxl_flow_id: FLOW_ID_A.to_owned(),
             ..settings(Side::Receiver)
         };
-        let plan = plan_activation(
+        let plan = make_activation_plan(
             &cat(),
             "nmossrc",
             &s,
@@ -1167,38 +1178,40 @@ mod tests {
             ),
         );
         match plan.inner {
-            InnerConfig::Placeholder { reason } => assert!(
+            InnerConfig::Fake { reason } => assert!(
                 reason.contains("caps") && reason.contains("flow format"),
                 "expected caps-driven reason: {reason}"
             ),
-            InnerConfig::Mxl { .. } => panic!("expected Placeholder, got Mxl"),
+            InnerConfig::Real(_) => panic!("expected Fake, got Real"),
         }
     }
 
     #[test]
-    fn happy_path_video_is_mxl_success() {
+    fn happy_path_video_is_real_success() {
         let s = CommonSettings {
             mxl_flow_id: FLOW_ID_A.to_owned(),
             caps: Some(video_caps()),
             ..settings(Side::Receiver)
         };
-        let plan = plan_activation(
+        let plan = make_activation_plan(
             &cat(),
             "nmossrc",
             &s,
             &req(Side::Receiver, Some(&video_flow_def(FLOW_ID_A))),
         );
         match plan.inner {
-            InnerConfig::Mxl { domain_path, flow_id, format, transport_file } => {
+            InnerConfig::Real(TransportConfig::Mxl {
+                domain_path, flow_id, format, transport_file,
+            }) => {
                 assert_eq!(domain_path, "/var/lib/mxl/domain-a");
                 assert_eq!(flow_id, FLOW_ID_A);
                 assert_eq!(format, FlowFormat::Video);
                 assert!(
                     transport_file.is_some(),
-                    "plan_activation must thread req.transport_file into InnerConfig",
+                    "make_activation_plan must thread req.transport_file into InnerConfig",
                 );
             }
-            InnerConfig::Placeholder { reason } => panic!("expected Mxl, got Placeholder({reason})"),
+            InnerConfig::Fake { reason } => panic!("expected Real(Mxl), got Fake({reason})"),
         }
         assert!(matches!(plan.ack, ActivationAck::Success));
     }
@@ -1214,14 +1227,14 @@ mod tests {
             mxl_flow_id: FLOW_ID_B.to_owned(),
             ..settings(Side::Sender)
         };
-        let plan = plan_activation(
+        let plan = make_activation_plan(
             &cat(),
             "nmossink",
             &s,
             &req(Side::Sender, Some(&video_flow_def(FLOW_ID_A))),
         );
         match (&plan.inner, &plan.ack) {
-            (InnerConfig::Mxl { flow_id, .. }, ActivationAck::Success) => {
+            (InnerConfig::Real(TransportConfig::Mxl { flow_id, .. }), ActivationAck::Success) => {
                 assert_eq!(flow_id, FLOW_ID_A, "activation file's id must win");
             }
             other => panic!("expected ack-success + inner using FLOW_ID_A, got: {other:?}"),
@@ -1232,24 +1245,24 @@ mod tests {
     fn domain_path_unset_is_failure_with_live_transport_file() {
         // Activation supplies the spliced transport file, but this
         // host has no `mxl-domain-path` so the element can't bring
-        // up mxlsink/mxlsrc. Per design: placeholder + failure ack.
+        // up mxlsink/mxlsrc. Per design: fake chain + failure ack.
         let s = CommonSettings {
             mxl_domain_path: String::new(),
             mxl_flow_id: FLOW_ID_A.to_owned(),
             ..settings(Side::Sender)
         };
-        let plan = plan_activation(
+        let plan = make_activation_plan(
             &cat(),
             "nmossink",
             &s,
             &req(Side::Sender, Some(&video_flow_def(FLOW_ID_A))),
         );
         match plan.inner {
-            InnerConfig::Placeholder { reason } => assert!(
+            InnerConfig::Fake { reason } => assert!(
                 reason.contains("mxl-domain-path"),
                 "expected mxl-domain-path reason, got: {reason}"
             ),
-            InnerConfig::Mxl { .. } => panic!("expected Placeholder when mxl-domain-path unset"),
+            InnerConfig::Real(_) => panic!("expected Fake when mxl-domain-path unset"),
         }
         match plan.ack {
             ActivationAck::Failure { reason } => assert!(
@@ -1271,7 +1284,7 @@ mod tests {
             mxl_flow_id: FLOW_ID_A.to_owned(),
             ..settings(Side::Sender)
         };
-        let plan = plan_activation(
+        let plan = make_activation_plan(
             &cat(),
             "nmossink",
             &s,
@@ -1294,13 +1307,13 @@ mod tests {
             mxl_flow_id: FLOW_ID_A.to_owned(),
             ..settings(Side::Sender)
         };
-        let plan = plan_activation(
+        let plan = make_activation_plan(
             &cat(),
             "nmossink",
             &s,
             &req(Side::Sender, Some("not json")),
         );
-        assert!(matches!(plan.inner, InnerConfig::Placeholder { .. }));
+        assert!(matches!(plan.inner, InnerConfig::Fake { .. }));
         assert!(matches!(plan.ack, ActivationAck::Failure { .. }));
     }
 
@@ -1477,8 +1490,8 @@ mod tests {
         /// Receiver synthesis is gated on `mxl-flow-id`: without it
         /// we have nothing to subscribe to and no stable id for the
         /// configuring flow_def. Returning `None` puts the element
-        /// on the placeholder path until an IS-05 activation supplies
-        /// the missing piece.
+        /// on the fake chain until an IS-05 activation supplies the
+        /// missing piece.
         #[test]
         fn receiver_caps_without_flow_id_returns_none() {
             let s = CommonSettings {
@@ -1538,43 +1551,43 @@ mod tests {
     mod auto_activate {
         use super::*;
 
-        fn mxl_inner() -> InnerConfig {
-            InnerConfig::Mxl {
+        fn real_inner() -> InnerConfig {
+            InnerConfig::Real(TransportConfig::Mxl {
                 domain_path: "/var/lib/mxl/domain-a".to_owned(),
                 flow_id: FLOW_ID_A.to_owned(),
                 format: FlowFormat::Video,
                 transport_file: Some(video_flow_def(FLOW_ID_A)),
-            }
+            })
         }
 
-        fn placeholder_inner() -> InnerConfig {
-            InnerConfig::Placeholder {
-                reason: "test fixture placeholder".to_owned(),
+        fn fake_inner() -> InnerConfig {
+            InnerConfig::Fake {
+                reason: "test fixture fake chain".to_owned(),
             }
         }
 
         #[test]
-        fn gate_passes_mxl_through_when_auto_activate_true() {
-            let after = super::super::apply_auto_activate_gate(mxl_inner(), true);
+        fn gate_passes_real_through_when_auto_activate_true() {
+            let after = super::super::apply_auto_activate_gate(real_inner(), true);
             match after {
-                InnerConfig::Mxl { flow_id, format, .. } => {
+                InnerConfig::Real(TransportConfig::Mxl { flow_id, format, .. }) => {
                     assert_eq!(flow_id, FLOW_ID_A);
                     assert_eq!(format, FlowFormat::Video);
                 }
-                InnerConfig::Placeholder { reason } => {
-                    panic!("auto-activate=true must not downgrade Mxl: {reason}")
+                InnerConfig::Fake { reason } => {
+                    panic!("auto-activate=true must not downgrade Real: {reason}")
                 }
             }
         }
 
         #[test]
-        fn gate_downgrades_mxl_to_placeholder_when_auto_activate_false() {
-            let after = super::super::apply_auto_activate_gate(mxl_inner(), false);
+        fn gate_downgrades_real_to_fake_when_auto_activate_false() {
+            let after = super::super::apply_auto_activate_gate(real_inner(), false);
             match after {
-                InnerConfig::Mxl { .. } => {
-                    panic!("auto-activate=false must downgrade Mxl to Placeholder")
+                InnerConfig::Real(_) => {
+                    panic!("auto-activate=false must downgrade Real to Fake")
                 }
-                InnerConfig::Placeholder { reason } => {
+                InnerConfig::Fake { reason } => {
                     assert!(
                         reason.contains("auto-activate=false"),
                         "expected gate-attributed reason, got: {reason}"
@@ -1587,19 +1600,19 @@ mod tests {
             }
         }
 
-        /// The gate never *upgrades* a placeholder. If
-        /// `decide_inner_config` already produced a placeholder
+        /// The gate never *upgrades* a fake chain. If
+        /// `decide_inner_config` already produced a fake
         /// (e.g. receiver with no caps), the gate must leave it
         /// alone regardless of `auto-activate`.
         #[test]
-        fn gate_leaves_placeholder_alone_under_both_settings() {
-            let after_true = super::super::apply_auto_activate_gate(placeholder_inner(), true);
-            assert!(matches!(after_true, InnerConfig::Placeholder { .. }));
-            let after_false = super::super::apply_auto_activate_gate(placeholder_inner(), false);
-            assert!(matches!(after_false, InnerConfig::Placeholder { .. }));
+        fn gate_leaves_fake_alone_under_both_settings() {
+            let after_true = super::super::apply_auto_activate_gate(fake_inner(), true);
+            assert!(matches!(after_true, InnerConfig::Fake { .. }));
+            let after_false = super::super::apply_auto_activate_gate(fake_inner(), false);
+            assert!(matches!(after_false, InnerConfig::Fake { .. }));
         }
 
-        /// IS-05 activations (`plan_activation`) are
+        /// IS-05 activations (`make_activation_plan`) are
         /// controller-driven and must not be gated by
         /// `auto-activate`: that property is the *setup-time*
         /// switch for "start without a controller", not a runtime
@@ -1614,22 +1627,24 @@ mod tests {
                 caps: Some(video_caps()),
                 // The element was started with the controller-driven
                 // path (auto-activate=false), so the inner sat on the
-                // placeholder at NULL→READY. An IS-05 PATCH then
-                // arrives — `plan_activation` must produce a real
-                // Mxl plan regardless of this flag.
+                // fake chain at NULL→READY. An IS-05 PATCH then
+                // arrives — `make_activation_plan` must produce a real
+                // plan regardless of this flag.
                 auto_activate: false,
                 ..settings(Side::Sender)
             };
-            let plan = plan_activation(
+            let plan = make_activation_plan(
                 &cat(),
                 "nmossink",
                 &s,
                 &req(Side::Sender, Some(&video_flow_def(FLOW_ID_A))),
             );
             match plan.inner {
-                InnerConfig::Mxl { flow_id, .. } => assert_eq!(flow_id, FLOW_ID_A),
-                InnerConfig::Placeholder { reason } => {
-                    panic!("IS-05 activation must reach Mxl regardless of auto-activate: {reason}")
+                InnerConfig::Real(TransportConfig::Mxl { flow_id, .. }) => {
+                    assert_eq!(flow_id, FLOW_ID_A)
+                }
+                InnerConfig::Fake { reason } => {
+                    panic!("IS-05 activation must reach Real regardless of auto-activate: {reason}")
                 }
             }
             assert!(matches!(plan.ack, ActivationAck::Success));
@@ -1668,23 +1683,23 @@ mod tests {
             .expect("resolve_mxl_flow_meta");
             let inner = super::super::decide_inner_config(&s, &flow, Some(&synth));
             assert!(
-                matches!(inner, InnerConfig::Mxl { .. }),
-                "fixture must produce Mxl before the gate"
+                matches!(inner, InnerConfig::Real(_)),
+                "fixture must produce Real before the gate"
             );
 
             // Same inner, but pass through the gate with both
             // toggle values:
             let eager = super::super::apply_auto_activate_gate(inner.clone(), true);
             assert!(
-                matches!(eager, InnerConfig::Mxl { .. }),
-                "auto-activate=true: caps-synthesised flow_id must keep the Mxl path"
+                matches!(eager, InnerConfig::Real(_)),
+                "auto-activate=true: caps-synthesised flow_id must keep the Real path"
             );
             let lazy = super::super::apply_auto_activate_gate(inner, false);
             match lazy {
-                InnerConfig::Placeholder { reason } => {
+                InnerConfig::Fake { reason } => {
                     assert!(reason.contains("auto-activate=false"))
                 }
-                InnerConfig::Mxl { .. } => {
+                InnerConfig::Real(_) => {
                     panic!("auto-activate=false: caps-synthesised flow_id must defer to IS-05")
                 }
             }

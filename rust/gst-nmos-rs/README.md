@@ -31,7 +31,7 @@ Both elements:
 | `mxl-domain-path` | string | required for MXL | Local filesystem path identifying the MXL Domain on this host; fed into the inner `mxlsink` / `mxlsrc` `domain=` property. If a `domain_def.json` is present in the directory its `id` is used to populate or cross-check `mxl-domain-id` (see below). |
 | `mxl-domain-id`  | string  | required for MXL (may be omitted if `mxl-domain-path` supplies it) | MXL Domain id (UUID) advertised in NMOS as `urn:x-nvnmos:tag:mxl-domain-id`. If `mxl-domain-path` points at a directory containing a `domain_def.json` (AMWA BCP-007-03 WIP) the file's `id` is used to populate this property when unset, or cross-checked against it when both are supplied (mismatch is an error — this is host-level identity). Overrides the transport file's tag when both are supplied. |
 | `mxl-flow-id`    | string  | optional  | MXL flow id (UUID) — on `nmossink` fed into `mxlsink.flow-id=`, on `nmossrc` into the matching `mxlsrc.{video,audio,data}-flow-id=` slot picked from `caps`. Overrides the transport file's top-level `id` when both are supplied — same property-override rule as `label` / `description`. |
-| `auto-activate`  | boolean | optional, default `false` | When `false` the element registers the resource so it appears on IS-04 and IS-05 but leaves the inner data path on the placeholder until an IS-05 PATCH activates it (`master_enable: true` on `/single/{senders,receivers}/{id}/active`). When `true` the element brings the inner `mxlsink` / `mxlsrc` up immediately once the configuring flow_def has been resolved at NULL→READY (or, for a deferred-mode sender, at READY→PAUSED) *and* calls `SyncResourceState` to push the daemon's IS-04/IS-05 view to active — i.e. it's a no-controller shortcut for development pipelines and for setups where flow identity comes entirely from properties / `transport-file*`. Orthogonal to how the flow_def itself becomes available: property override of `mxl-flow-id`, supplied `transport-file*`, and caps→flow_def synthesis all feed the same gate. |
+| `auto-activate`  | boolean | optional, default `false` | When `false` the element registers the resource so it appears on IS-04 and IS-05 but leaves the inner data path on the fake chain until an IS-05 PATCH activates it (`master_enable: true` on `/single/{senders,receivers}/{id}/active`). When `true` the element brings the inner `mxlsink` / `mxlsrc` up immediately once the configuring flow_def has been resolved at NULL→READY (or, for a deferred-mode sender, at READY→PAUSED) *and* calls `SyncResourceState` to push the daemon's IS-04/IS-05 view to active — i.e. it's a no-controller shortcut for development pipelines and for setups where flow identity comes entirely from properties / `transport-file*`. Orthogonal to how the flow_def itself becomes available: property override of `mxl-flow-id`, supplied `transport-file*`, and caps→flow_def synthesis all feed the same gate. |
 
 `nmossink`-only:
 
@@ -82,12 +82,12 @@ from "is the data path live?":
   `mxl-flow-id`), or for the deferred-mode sender, synthesised
   from peer caps at READY→PAUSED. With no flow_def in play the
   session opens with no resource and the data path stays on the
-  placeholder until an IS-05 activation supplies one.
+  fake chain until an IS-05 activation supplies one.
 
 - **Inner data path** (real `mxlsink` / `mxlsrc`) only goes live
   when `auto-activate=true` *or* when an IS-05 activation arrives.
   With the default `auto-activate=false` the element registers the
-  resource but leaves the inner on the placeholder; the daemon's
+  resource but leaves the inner on the fake chain; the daemon's
   `/single/{senders,receivers}/{id}/active` shows
   `master_enable: false` until an external controller PATCHes the
   resource. Setting `auto-activate=true` is the no-controller
@@ -122,7 +122,7 @@ Drive an element through `NULL`→`PLAYING`→`NULL` against a live
 daemon to exercise the session lifecycle.
 
 Without `mxl-domain-path` (and `mxl-flow-id`) the element opens a
-session but its data path stays on the placeholder:
+session but its data path stays on the fake chain:
 
 ```sh
 # terminal 1
@@ -137,9 +137,8 @@ GST_DEBUG=nmossink:5 gst-launch-1.0 -e \
 ```
 
 Expected: `session opened ... no resource registered; inner data path:
-placeholder (...)` then `session closed`. The daemon logs the
-matching `OpenSession`, `SubscribeActivations`, and `CloseSession`
-calls.
+fake (...)` then `session closed`. The daemon logs the matching
+`OpenSession`, `SubscribeActivations`, and `CloseSession` calls.
 
 Add `transport-file-path=...` (or `mxl-flow-id=` directly) plus
 `mxl-domain-path=` to register the Sender via `AddSender`, then add
@@ -162,15 +161,15 @@ resource_handle=... resource_id=...; inner data path: mxl
 (domain_path=..., flow_id=..., format=...)`. The daemon logs the
 matching `AddSender`. An IS-05 PATCH activation against this
 resource is dispatched through the element: it logs `applying
-activation … plan inner=Mxl(…), ack=Success` and (when the
+activation … plan inner=Real(Mxl(…)), ack=Success` and (when the
 pipeline is past READY) the swap happens behind a single-shot IDLE
 pad probe before the daemon receives the success ack. A
-deactivation logs `activation is a deactivation … swapping to
-placeholder` and acks success. A PATCH that the element can't
-honour locally (e.g. `mxl-domain-path` is unset on this host, or
-the `mxl-flow-id` property contradicts the activation's
-transport file) is acked back with `success=false` and a
-`failure_reason` that names the specific check that failed.
+deactivation logs `activation is a deactivation … swapping to fake
+chain` and acks success. A PATCH that the element can't honour
+locally (e.g. `mxl-domain-path` is unset on this host, or the
+`mxl-flow-id` property contradicts the activation's transport
+file) is acked back with `success=false` and a `failure_reason`
+that names the specific check that failed.
 
 On `nmossrc` the inner `mxlsrc` also needs to know which media kind
 the flow carries — `video/x-raw` → `video-flow-id`, `audio/x-raw` →
@@ -364,7 +363,7 @@ across the steady-state window.
   whether the data path goes live eagerly at NULL→READY or waits for
   an IS-05 PATCH. Default `false` gives canonical NMOS semantics:
   the resource is registered (visible on IS-04) but the inner
-  data path stays on the placeholder until an external controller
+  data path stays on the fake chain until an external controller
   PATCHes `master_enable: true` against the
   `/single/{senders,receivers}/{id}/staged` endpoint. `true` is the
   no-controller shortcut: once the configuring flow_def has been
@@ -379,7 +378,8 @@ across the steady-state window.
   data path. The element reads the event's transport file (for MXL
   receivers this is the daemon-spliced internal `flow_def` carrying
   the PATCHed `mxl_domain_id` / `mxl_flow_id`), then swaps the
-  inner element between `mxlsink` / `mxlsrc` and the placeholder.
+  inner element between the real `mxlsink` / `mxlsrc` chain and
+  the fake chain.
   The daemon's view is authoritative for identity — an IS-05 PATCH
   legitimately replaces the configured-at-startup `mxl-flow-id` /
   `mxl-domain-id` and the element silently picks up the new values.
@@ -398,22 +398,22 @@ across the steady-state window.
 - When the resolved configuration pins a Domain path *and* a Flow id
   (plus a recognised essence shape on the receiver, supplied via
   `caps` or read from the transport file's `format`), the inner data
-  path is the real `mxlsink` / `mxlsrc` configured from those
-  values. Otherwise the bin keeps a placeholder so the element
+  path is the real `mxlsink` / `mxlsrc` chain configured from those
+  values. Otherwise the bin keeps a fake chain so the element
   remains valid in the pipeline: `fakesink` on `nmossink` (sinks
   accept ANY caps), and an `appsrc` configured with the
   best-available essence caps on `nmossrc` (the `caps` property, or
-  caps synthesised from `transport-file*`). The `nmossrc`
-  placeholder is held idle — we never push buffers into the
-  `appsrc`, so its basesrc loop blocks in `create()`, but downstream
-  caps queries are answered against the concrete essence shape so
+  caps synthesised from `transport-file*`). The `nmossrc` fake
+  chain is held idle — we never push buffers into the `appsrc`, so
+  its basesrc loop blocks in `create()`, but downstream caps
+  queries are answered against the concrete essence shape so
   negotiation can complete and the pipeline can reach PLAYING while
   the bin waits for an IS-05 activation to swap the inner to
-  `mxlsrc`. A `fakesrc` placeholder is used only as a last-resort
-  fallback (constructed-time, before any properties have been set);
-  it cannot satisfy caps negotiation and the NULL→READY transition
-  always replaces it with the `appsrc` form once a caps source is
-  available.
+  `mxlsrc`. When no caps source is yet available (constructed-time,
+  before any properties have been set) the fake chain is built as
+  a bare `appsrc` without caps; it cannot satisfy caps negotiation
+  in that state, and the NULL→READY transition replaces it with a
+  caps-aware `appsrc` as soon as a caps source becomes available.
 - Both elements support a `caps`-driven flow_def synthesis path:
   when the user supplies essence caps (`video/x-raw,format=v210,…`,
   `audio/x-raw,format=F32LE,…`, or `meta/x-st-2038,framerate=…`)

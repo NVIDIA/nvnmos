@@ -19,7 +19,7 @@
 //! * Both agreeing: use the value (DEBUG log at the caller).
 //! * Both disagreeing: hard error.
 //! * Neither: empty id / `Unspecified` format — the element will
-//!   fall back to its placeholder data path.
+//!   fall back to its fake chain.
 //!
 //! At NULL→READY the element-level rule is "property overrides
 //! file", not "cross-check, error on mismatch". The caller therefore
@@ -156,7 +156,7 @@ pub(crate) fn read_flow_def_meta(text: &str) -> Result<FlowDefMeta, FlowDefError
 /// derived from `caps` via [`FlowFormat::from_caps`] (both elements
 /// route their caps through the same helper); when `caps` is unset
 /// or its media-type isn't recognised it falls back to
-/// [`FlowFormat::Unspecified`] and the file or the placeholder
+/// [`FlowFormat::Unspecified`] and the file or the fake chain
 /// decides.
 pub(crate) fn resolve_mxl_flow_meta(
     property_id: &str,

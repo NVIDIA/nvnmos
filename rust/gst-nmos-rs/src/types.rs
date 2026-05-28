@@ -76,8 +76,8 @@ pub enum CapsMode {
 /// matching `mxlsrc` property (`video-flow-id` / `audio-flow-id` /
 /// `data-flow-id`). `Unspecified` means the format is not known yet
 /// — neither the `caps` property nor a `transport-file` pinned it
-/// — and the element falls back to its placeholder data path until
-/// a later reconfiguration supplies one.
+/// — and the element falls back to its fake chain until a later
+/// reconfiguration supplies one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum FlowFormat {
     /// Format not pinned.
@@ -105,7 +105,7 @@ impl FlowFormat {
 
     /// Parse a `urn:x-nmos:format:*` string. Unknown formats map to
     /// [`FlowFormat::Unspecified`] so the element falls through to
-    /// its placeholder path rather than failing hard.
+    /// its fake chain rather than failing hard.
     pub(crate) fn from_format_urn(s: &str) -> Self {
         match s {
             "urn:x-nmos:format:video" => Self::Video,
@@ -121,7 +121,7 @@ impl FlowFormat {
     /// `audio/x-raw` → Audio, `meta/x-st-2038` → Data). Returns
     /// [`FlowFormat::Unspecified`] for empty/ANY caps and for any
     /// other media type — the caller is responsible for falling
-    /// back to the placeholder.
+    /// back to the fake chain.
     pub(crate) fn from_caps(caps: &gstreamer::Caps) -> Self {
         let Some(structure) = caps.structure(0) else {
             return Self::Unspecified;
