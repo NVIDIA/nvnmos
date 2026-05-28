@@ -65,13 +65,13 @@ impl Side {
 
 /// Translate the GObject `Transport` enum to the wire enum.
 ///
-/// `Mxl` is the only variant whose data path is fully wired
-/// today. `Udp` and `Udp2` reach this helper once `validate_and_open`
-/// resolves an SDP into a [`TransportConfig::Udp`] but the
-/// inner chain factories still bail with "not yet implemented".
-/// `NvDsUdp` is rejected up-front (Phase 2). The mapping is
-/// provided eagerly so the helper stays exhaustive as the new
-/// variants come online.
+/// `Mxl` carries data via the MXL Domain. `Udp` and `Udp2` reach
+/// this helper once `validate_and_open` resolves an SDP into a
+/// [`TransportConfig::Udp`] and the inner chain factories
+/// instantiate `udpsrc` / `udpsink`. `NvDsUdp` is rejected
+/// up-front because the DeepStream `nvdsudp*` elements aren't
+/// wired in yet. The mapping is provided eagerly so the helper
+/// stays exhaustive across all `Transport` variants.
 pub(crate) fn transport_to_proto(t: Transport) -> ProtoTransport {
     match t {
         Transport::Mxl => ProtoTransport::Mxl,
@@ -492,10 +492,10 @@ pub(crate) fn validate_and_open(
             resolve_inner_config_udp(element, settings, UdpVariant::V2, resolved_transport_file)?
         }
         Transport::NvDsUdp => bail!(
-            "{element}: transport=nvdsudp is not yet implemented (Phase 2 — \
-             ST 2110 via DeepStream's nvdsudp elements, gated on \
-             ConnectX/Rivermax hardware); only `mxl`, `udp` and `udp2` are \
-             implemented today"
+            "{element}: transport=nvdsudp is not yet implemented — strict \
+             ST 2110 receive/send via DeepStream's `nvdsudp` elements is \
+             gated on ConnectX / Rivermax hardware; only `mxl`, `udp` and \
+             `udp2` are implemented today"
         ),
     };
 
@@ -1261,8 +1261,8 @@ pub(crate) fn make_activation_plan(
                 ack: ActivationAck::Failure {
                     reason: format!(
                         "{element}: activation rejected — transport=nvdsudp is not yet \
-                         implemented (Phase 2 — ST 2110 via DeepStream's nvdsudp \
-                         elements, gated on ConnectX/Rivermax hardware)",
+                         implemented; strict ST 2110 send/receive via DeepStream's \
+                         `nvdsudp` elements is gated on ConnectX / Rivermax hardware",
                     ),
                 },
             };
@@ -1563,13 +1563,14 @@ mod tests {
         }
     }
 
-    /// Phase-3 UDP dispatch surfaces in [`decide_inner_config_udp`]
+    /// UDP transport dispatch surfaces in [`decide_inner_config_udp`]
     /// and [`make_activation_plan`] (for `Transport::Udp` /
-    /// `Transport::Udp2` / `Transport::NvDsUdp`). The chain factories
-    /// (`crate::inner::build_udpsink` / `build_udpsrc`) still bail
-    /// with "not yet implemented", but the SDP module is reachable
-    /// at runtime: the resolved `TransportConfig::Udp` carries a
-    /// real `UdpMedia` produced by [`crate::sdp::parse_sdp`].
+    /// `Transport::Udp2` / `Transport::NvDsUdp`). The resolved
+    /// `TransportConfig::Udp` carries a real `UdpMedia` produced by
+    /// [`crate::sdp::parse_sdp`], which the chain factories
+    /// (`crate::inner::build_udpsink` / `build_udpsrc`) then
+    /// turn into `udpsrc` / `udpsink` GStreamer chains;
+    /// `Transport::NvDsUdp` is rejected before reaching either.
     mod udp_dispatch {
         use super::*;
 

@@ -33,6 +33,12 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# POSIX getifaddrs for resolving an IPv4/IPv6 host address back to its
+# kernel interface name (NMOS carries IP, GStreamer udpsrc/udpsink want
+# `multicast-iface=<name>`).
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", default-features = false, features = ["net"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # Used by the multi-flow integration test (tests/multi_flow_video_data.rs)

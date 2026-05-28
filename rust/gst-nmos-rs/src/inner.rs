@@ -640,13 +640,19 @@ pub(crate) fn build_mxlsrc(
 /// `bind-port` is set when `primary.source_port` is `Some` so
 /// the IS-04 / IS-05 advertised source port matches the wire.
 /// `bind-address` is set when `primary.interface_ip` is `Some` so
-/// unicast send routing picks the right NIC; the multicast-side
-/// selection (the kernel-level `IP_MULTICAST_IF` socket option,
-/// exposed on udpsink as the `multicast-iface` *interface name*)
-/// is deferred — resolving interface_ip → iface name needs
-/// `getifaddrs` and is plumbed in a follow-up commit. On
-/// single-NIC hosts multicast send takes the default interface
-/// anyway, which is what the demo script exercises today.
+/// unicast send routing picks the right NIC. For multicast
+/// destinations [`multicast_iface_name`] additionally resolves
+/// `interface_ip` to its kernel interface name and pins it on
+/// `udpsink.multicast-iface` — `bind-address` alone does *not*
+/// constrain Linux multicast egress (`IP_MULTICAST_IF` does), so
+/// without this set on a multi-NIC host the kernel's default
+/// multicast route picks the NIC, which is wrong for the SMPTE
+/// "red/blue" two-NIC layout. Unknown interface IPs (operator
+/// misconfiguration, or an `interface_ip` that lives on a
+/// different host) silently fall back to "leave `multicast-iface`
+/// unset and let the kernel's default-route pick" — that's the
+/// only safe answer when we can't prove which NIC was intended,
+/// and matches single-NIC hosts where there's only one choice.
 pub(crate) fn build_udpsink(
     media: &UdpMedia,
     variant: UdpVariant,
@@ -702,6 +708,12 @@ pub(crate) fn build_udpsink(
     }
     if let Some(addr) = &media.primary.interface_ip {
         udpsink.set_property("bind-address", addr);
+    }
+    if let Some(iface) = multicast_iface_name(
+        &media.primary.destination_ip,
+        media.primary.interface_ip.as_deref(),
+    ) {
+        udpsink.set_property("multicast-iface", &iface);
     }
 
     let bin = gst::Bin::with_name("nmossink-udp");
@@ -817,25 +829,173 @@ fn ptime_ns_from_rtp_caps(rtp_s: &gst::StructureRef) -> Result<Option<i64>, anyh
     Ok(Some(ns as i64))
 }
 
+/// Resolve the kernel interface name to set on `multicast-iface`
+/// when the destination is multicast and `interface_ip` is bound on
+/// a local NIC. `None` collapses every "leave the property unset"
+/// case:
+///
+/// - Unicast destination — no multicast routing decision to pin;
+///   `bind-address` already covers source-IP selection for senders
+///   and the kernel's destination-IP demux covers receivers.
+/// - `interface_ip` absent on the [`UdpLeg`] — user didn't express
+///   a NIC preference; let the kernel pick.
+/// - Malformed `destination_ip` or `interface_ip` — we don't try to
+///   guess, but we also don't fail the chain factory; the SDP parser
+///   would have rejected these already.
+/// - `interface_ip` not bound on any local NIC ([`crate::iface::iface_name_for_ip`]
+///   returns `None`) — operator misconfiguration or the SDP came
+///   from a different host; falling back to the default route is the
+///   only safe answer when we can't prove which NIC the user meant.
+fn multicast_iface_name(destination_ip: &str, interface_ip: Option<&str>) -> Option<String> {
+    let dest = destination_ip.parse::<std::net::IpAddr>().ok()?;
+    if !dest.is_multicast() {
+        return None;
+    }
+    let iface = interface_ip?.parse::<std::net::IpAddr>().ok()?;
+    crate::iface::iface_name_for_ip(iface)
+}
+
 /// Build the inner UDP/RTP source chain for `nmossrc`. Always
 /// constructs a sub-bin:
-/// `udpsrc ! capsfilter(media.rtp_caps) ! rtp<essence>depay ! capsfilter(advertise_caps)?`
-/// (or the gst-plugins-rs `udpsrc2` + `*depay2` family for
-/// [`UdpVariant::V2`]) with the trailing capsfilter's (or the
-/// depayloader's) src pad ghosted out so the outer
+/// `udpsrc(caps=rtp_caps) ! rtp<essence>depay [! capsfilter(advertise_caps)]`
+/// (with the depayloader picked via [`select_rtp_factory`], so
+/// [`UdpVariant::V2`] auto-upgrades to the `gst-plugins-rs`
+/// `*depay2` sibling when present and falls back to V1 when not)
+/// with the trailing element's src pad ghosted out so the outer
 /// [`rebuild_chain`] swap mechanism plugs it in directly behind the
 /// anchor.
 ///
-/// **Not yet implemented.** See [`build_udpsink`].
+/// **`rtpjitterbuffer` is intentionally not included.** ST 2110 RTP
+/// is open-loop multicast (no NACK feedback path — retransmission is
+/// impossible), and single-RTP-flow packet order is preserved by
+/// every modern Ethernet switch and NIC RSS bucket (the 5-tuple hash
+/// keeps a flow on one path / one receive queue). The remaining
+/// services `rtpjitterbuffer` provides — `do-lost` events for loss
+/// detection, the `stats` `GstStructure` for telemetry — only earn
+/// their cost (~one frame of latency at the default 200 ms; even
+/// tuned to 40 ms still meaningful for low-latency RTP) if the
+/// element surface plumbs them out to user code, which `nmossrc`
+/// doesn't yet. Adding the jitterbuffer is a couple of `bin.add` /
+/// `link` lines slotted between `udpsrc` and the depayloader; that
+/// change should land alongside the surface that justifies its
+/// latency cost (an `rtp-latency` element property + an `rtp-stats`
+/// readback or a periodic element `GstMessage`). Strict ST 2110
+/// reception with kernel-bypass + PTP-aligned timing belongs to
+/// `nvdsudpsrc` rather than this OSS chain.
+///
+/// `udpsrc.caps` is set to `media.rtp_caps` so downstream caps
+/// queries (and the depayloader's pad negotiation) see the exact
+/// `application/x-rtp` shape from the SDP — no separate
+/// `capsfilter` needed for the RTP side.
+///
+/// `multicast-iface` (via [`multicast_iface_name`]) is set only
+/// when the destination is multicast and the configured
+/// `interface_ip` resolves to a local NIC. For multicast receive
+/// this matters *more* than for sender egress: without it, the
+/// kernel sends `IGMP_JOIN_GROUP` on whichever interface its
+/// multicast route table picks (often the default route, wrong for
+/// SMPTE red/blue layouts), and packets arriving on the *other*
+/// NIC are silently dropped with no error.
+///
+/// `multicast-source` is set to `+<source_ip>` when the SDP carried
+/// an SSM `a=source-filter:incl IN IP4 …` line. This pins the
+/// kernel-level SSM include filter (`MCAST_JOIN_SOURCE_GROUP`) so
+/// only packets from the advertised sender are accepted — the
+/// canonical NMOS / ST 2110 SSM scheme. Only applied for multicast
+/// destinations; for unicast there's nothing to filter against.
 pub(crate) fn build_udpsrc(
-    _media: &UdpMedia,
-    _variant: UdpVariant,
-    _advertise_caps: Option<&gst::Caps>,
+    media: &UdpMedia,
+    variant: UdpVariant,
+    advertise_caps: Option<&gst::Caps>,
 ) -> Result<gst::Element, anyhow::Error> {
-    bail!(
-        "UDP/RTP receiver chain is not yet implemented; the chain-factory dispatch \
-         is wired but the inner element construction lands in a follow-up commit",
-    );
+    let rtp_s = media
+        .rtp_caps
+        .structure(0)
+        .ok_or_else(|| anyhow!("UdpMedia.rtp_caps is empty (no structure(0))"))?;
+    let encoding_name = rtp_s
+        .get::<&str>("encoding-name")
+        .map_err(|e| anyhow!("UdpMedia.rtp_caps missing `encoding-name`: {e}"))?;
+
+    let depayloader_factory = select_rtp_factory("depay", media.format, encoding_name, variant)?;
+    let depayloader = gst::ElementFactory::make(&depayloader_factory)
+        .name("nmossrc-depayloader")
+        .build()
+        .with_context(|| format!("instantiating depayloader `{depayloader_factory}`"))?;
+
+    let udpsrc = gst::ElementFactory::make("udpsrc")
+        .name("nmossrc-udpsrc")
+        .property("address", &media.primary.destination_ip)
+        .property("port", i32::from(media.primary.destination_port))
+        .property("caps", &media.rtp_caps)
+        .build()
+        .with_context(|| {
+            format!(
+                "instantiating `udpsrc` (address={}, port={})",
+                media.primary.destination_ip, media.primary.destination_port,
+            )
+        })?;
+
+    let dest_is_multicast = media
+        .primary
+        .destination_ip
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_multicast());
+
+    if let Some(iface) = multicast_iface_name(
+        &media.primary.destination_ip,
+        media.primary.interface_ip.as_deref(),
+    ) {
+        udpsrc.set_property("multicast-iface", &iface);
+    }
+    if dest_is_multicast {
+        if let Some(source_ip) = &media.primary.source_ip {
+            udpsrc.set_property("multicast-source", format!("+{source_ip}"));
+        }
+    }
+
+    let bin = gst::Bin::with_name("nmossrc-udp");
+    bin.add_many([&udpsrc, &depayloader])
+        .map_err(|e| anyhow!("adding udpsrc + depayloader to inner bin: {e}"))?;
+    udpsrc
+        .link(&depayloader)
+        .with_context(|| "linking udpsrc to depayloader")?;
+
+    let tail_src_pad = match advertise_caps {
+        None => depayloader
+            .static_pad("src")
+            .ok_or_else(|| anyhow!("depayloader `{depayloader_factory}` missing src pad"))?,
+        Some(caps) => {
+            let capsfilter = gst::ElementFactory::make("capsfilter")
+                .name("nmossrc-caps")
+                .property("caps", caps)
+                .build()
+                .map_err(|e| {
+                    anyhow!("instantiating `capsfilter` for nmossrc caps advertisement: {e}")
+                })?;
+            bin.add(&capsfilter)
+                .map_err(|e| anyhow!("adding tail capsfilter to inner bin: {e}"))?;
+            depayloader
+                .link(&capsfilter)
+                .with_context(|| "linking depayloader to tail capsfilter")?;
+            capsfilter
+                .static_pad("src")
+                .ok_or_else(|| anyhow!("tail capsfilter missing src pad"))?
+        }
+    };
+
+    let ghost = gst::GhostPad::builder(gst::PadDirection::Src)
+        .name("src")
+        .build();
+    ghost
+        .set_target(Some(&tail_src_pad))
+        .map_err(|e| anyhow!("setting inner ghost src target: {e}"))?;
+    ghost
+        .set_active(true)
+        .map_err(|e| anyhow!("activating inner ghost src: {e}"))?;
+    bin.add_pad(&ghost)
+        .map_err(|e| anyhow!("adding ghost src to inner bin: {e}"))?;
+
+    Ok(bin.upcast())
 }
 
 fn require_mxl_factory(name: &'static str) -> Result<(), anyhow::Error> {
@@ -1174,19 +1334,218 @@ mod tests {
         assert!(format!("{err:#}").contains("positive"));
     }
 
-    // The UDP receiver-side `build_udpsrc` factory is still a stub
-    // until chunk 3 of the Phase 3 stack lands; the test below pins
-    // the current contract: returns `Err` with a clearly-attributed
-    // message until the chain construction lands.
+    /// `minimal_udp_media` with `interface_ip=127.0.0.1` so the
+    /// multicast-iface resolver finds a real local NIC (`lo` on Linux,
+    /// `lo0` on macOS) and the test doesn't depend on which physical
+    /// NICs the host happens to expose. Loopback is also multicast-
+    /// capable, so `IP_MULTICAST_IF` setsockopt against it isn't
+    /// nonsensical.
+    fn multicast_udp_media_with_loopback_iface() -> UdpMedia {
+        let mut media = minimal_udp_media();
+        media.primary.interface_ip = Some("127.0.0.1".to_owned());
+        media
+    }
 
     #[test]
-    fn build_udpsrc_bails_with_not_implemented() {
-        let err = build_udpsrc(&minimal_udp_media(), UdpVariant::V2, None)
-            .expect_err("UDP src stub must bail");
+    fn build_udpsink_pins_multicast_iface_when_destination_is_multicast() {
+        let elem = build_udpsink(&multicast_udp_media_with_loopback_iface(), UdpVariant::V1)
+            .expect("multicast sender chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let udpsink = child(&bin, "nmossink-udpsink");
+        let iface = udpsink.property::<String>("multicast-iface");
+        assert!(
+            !iface.is_empty(),
+            "multicast-iface must be set when destination is multicast and \
+             interface_ip is bound on a local NIC (loopback resolves to a \
+             non-empty name on every supported platform)",
+        );
+    }
+
+    #[test]
+    fn build_udpsink_skips_multicast_iface_when_destination_is_unicast() {
+        let mut media = minimal_udp_media();
+        media.primary.destination_ip = "192.0.2.50".to_owned();
+        media.primary.interface_ip = Some("127.0.0.1".to_owned());
+        let elem = build_udpsink(&media, UdpVariant::V1)
+            .expect("unicast sender chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let udpsink = child(&bin, "nmossink-udpsink");
+        assert_eq!(
+            udpsink.property::<Option<String>>("multicast-iface"),
+            None,
+            "multicast-iface must remain unset for unicast destinations (the \
+             property is only meaningful for IP_MULTICAST_IF / IGMP group joins)",
+        );
+    }
+
+    #[test]
+    fn build_udpsrc_video_v1_uses_rtpvrawdepay_and_udpsrc() {
+        let elem = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, None)
+            .expect("V1 video receiver chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let udpsrc = child(&bin, "nmossrc-udpsrc");
+        assert_eq!(udpsrc.factory().expect("udpsrc has a factory").name(), "udpsrc");
+        assert_eq!(udpsrc.property::<String>("address"), "239.1.1.1");
+        assert_eq!(udpsrc.property::<i32>("port"), 5004);
+        let caps_on_udpsrc = udpsrc
+            .property::<Option<gst::Caps>>("caps")
+            .expect("udpsrc.caps must be pinned to the RTP shape from the SDP");
+        let s = caps_on_udpsrc.structure(0).expect("rtp caps structure(0)");
+        assert_eq!(s.name(), "application/x-rtp");
+        assert_eq!(s.get::<&str>("encoding-name").unwrap(), "RAW");
+        let depay = child(&bin, "nmossrc-depayloader");
+        assert_eq!(
+            depay.factory().expect("depayloader has a factory").name(),
+            "rtpvrawdepay",
+            "V1 video chain must use gst-plugins-good `rtpvrawdepay`",
+        );
+        let ghost = bin
+            .static_pad("src")
+            .expect("inner bin missing `src` ghost pad");
+        assert!(ghost.is::<gst::GhostPad>());
+    }
+
+    #[test]
+    fn build_udpsrc_audio_l24_uses_rtpl24depay() {
+        let elem = build_udpsrc(&audio_l24_ptime_media(), UdpVariant::V1, None)
+            .expect("L24 audio receiver chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let depay = child(&bin, "nmossrc-depayloader");
+        assert_eq!(
+            depay.factory().expect("depayloader has a factory").name(),
+            "rtpL24depay",
+            "L24 audio chain must use gst-plugins-good `rtpL24depay`",
+        );
+    }
+
+    #[test]
+    fn build_udpsrc_audio_l16_uses_rtpl16depay() {
+        let mut media = audio_l24_ptime_media();
+        media.rtp_caps = gst::Caps::from_str(
+            "application/x-rtp,media=audio,clock-rate=48000,encoding-name=L16,\
+             encoding-params=(string)2,payload=97",
+        )
+        .expect("static rtp caps parse");
+        let elem = build_udpsrc(&media, UdpVariant::V1, None)
+            .expect("L16 audio receiver chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let depay = child(&bin, "nmossrc-depayloader");
+        assert_eq!(
+            depay.factory().expect("depayloader has a factory").name(),
+            "rtpL16depay",
+        );
+    }
+
+    #[test]
+    fn build_udpsrc_pins_multicast_iface_when_destination_is_multicast() {
+        let elem = build_udpsrc(&multicast_udp_media_with_loopback_iface(), UdpVariant::V1, None)
+            .expect("multicast receiver chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let udpsrc = child(&bin, "nmossrc-udpsrc");
+        let iface = udpsrc.property::<String>("multicast-iface");
+        assert!(
+            !iface.is_empty(),
+            "multicast-iface must be set on udpsrc when joining a multicast \
+             group; on multi-NIC hosts a missing value silently joins on the \
+             wrong NIC and the receiver appears dead with no error",
+        );
+    }
+
+    #[test]
+    fn build_udpsrc_skips_multicast_iface_when_destination_is_unicast() {
+        let mut media = minimal_udp_media();
+        media.primary.destination_ip = "192.0.2.50".to_owned();
+        media.primary.interface_ip = Some("127.0.0.1".to_owned());
+        let elem = build_udpsrc(&media, UdpVariant::V1, None)
+            .expect("unicast receiver chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let udpsrc = child(&bin, "nmossrc-udpsrc");
+        assert_eq!(
+            udpsrc.property::<Option<String>>("multicast-iface"),
+            None,
+        );
+    }
+
+    #[test]
+    fn build_udpsrc_pins_ssm_source_filter_via_multicast_source() {
+        let mut media = multicast_udp_media_with_loopback_iface();
+        media.primary.source_ip = Some("192.0.2.100".to_owned());
+        let elem = build_udpsrc(&media, UdpVariant::V1, None)
+            .expect("SSM receiver chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let udpsrc = child(&bin, "nmossrc-udpsrc");
+        assert_eq!(
+            udpsrc.property::<String>("multicast-source"),
+            "+192.0.2.100",
+            "udpsrc.multicast-source format is `+<source-ip>` for SSM include \
+             mode; the `+` prefix is mandatory per the property's documented grammar",
+        );
+    }
+
+    #[test]
+    fn build_udpsrc_omits_ssm_filter_for_unicast_destinations() {
+        let mut media = minimal_udp_media();
+        media.primary.destination_ip = "192.0.2.50".to_owned();
+        media.primary.source_ip = Some("192.0.2.100".to_owned());
+        let elem = build_udpsrc(&media, UdpVariant::V1, None)
+            .expect("unicast receiver chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let udpsrc = child(&bin, "nmossrc-udpsrc");
+        assert_eq!(
+            udpsrc.property::<Option<String>>("multicast-source"),
+            None,
+            "multicast-source is an SSM filter; for unicast destinations the \
+             IP layer already filters by source address and the property has \
+             no meaning",
+        );
+    }
+
+    #[test]
+    fn build_udpsrc_pins_advertise_caps_via_tail_capsfilter() {
+        let advertise = gst::Caps::from_str(
+            "video/x-raw,format=UYVP,width=1920,height=1080,framerate=50/1",
+        )
+        .unwrap();
+        let elem = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, Some(&advertise))
+            .expect("receiver chain with advertise_caps must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let capsfilter = child(&bin, "nmossrc-caps");
+        assert_eq!(capsfilter.factory().unwrap().name(), "capsfilter");
+        let pinned = capsfilter.property::<gst::Caps>("caps");
+        assert!(
+            pinned.can_intersect(&advertise),
+            "tail capsfilter must carry the advertise_caps the caller passed in",
+        );
+    }
+
+    #[test]
+    fn build_udpsrc_rejects_unsupported_essence() {
+        let mut media = minimal_udp_media();
+        media.rtp_caps = gst::Caps::from_str(
+            "application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96",
+        )
+        .expect("static rtp caps parse");
+        let err = build_udpsrc(&media, UdpVariant::V1, None)
+            .expect_err("H264 must be rejected (today only RAW/L24/L16 are supported)");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("not yet implemented"),
-            "expected `not yet implemented` in error: {msg}",
+            msg.contains("unsupported essence")
+                && msg.contains("encoding-name=`H264`"),
+            "expected unsupported-essence attribution: {msg}",
+        );
+    }
+
+    #[test]
+    fn build_udpsrc_v2_falls_back_to_v1_when_depay2_missing() {
+        let elem = build_udpsrc(&audio_l24_ptime_media(), UdpVariant::V2, None)
+            .expect("V2 receiver must fall back to V1 depayloader if `*depay2` absent");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let depay = child(&bin, "nmossrc-depayloader");
+        let factory_name = depay.factory().expect("depayloader has a factory").name();
+        assert!(
+            factory_name == "rtpL24depay2" || factory_name == "rtpL24depay",
+            "V2 dispatch must pick `rtpL24depay2` if present, else fall back to \
+             `rtpL24depay`; got `{factory_name}`",
         );
     }
 }

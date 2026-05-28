@@ -132,6 +132,7 @@ use gstreamer as gst;
 mod daemon;
 mod domain;
 mod flow_def;
+mod iface;
 mod inner;
 mod nmossink;
 mod nmossrc;

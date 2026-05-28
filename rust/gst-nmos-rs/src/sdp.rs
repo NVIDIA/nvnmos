@@ -32,11 +32,12 @@
 //!   * Video: RFC 4175 `encoding-name=RAW`,
 //!     `sampling=YCbCr-4:2:2` at `depth=10` (→ `format=UYVP`) and
 //!     `depth=8` (→ `format=UYVY`); other samplings and bit-depths
-//!     land in a follow-up commit.
+//!     (RGB/RGBA/BGR/BGRA, YCbCr-4:4:4, YCbCr-4:2:0, YCbCr-4:1:1)
+//!     are not yet handled.
 //!   * Audio: ST 2110-30 / RFC 3190 `L24` (→ `S24BE`) and
 //!     RFC 3551 `L16` (→ `S16BE`); `L8` is intentionally
 //!     unsupported (out of scope for ST 2110-30).
-//!   * ANC `smpte291` essence lands in a follow-up commit.
+//!   * ANC `smpte291` essence is not yet handled.
 //!
 //! `a=ptime:` / `a=maxptime:` are surfaced on the RTP caps as
 //! `a-ptime` / `a-maxptime` so that `set_media_from_caps`
