@@ -136,6 +136,7 @@ mod inner;
 mod nmossink;
 mod nmossrc;
 mod runtime;
+mod sdp;
 mod session;
 mod types;
 

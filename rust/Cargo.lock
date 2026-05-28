@@ -521,6 +521,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-app",
  "gstreamer-base",
+ "gstreamer-sdp",
  "gstreamer-video",
  "hyper-util",
  "nvnmos-rpc",
@@ -619,6 +620,29 @@ checksum = "1b844f3559b6ab0379b4b771261643783ae4e0ffa71d5f5f46e33b7acf66b752"
 dependencies = [
  "glib-sys",
  "gobject-sys",
+ "gstreamer-sys",
+ "libc",
+ "system-deps",
+]
+
+[[package]]
+name = "gstreamer-sdp"
+version = "0.24.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50baa076d2527998da6f496f8191d482542c65b2d46f3f5ad080f6d4bec38e68"
+dependencies = [
+ "glib",
+ "gstreamer",
+ "gstreamer-sdp-sys",
+]
+
+[[package]]
+name = "gstreamer-sdp-sys"
+version = "0.24.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c85463e73afed803cf41395ebe534438e0a7ab9142a2cae2bb419b6a56f9387"
+dependencies = [
+ "glib-sys",
  "gstreamer-sys",
  "libc",
  "system-deps",
