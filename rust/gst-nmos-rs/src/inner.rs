@@ -604,19 +604,190 @@ pub(crate) fn build_mxlsrc(
 /// [`rebuild_chain`] swap mechanism plugs it in directly behind the
 /// anchor.
 ///
-/// **Not yet implemented.** This factory is wired into
-/// `nmossink::execute_activation_plan` so the dispatch shape compiles
-/// against `TransportConfig::Udp`; the matching arms only become
-/// reachable at runtime once `validate_and_open` stops rejecting
-/// non-MXL transports.
+/// `pt` is taken from `media.rtp_caps.payload`; for audio
+/// essences `min-ptime` / `max-ptime` are pinned (in nanoseconds)
+/// from the `a-ptime` field [`crate::sdp::parse_sdp`] hoists onto
+/// the RTP caps so the receiver sees exactly the packet duration
+/// the SDP advertises. `ssrc` is left at the payloader's default
+/// (random per element instance) — the daemon-published SDP does
+/// not advertise an SSRC.
+///
+/// `udpsink.async=false` mirrors `mxlsink`'s rationale (see
+/// [`build_mxlsink`]'s doc): mid-stream activation behind the
+/// anchor's block-probe needs synchronous READY→PAUSED so the
+/// state-change resolves before the probe is removed and buffers
+/// start flowing. `sync=true` preserves RTP packet timing.
+///
+/// `bind-port` is set when `primary.source_port` is `Some` so
+/// the IS-04 / IS-05 advertised source port matches the wire.
+/// `bind-address` is set when `primary.interface_ip` is `Some` so
+/// unicast send routing picks the right NIC; the multicast-side
+/// selection (the kernel-level `IP_MULTICAST_IF` socket option,
+/// exposed on udpsink as the `multicast-iface` *interface name*)
+/// is deferred — resolving interface_ip → iface name needs
+/// `getifaddrs` and is plumbed in a follow-up commit. On
+/// single-NIC hosts multicast send takes the default interface
+/// anyway, which is what the demo script exercises today.
 pub(crate) fn build_udpsink(
-    _media: &UdpMedia,
-    _variant: UdpVariant,
+    media: &UdpMedia,
+    variant: UdpVariant,
 ) -> Result<gst::Element, anyhow::Error> {
-    bail!(
-        "UDP/RTP sender chain is not yet implemented; the chain-factory dispatch \
-         is wired but the inner element construction lands in a follow-up commit",
-    );
+    let rtp_s = media
+        .rtp_caps
+        .structure(0)
+        .ok_or_else(|| anyhow!("UdpMedia.rtp_caps is empty (no structure(0))"))?;
+    let encoding_name = rtp_s
+        .get::<&str>("encoding-name")
+        .map_err(|e| anyhow!("UdpMedia.rtp_caps missing `encoding-name`: {e}"))?;
+    let pt = rtp_s
+        .get::<i32>("payload")
+        .map_err(|e| anyhow!("UdpMedia.rtp_caps missing `payload` field: {e}"))?;
+    if !(0..=127).contains(&pt) {
+        bail!(
+            "UdpMedia.rtp_caps `payload`={pt} out of valid RTP payload-type range 0..=127"
+        );
+    }
+    let ptime_ns = if matches!(media.format, FlowFormat::Audio) {
+        ptime_ns_from_rtp_caps(rtp_s)?
+    } else {
+        None
+    };
+
+    let payloader_factory = select_rtp_factory("pay", media.format, encoding_name, variant)?;
+    let payloader = gst::ElementFactory::make(&payloader_factory)
+        .name("nmossink-payloader")
+        .property("pt", pt as u32)
+        .build()
+        .with_context(|| {
+            format!("instantiating payloader `{payloader_factory}` (pt={pt})")
+        })?;
+    if let Some(ns) = ptime_ns {
+        payloader.set_property("min-ptime", ns);
+        payloader.set_property("max-ptime", ns);
+    }
+
+    let udpsink = gst::ElementFactory::make("udpsink")
+        .name("nmossink-udpsink")
+        .property("host", &media.primary.destination_ip)
+        .property("port", i32::from(media.primary.destination_port))
+        .property("async", false)
+        .property("sync", true)
+        .property("auto-multicast", true)
+        .build()
+        .with_context(|| {
+            format!(
+                "instantiating `udpsink` (host={}, port={})",
+                media.primary.destination_ip, media.primary.destination_port,
+            )
+        })?;
+    if let Some(port) = media.primary.source_port {
+        udpsink.set_property("bind-port", i32::from(port));
+    }
+    if let Some(addr) = &media.primary.interface_ip {
+        udpsink.set_property("bind-address", addr);
+    }
+
+    let bin = gst::Bin::with_name("nmossink-udp");
+    bin.add_many([&payloader, &udpsink])
+        .map_err(|e| anyhow!("adding payloader + udpsink to inner bin: {e}"))?;
+    payloader
+        .link(&udpsink)
+        .with_context(|| "linking payloader to udpsink")?;
+
+    let payloader_sink = payloader
+        .static_pad("sink")
+        .ok_or_else(|| anyhow!("payloader `{payloader_factory}` missing sink pad"))?;
+    let ghost = gst::GhostPad::builder(gst::PadDirection::Sink)
+        .name("sink")
+        .build();
+    ghost
+        .set_target(Some(&payloader_sink))
+        .map_err(|e| anyhow!("setting inner ghost sink target: {e}"))?;
+    ghost
+        .set_active(true)
+        .map_err(|e| anyhow!("activating inner ghost sink: {e}"))?;
+    bin.add_pad(&ghost)
+        .map_err(|e| anyhow!("adding ghost sink to inner bin: {e}"))?;
+
+    Ok(bin.upcast())
+}
+
+/// Look up the v1 (`gst-plugins-good`) factory name for an
+/// `rtp<essence><suffix>` element pair, optionally upgrading to the
+/// v2 (`gst-plugins-rs`) sibling when [`UdpVariant::V2`] is
+/// requested.
+///
+/// `suffix` is `"pay"` for senders or `"depay"` for receivers;
+/// `stem` is `"rtpvraw"` / `"rtpL24"` / `"rtpL16"` based on the
+/// essence shape (FlowFormat + RTP encoding-name).
+///
+/// V2 falls back to V1 transparently when the `*pay2` / `*depay2`
+/// sibling isn't present — `gst-plugins-rs` ships v2 forms
+/// piecemeal (e.g. `rtpvrawpay2` lands separately from
+/// `rtpL24pay2`) so the V2 dispatch shouldn't break in environments
+/// that have only some of them.
+fn select_rtp_factory(
+    suffix: &str,
+    format: FlowFormat,
+    encoding_name: &str,
+    variant: UdpVariant,
+) -> Result<String, anyhow::Error> {
+    let stem = match (format, encoding_name) {
+        (FlowFormat::Video, "RAW") => "rtpvraw",
+        (FlowFormat::Audio, "L24") => "rtpL24",
+        (FlowFormat::Audio, "L16") => "rtpL16",
+        _ => bail!(
+            "unsupported essence for UDP/RTP `{suffix}`: format={format:?}, \
+             encoding-name=`{encoding_name}` (today RFC 4175 `RAW` video and \
+             ST 2110-30 `L24` / `L16` audio are supported)"
+        ),
+    };
+    let v1 = format!("{stem}{suffix}");
+    if gst::ElementFactory::find(&v1).is_none() {
+        bail!(
+            "GStreamer factory `{v1}` not found; install `gst-plugins-good` and \
+             ensure it's on `GST_PLUGIN_PATH`"
+        );
+    }
+    match variant {
+        UdpVariant::V1 => Ok(v1),
+        UdpVariant::V2 => {
+            let v2 = format!("{v1}2");
+            if gst::ElementFactory::find(&v2).is_some() {
+                Ok(v2)
+            } else {
+                Ok(v1)
+            }
+        }
+    }
+}
+
+/// Convert the `a-ptime` field hoisted onto the RTP caps by
+/// [`crate::sdp::parse_sdp`] into nanoseconds for `rtpaudiopay`'s
+/// `min-ptime` / `max-ptime` properties. SDP carries ptime in
+/// (possibly fractional) milliseconds; the payloader properties
+/// are `int64` nanoseconds.
+///
+/// Returns `Ok(None)` when the field is absent (no ptime to pin —
+/// the payloader will use its default packetisation). Returns
+/// `Err` for a present-but-malformed value (non-numeric, ≤0,
+/// overflows i64 ns), which we want to surface clearly rather
+/// than silently fall back to defaults.
+fn ptime_ns_from_rtp_caps(rtp_s: &gst::StructureRef) -> Result<Option<i64>, anyhow::Error> {
+    let Ok(s) = rtp_s.get::<&str>("a-ptime") else {
+        return Ok(None);
+    };
+    let ms: f64 = s
+        .parse()
+        .with_context(|| format!("parsing a-ptime=`{s}` as milliseconds"))?;
+    if !ms.is_finite() || ms <= 0.0 {
+        bail!("a-ptime=`{s}` ms must be a finite positive value");
+    }
+    let ns = ms * 1_000_000.0;
+    if ns > i64::MAX as f64 {
+        bail!("a-ptime=`{s}` ms overflows i64 nanoseconds");
+    }
+    Ok(Some(ns as i64))
 }
 
 /// Build the inner UDP/RTP source chain for `nmossrc`. Always
@@ -737,32 +908,227 @@ mod tests {
             )
             .expect("static rtp caps parse"),
             raw_caps: gst::Caps::from_str(
-                "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1",
+                "video/x-raw,format=UYVP,width=1920,height=1080,framerate=50/1",
             )
             .expect("static raw caps parse"),
         }
     }
 
-    // The two stub factories are wired into the dispatch arms in
-    // `nmossink/imp.rs` and `nmossrc/imp.rs` so when the
-    // [`crate::session::TransportConfig::Udp`] variant becomes
-    // reachable (i.e. once `validate_and_open` stops rejecting non-
-    // MXL transports) the dispatch lands here. These tests pin the
-    // current contract: until the chain-construction work lands,
-    // both stubs return `Err` with a clearly-attributed message.
-    // When the real implementations come in, these flip into
-    // success-path tests for the chain bins.
+    /// L24 stereo 48 kHz with `a-ptime=0.125` already hoisted onto
+    /// `rtp_caps` (mirroring what `sdp::parse_sdp` produces for an
+    /// SDP carrying `a=ptime:0.125`). 0.125 ms = 125 µs = 125_000 ns
+    /// — see `audio_l24_ptime_pins_min_max_ptime_ns` below.
+    fn audio_l24_ptime_media() -> UdpMedia {
+        init_gst();
+        UdpMedia {
+            format: FlowFormat::Audio,
+            primary: UdpLeg {
+                destination_ip: "239.2.2.2".to_owned(),
+                destination_port: 5004,
+                interface_ip: Some("192.0.2.10".to_owned()),
+                source_ip: None,
+                source_port: Some(5005),
+            },
+            secondary: None,
+            rtp_caps: gst::Caps::from_str(
+                "application/x-rtp,media=audio,clock-rate=48000,encoding-name=L24,\
+                 encoding-params=(string)2,payload=97,a-ptime=(string)0.125",
+            )
+            .expect("static rtp caps parse"),
+            raw_caps: gst::Caps::from_str(
+                "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved",
+            )
+            .expect("static raw caps parse"),
+        }
+    }
+
+    /// Find a child element of `bin` by GstObject name (which is
+    /// what we set with the builder's `name(...)` call in
+    /// [`build_udpsink`]).
+    fn child(bin: &gst::Bin, name: &str) -> gst::Element {
+        bin.by_name(name)
+            .unwrap_or_else(|| panic!("inner bin missing child `{name}`"))
+    }
 
     #[test]
-    fn build_udpsink_bails_with_not_implemented() {
-        let err = build_udpsink(&minimal_udp_media(), UdpVariant::V1)
-            .expect_err("UDP sink stub must bail");
-        let msg = format!("{err:#}");
+    fn build_udpsink_video_v1_uses_rtpvrawpay_and_udpsink() {
+        let elem = build_udpsink(&minimal_udp_media(), UdpVariant::V1)
+            .expect("V1 video sender chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let pay = child(&bin, "nmossink-payloader");
+        assert_eq!(
+            pay.factory().expect("payloader has a factory").name(),
+            "rtpvrawpay",
+            "V1 video chain must use gst-plugins-good `rtpvrawpay`",
+        );
+        assert_eq!(
+            pay.property::<u32>("pt"),
+            96,
+            "payloader `pt` must match rtp_caps `payload`",
+        );
+        let udpsink = child(&bin, "nmossink-udpsink");
+        assert_eq!(udpsink.factory().expect("udpsink has a factory").name(), "udpsink");
+        assert_eq!(udpsink.property::<String>("host"), "239.1.1.1");
+        assert_eq!(udpsink.property::<i32>("port"), 5004);
+        assert!(!udpsink.property::<bool>("async"));
+        assert!(udpsink.property::<bool>("sync"));
+        let ghost = bin
+            .static_pad("sink")
+            .expect("inner bin missing `sink` ghost pad");
+        assert!(ghost.is::<gst::GhostPad>());
+    }
+
+    #[test]
+    fn build_udpsink_audio_l24_pins_min_max_ptime_ns() {
+        let elem = build_udpsink(&audio_l24_ptime_media(), UdpVariant::V1)
+            .expect("L24 audio sender chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let pay = child(&bin, "nmossink-payloader");
+        assert_eq!(
+            pay.factory().expect("payloader has a factory").name(),
+            "rtpL24pay",
+            "L24 audio chain must use gst-plugins-good `rtpL24pay`",
+        );
+        assert_eq!(pay.property::<u32>("pt"), 97);
+        // 0.125 ms × 1_000_000 ns/ms = 125_000 ns.
+        assert_eq!(
+            pay.property::<i64>("min-ptime"),
+            125_000,
+            "min-ptime must be pinned to ptime in ns",
+        );
+        assert_eq!(
+            pay.property::<i64>("max-ptime"),
+            125_000,
+            "max-ptime must be pinned to ptime in ns",
+        );
+        let udpsink = child(&bin, "nmossink-udpsink");
+        assert_eq!(udpsink.property::<i32>("bind-port"), 5005);
+        assert_eq!(udpsink.property::<String>("bind-address"), "192.0.2.10");
+    }
+
+    #[test]
+    fn build_udpsink_audio_l16_uses_rtpl16pay() {
+        let mut media = audio_l24_ptime_media();
+        media.rtp_caps = gst::Caps::from_str(
+            "application/x-rtp,media=audio,clock-rate=48000,encoding-name=L16,\
+             encoding-params=(string)2,payload=98",
+        )
+        .expect("static rtp caps parse");
+        let elem = build_udpsink(&media, UdpVariant::V1).expect("L16 audio sender chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let pay = child(&bin, "nmossink-payloader");
+        assert_eq!(pay.factory().expect("payloader has a factory").name(), "rtpL16pay");
+    }
+
+    #[test]
+    fn build_udpsink_v2_falls_back_to_v1_when_pay2_missing() {
+        // None of `rtpL24pay2` / `rtpL16pay2` exist in
+        // gst-plugins-rs today; if a v2 sibling were added in the
+        // future this test would silently switch to it (the success
+        // path is "v2 element returned"). The fallback semantic
+        // we're pinning here is "V2 dispatch never fails when V1 is
+        // present, even if no v2 sibling is".
+        let elem = build_udpsink(&audio_l24_ptime_media(), UdpVariant::V2)
+            .expect("V2 L24 chain must construct (falls back to V1 when rtpL24pay2 absent)");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let pay = child(&bin, "nmossink-payloader");
+        let factory_name = pay.factory().expect("payloader has a factory").name();
         assert!(
-            msg.contains("not yet implemented"),
-            "expected `not yet implemented` in error: {msg}",
+            factory_name == "rtpL24pay2" || factory_name == "rtpL24pay",
+            "V2 dispatch must pick `rtpL24pay2` if present, else fall back to \
+             `rtpL24pay`; got `{factory_name}`",
         );
     }
+
+    #[test]
+    fn build_udpsink_rejects_unsupported_essence() {
+        let mut media = minimal_udp_media();
+        media.rtp_caps = gst::Caps::from_str(
+            "application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96",
+        )
+        .expect("static rtp caps parse");
+        let err = build_udpsink(&media, UdpVariant::V1)
+            .expect_err("H264 must be rejected (today only RAW/L24/L16 are supported)");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unsupported essence")
+                && msg.contains("encoding-name=`H264`"),
+            "expected unsupported-essence attribution: {msg}",
+        );
+    }
+
+    #[test]
+    fn build_udpsink_rejects_missing_payload() {
+        let mut media = minimal_udp_media();
+        media.rtp_caps = gst::Caps::from_str(
+            "application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW",
+        )
+        .expect("static rtp caps parse");
+        let err = build_udpsink(&media, UdpVariant::V1)
+            .expect_err("rtp_caps without `payload` must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("payload"),
+            "expected `payload` in error message: {msg}",
+        );
+    }
+
+    #[test]
+    fn build_udpsink_rejects_out_of_range_pt() {
+        let mut media = minimal_udp_media();
+        media.rtp_caps = gst::Caps::from_str(
+            "application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,payload=200",
+        )
+        .expect("static rtp caps parse");
+        let err = build_udpsink(&media, UdpVariant::V1)
+            .expect_err("payload=200 is out of valid PT range 0..=127");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("0..=127") && msg.contains("200"),
+            "expected PT-range attribution: {msg}",
+        );
+    }
+
+    #[test]
+    fn ptime_ns_from_rtp_caps_round_trips_fractional_ms() {
+        init_gst();
+        let caps = gst::Caps::from_str(
+            "application/x-rtp,media=audio,clock-rate=48000,encoding-name=L24,\
+             payload=97,a-ptime=(string)0.125",
+        )
+        .unwrap();
+        let s = caps.structure(0).unwrap();
+        assert_eq!(ptime_ns_from_rtp_caps(s).unwrap(), Some(125_000));
+    }
+
+    #[test]
+    fn ptime_ns_from_rtp_caps_returns_none_when_absent() {
+        init_gst();
+        let caps = gst::Caps::from_str(
+            "application/x-rtp,media=audio,clock-rate=48000,encoding-name=L24,payload=97",
+        )
+        .unwrap();
+        let s = caps.structure(0).unwrap();
+        assert_eq!(ptime_ns_from_rtp_caps(s).unwrap(), None);
+    }
+
+    #[test]
+    fn ptime_ns_from_rtp_caps_rejects_negative() {
+        init_gst();
+        let caps = gst::Caps::from_str(
+            "application/x-rtp,media=audio,clock-rate=48000,encoding-name=L24,\
+             payload=97,a-ptime=(string)-1.0",
+        )
+        .unwrap();
+        let s = caps.structure(0).unwrap();
+        let err = ptime_ns_from_rtp_caps(s).expect_err("negative ptime must be rejected");
+        assert!(format!("{err:#}").contains("positive"));
+    }
+
+    // The UDP receiver-side `build_udpsrc` factory is still a stub
+    // until chunk 3 of the Phase 3 stack lands; the test below pins
+    // the current contract: returns `Err` with a clearly-attributed
+    // message until the chain construction lands.
 
     #[test]
     fn build_udpsrc_bails_with_not_implemented() {

@@ -405,12 +405,15 @@ pub(crate) struct UdpMedia {
     pub(crate) secondary: Option<UdpLeg>,
     /// `application/x-rtp,...` caps the depayloader consumes (and
     /// the payloader produces). Carries PT, clock-rate,
-    /// encoding-name, ptime, channels, sampling, depth and any
-    /// other essence-specific RFC 4175 / RFC 3551 / RFC 3190
-    /// parameters that `a=rtpmap` / `a=fmtp` / `a=ptime` map to.
-    /// Tests read this field; production code will start reading
-    /// it the moment the chain factories stop being stubs.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// encoding-name, channels, sampling, depth and any other
+    /// essence-specific RFC 4175 / RFC 3551 / RFC 3190 parameters
+    /// that `a=rtpmap` / `a=fmtp` map to. `a=ptime:` / `a=maxptime:`
+    /// are hoisted onto these caps as `a-ptime` / `a-maxptime`
+    /// (the GStreamer convention `SDPMedia::set_media_from_caps`
+    /// rebuilds into standalone `a=…:` SDP attributes). The
+    /// payloader / depayloader and the chain factories
+    /// ([`crate::inner::build_udpsink`] et al) read this field
+    /// directly.
     pub(crate) rtp_caps: gst::Caps,
     /// Essence caps (`video/x-raw,…`, `audio/x-raw,…`,
     /// `meta/x-st-2038,…`). The receiver pins these on its ghost
