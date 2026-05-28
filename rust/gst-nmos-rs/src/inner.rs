@@ -604,13 +604,32 @@ pub(crate) fn build_mxlsrc(
 /// [`rebuild_chain`] swap mechanism plugs it in directly behind the
 /// anchor.
 ///
+/// **Contract.** `media` is expected to come from
+/// [`crate::sdp::parse_sdp`], which guarantees the RTP caps carry
+/// the full set of fields this factory reads: `encoding-name`,
+/// `payload`, `clock-rate`, `encoding-params`, and (for audio
+/// SDPs that included `a=ptime:`) `a-ptime`. There is no
+/// caps-derives-SDP / synthesis path for UDP today, so the only
+/// caller (`decide_inner_config_udp`) won't reach here with an
+/// incomplete `rtp_caps`; absent an SDP the caller returns
+/// `InnerConfig::Fake` instead and waits for IS-05 PATCH. When
+/// BCP-006-02-style transmitter-side SDP synthesis from `caps` +
+/// properties lands, the defaults it picks (PT 96, ptime 1 ms
+/// for audio, encoding-name from raw caps, …) flow through the
+/// same `UdpMedia` surface and this factory needs no changes.
+///
 /// `pt` is taken from `media.rtp_caps.payload`; for audio
 /// essences `min-ptime` / `max-ptime` are pinned (in nanoseconds)
 /// from the `a-ptime` field [`crate::sdp::parse_sdp`] hoists onto
 /// the RTP caps so the receiver sees exactly the packet duration
-/// the SDP advertises. `ssrc` is left at the payloader's default
-/// (random per element instance) — the daemon-published SDP does
-/// not advertise an SSRC.
+/// the SDP advertises. When `a-ptime` is absent the payloader
+/// auto-sizes packets based on buffer arrival — `parse_sdp`
+/// faithfully reflects "SDP didn't say" and we deliberately don't
+/// pick a default here.
+///
+/// `ssrc` is left at the payloader's default (random per element
+/// instance) — the daemon-published SDP does not advertise an
+/// SSRC.
 ///
 /// `udpsink.async=false` mirrors `mxlsink`'s rationale (see
 /// [`build_mxlsink`]'s doc): mid-stream activation behind the
@@ -671,8 +690,6 @@ pub(crate) fn build_udpsink(
         .property("host", &media.primary.destination_ip)
         .property("port", i32::from(media.primary.destination_port))
         .property("async", false)
-        .property("sync", true)
-        .property("auto-multicast", true)
         .build()
         .with_context(|| {
             format!(
@@ -721,6 +738,15 @@ pub(crate) fn build_udpsink(
 /// `stem` is `"rtpvraw"` / `"rtpL24"` / `"rtpL16"` based on the
 /// essence shape (FlowFormat + RTP encoding-name).
 ///
+/// `encoding_name` is matched ASCII-case-insensitively. The SDP
+/// parser already upper-cases `encoding-name` (GStreamer's
+/// `gst_sdp_media_get_caps_from_media` calls `g_ascii_strup` on
+/// the rtpmap name before storing it on the caps), so any value
+/// produced by [`crate::sdp::parse_sdp`] is already canonical;
+/// the normalisation here is defensive against future call sites
+/// that build `UdpMedia` directly (synthesis-from-caps,
+/// hand-crafted tests, …).
+///
 /// V2 falls back to V1 transparently when the `*pay2` / `*depay2`
 /// sibling isn't present — `gst-plugins-rs` ships v2 forms
 /// piecemeal (e.g. `rtpvrawpay2` lands separately from
@@ -732,7 +758,8 @@ fn select_rtp_factory(
     encoding_name: &str,
     variant: UdpVariant,
 ) -> Result<String, anyhow::Error> {
-    let stem = match (format, encoding_name) {
+    let encoding_name_upper = encoding_name.to_ascii_uppercase();
+    let stem = match (format, encoding_name_upper.as_str()) {
         (FlowFormat::Video, "RAW") => "rtpvraw",
         (FlowFormat::Audio, "L24") => "rtpL24",
         (FlowFormat::Audio, "L16") => "rtpL16",
@@ -1037,6 +1064,28 @@ mod tests {
             factory_name == "rtpL24pay2" || factory_name == "rtpL24pay",
             "V2 dispatch must pick `rtpL24pay2` if present, else fall back to \
              `rtpL24pay`; got `{factory_name}`",
+        );
+    }
+
+    #[test]
+    fn build_udpsink_accepts_lowercase_encoding_name() {
+        let mut media = audio_l24_ptime_media();
+        media.rtp_caps = gst::Caps::from_str(
+            "application/x-rtp,media=audio,clock-rate=48000,encoding-name=l24,\
+             payload=97,encoding-params=(string)2,a-ptime=(string)0.125",
+        )
+        .expect("static rtp caps parse");
+        let elem = build_udpsink(&media, UdpVariant::V1).expect(
+            "lower-case `encoding-name=l24` must be normalised to `L24` and accepted; \
+             parse_sdp upper-cases via g_ascii_strup but build_udpsink must also \
+             tolerate hand-built caps from non-SDP call sites",
+        );
+        assert!(
+            elem.downcast_ref::<gst::Bin>()
+                .and_then(|b| b.by_name("nmossink-payloader"))
+                .map(|p| p.factory().map(|f| f.name().to_string()).unwrap_or_default())
+                .is_some_and(|n| n == "rtpL24pay"),
+            "lower-case encoding-name must still resolve to `rtpL24pay`",
         );
     }
 
