@@ -67,7 +67,7 @@ Each `NvNmosSenderConfig` and `NvNmosReceiverConfig` includes a `transport` fiel
 | `NVNMOS_TRANSPORT_RTP`  | Session Description Protocol (SDP) per SMPTE ST 2110 / IETF RFCs     | RFC 4566   |
 | `NVNMOS_TRANSPORT_MXL`  | MXL flow definition (JSON) as consumed by the MXL SDK                | MXL SDK    |
 
-### NvNmos extensions to the transport file
+### NvNmos Extensions to the Transport File
 
 NvNmos uses a small set of extensions in the transport file to convey configuration that the standard transport file format does not carry. The same conceptual extensions are carried differently in the two transport file formats:
 
@@ -97,9 +97,46 @@ NvNmos also publishes the `urn:x-nvnmos:tag:name` tag on the corresponding NMOS 
 
 For MXL Senders, the top-level `id` field of the flow definition (if present, a UUID) is used as the MXL flow identity (i.e. the `mxl_flow_id` IS-05 transport parameter); if absent, the generated NMOS Flow id is used in its place. The NMOS Flow id itself is always derived from the `seed` and the name (`urn:x-nvnmos:tag:name` value) and is independent of the flow definition's `id` field. For MXL Receivers, the MXL flow identity is supplied dynamically through IS-05 Connection Management, so the `id` field of the flow definition is ignored.
 
-### Connection activations
+### Connection Activations
 
 When an IS-05 Connection API activation occurs, the library invokes the application's `connection_activated` callback with an `NvNmosSide` (Sender or Receiver), the application's `name`, and an updated `transport_file` reflecting the new active transport parameters. For an RTP Sender or Receiver, the callback receives an SDP file; for an MXL Sender or Receiver, the callback receives an MXL flow definition (JSON) with the new active `mxl_domain_id` and `mxl_flow_id` spliced in (as the `urn:x-nvnmos:tag:mxl-domain-id` tag value and the top-level `id` field, respectively). The application is expected to dispatch on `(side, name)` to identify the Sender or Receiver and react accordingly (for example, by reconfiguring its data plane). Conversely, if an activation (or deactivation) has already occurred in the application's data plane by some other means, outside the NMOS API, the application calls `nmos_connection_activate` (also passing the `side`) to update the IS-04 and IS-05 model to reflect it. The library does not initiate any activation on the application's behalf.
+
+## API Changes for MXL Support
+
+Existing application code needs to be updated as itemised below - mostly possible with search-and-replace.
+
+### Configuration Changes
+
+- `NvNmosSenderConfig::sdp` and `NvNmosReceiverConfig::sdp` (`const char *`) are now `NvNmosSenderConfig::transport_file` and `NvNmosReceiverConfig::transport_file`. A new sibling `NvNmosTransport transport` field selects the format: `NVNMOS_TRANSPORT_RTP` for SDP (the zero-initialised default), `NVNMOS_TRANSPORT_MXL` for an MXL flow definition (JSON).
+- The SDP identity attribute `a=x-nvnmos-id:<id>` is now `a=x-nvnmos-name:<name>` — renamed for clarity, since its value has always been the caller-chosen name (unique within the Node), not a UUID. The NMOS resource UUIDs are generated deterministically by the library from `NvNmosNodeConfig::seed` + name and are now also exposed via the new ID accessors below.
+- `remove_nmos_sender_from_node_server` and `remove_nmos_receiver_from_node_server` now take a caller-chosen name (`sender_name` / `receiver_name`) instead of a UUID.
+
+### Activation Changes
+
+- The IS-05 activation callback typedef `nmos_connection_rtp_activation_callback` is now `nmos_connection_activation_callback`, and its signature changed from `(server, id, sdp)` to `(server, side, name, transport_file)`. The matching `NvNmosNodeConfig::rtp_connection_activated` field is now `connection_activated`. The new `NvNmosSide` parameter (`NVNMOS_SIDE_SENDER` / `NVNMOS_SIDE_RECEIVER`) disambiguates a name that may now be shared between a Sender and a Receiver on the same Node — names are scoped per side.
+- `nmos_connection_rtp_activate(server, id, sdp)` is now `nmos_connection_activate(server, side, name, transport_file)`.
+
+### New ID-Accessors
+
+The NMOS resource UUIDs are deterministic pure functions of `(seed, side, name)`. Three pure accessors compute them without a server:
+
+- `nmos_make_node_id(seed, out, out_len)`
+- `nmos_make_sender_id(seed, sender_name, out, out_len)`
+- `nmos_make_receiver_id(seed, receiver_name, out, out_len)`
+
+Three live accessors look them up on a running server:
+
+- `nmos_get_node_id(server, out, out_len)`
+- `nmos_get_sender_id(server, sender_name, out, out_len)`
+- `nmos_get_receiver_id(server, receiver_name, out, out_len)`
+
+All write a null-terminated UUID into a buffer of at least `NVNMOS_ID_LEN` bytes (37, including the terminator). Each returns `bool`.
+
+### MXL Transport File Format
+
+For `NVNMOS_TRANSPORT_MXL` the transport file is an MXL flow definition JSON (the form consumed by the MXL SDK), with NvNmos extensions carried as entries in the standard `tags` property keyed by `urn:x-nvnmos:tag:*` URN strings. See *NvNmos Extensions to the Transport File* above for the full set.
+
+For the full per-field documentation see [`src/nvnmos.h`](src/nvnmos.h).
 
 ## Docker-Based Build
 
@@ -365,7 +402,7 @@ Build the library and application with the following command or manually using t
 cmake --build build --config <Release-or-Debug> --parallel
 ```
 
-### Local `nmos-cpp` checkout (Conan for dependencies only)
+### Local nmos-cpp Checkout (Conan for Dependencies Only)
 
 To build against a clone of [nmos-cpp](https://github.com/sony/nmos-cpp) while using Conan to resolve Boost, cpprestsdk, Avahi or mDNSResponder, and other dependencies:
 
@@ -475,7 +512,7 @@ http://<host-address>:<port>/
 
 ## Troubleshooting
 
-### Address already in use
+### Address Already in Use
 
 When running multiple NMOS Node instances, each process must be configured to use different ports, i.e., with a unique `port` value.
 When the port is already in use, at start-up, the application may show a message like the following:
@@ -484,7 +521,7 @@ When the port is already in use, at start-up, the application may show a message
 asio listen error: system:98 (Address already in use)
 ```
 
-### Apple Bonjour compatibility warnings
+### Apple Bonjour Compatibility Warnings
 
 When using Avahi for DNS-SD, shortly after start-up the following lines may be displayed in the log.
 They do not indicate a problem and can be ignored.
@@ -495,7 +532,7 @@ They do not indicate a problem and can be ignored.
 *** WARNING *** For more information see <http://0pointer.de/blog/projects/avahi-compat.html>
 ```
 
-### DNSServiceRegister and DNSServiceBrowse errors
+### DNSServiceRegister and DNSServiceBrowse Errors
 
 The application may show messages like the following shortly after start-up:
 
