@@ -118,16 +118,14 @@ property surface above.
 
 ## Smoke test
 
-Drive an element through `NULL`→`PLAYING`→`NULL` against a live
-daemon to exercise the session lifecycle.
-
-For a more thorough end-to-end demo — three NMOS Nodes (producer,
-consumer, processor) sharing one MXL Domain, with an interactive
-menu for IS-05 enable / disable / rewire — run
-`scripts/gst-nmos-rs-demo.sh`. The script builds `nvnmosd` + the
-plugin, spawns the daemon and three gst-launch pipelines, then
-drops into a menu that PATCHes the IS-05 endpoints so you can
-exercise activation paths against a live pipeline.
+For an end-to-end demo — three NMOS Nodes (producer, consumer,
+processor) sharing one MXL Domain, with an interactive menu for
+IS-05 enable / disable / rewire — run
+[`scripts/gst-nmos-rs-demo.sh`](scripts/gst-nmos-rs-demo.sh). The
+script builds `nvnmosd` + the plugin, spawns the daemon and three
+gst-launch pipelines, then drops into a menu that PATCHes the
+IS-05 endpoints so you can exercise activation paths against a
+live pipeline.
 
 Without `mxl-domain-path` (and `mxl-flow-id`) the element opens a
 session but its data path stays on the fake chain:
@@ -313,12 +311,13 @@ consumer pipeline
 A self-contained `gst-launch-1.0` form using `videotestsrc` +
 `audiotestsrc` (so no `appsrc`/`appsink` programming is required;
 this exercises the multi-flow registration path even though it
-doesn't drive synthesised ANC) is in the smoke-test plan at
-`doc/designs/nvnmos-example-smoke-test-plan/gst-nmos-rs-smoke.sh`
-(stage 15) — see that file for the full producer/consumer
-invocations. The rigorous version with real `appsrc`/`appsink`
-plumbing and per-frame index validation lives in
-[`tests/multi_flow_video_data.rs`](tests/multi_flow_video_data.rs)
+doesn't drive synthesised ANC) is wired into the interactive
+demo script at [`scripts/gst-nmos-rs-demo.sh`](scripts/gst-nmos-rs-demo.sh):
+Node 1 contributes two MXL Senders (video + audio) and Node 2
+contributes two MXL Receivers (video + audio) to the same Domain,
+all sharing per-node seeds. The rigorous version with real
+`appsrc`/`appsink` plumbing and per-frame index validation lives
+in [`tests/multi_flow_video_data.rs`](tests/multi_flow_video_data.rs)
 and is `#[ignore]`d because it needs the real MXL toolchain.
 
 To opt in to the integration test on a host with `/dev/shm` and
@@ -394,15 +393,24 @@ across the steady-state window.
   The essence-shape cross-check still applies, so an activation
   that tries to push an incompatible essence type at the element
   (e.g. a v210 video flow at an `nmossrc` configured for audio
-  caps) is ack-failed. Swaps run inline at state ≤ READY and via a
-  single-shot IDLE pad probe at state ≥ PAUSED, following the
-  idiomatic gst-plugins-rs pattern (`transcriberbin`,
-  `fallbackswitch`). The activation is acked back to the daemon as
-  `success=true` when the inner element was successfully brought up
-  (or deactivation completed), and `success=false` with a
-  `failure_reason` when it could not — most commonly because
-  `mxl-domain-path` is unset on this host or the essence-shape
-  cross-check failed.
+  caps) is ack-failed. Swaps use a single mechanism regardless of
+  pipeline state: a permanent `identity` anchor sits behind a fixed
+  ghost-pad target, the chain (fake or real) lives behind the
+  anchor, and the activation handler runs on a `call_async` worker
+  thread that installs an `IDLE | BLOCK_DOWNSTREAM` probe on the
+  anchor's chain-side pad, unlinks / removes / adds / links the
+  chain behind the anchor, and removes the probe. Sticky events
+  (STREAM_START, CAPS, SEGMENT) re-flow to the new chain on its
+  first buffer push, so the external ghost-pad target never has to
+  be retargeted. For real → real re-activations the handler inserts
+  a fake-chain hop between the two real instances so libmxl's
+  per-process state (`FlowWriter` / `FlowReader`) is fully released
+  before the new one tries to attach. The activation is acked back
+  to the daemon as `success=true` when the inner element was
+  successfully brought up (or deactivation completed), and
+  `success=false` with a `failure_reason` when it could not — most
+  commonly because `mxl-domain-path` is unset on this host or the
+  essence-shape cross-check failed.
 - When the resolved configuration pins a Domain path *and* a Flow id
   (plus a recognised essence shape on the receiver, supplied via
   `caps` or read from the transport file's `format`), the inner data

@@ -279,7 +279,7 @@ If neither `transport-file` nor `caps` is provided, `nmossink` defers NMOS regis
 - The deferred `nmossink`'s peer query lands on those caps and registers the sender with the daemon.
 - The pipeline reaches PAUSED as part of any normal `set_state(PLAYING)` transition — typically in milliseconds, well before the receiver is activated or starts producing buffers.
 
-Both endpoints are at IS-04 by the time the pipeline is up, and there is no Catch-22 (PAUSED ≠ streaming-to-network). The internal gating mechanism (`output-selector → fakesink while deactivated`, per *Sink deactivation*) keeps the inner wire sink out of the data path until an IS-05 activation arrives.
+Both endpoints are at IS-04 by the time the pipeline is up, and there is no Catch-22 (PAUSED ≠ streaming-to-network). The internal gating mechanism (Phase 1 as-built: the inner chain is a `fakesink` behind the anchor while deactivated — see [*Phase 1 as-built: anchor + block-probe*](#phase-1-as-built-anchor--block-probe); originally planned as `output-selector → fakesink`, per *Sink deactivation*) keeps the inner wire sink out of the data path until an IS-05 activation arrives.
 
 **Where deferred mode does break:** any chain where an intermediate element determines its output caps from buffer content — `h264parse` needing SPS/PPS, decoders inferring colorimetry from packet headers, etc. The peer query at PAUSED can't fix caps if upstream hasn't seen data. For those pipelines, declare `caps` explicitly on `nmossink` (Route B) and the sender registers at NULL→READY instead, alongside the receiver.
 
@@ -368,6 +368,8 @@ ST 2022-7 NIC selection, jitter-buffer overrides, and similar per-transport knob
 
 ### Sink (`nmossink`) deactivation
 
+> **Superseded in Phase 1.** The `output-selector` mechanism described below is the **originally-planned** design and was not adopted as-is. Phase 1 implementation replaced it with a permanent `identity` anchor + `IDLE | BLOCK_DOWNSTREAM` block-probe + chain swap, uniform across `nmossink` and `nmossrc`. See [*Phase 1 as-built: anchor + block-probe*](#phase-1-as-built-anchor--block-probe) below for the as-built mechanism and the reasons we diverged. The prose below is preserved as historical context.
+
 Goal: keep consuming upstream so the rest of the pipeline isn't blocked; no transmission on the wire.
 
 **Mechanism: `output-selector` → { inner wire sink | `fakesink sync=true async=false` }.** Active-pad flips on activation/deactivation. This is the pattern in `nvdsnmosbin/src/gstnvdssdpsink.cpp` (see the construction at the `output_selector` / `fakesink sync=true async=false` lines) and we adopt it verbatim because it solves two problems we'd otherwise hit:
@@ -379,6 +381,8 @@ Goal: keep consuming upstream so the rest of the pipeline isn't blocked; no tran
 `valve` / `tee` alternatives were considered and rejected: `valve` drops buffers downstream-of-itself, which still leaves the inner sink in the data path and exposes it to gappy input; `tee` works but adds a buffer copy. The output-selector pattern is cheaper and aligns with the prior art.
 
 ### Source (`nmossrc`) deactivation and reconfiguration
+
+> **Superseded in Phase 1.** The `input-selector` + flush-start/stop + (Phase 2+) pause-top-level-pipeline mechanism described below is the **originally-planned** design and was not adopted as-is. Phase 1 implementation replaced it with the same permanent `identity` anchor + block-probe + chain swap mechanism used on `nmossink`. The (A) / (B) / (C) problem decomposition below remains useful, and Phase 2 (`nvdsudp` / OSS `udp`) may still need to re-introduce some of the clock-renegotiation machinery; see [*Phase 1 as-built: anchor + block-probe*](#phase-1-as-built-anchor--block-probe) below for what shipped and the reasons we diverged. The prose below is preserved as historical context.
 
 This is the hardest single design question. The prior art in `nvds_nmos_bin/src/gstnvdssdpsrc.cpp::react_to_sdp_change` evolved through three commits worth examining in order:
 
@@ -408,6 +412,47 @@ We don't take a position on isolation strategy in Phase 1 — MXL avoids (B) reg
 
 Per-format synthetic filler (e.g., black v210, silence) when an `nmossrc` is *inactive but should still produce something downstream* is a separate, opt-in concern via an `idle-mode` property. Available only for formats we can synthesize cheaply (raw audio, raw video); compressed essences (jxsv) don't get filler. Standard GStreamer gap mechanisms (`rtpjitterbuffer` GAP events, livesync, downstream `is-live` semantics) handle steady-state missing-data — they do **not** solve (A), (B), or (C) on their own.
 
+### Phase 1 as-built: anchor + block-probe
+
+Phase 1 implementation evolved a different (and simpler) mechanism than the `output-selector` / `input-selector` patterns prescribed above. Two issues drove the rework during bring-up:
+
+1. **Sticky-event continuity across mid-stream IS-05 PATCH activations.** Switching the data path by retargeting a ghost pad (or by flipping a selector's active pad) loses STREAM_START / CAPS / SEGMENT in flight, leaving downstream with stale or absent caps. We observed this directly as a video freeze on the consumer side when a Sender was re-activated against a different MXL Flow id.
+2. **`libmxl` per-process state release on re-activations.** An IS-05 activation against the same Flow id (`real → real` in the activation router's terms — for example, when a controller toggles `master_enable` without changing identity) needs an intermediate "fully released" state to let `libmxl`'s `FlowWriter` / `FlowReader` drop before the new instance tries to attach to the same shared-memory slot. Without this, the second instance silently keeps consuming/producing on stale handles.
+
+#### The as-built mechanism
+
+Uniform across `nmossink` and `nmossrc`:
+
+- A permanent `identity` element — the **anchor** — sits behind a fixed ghost-pad target. The ghost is wired to the anchor's outer-facing pad once at construction and **never** retargeted. This is the invariant that solves (1): downstream is always linked to the anchor's external pad, and sticky events live there independent of whatever is wired behind the anchor.
+- The **chain** (one of: fake chain, real `mxlsink` / `mxlsrc` chain) lives behind the anchor (`chain → anchor.sink_pad → anchor.src_pad → ghost.target` on the sink side, mirror-image on the source side).
+- The activation handler runs on a `call_async` worker thread (so the daemon's gRPC client thread is never parked behind a state transition). It:
+  1. Installs an `IDLE | BLOCK_DOWNSTREAM` probe on the anchor's chain-side pad.
+  2. Unlinks the old chain from the anchor, sets it to `NULL`, removes it from the bin.
+  3. Builds the new chain, adds it to the bin, links it to the anchor, syncs its state with the parent.
+  4. Removes the probe.
+  
+  Sticky events re-flow to the new chain automatically on the next buffer push at the anchor — this is GStreamer's normal "next-buffer carries sticky events forward" semantic, which means e.g. `mxlsink::set_caps` fires before the first `render()`.
+- For `real → real` re-activations the handler runs the swap twice under the same overall handler invocation: `real → fake → real`. This satisfies (2) — the old `FlowWriter` / `FlowReader` is fully dropped during the `fake` interlude before the new one attaches.
+
+#### The fake chain
+
+The fake chains keep the element valid in the pipeline while deactivated, replacing the `output-selector → blackhole` / `input-selector → disabled_pad` gating from the original design:
+
+- **`nmossink`**: a `fakesink`, which accepts ANY caps. Equivalent role to the originally-planned `fakesink sync=true async=false` blackhole.
+- **`nmossrc`**: a live `appsrc` with `format=Time` and caps set from the best-available source (the `caps` property, or caps derived from `transport-file*`). We never push buffers into it, so its basesrc loop blocks in `create()` while downstream caps queries are answered against the concrete essence shape — the pipeline can reach PLAYING while waiting for an IS-05 activation. At constructed-time (before any properties have been set) the `appsrc` is built without caps, and the NULL→READY transition replaces it with a caps-aware `appsrc` as soon as a caps source becomes available.
+
+#### Where this design lands relative to the original (A) / (B) / (C) decomposition
+
+Mapping back to the three engineering problems identified in *Source deactivation and reconfiguration* above:
+
+- **(A) Inner-source teardown / rebuild on activation changes.** Solved by the block-probe: `IDLE | BLOCK_DOWNSTREAM` already gives us a quiet point with downstream paused, so no separate `flush-start` / `flush-stop` is needed in Phase 1.
+- **(B) Clock renegotiation when the wire source's clock changes.** Doesn't bite in Phase 1 because `mxlsrc` doesn't provide the pipeline clock. Phase 2 (`nvdsudpsrc`) may need to re-introduce some of the pause-top-level-pipeline machinery from the original design; the anchor pattern composes with that orthogonally.
+- **(C) Multi-receiver coupling.** Doesn't apply: independent `nmossrc` elements each have their own anchor and are mutually independent. The `gst_element_set_locked_state` workaround from `nvdsnmosbin` MR 126 is unnecessary.
+
+#### Why we ended up here, in one sentence
+
+The original design adopted the selector pattern verbatim from `nvdsnmosbin`. Phase 1 bring-up surfaced (1) sticky-event continuity issues that the selector pattern doesn't solve well (because downstream's peer pad changes on every flip), and (2) `libmxl` per-process state-reuse semantics that no design captured at the time the design doc was written. The anchor + block-probe + `real → fake → real` mechanism handles both natively, generalises across `nmossink` and `nmossrc`, and is the one described in the user-facing element README ([`rust/gst-nmos-rs/README.md`](../../../rust/gst-nmos-rs/README.md), *Status* section) and in [`rust/gst-nmos-rs/src/inner.rs`](../../../rust/gst-nmos-rs/src/inner.rs).
+
 ### Sender timestamp modes (deferred)
 
 A `timestamp-mode` property (passthrough vs. regenerated wire timestamps) was sketched here but has been pulled out of Phase 1. The semantics differ between `mxlsink` (no regenerate path until the upstream element grows one) and the `udpsink` family (where regenerate maps to existing properties), and committing to a GObject surface before those mappings are concrete risks shipping a knob whose `regenerate` value silently no-ops on MXL. Will return as a per-transport property once both inner elements expose the corresponding knobs; an issue on the `mxl` repo will be filed at that point.
@@ -427,7 +472,7 @@ A `timestamp-mode` property (passthrough vs. regenerated wire timestamps) was sk
 - **Connection API responsiveness**: slow elements stall PATCH responses. Mitigation: tight default `AckActivation` timeout; document the failure mode.
 - **Daemon discovery**: `daemon-uri` property with a sensible default. Document; don't auto-spawn.
 - **Daemon reconnect**: long-lived `SubscribeActivations` streams must reconnect cleanly across daemon restarts. Session id durable across reconnects; daemon keeps session state until explicit close or TTL.
-- **Inner-sink state under gating**: the `output-selector` pattern removes the inner sink from the data path on deactivation. We still need to confirm per-transport that `nvdsudpsink`/`mxlsink` cleanly handle being de-pathed at runtime; if either disagrees, fall back to keeping it on the path with `fakesink sync=true async=false` *downstream* of the inner sink instead of *replacing* it (slightly more expensive, more conservative).
+- **Inner-sink state under gating**: the originally-planned `output-selector` pattern removes the inner sink from the data path on deactivation. We still need to confirm per-transport that `nvdsudpsink`/`mxlsink` cleanly handle being de-pathed at runtime; if either disagrees, fall back to keeping it on the path with `fakesink sync=true async=false` *downstream* of the inner sink instead of *replacing* it (slightly more expensive, more conservative). (Phase 1 update: the as-built mechanism tears down and rebuilds the inner sink across activations rather than de-pathing it; this has been validated against `mxlsink`. Phase 2 must still validate the same against `nvdsudpsink`. See [*Phase 1 as-built: anchor + block-probe*](#phase-1-as-built-anchor--block-probe).)
 - **Cross-platform paths**: UDS on Linux/macOS, named pipe on Windows, TCP fallback. gRPC supports all three.
 - **NvNmos C-API thread safety**: confirmed thread-safe — every state mutation in `nvnmos_impl.cpp` takes `model.write_lock()` before touching the nmos-cpp model. The daemon can call NvNmos from any worker thread; no daemon-side serialisation needed.
 
@@ -435,8 +480,8 @@ A `timestamp-mode` property (passthrough vs. regenerated wire timestamps) was sk
 
 Folded in from the focused review of `nvds_nmos_bin/src/` (and its bug-fix branches `bugfix/nvnmos`, `bugfix/fix-ds-patches`, `bugfix/dbus-system-bus-address`, `bugfix/avahi-capabilities`, `bugfix/cap_dac_read_search`, `bugfix/lock-state-propagation`), plus `mxl/rust/gst-mxl-rs/src/`. The findings that shape the design are recorded inline above; this section keeps the audit trail.
 
-- **Sink gating** is `output-selector` + `fakesink sync=true async=false` (`gstnvdssdpsink.cpp` around the `output_selector` construction). Adopted verbatim. See *Sink deactivation*.
-- **Source regain-sync / reconfiguration** in the prior art is a three-commit story in `gstnvdssdpsrc.cpp::react_to_sdp_change`: input-selector + tear-down/rebuild + pause-the-top-level-pipeline (release/26.1), plus the locked-state fix (MR 126 / `bugfix/lock-state-propagation`) for multi-receiver coupling, plus the flush-event + idempotent-pause/resume refinement (MR 128 / `bugfix/5597128`). We adopt the architecture *with both bug-fixes folded in from day one*, and avoid the clock-renegotiation pause/resume in Phase 1 because MXL doesn't drive the pipeline clock. See *Source deactivation and reconfiguration*.
+- **Sink gating** is `output-selector` + `fakesink sync=true async=false` (`gstnvdssdpsink.cpp` around the `output_selector` construction). Originally planned to be adopted verbatim. See *Sink deactivation*. (Phase 1 update: not adopted as-is — the chain-swap-behind-an-anchor mechanism in [*Phase 1 as-built: anchor + block-probe*](#phase-1-as-built-anchor--block-probe) achieves the same outcome via a different mechanism.)
+- **Source regain-sync / reconfiguration** in the prior art is a three-commit story in `gstnvdssdpsrc.cpp::react_to_sdp_change`: input-selector + tear-down/rebuild + pause-the-top-level-pipeline (release/26.1), plus the locked-state fix (MR 126 / `bugfix/lock-state-propagation`) for multi-receiver coupling, plus the flush-event + idempotent-pause/resume refinement (MR 128 / `bugfix/5597128`). Originally planned to adopt the architecture *with both bug-fixes folded in from day one*, and avoid the clock-renegotiation pause/resume in Phase 1 because MXL doesn't drive the pipeline clock. See *Source deactivation and reconfiguration*. (Phase 1 update: the same chain-swap-behind-an-anchor mechanism applies — the MR 126 lock-state fix is unnecessary because independent `nmossrc` elements don't share state, and the MR 128 flush dance is unnecessary because the block-probe gives us an equivalent quiet point. See [*Phase 1 as-built: anchor + block-probe*](#phase-1-as-built-anchor--block-probe).)
 - **Activation callback honesty**: `gstnvdsnmosbin.cpp::nmos_connection_callback` always returns `true`. Failures in downstream property changes were not surfaced to NvNmos / IS-05. The new design propagates `AckActivation` outcomes end-to-end (see *Activation flow*).
 - **SDP-driven properties are `GST_PARAM_MUTABLE_PLAYING`** on `gstnvdssdpsink`/`gstnvdssdpsrc`. That's how activation flips inner-element configuration without a state cycle. Our `nmossrc`/`nmossink` keep the same property mutability for the per-transport properties that translate from activation events.
 - **In-process re-invocation of the callback** (`gstnvdsnmosbin.cpp` at `nmos_connection_callback(&fake_server, id, patched_sdp)`) is how `nvdsnmosbin` simulates out-of-band updates. That use-case maps cleanly onto our `SyncResourceState` RPC; we shouldn't need the `fake_server` trick.
@@ -444,6 +489,8 @@ Folded in from the focused review of `nvds_nmos_bin/src/` (and its bug-fix branc
 - **`gst-mxl-rs` API surface** (`mxlsrc`/`mxlsink` `imp.rs`): essence buffers in/out, no RTP meta to maintain; PTS-passthrough is supported, regenerate isn't yet (we file an issue when the design solidifies, see *Sender timestamp modes*). No surprise composition issues for Phase 1.
 
 ### Proposed `nmossrc` / `nmossink` state-machine table
+
+> **Superseded in Phase 1.** The table below reflects the **originally-planned** `output-selector` / `input-selector` design. Phase 1 implementation does not separate the data path from the "Activated" state at this granularity: the chain *is* the data path, and the activation handler swaps it in place behind the anchor (see [*Phase 1 as-built: anchor + block-probe*](#phase-1-as-built-anchor--block-probe)). The table is preserved as historical context.
 
 State refers to GStreamer element state; "Activated" tracks the latest IS-05 activation.
 
