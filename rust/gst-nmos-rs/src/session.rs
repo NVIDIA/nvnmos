@@ -21,7 +21,7 @@ use crate::daemon::{ActivationHandler, ActivationRequest, Session};
 use crate::domain::{self, DomainIdOrigin};
 use crate::flow_def::{self, FlowDefBuildInput, FlowDefOverrides, ValueOrigin};
 use crate::runtime::SHARED_RUNTIME;
-use crate::sdp;
+use crate::sdp::{self, SdpOverrides};
 use crate::types::{CapsMode, FlowFormat, Transport};
 
 /// Open-session timeout. Aligned with the daemon's activation ack
@@ -260,19 +260,12 @@ pub(crate) struct CommonSettings {
     /// at activation). Honoured only when `transport == Udp` /
     /// `Udp2`; ignored on the MXL path.
     ///
-    /// Consumed by the upcoming `splice_overrides_sdp` /
-    /// `synthesise_or_passthrough_udp` path; currently
-    /// populated by `From<Settings>` and dropped further down,
-    /// so the dead_code lint is suppressed until the consumer
-    /// lands.
-    #[allow(dead_code)]
     pub(crate) source_ip: String,
     /// IS-05 RTP sender transport_params `source_port` — Sender-
     /// only. Local egress port for `udpsink` (drives both
     /// `udpsink.bind-port` and the SDP `a=x-nvnmos-src-port:`
     /// attribute). 0 = unset. Ignored on the Receiver side
     /// (IS-05 receiver schema doesn't define this slot).
-    #[allow(dead_code)]
     pub(crate) source_port: u16,
     /// IS-05 RTP sender transport_params `destination_ip` —
     /// Sender-only. Remote destination IP (unicast peer or
@@ -280,7 +273,6 @@ pub(crate) struct CommonSettings {
     /// configuring SDP and the `udpsink.host` property. Empty
     /// string = unset. Ignored on the Receiver side (receivers
     /// use `multicast_ip` + `interface_ip` instead).
-    #[allow(dead_code)]
     pub(crate) destination_ip: String,
     /// IS-05 RTP transport_params `destination_port`. Same name on
     /// both sides but with different semantics:
@@ -291,7 +283,6 @@ pub(crate) struct CommonSettings {
     ///
     /// 0 = unset (falls back to the SDP `m=` port if a transport
     /// file is supplied, else to [`crate::sdp::defaults::RTP_PORT`]).
-    #[allow(dead_code)]
     pub(crate) destination_port: u16,
     /// IS-05 RTP receiver transport_params `interface_ip` —
     /// Receiver-only. Local NIC IP used for the IGMP join
@@ -301,7 +292,6 @@ pub(crate) struct CommonSettings {
     /// SDP as the `a=x-nvnmos-iface-ip:` attribute. Empty string =
     /// unset. Ignored on the Sender side (senders use `source_ip`
     /// for the same wire concept).
-    #[allow(dead_code)]
     pub(crate) interface_ip: String,
     /// IS-05 RTP receiver transport_params `multicast_ip` —
     /// Receiver-only. Multicast group to join (or empty for
@@ -310,7 +300,6 @@ pub(crate) struct CommonSettings {
     /// string = unset (unicast / let the SDP / daemon resolve).
     /// Ignored on the Sender side (senders use `destination_ip`
     /// for the same wire concept).
-    #[allow(dead_code)]
     pub(crate) multicast_ip: String,
     /// Whether the element brings its inner `mxlsink` / `mxlsrc` up
     /// immediately at NULL→READY (or, for a deferred-mode sender,
@@ -776,6 +765,81 @@ fn caps_format(settings: &CommonSettings) -> FlowFormat {
         .unwrap_or(FlowFormat::Unspecified)
 }
 
+/// Build an [`SdpOverrides`] from the element's property snapshot
+/// for the RTP transports. Mirrors [`property_overrides_mxl`] on the
+/// MXL path:
+///
+/// * Empty-string properties map to `None` (i.e. "user did not set
+///   this; leave the file's value alone").
+/// * Zero ports map to `None` (`http-port`'s "unset" sentinel
+///   convention, extended to all u16 port slots).
+/// * `caps_mode` is passed through by value because
+///   [`CapsMode::Auto`] is already the "no override" sentinel.
+///
+/// Per-side dispatch reflects the IS-05 schema's asymmetry:
+///
+/// * **Sender**: `settings.source_ip` is the local egress NIC IP
+///   and feeds **both** [`SdpOverrides::source_ip`] (used by the
+///   splice as the SDP `a=source-filter:` include-source — RFC
+///   4607 SSM convention) and [`SdpOverrides::interface_ip`]
+///   (used as `a=x-nvnmos-iface-ip:`). The two SDP slots carry
+///   the same IP on a Sender because they're both saying "this
+///   is where the sender egresses from", just for different
+///   downstream consumers (SSM-aware receivers vs libnvnmos).
+///   Receiver-only slots (`interface_ip`, `multicast_ip`) are
+///   not read.
+/// * **Receiver**: [`SdpOverrides::source_ip`] is the SSM
+///   include-source (remote sender's IP) from
+///   `settings.source_ip`; [`SdpOverrides::interface_ip`] is the
+///   local NIC from `settings.interface_ip`;
+///   [`SdpOverrides::destination_ip`] is the multicast group
+///   from `settings.multicast_ip` (the SDP `c=` line wire slot
+///   that IS-05 splits between sender's `destination_ip` and
+///   receiver's `multicast_ip` per resource direction).
+///   `source_port` is left unset (the IS-05 receiver schema
+///   doesn't define a local source-port slot).
+///
+/// `transport_caps`-driven overrides (audio clock-rate, ptime,
+/// pt) are **not** handled by this builder — they land in a
+/// follow-up that extends [`SdpOverrides`] with the scalar slots
+/// and the corresponding splice machinery (`m=` / `a=rtpmap:` /
+/// `a=fmtp:` rewrites).
+fn property_overrides_udp(settings: &CommonSettings) -> SdpOverrides<'_> {
+    fn opt(s: &str) -> Option<&str> {
+        if s.is_empty() { None } else { Some(s) }
+    }
+    fn opt_port(p: u16) -> Option<u16> {
+        if p == 0 { None } else { Some(p) }
+    }
+    let (source_ip, interface_ip, destination_ip, source_port) = match settings.side {
+        Side::Sender => (
+            opt(&settings.source_ip),
+            // Sender duplicates source_ip into the iface-ip slot
+            // — see the per-side dispatch note above.
+            opt(&settings.source_ip),
+            opt(&settings.destination_ip),
+            opt_port(settings.source_port),
+        ),
+        Side::Receiver => (
+            opt(&settings.source_ip),
+            opt(&settings.interface_ip),
+            opt(&settings.multicast_ip),
+            None,
+        ),
+    };
+    SdpOverrides {
+        label: opt(&settings.label),
+        description: opt(&settings.description),
+        name: opt(&settings.name),
+        interface_ip,
+        destination_ip,
+        destination_port: opt_port(settings.destination_port),
+        source_ip,
+        source_port,
+        caps_mode: settings.caps_mode,
+    }
+}
+
 /// Build a [`FlowDefOverrides`] from the element's property snapshot.
 /// Empty-string properties map to `None` (i.e. "user did not set
 /// this; leave the file's value alone"). `mxl_domain_id` is taken
@@ -999,6 +1063,21 @@ fn resolve_inner_config_udp(
     variant: UdpVariant,
     resolved_transport_file: Option<String>,
 ) -> Result<(InnerConfig, Option<String>), anyhow::Error> {
+    // Property-overrides splice: rewrite any user-set
+    // identity / cosmetic / network properties (label,
+    // description, name, IS-05 endpoints, caps_mode) into
+    // the SDP before the daemon sees it. Mirrors
+    // `resolve_inner_config_mxl`'s `flow_def::splice_overrides`
+    // call. Activation-time SDP stays authoritative (see
+    // `make_activation_plan`) — the splice runs at startup
+    // only.
+    let resolved_transport_file = match resolved_transport_file {
+        Some(text) => Some(
+            sdp::splice_overrides(&text, &property_overrides_udp(settings))
+                .with_context(|| format!("{element}: splicing property overrides into SDP"))?,
+        ),
+        None => None,
+    };
     let inner =
         decide_inner_config_udp(element, settings, variant, resolved_transport_file.as_deref())?;
     Ok((inner, resolved_transport_file))
@@ -1857,6 +1936,228 @@ mod tests {
                 ),
                 ActivationAck::Success => panic!("expected Failure ack on malformed SDP"),
             }
+        }
+
+        // -- property_overrides_udp builder ------------------------
+
+        /// Pure-function: a Sender's `source_ip` populates BOTH
+        /// `SdpOverrides.source_ip` (SDP `a=source-filter:` SSM
+        /// include-source) AND `SdpOverrides.interface_ip` (SDP
+        /// `a=x-nvnmos-iface-ip:`). See `property_overrides_udp`'s
+        /// doc for the per-side dispatch rationale.
+        #[test]
+        fn property_overrides_udp_sender_duplicates_source_ip_into_iface_ip() {
+            let s = CommonSettings {
+                side: Side::Sender,
+                source_ip: "192.0.2.10".to_owned(),
+                source_port: 5005,
+                destination_ip: "239.1.1.1".to_owned(),
+                destination_port: 5004,
+                // Receiver-only slots are populated but must be
+                // ignored on the Sender side.
+                interface_ip: "should-not-leak.example".to_owned(),
+                multicast_ip: "should-not-leak.example".to_owned(),
+                ..udp_settings(Side::Sender, Transport::Udp)
+            };
+            let o = property_overrides_udp(&s);
+            assert_eq!(o.source_ip, Some("192.0.2.10"));
+            assert_eq!(o.interface_ip, Some("192.0.2.10"));
+            assert_eq!(o.source_port, Some(5005));
+            assert_eq!(o.destination_ip, Some("239.1.1.1"));
+            assert_eq!(o.destination_port, Some(5004));
+        }
+
+        /// Pure-function: a Receiver's `multicast_ip` populates
+        /// `SdpOverrides.destination_ip` (the SDP `c=` line wire
+        /// slot, which IS-05 splits between sender's
+        /// `destination_ip` and receiver's `multicast_ip` by
+        /// resource direction). `source_port` is forced to
+        /// `None` because the IS-05 receiver schema doesn't
+        /// define that slot.
+        #[test]
+        fn property_overrides_udp_receiver_maps_multicast_ip_to_destination_ip() {
+            let s = CommonSettings {
+                side: Side::Receiver,
+                source_ip: "192.0.2.20".to_owned(),
+                interface_ip: "192.0.2.30".to_owned(),
+                multicast_ip: "239.1.1.1".to_owned(),
+                destination_port: 5004,
+                // Sender-only slot — must be ignored on the
+                // Receiver side.
+                destination_ip: "should-not-leak.example".to_owned(),
+                source_port: 9999,
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            let o = property_overrides_udp(&s);
+            assert_eq!(o.source_ip, Some("192.0.2.20"));
+            assert_eq!(o.interface_ip, Some("192.0.2.30"));
+            assert_eq!(o.destination_ip, Some("239.1.1.1"));
+            assert_eq!(o.destination_port, Some(5004));
+            assert_eq!(
+                o.source_port, None,
+                "IS-05 receiver schema has no source-port slot",
+            );
+        }
+
+        /// All slots `None` when no property is set. Pins that
+        /// the empty-string / zero "unset" sentinel convention
+        /// flows through to the splice helper as "leave the
+        /// file's value alone". The shared `settings()` fixture
+        /// pre-fills `name` for IS-04 registration coverage; we
+        /// clear it here together with the other identity /
+        /// network fields so the test asserts on the splice
+        /// builder's behaviour, not the fixture's defaults.
+        #[test]
+        fn property_overrides_udp_default_settings_are_all_none() {
+            for side in [Side::Sender, Side::Receiver] {
+                let s = CommonSettings {
+                    name: String::new(),
+                    label: String::new(),
+                    description: String::new(),
+                    source_ip: String::new(),
+                    source_port: 0,
+                    destination_ip: String::new(),
+                    destination_port: 0,
+                    interface_ip: String::new(),
+                    multicast_ip: String::new(),
+                    ..udp_settings(side, Transport::Udp)
+                };
+                let o = property_overrides_udp(&s);
+                assert_eq!(o.label, None, "{side:?}");
+                assert_eq!(o.description, None, "{side:?}");
+                assert_eq!(o.name, None, "{side:?}");
+                assert_eq!(o.interface_ip, None, "{side:?}");
+                assert_eq!(o.destination_ip, None, "{side:?}");
+                assert_eq!(o.destination_port, None, "{side:?}");
+                assert_eq!(o.source_ip, None, "{side:?}");
+                assert_eq!(o.source_port, None, "{side:?}");
+            }
+        }
+
+        // -- resolve_inner_config_udp end-to-end -------------------
+
+        /// Round-trip: with a baseline SDP in `transport_file`
+        /// and property overrides set, `resolve_inner_config_udp`
+        /// must return the spliced text (the second tuple
+        /// element) **and** the spliced `UdpMedia` inside
+        /// `InnerConfig::Real(TransportConfig::Udp)`. Mirrors
+        /// the MXL `resolve_inner_config_mxl` →
+        /// `flow_def::splice_overrides` end-to-end story.
+        #[test]
+        fn resolve_inner_config_udp_applies_property_overrides_to_transport_file() {
+            let s = CommonSettings {
+                side: Side::Receiver,
+                // Override the c= line address + m= port +
+                // session `s=` (label) + session `i=`
+                // (description) + session `a=x-nvnmos-name`.
+                multicast_ip: "232.0.0.1".to_owned(),
+                interface_ip: "192.0.2.30".to_owned(),
+                source_ip: "192.0.2.20".to_owned(),
+                destination_port: 5008,
+                label: "Spliced label".to_owned(),
+                description: "Spliced description".to_owned(),
+                name: "spliced-name".to_owned(),
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            let (inner, spliced_text) = resolve_inner_config_udp(
+                "nmossrc",
+                &s,
+                UdpVariant::V1,
+                Some(VIDEO_UDP_SDP.to_owned()),
+            )
+            .expect("splice + decide must succeed");
+
+            // The returned transport_file text carries the
+            // overrides.
+            let spliced = spliced_text.expect("transport_file must be Some after splice");
+            assert!(spliced.contains("c=IN IP4 232.0.0.1"),
+                "c= must be overridden to multicast_ip 232.0.0.1; got: {spliced}");
+            assert!(spliced.contains("m=video 5008"),
+                "m= port must be overridden to 5008; got: {spliced}");
+            assert!(spliced.contains("s=Spliced label\r\n"),
+                "s= must be overridden to label; got: {spliced}");
+            assert!(spliced.contains("i=Spliced description\r\n"),
+                "i= must be overridden to description; got: {spliced}");
+            assert!(spliced.contains("a=x-nvnmos-name:spliced-name\r\n"),
+                "session-level a=x-nvnmos-name must carry overridden name; got: {spliced}");
+            assert!(spliced.contains("a=x-nvnmos-iface-ip:192.0.2.30"),
+                "a=x-nvnmos-iface-ip must carry receiver's interface_ip; got: {spliced}");
+
+            // The Real(Udp) inner config carries the spliced
+            // UdpMedia (same source of truth).
+            match inner {
+                InnerConfig::Real(TransportConfig::Udp { media, transport_file, .. }) => {
+                    assert_eq!(media.primary.destination_ip, "232.0.0.1");
+                    assert_eq!(media.primary.destination_port, 5008);
+                    assert_eq!(media.primary.source_ip.as_deref(), Some("192.0.2.20"));
+                    assert_eq!(media.primary.interface_ip.as_deref(), Some("192.0.2.30"));
+                    assert_eq!(
+                        transport_file.as_deref(),
+                        Some(spliced.as_str()),
+                        "TransportConfig::Udp.transport_file must be the spliced text",
+                    );
+                }
+                other => panic!("expected Real(Udp), got {other:?}"),
+            }
+        }
+
+        /// No `transport_file` supplied → splice is a no-op and
+        /// the existing deferred-fake path is preserved. Pins
+        /// that adding the splice doesn't change behaviour for
+        /// the caps-only case, which a future caps-only SDP
+        /// synthesis path will rework.
+        #[test]
+        fn resolve_inner_config_udp_no_transport_file_remains_fake() {
+            let s = CommonSettings {
+                // Properties set but no transport file —
+                // splice is skipped, no synth yet.
+                multicast_ip: "232.0.0.1".to_owned(),
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            let (inner, text) =
+                resolve_inner_config_udp("nmossrc", &s, UdpVariant::V1, None).expect("no error");
+            assert!(text.is_none(), "no input → no spliced output");
+            assert!(matches!(inner, InnerConfig::Fake { .. }));
+        }
+
+        /// Activation SDP is authoritative — property overrides
+        /// must NOT splice into the activation transport file.
+        /// Mirrors `resolve_activation_inner_mxl`'s
+        /// `property_id=""` choice (see its doc comment at
+        /// "Activation: the daemon's transport file is
+        /// authoritative."). The transport file in the
+        /// returned Real(Udp) config must equal the activation
+        /// input byte-for-byte.
+        #[test]
+        fn activation_udp_does_not_apply_property_overrides() {
+            let s = CommonSettings {
+                side: Side::Receiver,
+                // Properties that WOULD splice if applied.
+                multicast_ip: "232.0.0.1".to_owned(),
+                destination_port: 5008,
+                label: "Spliced label".to_owned(),
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            let plan = make_activation_plan(
+                &cat(),
+                "nmossrc",
+                &s,
+                &req(Side::Receiver, Some(VIDEO_UDP_SDP)),
+            );
+            match plan.inner {
+                InnerConfig::Real(TransportConfig::Udp { media, transport_file, .. }) => {
+                    // Activation address is preserved.
+                    assert_eq!(media.primary.destination_ip, "239.1.1.1");
+                    assert_eq!(media.primary.destination_port, 5004);
+                    assert_eq!(
+                        transport_file.as_deref(),
+                        Some(VIDEO_UDP_SDP),
+                        "activation SDP must pass through untouched",
+                    );
+                }
+                other => panic!("expected Real(Udp), got {other:?}"),
+            }
+            assert!(matches!(plan.ack, ActivationAck::Success));
         }
 
         #[test]
