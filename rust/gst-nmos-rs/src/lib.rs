@@ -102,7 +102,7 @@
 //! whenever a flow_def is in play (`transport-file*` at NULL→READY,
 //! a flow_def synthesised from `caps + mxl-flow-id`, or the
 //! daemon-spliced internal transport file at activation). The
-//! flow_def is reverse-mapped via [`flow_def::caps_from_flow_def`]
+//! flow_def is reverse-mapped via [`flow_def::caps_from`]
 //! and pinned by an internal `mxlsrc ! capsfilter` chain so
 //! downstream caps queries see the concrete shape the flow will
 //! carry — the canonical `nmossrc ! transform ! nmossink` pipeline

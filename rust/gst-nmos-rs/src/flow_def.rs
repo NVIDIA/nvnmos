@@ -33,7 +33,7 @@
 //! `property_id` to [`resolve_mxl_flow_meta`] so the file always
 //! wins silently.
 //!
-//! [`build_from_caps`] is the reverse path: given GStreamer essence
+//! [`from_caps`] is the reverse path: given GStreamer essence
 //! caps plus property state, emit a `flow_def` JSON document that
 //! satisfies the MXL `FlowParser` (its hard requirements: `id`,
 //! `format`, non-empty `label`, non-empty `tags["urn:x-nmos:tag:grouphint/v1.0"]`,
@@ -63,7 +63,7 @@ struct RawRational {
     denominator: i64,
 }
 
-/// Subset of the flow_def schema needed by [`caps_from_flow_def`].
+/// Subset of the flow_def schema needed by [`caps_from`].
 /// `media_type` selects the GStreamer caps name, the remaining
 /// fields populate its structure; everything `RawFlowDef` already
 /// covers (`id`, `format`) is repeated so we can deserialise once.
@@ -78,6 +78,16 @@ struct RawFlowDefForCaps {
     interlace_mode: Option<String>,
 }
 
+/// All `flow_def` module errors funnel through a single type so that
+/// `?` chains cleanly between the parse/cross-check helpers and the
+/// caps-driven [`from_caps`] synthesis path, matching the
+/// single-error-type contract used by the [`crate::sdp`] module on
+/// the UDP side. Variants are tagged into two groups by their
+/// `#[error("…")]` prose: those that report parse / cross-check
+/// failures (input was unusable as a flow_def) and those that
+/// report synthesis failures (caller-supplied caps / scalars
+/// weren't enough to build a flow_def). Adding a new variant on
+/// either side does not require a new error type.
 #[derive(Debug, Error)]
 pub(crate) enum FlowDefError {
     #[error("failed to parse transport file as JSON: {source}")]
@@ -102,6 +112,37 @@ pub(crate) enum FlowDefError {
     NotAnObject,
     #[error("transport file `tags` is not a JSON object")]
     TagsNotAnObject,
+
+    // Variants below cover the caps→flow_def synthesis path
+    // (formerly `FlowDefError`). Collapsing them in here keeps
+    // [`from_caps`] / [`caps_from`] returning the same error type
+    // — matching the [`crate::sdp::SdpError`] shape — and lets
+    // future cross-helpers (e.g. parse-then-rebuild splice) chain
+    // without `map_err` between submodules.
+    #[error("synthesising flow_def from caps requires a non-empty `mxl-flow-id`")]
+    MissingFlowId,
+    #[error("synthesising flow_def from caps requires a non-empty `sender-name` / `receiver-name`")]
+    MissingName,
+    #[error("synthesising flow_def from caps requires a non-empty `mxl-domain-id`")]
+    MissingMxlDomainId,
+    #[error("caps are empty or ANY; an essence shape is required to synthesise a flow_def")]
+    EmptyCaps,
+    #[error(
+        "caps `{0}` are not supported by the caps→flow_def builder; supported shapes are `video/x-raw,format=v210,…`, `audio/x-raw,format=F32LE,…`, and `meta/x-st-2038,framerate=…,…`"
+    )]
+    UnsupportedCaps(String),
+    #[error("caps `{name}` are missing required field `{field}`{}", .hint.as_deref().map(|h| format!(" ({h})")).unwrap_or_default())]
+    MissingCapsField {
+        name: String,
+        field: &'static str,
+        hint: Option<String>,
+    },
+    #[error("caps `{name}` field `{field}` has unsupported value `{value}`")]
+    UnsupportedCapsValue {
+        name: String,
+        field: &'static str,
+        value: String,
+    },
 }
 
 #[derive(Debug)]
@@ -311,7 +352,7 @@ pub(crate) fn splice_overrides(
     Ok(serde_json::to_string(&value).expect("flow_def value is always serialisable"))
 }
 
-/// Inputs to [`build_from_caps`]. All borrowed; the builder doesn't
+/// Inputs to [`from_caps`]. All borrowed; the builder doesn't
 /// hold any of these beyond the call.
 #[derive(Debug)]
 pub(crate) struct FlowDefBuildInput<'a> {
@@ -339,34 +380,6 @@ pub(crate) struct FlowDefBuildInput<'a> {
     pub(crate) caps: &'a gst::Caps,
 }
 
-#[derive(Debug, Error)]
-pub(crate) enum FlowDefBuildError {
-    #[error("synthesising flow_def from caps requires a non-empty `mxl-flow-id`")]
-    MissingFlowId,
-    #[error("synthesising flow_def from caps requires a non-empty `sender-name` / `receiver-name`")]
-    MissingName,
-    #[error("synthesising flow_def from caps requires a non-empty `mxl-domain-id`")]
-    MissingMxlDomainId,
-    #[error("caps are empty or ANY; an essence shape is required to synthesise a flow_def")]
-    EmptyCaps,
-    #[error(
-        "caps `{0}` are not supported by the caps→flow_def builder; supported shapes are `video/x-raw,format=v210,…`, `audio/x-raw,format=F32LE,…`, and `meta/x-st-2038,framerate=…,…`"
-    )]
-    UnsupportedCaps(String),
-    #[error("caps `{name}` are missing required field `{field}`{}", .hint.as_deref().map(|h| format!(" ({h})")).unwrap_or_default())]
-    MissingCapsField {
-        name: String,
-        field: &'static str,
-        hint: Option<String>,
-    },
-    #[error("caps `{name}` field `{field}` has unsupported value `{value}`")]
-    UnsupportedCapsValue {
-        name: String,
-        field: &'static str,
-        value: String,
-    },
-}
-
 /// Build an MXL `flow_def` JSON document from essence caps and
 /// property state. The shape matches the reference flows in the MXL
 /// SDK (`mxl/lib/tests/data/{v210,audio,data}_flow.json`).
@@ -376,27 +389,27 @@ pub(crate) enum FlowDefBuildError {
 /// `transfer_characteristic` from `format=v210` alone. The user can
 /// add those by supplying a `transport-file` (which then wins over
 /// the builder).
-pub(crate) fn build_from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDefBuildError> {
+pub(crate) fn from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDefError> {
     if input.flow_id.is_empty() {
-        return Err(FlowDefBuildError::MissingFlowId);
+        return Err(FlowDefError::MissingFlowId);
     }
     if input.name.is_empty() {
-        return Err(FlowDefBuildError::MissingName);
+        return Err(FlowDefError::MissingName);
     }
     if input.mxl_domain_id.is_empty() {
-        return Err(FlowDefBuildError::MissingMxlDomainId);
+        return Err(FlowDefError::MissingMxlDomainId);
     }
     let structure = input
         .caps
         .structure(0)
-        .ok_or(FlowDefBuildError::EmptyCaps)?;
+        .ok_or(FlowDefError::EmptyCaps)?;
 
     let name = structure.name();
     let (format, body) = match name.as_str() {
         "video/x-raw" => build_video_body(structure)?,
         "audio/x-raw" => build_audio_body(structure)?,
         "meta/x-st-2038" => build_data_body(structure)?,
-        other => return Err(FlowDefBuildError::UnsupportedCaps(other.to_owned())),
+        other => return Err(FlowDefError::UnsupportedCaps(other.to_owned())),
     };
 
     let role = match format {
@@ -454,13 +467,13 @@ pub(crate) fn build_from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, F
 /// component layout should supply a `transport-file` instead.
 fn build_video_body(
     structure: &gst::StructureRef,
-) -> Result<(FlowFormat, Vec<(String, serde_json::Value)>), FlowDefBuildError> {
+) -> Result<(FlowFormat, Vec<(String, serde_json::Value)>), FlowDefError> {
     let name = structure.name();
     let format = caps_field_string(structure, "format")?;
     let media_type = match format.as_str() {
         "v210" => "video/v210",
         other => {
-            return Err(FlowDefBuildError::UnsupportedCapsValue {
+            return Err(FlowDefError::UnsupportedCapsValue {
                 name: name.to_string(),
                 field: "format",
                 value: other.to_owned(),
@@ -505,13 +518,13 @@ fn build_video_body(
 
 fn build_audio_body(
     structure: &gst::StructureRef,
-) -> Result<(FlowFormat, Vec<(String, serde_json::Value)>), FlowDefBuildError> {
+) -> Result<(FlowFormat, Vec<(String, serde_json::Value)>), FlowDefError> {
     let name = structure.name();
     let format = caps_field_string(structure, "format")?;
     let (media_type, bit_depth) = match format.as_str() {
         "F32LE" => ("audio/float32", 32),
         other => {
-            return Err(FlowDefBuildError::UnsupportedCapsValue {
+            return Err(FlowDefError::UnsupportedCapsValue {
                 name: name.to_string(),
                 field: "format",
                 value: other.to_owned(),
@@ -536,7 +549,7 @@ fn build_audio_body(
 
 fn build_data_body(
     structure: &gst::StructureRef,
-) -> Result<(FlowFormat, Vec<(String, serde_json::Value)>), FlowDefBuildError> {
+) -> Result<(FlowFormat, Vec<(String, serde_json::Value)>), FlowDefError> {
     let framerate = caps_field_fraction(
         structure,
         "framerate",
@@ -561,7 +574,7 @@ fn build_data_body(
     Ok((FlowFormat::Data, fields))
 }
 
-/// Errors from [`caps_from_flow_def`].
+/// Errors from [`caps_from`].
 #[derive(Debug, Error)]
 pub(crate) enum FlowDefCapsError {
     #[error("failed to parse transport file as JSON: {source}")]
@@ -584,7 +597,7 @@ pub(crate) enum FlowDefCapsError {
     },
 }
 
-/// Reverse of [`build_from_caps`]: turn an MXL `flow_def` JSON
+/// Reverse of [`from_caps`]: turn an MXL `flow_def` JSON
 /// document into essence Caps that `nmossrc` advertises on its
 /// ghost source pad so downstream caps queries (and a peer-querying
 /// deferred `nmossink`) see the concrete shape the flow will carry.
@@ -599,7 +612,7 @@ pub(crate) enum FlowDefCapsError {
 /// The receiver treats both as a hard NULL→READY (or activation)
 /// failure — if the user supplied a transport file (or the daemon
 /// spliced one), the file is expected to be complete.
-pub(crate) fn caps_from_flow_def(text: &str) -> Result<gst::Caps, FlowDefCapsError> {
+pub(crate) fn caps_from(text: &str) -> Result<gst::Caps, FlowDefCapsError> {
     let raw: RawFlowDefForCaps =
         serde_json::from_str(text).map_err(|source| FlowDefCapsError::Parse { source })?;
     let media_type = raw
@@ -692,10 +705,10 @@ fn rational_to_gst_fraction(
 fn caps_field_string(
     structure: &gst::StructureRef,
     field: &'static str,
-) -> Result<String, FlowDefBuildError> {
+) -> Result<String, FlowDefError> {
     structure
         .get::<String>(field)
-        .map_err(|_| FlowDefBuildError::MissingCapsField {
+        .map_err(|_| FlowDefError::MissingCapsField {
             name: structure.name().to_string(),
             field,
             hint: None,
@@ -705,10 +718,10 @@ fn caps_field_string(
 fn caps_field_i32(
     structure: &gst::StructureRef,
     field: &'static str,
-) -> Result<i32, FlowDefBuildError> {
+) -> Result<i32, FlowDefError> {
     structure
         .get::<i32>(field)
-        .map_err(|_| FlowDefBuildError::MissingCapsField {
+        .map_err(|_| FlowDefError::MissingCapsField {
             name: structure.name().to_string(),
             field,
             hint: None,
@@ -719,11 +732,11 @@ fn caps_field_fraction(
     structure: &gst::StructureRef,
     field: &'static str,
     hint: Option<&str>,
-) -> Result<(i32, i32), FlowDefBuildError> {
+) -> Result<(i32, i32), FlowDefError> {
     structure
         .get::<gst::Fraction>(field)
         .map(|f| (f.numer(), f.denom()))
-        .map_err(|_| FlowDefBuildError::MissingCapsField {
+        .map_err(|_| FlowDefError::MissingCapsField {
             name: structure.name().to_string(),
             field,
             hint: hint.map(str::to_owned),
@@ -1020,7 +1033,7 @@ mod tests {
         let caps = caps_from_str(
             "video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001",
         );
-        let json = build_from_caps(&input(UUID_A, "cam-1", &caps)).unwrap();
+        let json = from_caps(&input(UUID_A, "cam-1", &caps)).unwrap();
         let v = parse(&json);
         assert_eq!(v["id"], UUID_A);
         assert_eq!(v["format"], "urn:x-nmos:format:video");
@@ -1064,7 +1077,7 @@ mod tests {
         let caps = caps_from_str(
             "video/x-raw,format=v210,width=720,height=486,framerate=30000/1001,interlace-mode=interlaced-tff",
         );
-        let json = build_from_caps(&FlowDefBuildInput {
+        let json = from_caps(&FlowDefBuildInput {
             label: "Studio A v210",
             description: "long description goes here",
             ..input(UUID_A, "cam-1", &caps)
@@ -1081,7 +1094,7 @@ mod tests {
         let caps = caps_from_str(
             "audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved",
         );
-        let json = build_from_caps(&input(UUID_A, "mic-1", &caps)).unwrap();
+        let json = from_caps(&input(UUID_A, "mic-1", &caps)).unwrap();
         let v = parse(&json);
         assert_eq!(v["format"], "urn:x-nmos:format:audio");
         assert_eq!(v["media_type"], "audio/float32");
@@ -1102,7 +1115,7 @@ mod tests {
     #[test]
     fn build_data_st2038_with_framerate() {
         let caps = caps_from_str("meta/x-st-2038,framerate=30/1");
-        let json = build_from_caps(&input(UUID_A, "anc-1", &caps)).unwrap();
+        let json = from_caps(&input(UUID_A, "anc-1", &caps)).unwrap();
         let v = parse(&json);
         assert_eq!(v["format"], "urn:x-nmos:format:data");
         assert_eq!(v["media_type"], "video/smpte291");
@@ -1117,9 +1130,9 @@ mod tests {
     #[test]
     fn build_data_st2038_without_framerate_is_hard_error() {
         let caps = caps_from_str("meta/x-st-2038");
-        let err = build_from_caps(&input(UUID_A, "anc-1", &caps)).unwrap_err();
+        let err = from_caps(&input(UUID_A, "anc-1", &caps)).unwrap_err();
         let msg = err.to_string();
-        assert!(matches!(err, FlowDefBuildError::MissingCapsField { field: "framerate", .. }));
+        assert!(matches!(err, FlowDefError::MissingCapsField { field: "framerate", .. }));
         assert!(msg.contains("capsfilter"), "missing-framerate error guides the user: {msg}");
     }
 
@@ -1127,37 +1140,37 @@ mod tests {
     fn missing_flow_id_is_hard_error() {
         let caps =
             caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
-        let err = build_from_caps(&input("", "cam-1", &caps)).unwrap_err();
-        assert!(matches!(err, FlowDefBuildError::MissingFlowId), "got: {err:?}");
+        let err = from_caps(&input("", "cam-1", &caps)).unwrap_err();
+        assert!(matches!(err, FlowDefError::MissingFlowId), "got: {err:?}");
     }
 
     #[test]
     fn missing_name_is_hard_error() {
         let caps =
             caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
-        let err = build_from_caps(&input(UUID_A, "", &caps)).unwrap_err();
-        assert!(matches!(err, FlowDefBuildError::MissingName), "got: {err:?}");
+        let err = from_caps(&input(UUID_A, "", &caps)).unwrap_err();
+        assert!(matches!(err, FlowDefError::MissingName), "got: {err:?}");
     }
 
     #[test]
     fn missing_mxl_domain_id_is_hard_error() {
         let caps =
             caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
-        let err = build_from_caps(&FlowDefBuildInput {
+        let err = from_caps(&FlowDefBuildInput {
             mxl_domain_id: "",
             ..input(UUID_A, "cam-1", &caps)
         })
         .unwrap_err();
-        assert!(matches!(err, FlowDefBuildError::MissingMxlDomainId), "got: {err:?}");
+        assert!(matches!(err, FlowDefError::MissingMxlDomainId), "got: {err:?}");
     }
 
     #[test]
     fn unsupported_video_format_is_hard_error() {
         let caps =
             caps_from_str("video/x-raw,format=I420,width=1920,height=1080,framerate=30000/1001");
-        let err = build_from_caps(&input(UUID_A, "cam-1", &caps)).unwrap_err();
+        let err = from_caps(&input(UUID_A, "cam-1", &caps)).unwrap_err();
         assert!(
-            matches!(err, FlowDefBuildError::UnsupportedCapsValue { field: "format", .. }),
+            matches!(err, FlowDefError::UnsupportedCapsValue { field: "format", .. }),
             "got: {err:?}"
         );
     }
@@ -1165,16 +1178,16 @@ mod tests {
     #[test]
     fn unsupported_caps_is_hard_error() {
         let caps = caps_from_str("application/x-rtp,media=video");
-        let err = build_from_caps(&input(UUID_A, "cam-1", &caps)).unwrap_err();
-        assert!(matches!(err, FlowDefBuildError::UnsupportedCaps(_)), "got: {err:?}");
+        let err = from_caps(&input(UUID_A, "cam-1", &caps)).unwrap_err();
+        assert!(matches!(err, FlowDefError::UnsupportedCaps(_)), "got: {err:?}");
     }
 
     #[test]
     fn missing_video_field_is_hard_error() {
         let caps = caps_from_str("video/x-raw,format=v210,width=1920,height=1080");
-        let err = build_from_caps(&input(UUID_A, "cam-1", &caps)).unwrap_err();
+        let err = from_caps(&input(UUID_A, "cam-1", &caps)).unwrap_err();
         assert!(
-            matches!(err, FlowDefBuildError::MissingCapsField { field: "framerate", .. }),
+            matches!(err, FlowDefError::MissingCapsField { field: "framerate", .. }),
             "got: {err:?}",
         );
     }
@@ -1183,13 +1196,13 @@ mod tests {
     fn build_then_parse_round_trips_through_read_flow_def_meta() {
         let caps =
             caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
-        let json = build_from_caps(&input(UUID_B, "cam-1", &caps)).unwrap();
+        let json = from_caps(&input(UUID_B, "cam-1", &caps)).unwrap();
         let meta = read_flow_def_meta(&json).unwrap();
         assert_eq!(meta.id, UUID_B);
         assert_eq!(meta.format, FlowFormat::Video);
     }
 
-    mod caps_from_flow_def {
+    mod caps_from {
         use super::*;
 
         #[test]
@@ -1203,7 +1216,7 @@ mod tests {
                 "frame_width": 1920,
                 "frame_height": 1080
             }"#;
-            let caps = super::caps_from_flow_def(json).unwrap();
+            let caps = super::caps_from(json).unwrap();
             let s = caps.structure(0).expect("structure");
             assert_eq!(s.name().as_str(), "video/x-raw");
             assert_eq!(s.get::<String>("format").unwrap(), "v210");
@@ -1225,7 +1238,7 @@ mod tests {
                 "frame_width": 720, "frame_height": 576,
                 "interlace_mode": "interleaved"
             }"#;
-            let caps = super::caps_from_flow_def(json).unwrap();
+            let caps = super::caps_from(json).unwrap();
             let s = caps.structure(0).expect("structure");
             assert_eq!(s.get::<String>("interlace-mode").unwrap(), "interleaved");
         }
@@ -1241,7 +1254,7 @@ mod tests {
                 "channel_count": 2,
                 "bit_depth": 32
             }"#;
-            let caps = super::caps_from_flow_def(json).unwrap();
+            let caps = super::caps_from(json).unwrap();
             let s = caps.structure(0).expect("structure");
             assert_eq!(s.name().as_str(), "audio/x-raw");
             assert_eq!(s.get::<String>("format").unwrap(), "F32LE");
@@ -1259,7 +1272,7 @@ mod tests {
                 "media_type": "video/smpte291",
                 "grain_rate": { "numerator": 30, "denominator": 1 }
             }"#;
-            let caps = super::caps_from_flow_def(json).unwrap();
+            let caps = super::caps_from(json).unwrap();
             let s = caps.structure(0).expect("structure");
             assert_eq!(s.name().as_str(), "meta/x-st-2038");
             let fr = s.get::<gst::Fraction>("framerate").unwrap();
@@ -1268,7 +1281,7 @@ mod tests {
 
         #[test]
         fn missing_media_type_is_error() {
-            let err = super::caps_from_flow_def(r#"{"id":"a"}"#).unwrap_err();
+            let err = super::caps_from(r#"{"id":"a"}"#).unwrap_err();
             assert!(
                 matches!(err, FlowDefCapsError::MissingField("media_type")),
                 "got: {err:?}"
@@ -1277,13 +1290,13 @@ mod tests {
 
         #[test]
         fn unsupported_media_type_is_error() {
-            let err = super::caps_from_flow_def(r#"{"media_type":"image/jpeg"}"#).unwrap_err();
+            let err = super::caps_from(r#"{"media_type":"image/jpeg"}"#).unwrap_err();
             assert!(matches!(err, FlowDefCapsError::UnsupportedMediaType(_)), "got: {err:?}");
         }
 
         #[test]
         fn missing_grain_rate_for_video_is_error() {
-            let err = super::caps_from_flow_def(
+            let err = super::caps_from(
                 r#"{"media_type":"video/v210","frame_width":1920,"frame_height":1080}"#,
             )
             .unwrap_err();
@@ -1295,7 +1308,7 @@ mod tests {
 
         #[test]
         fn missing_frame_width_for_video_is_error() {
-            let err = super::caps_from_flow_def(
+            let err = super::caps_from(
                 r#"{"media_type":"video/v210","grain_rate":{"numerator":30,"denominator":1},"frame_height":1080}"#,
             )
             .unwrap_err();
@@ -1307,7 +1320,7 @@ mod tests {
 
         #[test]
         fn parse_error_is_surfaced() {
-            let err = super::caps_from_flow_def("not json").unwrap_err();
+            let err = super::caps_from("not json").unwrap_err();
             assert!(matches!(err, FlowDefCapsError::Parse { .. }), "got: {err:?}");
         }
 
@@ -1316,8 +1329,8 @@ mod tests {
             ensure_gst_initialised();
             let original_caps =
                 caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
-            let json = build_from_caps(&input(UUID_A, "cam-1", &original_caps)).unwrap();
-            let derived = super::caps_from_flow_def(&json).unwrap();
+            let json = from_caps(&input(UUID_A, "cam-1", &original_caps)).unwrap();
+            let derived = super::caps_from(&json).unwrap();
             // Both should agree on the structure name + the essence
             // fields the builder emits (framerate, width, height,
             // format).
@@ -1332,8 +1345,8 @@ mod tests {
             ensure_gst_initialised();
             let original_caps =
                 caps_from_str("audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved");
-            let json = build_from_caps(&input(UUID_A, "mic-1", &original_caps)).unwrap();
-            let derived = super::caps_from_flow_def(&json).unwrap();
+            let json = from_caps(&input(UUID_A, "mic-1", &original_caps)).unwrap();
+            let derived = super::caps_from(&json).unwrap();
             assert!(
                 derived.can_intersect(&original_caps),
                 "derived caps `{derived}` should intersect original `{original_caps}`"
@@ -1344,8 +1357,8 @@ mod tests {
         fn round_trip_with_build_from_caps_data() {
             ensure_gst_initialised();
             let original_caps = caps_from_str("meta/x-st-2038,framerate=30/1");
-            let json = build_from_caps(&input(UUID_A, "anc-1", &original_caps)).unwrap();
-            let derived = super::caps_from_flow_def(&json).unwrap();
+            let json = from_caps(&input(UUID_A, "anc-1", &original_caps)).unwrap();
+            let derived = super::caps_from(&json).unwrap();
             assert!(
                 derived.can_intersect(&original_caps),
                 "derived caps `{derived}` should intersect original `{original_caps}`"

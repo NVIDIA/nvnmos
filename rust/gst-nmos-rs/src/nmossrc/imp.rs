@@ -749,7 +749,7 @@ fn derive_advertise_caps(
     let Some(text) = transport_file.filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
-    let caps = crate::flow_def::caps_from_flow_def(text).map_err(|e| {
+    let caps = crate::flow_def::caps_from(text).map_err(|e| {
         anyhow::anyhow!(
             "deriving essence caps from transport file for ghost-pad advertisement: {e}",
         )

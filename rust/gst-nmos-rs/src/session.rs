@@ -190,7 +190,7 @@ pub(crate) struct CommonSettings {
     /// Essence caps. On `nmossink`, when no `transport_file*` is
     /// supplied, the element synthesises a flow_def JSON from these
     /// caps plus the resolved property state
-    /// (see [`crate::flow_def::build_from_caps`]). On `nmossrc`,
+    /// (see [`crate::flow_def::from_caps`]). On `nmossrc`,
     /// the media-type structure name decides which `mxlsrc` flow-id
     /// slot receives `mxl-flow-id` and the caps are pinned on the
     /// ghost source pad so downstream caps queries see the concrete
@@ -364,7 +364,7 @@ pub(crate) fn validate_and_open(
     }
 
     let resolved_transport_file = resolve_transport_file(element, settings)?;
-    let transport_file = synthesise_or_passthrough(
+    let transport_file = synthesise_or_passthrough_mxl(
         cat,
         element,
         settings,
@@ -380,7 +380,7 @@ pub(crate) fn validate_and_open(
     // shape and a mismatch is a real error.
     let transport_file = match transport_file {
         Some(text) => Some(
-            flow_def::splice_overrides(&text, &property_overrides(settings, &domain_resolution.id))
+            flow_def::splice_overrides(&text, &property_overrides_mxl(settings, &domain_resolution.id))
                 .with_context(|| format!("{element}: splicing property overrides into transport file"))?,
         ),
         None => None,
@@ -473,7 +473,7 @@ pub(crate) fn validate_and_open(
 /// If the user supplied a `transport-file` (literal or path), pass
 /// it through; otherwise, when `caps` is set and `mxl-flow-id` is
 /// non-empty, synthesise a flow_def JSON document via
-/// [`flow_def::build_from_caps`]. When *both* a transport file and
+/// [`flow_def::from_caps`]. When *both* a transport file and
 /// `caps` are set, the file is passed through and the caps are
 /// cross-checked against the file's `format` further down the
 /// validate path (a mismatch is a hard error, not silently dropped).
@@ -492,7 +492,7 @@ pub(crate) fn validate_and_open(
 /// transport file nor enough property state to build one. The element
 /// then opens the session without a transport file and runs on the
 /// fake chain until an IS-05 activation arrives.
-fn synthesise_or_passthrough(
+fn synthesise_or_passthrough_mxl(
     cat: &gst::DebugCategory,
     element: &str,
     settings: &CommonSettings,
@@ -518,7 +518,7 @@ fn synthesise_or_passthrough(
                 );
                 return Ok(None);
             }
-            let json = flow_def::build_from_caps(&FlowDefBuildInput {
+            let json = flow_def::from_caps(&FlowDefBuildInput {
                 flow_id: &settings.mxl_flow_id,
                 name: &settings.name,
                 mxl_domain_id: resolved_mxl_domain_id,
@@ -557,7 +557,7 @@ fn caps_format(settings: &CommonSettings) -> FlowFormat {
 /// from the domain resolution result, not the raw property, so the
 /// `domain_def.json`-derived value also flows into the splice when
 /// the user didn't set the property directly.
-fn property_overrides<'a>(
+fn property_overrides_mxl<'a>(
     settings: &'a CommonSettings,
     resolved_mxl_domain_id: &'a str,
 ) -> FlowDefOverrides<'a> {
@@ -711,7 +711,7 @@ pub(crate) fn register_deferred(
         );
     }
 
-    let json = flow_def::build_from_caps(&FlowDefBuildInput {
+    let json = flow_def::from_caps(&FlowDefBuildInput {
         flow_id: &settings.mxl_flow_id,
         name: &settings.name,
         mxl_domain_id: &domain_resolution.id,
@@ -1090,7 +1090,7 @@ mod tests {
             mxl_flow_id: FLOW_ID_B.to_owned(),
             ..settings(Side::Sender)
         };
-        let overrides = property_overrides(&s, DOMAIN_ID);
+        let overrides = property_overrides_mxl(&s, DOMAIN_ID);
         let spliced =
             flow_def::splice_overrides(&video_flow_def(FLOW_ID_A), &overrides).unwrap();
         let v: serde_json::Value = serde_json::from_str(&spliced).unwrap();
@@ -1425,7 +1425,7 @@ mod tests {
                 .expect("static caps parse");
             let res = register_deferred(&cat(), "nmossink", &sender_settings(), &no_session(), caps);
             let err = res.expect_err("unsupported caps must be rejected");
-            // exact message is owned by build_from_caps; we just want
+            // exact message is owned by from_caps; we just want
             // the synthesis-context wrapper to be present.
             assert!(
                 format!("{err:#}").contains("synthesising flow_def"),
@@ -1452,7 +1452,7 @@ mod tests {
         }
     }
 
-    mod synthesise_or_passthrough {
+    mod synthesise_or_passthrough_mxl {
         use super::*;
 
         fn parse(json: &str) -> serde_json::Value {
@@ -1462,7 +1462,7 @@ mod tests {
         /// Caps + `mxl-flow-id` on a Receiver synthesises a configuring
         /// flow_def the daemon can use to advertise narrow Receiver
         /// Caps on IS-04. The synthesised shape matches what the
-        /// equivalent Sender call would produce — `build_from_caps`
+        /// equivalent Sender call would produce — `from_caps`
         /// is symmetric.
         #[test]
         fn receiver_caps_and_flow_id_synthesise_flow_def() {
@@ -1474,7 +1474,7 @@ mod tests {
                 caps: Some(video_caps()),
                 ..settings(Side::Receiver)
             };
-            let out = super::synthesise_or_passthrough(&cat(), "nmossrc", &s, DOMAIN_ID, None)
+            let out = super::synthesise_or_passthrough_mxl(&cat(), "nmossrc", &s, DOMAIN_ID, None)
                 .expect("synthesis must succeed");
             let text = out.expect("Receiver synthesis must yield Some(json) when caps + flow id are set");
             let v = parse(&text);
@@ -1499,7 +1499,7 @@ mod tests {
                 ..settings(Side::Receiver)
             };
             assert!(s.mxl_flow_id.is_empty(), "test precondition");
-            let out = super::synthesise_or_passthrough(&cat(), "nmossrc", &s, DOMAIN_ID, None)
+            let out = super::synthesise_or_passthrough_mxl(&cat(), "nmossrc", &s, DOMAIN_ID, None)
                 .expect("absent flow id must not error");
             assert!(out.is_none(), "Receiver without flow id must not synthesise");
         }
@@ -1514,7 +1514,7 @@ mod tests {
                 caps: Some(video_caps()),
                 ..settings(Side::Sender)
             };
-            let out = super::synthesise_or_passthrough(&cat(), "nmossink", &s, DOMAIN_ID, None)
+            let out = super::synthesise_or_passthrough_mxl(&cat(), "nmossink", &s, DOMAIN_ID, None)
                 .expect("Sender synthesis must succeed");
             let v = parse(&out.expect("Sender synthesis yields Some(json)"));
             assert_eq!(v["id"], FLOW_ID_A);
@@ -1532,7 +1532,7 @@ mod tests {
                 ..settings(Side::Receiver)
             };
             let resolved = Some(video_flow_def(FLOW_ID_A));
-            let out = super::synthesise_or_passthrough(&cat(), "nmossrc", &s, DOMAIN_ID, resolved.clone())
+            let out = super::synthesise_or_passthrough_mxl(&cat(), "nmossrc", &s, DOMAIN_ID, resolved.clone())
                 .expect("passthrough must succeed");
             assert_eq!(
                 out.as_deref(),
@@ -1666,7 +1666,7 @@ mod tests {
             // Mimic the validate_and_open chain up to the gate:
             // synthesise the flow_def, resolve flow meta, decide
             // inner config — then apply the gate twice.
-            let synth = super::super::synthesise_or_passthrough(
+            let synth = super::super::synthesise_or_passthrough_mxl(
                 &cat(),
                 "nmossink",
                 &s,

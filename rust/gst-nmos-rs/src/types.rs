@@ -117,7 +117,7 @@ impl FlowFormat {
 
     /// Map the first structure of a [`gstreamer::Caps`] to its
     /// `FlowFormat`. Mirrors the dispatch in
-    /// [`crate::flow_def::build_from_caps`] (`video/x-raw` → Video,
+    /// [`crate::flow_def::from_caps`] (`video/x-raw` → Video,
     /// `audio/x-raw` → Audio, `meta/x-st-2038` → Data). Returns
     /// [`FlowFormat::Unspecified`] for empty/ANY caps and for any
     /// other media type — the caller is responsible for falling
