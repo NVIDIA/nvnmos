@@ -48,7 +48,7 @@
 //! `a=ptime:` / `a=maxptime:` are surfaced on the RTP caps as
 //! `a-ptime` / `a-maxptime` so that `set_media_from_caps`
 //! round-trips them as standalone `a=…:` lines on build — see
-//! [`derive_raw_caps_audio`] for the reasoning.
+//! [`raw_caps_from_rtp_audio`] for the reasoning.
 
 
 use std::str::FromStr;
@@ -380,7 +380,7 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
     // `g_ascii_strup` (gstsdpmessage.c) so the match arms below
     // can use the canonical upper-case form. An absent field falls
     // through to "" which doesn't match any arm — the inner
-    // `derive_raw_caps_*` then surfaces the precise reason.
+    // `raw_caps_from_rtp_*` then surfaces the precise reason.
     let encoding_name = structure.get::<&str>("encoding-name").unwrap_or("");
     let format = match (media_kind, encoding_name) {
         // RFC 8331 / ST 2110-40 carries SMPTE 291 ANC under
@@ -398,9 +398,9 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
     };
 
     let raw_caps = match format {
-        FlowFormat::Video => derive_raw_caps_video(&rtp_caps)?,
-        FlowFormat::Audio => derive_raw_caps_audio(&rtp_caps)?,
-        FlowFormat::Data => derive_raw_caps_data(&rtp_caps)?,
+        FlowFormat::Video => raw_caps_from_rtp_video(&rtp_caps)?,
+        FlowFormat::Audio => raw_caps_from_rtp_audio(&rtp_caps)?,
+        FlowFormat::Data => raw_caps_from_rtp_data(&rtp_caps)?,
         FlowFormat::Unspecified => unreachable!(
             "format dispatch above never produces FlowFormat::Unspecified"
         ),
@@ -1078,10 +1078,10 @@ fn extract_source_ip_from_filter(value: &str) -> Option<String> {
 /// Note that the returned preset always implies the standard
 /// narrow range (`16_235`) of its colorimetry tuple. ST 2110-21
 /// `RANGE=FULL` / `FULLPROTECT` is **not** propagated; see
-/// `derive_raw_caps_video`'s docstring for the rationale (V2
+/// `raw_caps_from_rtp_video`'s docstring for the rationale (V2
 /// doesn't read `RANGE` either, so plumbing it asymmetrically
 /// via the V1 capssetter would diverge V1/V2 output).
-fn colorimetry_for_caps(sdp: &str, depth: u32, tcs: Option<&str>) -> Option<&'static str> {
+fn caps_colorimetry_from_sdp(sdp: &str, depth: u32, tcs: Option<&str>) -> Option<&'static str> {
     match sdp.to_ascii_uppercase().as_str() {
         "BT601-5" | "BT601" => Some("bt601"),
         "BT709-2" | "BT709" => Some("bt709"),
@@ -1117,9 +1117,9 @@ fn colorimetry_for_caps(sdp: &str, depth: u32, tcs: Option<&str>) -> Option<&'st
 /// Optional fields (added only when the SDP provides a recognised
 /// value):
 ///   * `colorimetry` — translated from fmtp `colorimetry` (+ `TCS`
-///     for `BT2100`) via [`colorimetry_for_caps`]. Required for
+///     for `BT2100`) via [`caps_colorimetry_from_sdp`]. Required for
 ///     correctness on the V1 receiver path where the depayloader
-///     ignores SDP colorimetry; see [`colorimetry_for_caps`]'s
+///     ignores SDP colorimetry; see [`caps_colorimetry_from_sdp`]'s
 ///     docs for the V1/V2 split rationale.
 ///
 /// Deliberately omitted (kept off the raw caps even when the SDP
@@ -1170,7 +1170,7 @@ fn colorimetry_for_caps(sdp: &str, depth: u32, tcs: Option<&str>) -> Option<&'st
 ///     content where `videoconvert` will still produce
 ///     visually-correct output (just at the wrong dynamic range
 ///     mapping).
-fn derive_raw_caps_video(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
+fn raw_caps_from_rtp_video(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
     let s = rtp_caps
         .structure(0)
         .ok_or_else(|| SdpError::CapsFromMedia("rtp caps empty".to_owned()))?;
@@ -1218,7 +1218,7 @@ fn derive_raw_caps_video(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
     } else {
         "progressive"
     };
-    let colorimetry_caps = colorimetry_for_caps(
+    let colorimetry_caps = caps_colorimetry_from_sdp(
         s.get::<&str>("colorimetry").unwrap_or(""),
         depth,
         // ST 2110-20 fmtp `TCS=` lands as `tcs=(string)…` on the
@@ -1261,7 +1261,7 @@ fn derive_raw_caps_video(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
 /// `set_media_from_caps` round-trips them back out as standalone
 /// `a=ptime:` / `a=maxptime:` lines. We do not copy them onto
 /// `audio/x-raw` because the format has no native ptime field.
-fn derive_raw_caps_audio(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
+fn raw_caps_from_rtp_audio(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
     let s = rtp_caps
         .structure(0)
         .ok_or_else(|| SdpError::CapsFromMedia("rtp caps empty".to_owned()))?;
@@ -1311,7 +1311,7 @@ fn derive_raw_caps_audio(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
 /// is clocked from the paired video flow at runtime and the caller
 /// (typically the element's `caps` property or the caps-merge on the
 /// `nmossrc` ghost src pad) supplies the framerate downstream.
-fn derive_raw_caps_data(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
+fn raw_caps_from_rtp_data(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
     let s = rtp_caps
         .structure(0)
         .ok_or_else(|| SdpError::CapsFromMedia("rtp caps empty".to_owned()))?;
@@ -1594,7 +1594,7 @@ mod tests {
     }
 
     /// Round-trip the colorimetry mapping through `parse_sdp` rather
-    /// than calling `colorimetry_for_caps` directly; this keeps the
+    /// than calling `caps_colorimetry_from_sdp` directly; this keeps the
     /// fmtp-key-name plumbing (`colorimetry` vs `tcs`) covered too.
     fn colorimetry_via_parse(sdp_colorimetry: &str, depth: u32, tcs: Option<&str>) -> Option<String> {
         init_gst();
@@ -1693,7 +1693,7 @@ mod tests {
         // must NOT smuggle a guess onto the caps; the V1 depay's
         // format-default takes over and the V2 depay also emits
         // nothing. depth=10 here is just to stay inside the
-        // `YCbCr-4:2:2` samplings `derive_raw_caps_video` accepts
+        // `YCbCr-4:2:2` samplings `raw_caps_from_rtp_video` accepts
         // today — the depth value doesn't otherwise affect the
         // `XYZ` / `UNSPECIFIED` arms.
         assert_eq!(colorimetry_via_parse("UNSPECIFIED", 10, Some("SDR")), None);
