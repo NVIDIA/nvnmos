@@ -444,20 +444,31 @@ impl NmosSrc {
         outcome: &InnerConfig,
     ) -> Result<(), anyhow::Error> {
         match outcome {
-            InnerConfig::Real(TransportConfig::Mxl {
-                domain_path,
-                flow_id,
-                format,
-                transport_file,
-            }) => {
-                let advertise_caps = derive_advertise_caps(transport_file.as_deref())?;
-                let mxlsrc = inner::build_mxlsrc(
-                    domain_path,
-                    flow_id,
-                    *format,
-                    advertise_caps.as_ref(),
-                )?;
-                self.swap_inner(bin, &mxlsrc)?;
+            InnerConfig::Real(transport) => {
+                let new_inner = match transport {
+                    TransportConfig::Mxl {
+                        domain_path,
+                        flow_id,
+                        format,
+                        transport_file,
+                    } => {
+                        let advertise_caps = derive_advertise_caps(transport_file.as_deref())?;
+                        inner::build_mxlsrc(domain_path, flow_id, *format, advertise_caps.as_ref())?
+                    }
+                    TransportConfig::Udp { variant, media, .. } => {
+                        // Receiver-side advertise_caps for UDP is the
+                        // essence shape carried by `media.raw_caps`
+                        // (derived from the SDP transport-file at
+                        // resolution time). Pinned via the bare
+                        // factory call here; the factory itself wraps
+                        // the depayloader + a trailing capsfilter so
+                        // downstream caps queries see the concrete
+                        // shape the flow will carry, mirroring the
+                        // `mxlsrc ! capsfilter` sub-bin pattern.
+                        inner::build_udpsrc(media, *variant, Some(&media.raw_caps))?
+                    }
+                };
+                self.swap_inner(bin, &new_inner)?;
                 // Reaching the `Real` branch at NULL→READY implies
                 // `auto-activate=true` (the `validate_and_open` gate
                 // downgrades to a fake chain otherwise). Tell the
@@ -470,7 +481,7 @@ impl NmosSrc {
                     &CAT,
                     "nmossrc",
                     &self.session,
-                    transport_file.as_deref(),
+                    transport.transport_file(),
                 ) {
                     gst::warning!(CAT, "nmossrc auto-activate sync failed: {e:#}");
                 }
@@ -659,6 +670,16 @@ impl NmosSrc {
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!("nmossrc: building inner mxlsrc: {e:#}"),
+                        };
+                    }
+                }
+            }
+            InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
+                match inner::build_udpsrc(media, *variant, Some(&media.raw_caps)) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return ActivationOutcome::Failed {
+                            reason: format!("nmossrc: building inner udpsrc: {e:#}"),
                         };
                     }
                 }

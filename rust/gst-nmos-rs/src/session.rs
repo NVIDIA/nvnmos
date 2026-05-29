@@ -67,8 +67,8 @@ impl Side {
 /// `Transport::Mxl` is the only variant fully wired today; the
 /// others exist for ABI stability and never reach this helper at
 /// runtime because `validate_and_open` rejects them first. The
-/// arm is enumerated so `cargo check` enforces exhaustiveness when
-/// the next variant lands.
+/// mapping is provided eagerly so the helper stays exhaustive as
+/// the new variants come online.
 pub(crate) fn transport_to_proto(t: Transport) -> ProtoTransport {
     match t {
         Transport::Mxl => ProtoTransport::Mxl,
@@ -293,8 +293,8 @@ pub(crate) enum InnerConfig {
 }
 
 /// Per-transport state needed to build a real chain. New transports
-/// (NVDS-UDP, plain UDP/RTP, ...) get their own variants alongside
-/// [`TransportConfig::Mxl`].
+/// (NVDS-UDP, ...) get their own variants alongside the two
+/// implemented today.
 #[derive(Debug, Clone)]
 pub(crate) enum TransportConfig {
     Mxl {
@@ -315,6 +315,143 @@ pub(crate) enum TransportConfig {
         /// Receivers whose `mxl-flow-id` will arrive via IS-05 PATCH).
         transport_file: Option<String>,
     },
+    /// OSS UDP/RTP transport. The inner chain is
+    /// `rtp*pay ! udpsink` for senders and
+    /// `udpsrc ! capsfilter(rtp_caps) ! rtp*depay ! capsfilter(raw_caps)?`
+    /// for receivers. The exact element factory names dispatch on
+    /// [`UdpVariant`].
+    ///
+    /// **Currently not constructed at runtime** — the SDP parsing
+    /// and synthesis that produces this variant lands in a follow-up
+    /// commit. The variant is present here so the chain-factory
+    /// dispatch in `nmossrc` / `nmossink` is wired and the type
+    /// surface is stable as that work lands. Tests do construct it
+    /// (see `session::tests::transport_config`), so the
+    /// `dead_code` suppression below is scoped to non-test builds
+    /// and will fire — and need removing — the moment production
+    /// code starts producing the variant.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Udp {
+        variant: UdpVariant,
+        media: UdpMedia,
+        /// SDP transport file the daemon advertises on IS-04 (either
+        /// the user-supplied one or the synthesised one). Retained
+        /// verbatim for logs / diagnostics; the data the inner chain
+        /// needs is denormalised into [`UdpMedia`].
+        transport_file: Option<String>,
+    },
+}
+
+impl TransportConfig {
+    /// The transport-file text the daemon advertises on IS-04 for
+    /// this configuration, in the format appropriate to the
+    /// transport family (flow_def JSON for MXL, SDP for UDP).
+    /// `None` when the configuration was synthesised purely from
+    /// properties + caps and no resource is being advertised
+    /// (deferred-mode awaiting peer caps).
+    pub(crate) fn transport_file(&self) -> Option<&str> {
+        match self {
+            Self::Mxl { transport_file, .. } | Self::Udp { transport_file, .. } => {
+                transport_file.as_deref()
+            }
+        }
+    }
+}
+
+/// Which factory family to use for the UDP socket and RTP
+/// (de)payloader elements.
+///
+/// `V1` is gst-plugins-good throughout: `udpsrc` / `udpsink` /
+/// `rtpvrawpay` / `rtpL24pay` / etc. `V2` prefers gst-plugins-rs
+/// (`udpsrc2`, `rtpvrawpay2`, `rtpL24pay2`, ...) and falls back to
+/// the v1 factory for any element that doesn't have a v2 form yet
+/// (notably `udpsink` — no `udpsink2` exists at time of writing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum UdpVariant {
+    V1,
+    V2,
+}
+
+/// One RTP media line's worth of state — everything the UDP chain
+/// factories need to instantiate the inner elements.
+///
+/// Essence-level state (`format`, `rtp_caps`, `raw_caps`) is shared
+/// across legs because both legs of an ST 2022-7 pair carry the
+/// same essence with the same PT / clock-rate / encoding-name; only
+/// the network params differ. Per-leg state lives on [`UdpLeg`].
+///
+/// Field names use NMOS / IS-05 terminology (`destination_ip`,
+/// `interface_ip`, `source_ip`, ...) for direction independence;
+/// the public element properties on `nmossrc` / `nmossink` use the
+/// underlying-element naming (`host` / `address` / `local-iface-ip`
+/// / `local-port` / `source-ip`) and are mapped onto these fields
+/// at property-set time. How the redundant secondary leg gets
+/// exposed on the property surface is a separate design decision —
+/// `nvdsudpsrc` for example overloads `local-iface-ip` into a
+/// comma-separated list and adds a combined `st2022-7-streams`
+/// property rather than `-2`-suffixed scalar twins — and is
+/// deferred until the redundancy work lands.
+#[derive(Debug, Clone)]
+pub(crate) struct UdpMedia {
+    /// Essence family — selects the payloader / depayloader factory
+    /// alongside [`UdpVariant`].
+    pub(crate) format: FlowFormat,
+    /// First (and, for non-redundant RTP, only) leg.
+    pub(crate) primary: UdpLeg,
+    /// Redundant secondary leg for ST 2022-7. `None` for
+    /// non-redundant RTP — which is everything today, until the
+    /// 2022-7 work lands.
+    pub(crate) secondary: Option<UdpLeg>,
+    /// `application/x-rtp,...` caps the depayloader consumes (and
+    /// the payloader produces). Carries PT, clock-rate,
+    /// encoding-name, ptime, channels, sampling, depth and any
+    /// other essence-specific RFC 4175 / RFC 3551 / RFC 3190
+    /// parameters that `a=rtpmap` / `a=fmtp` / `a=ptime` map to.
+    /// Tests read this field; production code will start reading
+    /// it the moment the chain factories stop being stubs.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) rtp_caps: gst::Caps,
+    /// Essence caps (`video/x-raw,…`, `audio/x-raw,…`,
+    /// `meta/x-st-2038,…`). The receiver pins these on its ghost
+    /// src pad so downstream caps queries see the concrete shape
+    /// the flow will carry, mirroring the MXL path's
+    /// `advertise_caps` derived from the flow_def.
+    pub(crate) raw_caps: gst::Caps,
+}
+
+/// One network leg of a [`UdpMedia`]. Non-redundant RTP has a single
+/// leg ([`UdpMedia::primary`]); ST 2022-7 adds a second
+/// ([`UdpMedia::secondary`]) carrying the same essence over an
+/// independent network path for hitless merging.
+///
+/// All fields are per-leg state that NMOS IS-05's
+/// `transport_params` carries one-for-one (with `source_ip`
+/// modelled as the NMOS-simplified single-entry equivalent of the
+/// SDP `a=source-filter:` include list — see field doc).
+#[derive(Debug, Clone)]
+pub(crate) struct UdpLeg {
+    /// Multicast group (or unicast destination). Sender's
+    /// `udpsink.host` / receiver's `udpsrc.address`.
+    pub(crate) destination_ip: String,
+    /// Sender's `udpsink.port` / receiver's `udpsrc.port`.
+    pub(crate) destination_port: u16,
+    /// Local interface IP. Nvds elements take this directly as
+    /// `local-iface-ip`; for `udpsrc` / `udpsink` we resolve to an
+    /// interface name and forward as `multicast-iface`.
+    pub(crate) interface_ip: Option<String>,
+    /// SSM source-IP filter. Receiver-only. NMOS-RTP
+    /// `transport_params[i].source_ip` is a single string by
+    /// design — the SDP `a=source-filter:` line supports list /
+    /// exclude semantics but NMOS constrains itself to one
+    /// include-mode source per leg. We forward this directly to
+    /// `nvdsudpsrc.source-address`; on the gst-plugins-good
+    /// `udpsrc` path it's advertised in NMOS but not currently
+    /// enforced at the socket (no native source-filter property).
+    pub(crate) source_ip: Option<String>,
+    /// Sender source port. Forwarded as `udpsink.bind-port`.
+    /// Sender-only.
+    pub(crate) source_port: Option<u16>,
 }
 
 /// Validate the settings snapshot and open a session via the shared
@@ -329,6 +466,14 @@ pub(crate) fn validate_and_open(
     session: &Mutex<Option<Session>>,
     activation_handler: ActivationHandler,
 ) -> Result<InnerConfig, anyhow::Error> {
+    if settings.transport != Transport::Mxl {
+        bail!(
+            "{element}: unsupported transport `{:?}`; only `mxl` is currently \
+             implemented (`udp`, `udp2` and `nvdsudp` are reserved enum values \
+             and will be available once the SDP parsing and chain factories land)",
+            settings.transport
+        );
+    }
     if settings.node_seed.is_empty() {
         bail!("{element}: `node-seed` is required");
     }
@@ -448,6 +593,28 @@ pub(crate) fn validate_and_open(
     let inner_summary = match &inner {
         InnerConfig::Real(TransportConfig::Mxl { domain_path, flow_id, format, .. }) => {
             format!("inner data path: mxl (domain_path={domain_path:?}, flow_id={flow_id}, format={format:?})")
+        }
+        InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
+            let leg_summary = |leg: &UdpLeg| {
+                format!(
+                    "{}:{} iface={:?} source_ip={:?} source_port={:?}",
+                    leg.destination_ip,
+                    leg.destination_port,
+                    leg.interface_ip,
+                    leg.source_ip,
+                    leg.source_port,
+                )
+            };
+            let mut s = format!(
+                "inner data path: udp ({variant:?}, format={:?}, primary=[{}]",
+                media.format,
+                leg_summary(&media.primary),
+            );
+            if let Some(secondary) = &media.secondary {
+                s.push_str(&format!(", secondary=[{}]", leg_summary(secondary)));
+            }
+            s.push(')');
+            s
         }
         InnerConfig::Fake { reason } => {
             format!("inner data path: fake ({reason})")
@@ -667,6 +834,12 @@ pub(crate) fn register_deferred(
     session: &Mutex<Option<Session>>,
     peer_caps: gst::Caps,
 ) -> Result<InnerConfig, anyhow::Error> {
+    if settings.transport != Transport::Mxl {
+        bail!(
+            "{element}: deferred registration unsupported for transport `{:?}`",
+            settings.transport
+        );
+    }
     if settings.side != Side::Sender {
         // Receiver deferred mode is explicitly out of scope (plan doc:
         // “`nmossrc` cannot use deferred mode — there is no peer to
@@ -1026,36 +1199,6 @@ mod tests {
     const FLOW_ID_B: &str = "00000000-0000-0000-0000-000000000002";
     const DOMAIN_ID: &str = "1ac254d9-c9be-475a-93a7-f80b9c1063a8";
 
-    /// Wire-enum mapping. Locks down the proto value each
-    /// [`Transport`] variant translates to so a refactor (e.g.
-    /// reordering the GObject enum, adding a new variant) doesn't
-    /// silently shift discriminants. Reordering the enum without
-    /// updating the proto mapping is otherwise an easy mistake to
-    /// make.
-    mod proto_mapping {
-        use super::*;
-
-        #[test]
-        fn mxl_maps_to_mxl_proto() {
-            assert_eq!(transport_to_proto(Transport::Mxl), ProtoTransport::Mxl);
-        }
-
-        #[test]
-        fn udp_maps_to_rtp_proto() {
-            assert_eq!(transport_to_proto(Transport::Udp), ProtoTransport::Rtp);
-        }
-
-        #[test]
-        fn udp2_maps_to_rtp_proto() {
-            assert_eq!(transport_to_proto(Transport::Udp2), ProtoTransport::Rtp);
-        }
-
-        #[test]
-        fn nvdsudp_maps_to_rtp_proto() {
-            assert_eq!(transport_to_proto(Transport::NvDsUdp), ProtoTransport::Rtp);
-        }
-    }
-
     fn cat() -> gst::DebugCategory {
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(|| {
@@ -1108,6 +1251,133 @@ mod tests {
             resource_handle: "test-resource".to_owned(),
             side,
             transport_file: transport_file.map(str::to_owned),
+        }
+    }
+
+    /// Representative [`UdpMedia`] for tests that exercise the
+    /// `TransportConfig::Udp` dispatch arms without going through
+    /// the (not yet implemented) SDP parsing. Single-leg; all
+    /// optional fields populated so accessor-style assertions can
+    /// see them.
+    fn sample_udp_media() -> UdpMedia {
+        use std::str::FromStr;
+        cat(); // ensures gst::init() ran
+        UdpMedia {
+            format: FlowFormat::Video,
+            primary: UdpLeg {
+                destination_ip: "239.1.1.1".to_owned(),
+                destination_port: 5004,
+                interface_ip: Some("192.0.2.10".to_owned()),
+                source_ip: Some("192.0.2.20".to_owned()),
+                source_port: Some(5004),
+            },
+            secondary: None,
+            rtp_caps: gst::Caps::from_str(
+                "application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,payload=96",
+            )
+            .expect("static rtp caps parse"),
+            raw_caps: gst::Caps::from_str(
+                "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1",
+            )
+            .expect("static raw caps parse"),
+        }
+    }
+
+    /// Wire-enum mapping. Locks down the proto value each
+    /// [`Transport`] variant translates to so a refactor (e.g.
+    /// reordering the GObject enum, adding a new variant) doesn't
+    /// silently shift discriminants. Reordering the enum without
+    /// updating the proto mapping is otherwise an easy mistake to
+    /// make.
+    mod proto_mapping {
+        use super::*;
+
+        #[test]
+        fn mxl_maps_to_mxl_proto() {
+            assert_eq!(transport_to_proto(Transport::Mxl), ProtoTransport::Mxl);
+        }
+
+        #[test]
+        fn udp_maps_to_rtp_proto() {
+            assert_eq!(transport_to_proto(Transport::Udp), ProtoTransport::Rtp);
+        }
+
+        #[test]
+        fn udp2_maps_to_rtp_proto() {
+            assert_eq!(transport_to_proto(Transport::Udp2), ProtoTransport::Rtp);
+        }
+
+        #[test]
+        fn nvdsudp_maps_to_rtp_proto() {
+            assert_eq!(transport_to_proto(Transport::NvDsUdp), ProtoTransport::Rtp);
+        }
+    }
+
+    /// [`TransportConfig`] type-surface coverage. The
+    /// [`TransportConfig::Mxl`] variant is exercised end-to-end by
+    /// the `make_activation_plan` / `apply_auto_activate_gate`
+    /// tests above; [`TransportConfig::Udp`] isn't (the SDP module
+    /// that would produce one hasn't landed) so the tests here
+    /// construct both variants directly to lock in the field
+    /// surface and the [`TransportConfig::transport_file`]
+    /// accessor's behaviour for each.
+    mod transport_config {
+        use super::*;
+
+        #[test]
+        fn udp_media_fixture_has_expected_fields() {
+            let m = sample_udp_media();
+            assert_eq!(m.format, FlowFormat::Video);
+            assert_eq!(m.primary.destination_ip, "239.1.1.1");
+            assert_eq!(m.primary.destination_port, 5004);
+            assert_eq!(m.primary.interface_ip.as_deref(), Some("192.0.2.10"));
+            assert_eq!(m.primary.source_ip.as_deref(), Some("192.0.2.20"));
+            assert_eq!(m.primary.source_port, Some(5004));
+            assert!(m.secondary.is_none());
+            assert!(!m.rtp_caps.is_empty());
+            assert!(!m.raw_caps.is_empty());
+        }
+
+        #[test]
+        fn transport_file_mxl_present() {
+            let tc = TransportConfig::Mxl {
+                domain_path: "/var/lib/mxl/x".to_owned(),
+                flow_id: FLOW_ID_A.to_owned(),
+                format: FlowFormat::Video,
+                transport_file: Some("payload".to_owned()),
+            };
+            assert_eq!(tc.transport_file(), Some("payload"));
+        }
+
+        #[test]
+        fn transport_file_mxl_absent() {
+            let tc = TransportConfig::Mxl {
+                domain_path: "/var/lib/mxl/x".to_owned(),
+                flow_id: FLOW_ID_A.to_owned(),
+                format: FlowFormat::Video,
+                transport_file: None,
+            };
+            assert_eq!(tc.transport_file(), None);
+        }
+
+        #[test]
+        fn transport_file_udp_v1_present() {
+            let tc = TransportConfig::Udp {
+                variant: UdpVariant::V1,
+                media: sample_udp_media(),
+                transport_file: Some("payload".to_owned()),
+            };
+            assert_eq!(tc.transport_file(), Some("payload"));
+        }
+
+        #[test]
+        fn transport_file_udp_v2_absent() {
+            let tc = TransportConfig::Udp {
+                variant: UdpVariant::V2,
+                media: sample_udp_media(),
+                transport_file: None,
+            };
+            assert_eq!(tc.transport_file(), None);
         }
     }
 
@@ -1186,6 +1456,9 @@ mod tests {
             InnerConfig::Real(TransportConfig::Mxl { format, .. }) => {
                 assert_eq!(format, FlowFormat::Data)
             }
+            InnerConfig::Real(TransportConfig::Udp { .. }) => {
+                panic!("expected Real(Mxl(data)), got Real(Udp)")
+            }
             InnerConfig::Fake { reason } => {
                 panic!("expected Real(Mxl(data)), got Fake({reason})")
             }
@@ -1243,6 +1516,9 @@ mod tests {
                     transport_file.is_some(),
                     "make_activation_plan must thread req.transport_file into InnerConfig",
                 );
+            }
+            InnerConfig::Real(TransportConfig::Udp { .. }) => {
+                panic!("expected Real(Mxl), got Real(Udp)")
             }
             InnerConfig::Fake { reason } => panic!("expected Real(Mxl), got Fake({reason})"),
         }
@@ -1419,6 +1695,35 @@ mod tests {
                 format!("{err:#}").contains("sender-only"),
                 "expected sender-only reason: {err:#}"
             );
+        }
+
+        #[test]
+        fn unsupported_transport_is_error() {
+            // Deferred mode rejects non-`mxl` transports up-front,
+            // mirroring `validate_and_open`'s same check. This test
+            // covers the synchronous branch; the async sibling is
+            // covered by integration tests.
+            for t in [Transport::Udp, Transport::Udp2, Transport::NvDsUdp] {
+                let s = CommonSettings {
+                    transport: t,
+                    ..sender_settings()
+                };
+                let res = register_deferred(
+                    &cat(),
+                    "nmossink",
+                    &s,
+                    &no_session(),
+                    good_caps(),
+                );
+                let err = res.expect_err(
+                    "non-mxl transport must be rejected by deferred path",
+                );
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.contains("deferred registration unsupported"),
+                    "expected deferred-transport rejection reason for {t:?}: {msg}",
+                );
+            }
         }
 
         #[test]
@@ -1607,6 +1912,9 @@ mod tests {
                     assert_eq!(flow_id, FLOW_ID_A);
                     assert_eq!(format, FlowFormat::Video);
                 }
+                InnerConfig::Real(TransportConfig::Udp { .. }) => {
+                    panic!("auto-activate=true must not change Mxl into Udp")
+                }
                 InnerConfig::Fake { reason } => {
                     panic!("auto-activate=true must not downgrade Real: {reason}")
                 }
@@ -1675,6 +1983,9 @@ mod tests {
             match plan.inner {
                 InnerConfig::Real(TransportConfig::Mxl { flow_id, .. }) => {
                     assert_eq!(flow_id, FLOW_ID_A)
+                }
+                InnerConfig::Real(TransportConfig::Udp { .. }) => {
+                    panic!("expected Real(Mxl), got Real(Udp)")
                 }
                 InnerConfig::Fake { reason } => {
                     panic!("IS-05 activation must reach Real regardless of auto-activate: {reason}")

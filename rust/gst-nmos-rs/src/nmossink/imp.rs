@@ -428,33 +428,35 @@ impl NmosSink {
         bin: &gst::Bin,
         outcome: &InnerConfig,
     ) -> Result<(), anyhow::Error> {
-        if let InnerConfig::Real(TransportConfig::Mxl {
-            domain_path,
-            flow_id,
-            transport_file,
-            ..
-        }) = outcome
-        {
-            let mxlsink = inner::build_mxlsink(domain_path, flow_id)?;
-            self.swap_inner(bin, &mxlsink)?;
-            // Reaching the `Real` branch at NULL→READY / READY→PAUSED
-            // implies `auto-activate=true` (the `validate_and_open`
-            // and `register_deferred` gates downgrade to a fake
-            // chain otherwise). Tell the daemon to bring the
-            // resource's IS-04/IS-05 view up to match the live
-            // data path so external state stays consistent without
-            // an external IS-05 PATCH.
-            if let Err(e) = crate::session::sync_active(
-                &CAT,
-                "nmossink",
-                &self.session,
-                transport_file.as_deref(),
-            ) {
-                // Inner is up and pushing already; don't tear it
-                // down for a SyncResourceState glitch, but surface
-                // the failure as a warning so it shows up in logs.
-                gst::warning!(CAT, "nmossink auto-activate sync failed: {e:#}");
+        let InnerConfig::Real(transport) = outcome else {
+            return Ok(());
+        };
+        let new_inner = match transport {
+            TransportConfig::Mxl { domain_path, flow_id, .. } => {
+                inner::build_mxlsink(domain_path, flow_id)?
             }
+            TransportConfig::Udp { variant, media, .. } => {
+                inner::build_udpsink(media, *variant)?
+            }
+        };
+        self.swap_inner(bin, &new_inner)?;
+        // Reaching the `Real` branch at NULL→READY / READY→PAUSED
+        // implies `auto-activate=true` (the `validate_and_open` and
+        // `register_deferred` gates downgrade to a fake chain
+        // otherwise). Tell the daemon to bring the resource's
+        // IS-04/IS-05 view up to match the live data path so
+        // external state stays consistent without an external
+        // IS-05 PATCH.
+        if let Err(e) = crate::session::sync_active(
+            &CAT,
+            "nmossink",
+            &self.session,
+            transport.transport_file(),
+        ) {
+            // Inner is up and pushing already; don't tear it down
+            // for a SyncResourceState glitch, but surface the
+            // failure as a warning so it shows up in logs.
+            gst::warning!(CAT, "nmossink auto-activate sync failed: {e:#}");
         }
         Ok(())
     }
@@ -649,6 +651,16 @@ impl NmosSink {
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!("nmossink: building inner mxlsink: {e:#}"),
+                        };
+                    }
+                }
+            }
+            InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
+                match inner::build_udpsink(media, *variant) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return ActivationOutcome::Failed {
+                            reason: format!("nmossink: building inner udpsink: {e:#}"),
                         };
                     }
                 }

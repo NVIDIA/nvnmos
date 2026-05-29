@@ -60,6 +60,7 @@ use gst::glib;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 
+use crate::session::{UdpMedia, UdpVariant};
 use crate::types::FlowFormat;
 
 /// Name of the permanent anchor element inside every `nmossink` /
@@ -596,6 +597,49 @@ pub(crate) fn build_mxlsrc(
     Ok(bin.upcast())
 }
 
+/// Build the inner UDP/RTP sink chain for `nmossink`. Always
+/// constructs a sub-bin: `rtp<essence>pay ! udpsink` (or the
+/// gst-plugins-rs `*pay2` family + `udpsink` for [`UdpVariant::V2`])
+/// with the payloader's sink pad ghosted out so the outer
+/// [`rebuild_chain`] swap mechanism plugs it in directly behind the
+/// anchor.
+///
+/// **Not yet implemented.** This factory is wired into
+/// `nmossink::execute_activation_plan` so the dispatch shape compiles
+/// against `TransportConfig::Udp`; the matching arms only become
+/// reachable at runtime once `validate_and_open` stops rejecting
+/// non-MXL transports.
+pub(crate) fn build_udpsink(
+    _media: &UdpMedia,
+    _variant: UdpVariant,
+) -> Result<gst::Element, anyhow::Error> {
+    bail!(
+        "UDP/RTP sender chain is not yet implemented; the chain-factory dispatch \
+         is wired but the inner element construction lands in a follow-up commit",
+    );
+}
+
+/// Build the inner UDP/RTP source chain for `nmossrc`. Always
+/// constructs a sub-bin:
+/// `udpsrc ! capsfilter(media.rtp_caps) ! rtp<essence>depay ! capsfilter(advertise_caps)?`
+/// (or the gst-plugins-rs `udpsrc2` + `*depay2` family for
+/// [`UdpVariant::V2`]) with the trailing capsfilter's (or the
+/// depayloader's) src pad ghosted out so the outer
+/// [`rebuild_chain`] swap mechanism plugs it in directly behind the
+/// anchor.
+///
+/// **Not yet implemented.** See [`build_udpsink`].
+pub(crate) fn build_udpsrc(
+    _media: &UdpMedia,
+    _variant: UdpVariant,
+    _advertise_caps: Option<&gst::Caps>,
+) -> Result<gst::Element, anyhow::Error> {
+    bail!(
+        "UDP/RTP receiver chain is not yet implemented; the chain-factory dispatch \
+         is wired but the inner element construction lands in a follow-up commit",
+    );
+}
+
 fn require_mxl_factory(name: &'static str) -> Result<(), anyhow::Error> {
     if gst::ElementFactory::find(name).is_none() {
         return Err(anyhow!(
@@ -661,4 +705,73 @@ pub(crate) fn build_initial(
         .set_active(true)
         .map_err(|e| glib::bool_error!("activating ghost pad: {e}"))?;
     Ok(ghost)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::UdpLeg;
+    use std::str::FromStr;
+
+    fn init_gst() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let _ = gst::init();
+        });
+    }
+
+    fn minimal_udp_media() -> UdpMedia {
+        init_gst();
+        UdpMedia {
+            format: FlowFormat::Video,
+            primary: UdpLeg {
+                destination_ip: "239.1.1.1".to_owned(),
+                destination_port: 5004,
+                interface_ip: None,
+                source_ip: None,
+                source_port: None,
+            },
+            secondary: None,
+            rtp_caps: gst::Caps::from_str(
+                "application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,payload=96",
+            )
+            .expect("static rtp caps parse"),
+            raw_caps: gst::Caps::from_str(
+                "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1",
+            )
+            .expect("static raw caps parse"),
+        }
+    }
+
+    // The two stub factories are wired into the dispatch arms in
+    // `nmossink/imp.rs` and `nmossrc/imp.rs` so when the
+    // [`crate::session::TransportConfig::Udp`] variant becomes
+    // reachable (i.e. once `validate_and_open` stops rejecting non-
+    // MXL transports) the dispatch lands here. These tests pin the
+    // current contract: until the chain-construction work lands,
+    // both stubs return `Err` with a clearly-attributed message.
+    // When the real implementations come in, these flip into
+    // success-path tests for the chain bins.
+
+    #[test]
+    fn build_udpsink_bails_with_not_implemented() {
+        let err = build_udpsink(&minimal_udp_media(), UdpVariant::V1)
+            .expect_err("UDP sink stub must bail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not yet implemented"),
+            "expected `not yet implemented` in error: {msg}",
+        );
+    }
+
+    #[test]
+    fn build_udpsrc_bails_with_not_implemented() {
+        let err = build_udpsrc(&minimal_udp_media(), UdpVariant::V2, None)
+            .expect_err("UDP src stub must bail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not yet implemented"),
+            "expected `not yet implemented` in error: {msg}",
+        );
+    }
 }
