@@ -110,8 +110,17 @@ pub(crate) const HTTP_PORT_BLURB: &str =
      node_config.";
 
 pub(crate) const TRANSPORT_BLURB: &str =
-    "Inner data path family. Only `mxl` is currently supported; the \
-     other values exist for ABI stability and are rejected.";
+    "Inner data path family. \
+     `mxl`: MXL shared-memory transport (`mxlsrc` / `mxlsink`). \
+     `udp`: ST 2110 over RTP/UDP via gst-plugins-good (`udpsrc` / \
+     `udpsink` + the `rtpvrawpay` / `rtpL24pay` / `rtpsmpte291pay` \
+     family). \
+     `udp2`: ST 2110 over RTP/UDP via gst-plugins-rs (`udpsrc2` + \
+     the `*pay2` / `*depay2` family where available, falling back \
+     to gst-plugins-good per-element). \
+     `nvdsudp`: reserved for DeepStream's `nvdsudp*` (kernel-bypass \
+     plus PTP-aligned timing for strict ST 2110); not yet \
+     implemented and rejected today.";
 
 pub(crate) const MXL_DOMAIN_ID_BLURB: &str =
     "MXL Domain identifier (UUID) advertised in NMOS as \
@@ -417,11 +426,12 @@ pub(crate) enum TransportConfig {
     /// Constructed at runtime by `resolve_inner_config_udp` (in
     /// `validate_and_open`) and `decide_inner_config_udp` (in
     /// `make_activation_plan`) once the SDP transport file has
-    /// been parsed by [`crate::sdp::parse_sdp`]. The chain
-    /// factories (`crate::inner::build_udpsink` /
-    /// `build_udpsrc`) currently bail with "not yet implemented";
-    /// they're replaced with real factories in a follow-up
-    /// commit.
+    /// been parsed by [`crate::sdp::parse_sdp`] (or synthesised
+    /// from `caps` + properties via [`crate::sdp::from_caps`]).
+    /// The chain factories ([`crate::inner::build_udpsink`] /
+    /// [`crate::inner::build_udpsrc`]) instantiate real
+    /// `udpsrc` / `udpsink` chains with the matching
+    /// [`UdpVariant`]-selected RTP (de)payloader.
     Udp {
         variant: UdpVariant,
         media: UdpMedia,
@@ -1804,9 +1814,8 @@ mod tests {
 
     /// Representative [`UdpMedia`] for tests that exercise the
     /// `TransportConfig::Udp` dispatch arms without going through
-    /// the (not yet implemented) SDP parsing. Single-leg; all
-    /// optional fields populated so accessor-style assertions can
-    /// see them.
+    /// the SDP parsing layer. Single-leg; all optional fields
+    /// populated so accessor-style assertions can see them.
     fn sample_udp_media() -> UdpMedia {
         use std::str::FromStr;
         cat(); // ensures gst::init() ran

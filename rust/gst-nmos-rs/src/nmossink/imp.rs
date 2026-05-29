@@ -898,10 +898,9 @@ mod tests {
         assert_eq!(cs.transport_caps, None);
     }
 
-    /// Pins that the `transport-caps` property — previously dead-end
-    /// at the `From<Settings>` boundary — now propagates into
-    /// `CommonSettings` so the upcoming splice / synth path can read
-    /// it for pt / audio clock-rate / ptime overrides + essence
+    /// Pins that the `transport-caps` property propagates into
+    /// `CommonSettings` so the splice / synth path can read it for
+    /// pt / audio clock-rate / ptime overrides + essence
     /// cross-check.
     #[test]
     fn from_settings_forwards_transport_caps() {
