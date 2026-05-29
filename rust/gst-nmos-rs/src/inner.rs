@@ -822,6 +822,36 @@ fn package_hint_for_stem(stem: &str) -> &'static str {
     }
 }
 
+/// Pick the `udpsrc` factory for a given [`UdpVariant`], mirroring
+/// the V2-fallback pattern in [`select_rtp_factory`].
+///
+/// `V1` is gst-plugins-good's `udpsrc`. `V2` prefers
+/// gst-plugins-rs' `udpsrc2` (the high-performance `recvmmsg` +
+/// optional GRO rewrite added in gst-plugins-rs 0.16 / GStreamer
+/// 1.30 — Centricular's primary motivation for it is exactly ST
+/// 2110 multicast capture), and falls back to V1 `udpsrc` when
+/// `udpsrc2` isn't installed. The factories are documented as
+/// drop-in API replacements for the properties this module sets
+/// today; see [`build_udpsrc`] for the one place the API differs
+/// (SSM source-filter property name).
+///
+/// No `udpsink2` exists upstream — `udpsrc2`'s motivation was
+/// fixing the receive-side packet-rate ceiling, which doesn't
+/// apply to sending — so the sender path doesn't need an
+/// analogous helper. [`build_udpsink`] hard-codes `udpsink`.
+fn select_udpsrc_factory(variant: UdpVariant) -> &'static str {
+    match variant {
+        UdpVariant::V1 => "udpsrc",
+        UdpVariant::V2 => {
+            if gst::ElementFactory::find("udpsrc2").is_some() {
+                "udpsrc2"
+            } else {
+                "udpsrc"
+            }
+        }
+    }
+}
+
 /// Convert the `a-ptime` field hoisted onto the RTP caps by
 /// [`crate::sdp::parse_sdp`] into nanoseconds for `rtpaudiopay`'s
 /// `min-ptime` / `max-ptime` properties. SDP carries ptime in
@@ -879,12 +909,13 @@ fn multicast_iface_name(destination_ip: &str, interface_ip: Option<&str>) -> Opt
 /// Build the inner UDP/RTP source chain for `nmossrc`. Always
 /// constructs a sub-bin:
 /// `udpsrc(caps=rtp_caps) ! rtp<essence>depay [! capsfilter(advertise_caps)]`
-/// (with the depayloader picked via [`select_rtp_factory`], so
-/// [`UdpVariant::V2`] auto-upgrades to the `gst-plugins-rs`
-/// `*depay2` sibling when present and falls back to V1 when not)
-/// with the trailing element's src pad ghosted out so the outer
-/// [`rebuild_chain`] swap mechanism plugs it in directly behind the
-/// anchor.
+/// (with the udpsrc factory picked via [`select_udpsrc_factory`]
+/// and the depayloader picked via [`select_rtp_factory`], so
+/// [`UdpVariant::V2`] auto-upgrades to `gst-plugins-rs`' `udpsrc2`
+/// and the `*depay2` siblings when present and falls back per
+/// element to V1 when not) with the trailing element's src pad
+/// ghosted out so the outer [`rebuild_chain`] swap mechanism
+/// plugs it in directly behind the anchor.
 ///
 /// **`rtpjitterbuffer` is intentionally not included.** ST 2110 RTP
 /// is open-loop multicast (no NACK feedback path — retransmission is
@@ -918,12 +949,21 @@ fn multicast_iface_name(destination_ip: &str, interface_ip: Option<&str>) -> Opt
 /// SMPTE red/blue layouts), and packets arriving on the *other*
 /// NIC are silently dropped with no error.
 ///
-/// `multicast-source` is set to `+<source_ip>` when the SDP carried
-/// an SSM `a=source-filter:incl IN IP4 …` line. This pins the
-/// kernel-level SSM include filter (`MCAST_JOIN_SOURCE_GROUP`) so
+/// The SSM include filter is configured from `primary.source_ip`
+/// when the SDP carried an SSM `a=source-filter:incl IN IP4 …`
+/// line. This pins the kernel-level `MCAST_JOIN_SOURCE_GROUP` so
 /// only packets from the advertised sender are accepted — the
 /// canonical NMOS / ST 2110 SSM scheme. Only applied for multicast
 /// destinations; for unicast there's nothing to filter against.
+/// The property name differs between V1 and V2:
+/// - `udpsrc` (V1) uses `multicast-source="+<ip>"` — the `+`
+///   prefix is mandatory per the documented grammar, selecting
+///   "include" rather than "exclude" mode.
+/// - `udpsrc2` (V2) uses `source-filter="<ip>"` (no signed prefix;
+///   dropped because mixing inclusive/exclusive on one property
+///   never made sense) plus a separate boolean
+///   `source-filter-exclusive` which we leave at its default
+///   `false` for NMOS's single-source-IP include case.
 pub(crate) fn build_udpsrc(
     media: &UdpMedia,
     variant: UdpVariant,
@@ -943,18 +983,26 @@ pub(crate) fn build_udpsrc(
         .build()
         .with_context(|| format!("instantiating depayloader `{depayloader_factory}`"))?;
 
-    let udpsrc = gst::ElementFactory::make("udpsrc")
+    let udpsrc_factory = select_udpsrc_factory(variant);
+    let udpsrc = gst::ElementFactory::make(udpsrc_factory)
         .name("nmossrc-udpsrc")
         .property("address", &media.primary.destination_ip)
-        .property("port", i32::from(media.primary.destination_port))
         .property("caps", &media.rtp_caps)
         .build()
         .with_context(|| {
             format!(
-                "instantiating `udpsrc` (address={}, port={})",
+                "instantiating `{udpsrc_factory}` (address={}, port={})",
                 media.primary.destination_ip, media.primary.destination_port,
             )
         })?;
+    // `udpsrc.port` is `gint` (gst-plugins-good's pspec) while
+    // `udpsrc2.port` is `guint` (gst-plugins-rs' pspec) — same
+    // wire value, different glib type tag, so the property setter
+    // has to be split by factory or glib raises a type-mismatch.
+    match udpsrc_factory {
+        "udpsrc2" => udpsrc.set_property("port", u32::from(media.primary.destination_port)),
+        _ => udpsrc.set_property("port", i32::from(media.primary.destination_port)),
+    }
 
     let dest_is_multicast = media
         .primary
@@ -970,7 +1018,14 @@ pub(crate) fn build_udpsrc(
     }
     if dest_is_multicast {
         if let Some(source_ip) = &media.primary.source_ip {
-            udpsrc.set_property("multicast-source", format!("+{source_ip}"));
+            // V1 `udpsrc` and V2 `udpsrc2` describe the same kernel
+            // SSM include filter with different property surfaces;
+            // see the doc-comment on `build_udpsrc` for the
+            // grammar rationale.
+            match udpsrc_factory {
+                "udpsrc2" => udpsrc.set_property("source-filter", source_ip.as_str()),
+                _ => udpsrc.set_property("multicast-source", format!("+{source_ip}")),
+            }
         }
     }
 
@@ -1272,14 +1327,16 @@ mod tests {
 
     #[test]
     fn build_udpsink_v2_falls_back_to_v1_when_pay2_missing() {
-        // None of `rtpL24pay2` / `rtpL16pay2` exist in
-        // gst-plugins-rs today; if a v2 sibling were added in the
-        // future this test would silently switch to it (the success
-        // path is "v2 element returned"). The fallback semantic
-        // we're pinning here is "V2 dispatch never fails when V1 is
-        // present, even if no v2 sibling is".
+        // gst-plugins-rs ships `rtpL24pay2` / `rtpL16pay2` today —
+        // so on a host with the `rsrtp` plugin loaded this test
+        // exercises the "V2 sibling present" branch; on a stock
+        // gst-plugins-good-only host it exercises the fallback
+        // branch. The fallback semantic we pin is "V2 dispatch
+        // never fails when V1 is present, even if no V2 sibling
+        // is"; the test accepting either factory name keeps it
+        // valid in both environments.
         let elem = build_udpsink(&audio_l24_ptime_media(), UdpVariant::V2)
-            .expect("V2 L24 chain must construct (falls back to V1 when rtpL24pay2 absent)");
+            .expect("V2 L24 chain must construct (picks `rtpL24pay2` if present, else `rtpL24pay`)");
         let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
         let pay = child(&bin, "nmossink-payloader");
         let factory_name = pay.factory().expect("payloader has a factory").name();
@@ -1699,8 +1756,13 @@ mod tests {
 
     #[test]
     fn build_udpsrc_v2_falls_back_to_v1_when_depay2_missing() {
+        // Symmetric with `build_udpsink_v2_falls_back_to_v1_when_pay2_missing`:
+        // gst-plugins-rs ships `rtpL24depay2` today, so this test
+        // pins the "V2 dispatch never fails when V1 is present"
+        // semantic and accepts either factory so it stays valid
+        // whether or not the V2 sibling is installed.
         let elem = build_udpsrc(&audio_l24_ptime_media(), UdpVariant::V2, None)
-            .expect("V2 receiver must fall back to V1 depayloader if `*depay2` absent");
+            .expect("V2 L24 receiver must construct (picks `rtpL24depay2` if present, else `rtpL24depay`)");
         let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
         let depay = child(&bin, "nmossrc-depayloader");
         let factory_name = depay.factory().expect("depayloader has a factory").name();
@@ -1708,6 +1770,144 @@ mod tests {
             factory_name == "rtpL24depay2" || factory_name == "rtpL24depay",
             "V2 dispatch must pick `rtpL24depay2` if present, else fall back to \
              `rtpL24depay`; got `{factory_name}`",
+        );
+    }
+
+    /// `true` iff gst-plugins-rs' `udpsrc2` is installed on the
+    /// host running the test. Tests that exercise V2 socket
+    /// dispatch soft-skip when this returns `false` because
+    /// `udpsrc2` lives in gst-plugins-rs 0.16+ / GStreamer 1.30+
+    /// and is not yet universal; the V2 fallback semantic
+    /// (V2-asks-but-V1-runs) is already pinned by
+    /// `build_udpsrc_v2_falls_back_to_v1_when_depay2_missing`.
+    fn udpsrc2_available() -> bool {
+        init_gst();
+        gst::ElementFactory::find("udpsrc2").is_some()
+    }
+
+    #[test]
+    fn select_udpsrc_factory_v1_always_returns_udpsrc() {
+        init_gst();
+        // V1 must never auto-upgrade to `udpsrc2` even when it's
+        // installed — `Transport::Udp` is the gst-plugins-good
+        // path by definition. The user opts into the V2 path by
+        // setting `Transport::Udp2` on the element property.
+        assert_eq!(select_udpsrc_factory(UdpVariant::V1), "udpsrc");
+    }
+
+    #[test]
+    fn select_udpsrc_factory_v2_prefers_udpsrc2_when_available() {
+        if !udpsrc2_available() {
+            return;
+        }
+        assert_eq!(select_udpsrc_factory(UdpVariant::V2), "udpsrc2");
+    }
+
+    #[test]
+    fn select_udpsrc_factory_v2_falls_back_to_udpsrc_when_udpsrc2_missing() {
+        if udpsrc2_available() {
+            // Can't exercise the fallback branch when the V2
+            // sibling is installed (we'd need to unregister it
+            // from the registry, which would poison the rest of
+            // the test binary). The fallback semantic is
+            // structural and is covered by reading
+            // `select_udpsrc_factory`; this test only fires on
+            // hosts without `udpsrc2` to give the negative branch
+            // CI coverage when it matters.
+            return;
+        }
+        assert_eq!(select_udpsrc_factory(UdpVariant::V2), "udpsrc");
+    }
+
+    #[test]
+    fn build_udpsrc_v2_uses_udpsrc2_when_available() {
+        if !udpsrc2_available() {
+            return;
+        }
+        let elem = build_udpsrc(&minimal_udp_media(), UdpVariant::V2, None)
+            .expect("V2 receiver must construct against udpsrc2");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let udpsrc = child(&bin, "nmossrc-udpsrc");
+        assert_eq!(
+            udpsrc.factory().expect("udpsrc has a factory").name(),
+            "udpsrc2",
+            "V2 receiver must pick gst-plugins-rs `udpsrc2` over gst-plugins-good `udpsrc`",
+        );
+        // Properties shared with V1 must still be set; note
+        // `udpsrc2.port` is `guint` (gst-plugins-rs) where
+        // `udpsrc.port` is `gint` (gst-plugins-good).
+        assert_eq!(udpsrc.property::<String>("address"), "239.1.1.1");
+        assert_eq!(udpsrc.property::<u32>("port"), 5004);
+        let caps_on_udpsrc = udpsrc
+            .property::<Option<gst::Caps>>("caps")
+            .expect("udpsrc2.caps must be pinned to the RTP shape from the SDP");
+        let s = caps_on_udpsrc.structure(0).expect("rtp caps structure(0)");
+        assert_eq!(s.name(), "application/x-rtp");
+        assert_eq!(s.get::<&str>("encoding-name").unwrap(), "RAW");
+    }
+
+    #[test]
+    fn build_udpsrc_v2_pins_ssm_filter_via_source_filter_property() {
+        if !udpsrc2_available() {
+            return;
+        }
+        let mut media = multicast_udp_media_with_loopback_iface();
+        media.primary.source_ip = Some("192.0.2.100".to_owned());
+        let elem = build_udpsrc(&media, UdpVariant::V2, None)
+            .expect("V2 SSM receiver chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let udpsrc = child(&bin, "nmossrc-udpsrc");
+        assert_eq!(
+            udpsrc.factory().expect("udpsrc has a factory").name(),
+            "udpsrc2",
+        );
+        assert_eq!(
+            udpsrc.property::<String>("source-filter"),
+            "192.0.2.100",
+            "udpsrc2 uses `source-filter=<ip>` (no signed prefix) instead of \
+             udpsrc's `multicast-source=+<ip>`; the include-vs-exclude split \
+             moved to a separate boolean property",
+        );
+        assert!(
+            !udpsrc.property::<bool>("source-filter-exclusive"),
+            "NMOS only ever describes a single allowed source IP via the SDP \
+             `a=source-filter:incl` clause; `source-filter-exclusive` must \
+             stay at its default `false` (include mode) so that single IP \
+             is the kernel-level include filter rather than an exclude list",
+        );
+        // multicast-iface plumbing must keep working on udpsrc2.
+        let iface = udpsrc.property::<String>("multicast-iface");
+        assert!(
+            !iface.is_empty(),
+            "udpsrc2 still needs `multicast-iface` to direct the IGMP join \
+             to the right NIC on multi-NIC hosts; the property name is \
+             unchanged from V1",
+        );
+    }
+
+    #[test]
+    fn build_udpsrc_v2_omits_ssm_filter_for_unicast_destinations() {
+        if !udpsrc2_available() {
+            return;
+        }
+        let mut media = minimal_udp_media();
+        media.primary.destination_ip = "192.0.2.50".to_owned();
+        media.primary.source_ip = Some("192.0.2.100".to_owned());
+        let elem = build_udpsrc(&media, UdpVariant::V2, None)
+            .expect("V2 unicast receiver chain must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let udpsrc = child(&bin, "nmossrc-udpsrc");
+        assert_eq!(udpsrc.factory().expect("udpsrc has a factory").name(), "udpsrc2");
+        // `udpsrc2.source-filter` has no pspec default, so unset
+        // reads back as `None` (not an empty string). For unicast
+        // the IP layer already filters by source, so we leave the
+        // property unset.
+        assert_eq!(
+            udpsrc.property::<Option<String>>("source-filter"),
+            None,
+            "source-filter is an SSM include list; for unicast the IP \
+             layer already filters by source and the property must \
+             stay unset",
         );
     }
 }

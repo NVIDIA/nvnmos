@@ -13,14 +13,20 @@ use gstreamer::glib;
 
 /// Transport family for the inner data path.
 ///
-/// Only [`Transport::Mxl`] is currently fully wired; the [`Transport::Udp`]
-/// and [`Transport::Udp2`] variants exist as ABI-stable enum values
-/// for the OSS UDP/RTP transport family (gst-plugins-good elements
-/// for `Udp`, gst-plugins-rs `udpsrc2` / `*pay2` / `*depay2` elements
-/// where available for `Udp2`) but are rejected at element
-/// construction time until the SDP parsing and chain factories are
-/// implemented. [`Transport::NvDsUdp`] is similarly reserved for the
-/// DeepStream `nvdsudp*` family; also rejected today.
+/// [`Transport::Mxl`] uses the MXL shared-memory pair (`mxlsrc` /
+/// `mxlsink`). [`Transport::Udp`] and [`Transport::Udp2`] both
+/// drive an OSS RTP-over-UDP chain (RFC 4175 video, ST 2110-30
+/// audio, RFC 8331 / ST 2110-40 ancillary), differing only in
+/// which factory family is preferred when both are installed:
+/// `Udp` picks gst-plugins-good (`udpsrc` / `udpsink` + the
+/// classic `rtpvrawpay` / `rtpL24pay` / … line-up) while `Udp2`
+/// prefers gst-plugins-rs' newer high-performance siblings
+/// (`udpsrc2` + the `*pay2` / `*depay2` family) and falls back
+/// per-element to the V1 form for anything without a V2 sibling
+/// yet — see [`crate::session::UdpVariant`] for the dispatch
+/// detail. [`Transport::NvDsUdp`] is reserved for the DeepStream
+/// `nvdsudp*` family (kernel-bypass plus PTP-aligned timing for
+/// strict ST 2110) and is rejected today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, glib::Enum)]
 #[repr(i32)]
 #[enum_type(name = "GstNmosTransport")]
@@ -29,17 +35,16 @@ pub enum Transport {
     #[default]
     #[enum_value(name = "MXL shared-memory transport", nick = "mxl")]
     Mxl = 0,
-    /// ST 2110 via OSS gst-plugins-good `udpsrc` / `udpsink` plus the
-    /// matching gst-plugins-good RTP (de)payloaders. Not implemented;
-    /// rejected today.
-    #[enum_value(name = "OSS udp + RTP via gst-plugins-good (not implemented)", nick = "udp")]
+    /// ST 2110 via OSS gst-plugins-good `udpsrc` / `udpsink` plus
+    /// the matching gst-plugins-good RTP (de)payloaders.
+    #[enum_value(name = "OSS udp + RTP via gst-plugins-good", nick = "udp")]
     Udp = 1,
-    /// ST 2110 via gst-plugins-rs `udpsrc2` plus the matching
+    /// ST 2110 via gst-plugins-rs' `udpsrc2` plus the
     /// gst-plugins-rs `*pay2` / `*depay2` RTP elements where
-    /// available, falling back to gst-plugins-good for elements that
-    /// don't yet exist in v2 form (notably `udpsink`). Not
-    /// implemented; rejected today.
-    #[enum_value(name = "OSS udp + RTP via gst-plugins-rs (not implemented)", nick = "udp2")]
+    /// available, falling back to gst-plugins-good per-element
+    /// for any V1-only piece (notably `udpsink` — no `udpsink2`
+    /// exists).
+    #[enum_value(name = "OSS udp + RTP via gst-plugins-rs", nick = "udp2")]
     Udp2 = 2,
     /// ST 2110 via DeepStream's `nvdsudp*`. Not implemented; rejected today.
     #[enum_value(name = "NvDsUdp / Rivermax (not implemented)", nick = "nvdsudp")]

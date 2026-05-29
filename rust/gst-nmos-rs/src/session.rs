@@ -364,9 +364,15 @@ impl TransportConfig {
 ///
 /// `V1` is gst-plugins-good throughout: `udpsrc` / `udpsink` /
 /// `rtpvrawpay` / `rtpL24pay` / etc. `V2` prefers gst-plugins-rs
-/// (`udpsrc2`, `rtpvrawpay2`, `rtpL24pay2`, ...) and falls back to
-/// the v1 factory for any element that doesn't have a v2 form yet
-/// (notably `udpsink` — no `udpsink2` exists at time of writing).
+/// (`udpsrc2`, `rtpL24pay2`, `rtpL24depay2`, …) on a per-element
+/// basis and falls back to the V1 factory for any element that
+/// doesn't yet have a V2 sibling. Per-element fallback (rather
+/// than all-or-nothing) matters because the V2 family is rolled
+/// out incrementally upstream — for example today
+/// gst-plugins-rs ships `rtpL24pay2`/`depay2` but not yet
+/// `rtpvrawpay2`/`depay2`, and no `udpsink2` exists at all (the
+/// performance motivation for `udpsrc2` was kernel receive
+/// efficiency, which doesn't translate to the send side).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UdpVariant {
     V1,
