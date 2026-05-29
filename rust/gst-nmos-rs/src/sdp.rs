@@ -61,6 +61,92 @@ use thiserror::Error;
 use crate::session::{UdpLeg, UdpMedia};
 use crate::types::{CapsMode, FlowFormat};
 
+/// Canonical default values for SDP synthesis, sourced from
+/// `nmos-cpp` so that the configuring SDPs produced by the
+/// future `synthesise_or_passthrough_udp` (when no
+/// `transport-file*` is set and no overriding GObject property
+/// supplies a value) agree with what a peer nmos-cpp
+/// implementation would emit.
+///
+/// Precedence model for SDP configuration at startup (see the
+/// module-level doc for the full description):
+///
+/// ```text
+/// Layer 1 (RTP overlay), lowest -> highest priority:
+///     defaults  <  transport-file*  <  transport-caps  <
+///     GObject properties
+///
+/// Layer 2 (essence cross-check):
+///     `caps` must agree with the resolved Layer-1 state for
+///     fixed-rate essence (video framerate / clock-rate,
+///     RFC 8331 ANC clock-rate, width/height/colorimetry/PAR);
+///     audio clock-rate / ptime / payload-type are Layer-1
+///     overrideable.
+///
+/// Activation SDP supersedes Layers 1 + 2 at activation time.
+/// ```
+///
+/// Each constant is currently consumed only by tests + the
+/// `MULTICAST_TTL` consumer in [`build_sdp`]; the
+/// `cfg_attr(not(test), allow(dead_code))` gate covers the
+/// rest until `synthesise_or_passthrough_udp` is wired up
+/// (mirrors the same pattern on
+/// [`SdpSession`] / [`SdpOverrides`]).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod defaults {
+    /// Default RTP payload type for `video/x-raw` (RFC 4175,
+    /// ST 2110-20). Matches the nmos-cpp default.
+    pub(crate) const VIDEO_PAYLOAD_TYPE: i32 = 96;
+
+    /// Default RTP payload type for `audio/x-raw` (ST 2110-30
+    /// L24/L16 PCM). Matches the nmos-cpp default.
+    pub(crate) const AUDIO_PAYLOAD_TYPE: i32 = 97;
+
+    /// Default RTP payload type for `meta/x-st-2038`
+    /// (RFC 8331 SMPTE 291 ANC, ST 2110-40). Matches the
+    /// nmos-cpp default. (98 is reserved for SMPTE ST 2022-6
+    /// muxed RTP and 99 is unassigned, so the numbering is
+    /// non-contiguous with video/audio.)
+    pub(crate) const ANC_PAYLOAD_TYPE: i32 = 100;
+
+    /// Default audio packet duration: 1 ms (1_000_000 ns) —
+    /// the canonical ST 2110-30 packet duration and the
+    /// nmos-cpp default. ST 2110-30 also permits 0.125 ms
+    /// (125_000 ns) for very-low-latency audio; request it
+    /// explicitly via `transport-caps` `a-ptime=0.125`.
+    ///
+    /// Stored in nanoseconds because that's what the GStreamer
+    /// `rtp*pay` `min-ptime` / `max-ptime` properties accept;
+    /// the SDP `a=ptime:` slot emits it as decimal
+    /// milliseconds.
+    pub(crate) const AUDIO_PTIME_NS: u64 = 1_000_000;
+
+    /// Default RTP port: 5004. Matches IS-05's `auto_rtp_port`
+    /// — i.e. the value the daemon substitutes for the
+    /// `auto` sentinel in transport_params at activation
+    /// time — and is the de-facto SMPTE ST 2110 convention.
+    pub(crate) const RTP_PORT: u16 = 5004;
+
+    /// `o=` line `<unicast-address>` fallback used before any
+    /// caps negotiation pins a NIC. Per RFC 4566 §5.2 this
+    /// slot may carry any address when the originator's real
+    /// address isn't known; `0.0.0.0` is the canonical
+    /// "unspecified" form. `build_sdp` substitutes the real
+    /// address once an `interface_ip` / `source_ip` property
+    /// or activation SDP resolves one.
+    pub(crate) const ORIGIN_ADDRESS: &str = "0.0.0.0";
+
+    /// TTL applied when the `c=` line address is multicast.
+    /// Per RFC 4566 §5.7 the `<addr>/<ttl>` suffix MUST be
+    /// present for IPv4 multicast and MUST be omitted for
+    /// unicast — `build_sdp` relies on `gst-sdp`'s
+    /// `add_connection` to suppress the suffix automatically
+    /// for unicast destinations (pinned by
+    /// `gst_sdp_strips_ttl_for_unicast_c_lines`), so this
+    /// constant only takes effect for multicast `c=` lines.
+    pub(crate) const MULTICAST_TTL: u32 = 64;
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum SdpError {
     #[error("SDP text could not be parsed: {0}")]
@@ -401,11 +487,13 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     let mut m = SDPMedia::new();
     m.set_proto("RTP/AVP");
     m.set_port_info(u32::from(leg.destination_port), 1);
-    // ttl=64 matches `nvds_nmos_bin::sdp_from_caps`; correct for
-    // typical multicast Senders. Unicast Senders strictly should
-    // omit the ttl suffix per RFC 4566 but the cpp reference also
-    // emits it unconditionally and downstream parsers tolerate it.
-    m.add_connection("IN", "IP4", &leg.destination_ip, 64, 0);
+    // Per RFC 4566 §5.7 the ttl suffix must be present for
+    // multicast `c=` lines and must be omitted for unicast.
+    // `gst-sdp`'s `add_connection` already strips the suffix
+    // for unicast destinations regardless of the `ttl`
+    // argument (see `gst_sdp_strips_ttl_for_unicast_c_lines`),
+    // so we can pass `MULTICAST_TTL` unconditionally.
+    m.add_connection("IN", "IP4", &leg.destination_ip, defaults::MULTICAST_TTL, 0);
     m.set_media_from_caps(&media.rtp_caps)
         .map_err(|e| SdpError::BuildMediaFromCaps(e.to_string()))?;
 
@@ -1019,6 +1107,127 @@ mod tests {
 
     fn init_gst() {
         let _ = gst::init();
+    }
+
+    // `defaults` regression guards: every constant pins a
+    // canonical `nmos-cpp` source location and the value
+    // should change only when nmos-cpp's matching constant
+    // changes. The tests are deliberately literal — they
+    // exist to trip CI if a constant is bumped accidentally
+    // (which would otherwise propagate silently through
+    // `synthesise_or_passthrough_udp` once it's wired up).
+
+    #[test]
+    fn defaults_payload_types_are_in_rfc_3551_dynamic_range() {
+        // RFC 3551 §6: dynamic payload-type range is 96..=127.
+        // ST 2110 / nmos-cpp pick from this range.
+        for (name, pt) in [
+            ("VIDEO", defaults::VIDEO_PAYLOAD_TYPE),
+            ("AUDIO", defaults::AUDIO_PAYLOAD_TYPE),
+            ("ANC", defaults::ANC_PAYLOAD_TYPE),
+        ] {
+            assert!(
+                (96..=127).contains(&pt),
+                "{name}_PAYLOAD_TYPE = {pt} is outside RFC 3551 §6 dynamic range (96..=127)",
+            );
+        }
+    }
+
+    #[test]
+    fn defaults_payload_types_match_nmos_cpp() {
+        // nmos-cpp/Development/nmos/sdp_utils.h:673-680
+        assert_eq!(defaults::VIDEO_PAYLOAD_TYPE, 96);
+        assert_eq!(defaults::AUDIO_PAYLOAD_TYPE, 97);
+        assert_eq!(defaults::ANC_PAYLOAD_TYPE, 100);
+    }
+
+    #[test]
+    fn defaults_audio_ptime_is_one_millisecond_in_nanoseconds() {
+        // nmos-cpp/Development/nmos/sdp_utils.cpp:305:
+        //   params.packet_time = packet_time ? *packet_time : 1;
+        // (`packet_time` is `double` in ms; we represent in
+        // ns because `rtp*pay`'s `min-ptime` / `max-ptime`
+        // properties take nanoseconds.)
+        assert_eq!(defaults::AUDIO_PTIME_NS, 1_000_000);
+    }
+
+    #[test]
+    fn defaults_rtp_port_matches_nmos_cpp_auto_rtp_port() {
+        // nmos-cpp/Development/nmos/connection_api.h:101:
+        //   int auto_rtp_port = 5004
+        assert_eq!(defaults::RTP_PORT, 5004);
+    }
+
+    #[test]
+    fn defaults_origin_address_is_rfc_4566_unspecified() {
+        // RFC 4566 §5.2: any IPv4 address is permitted when
+        // the originator's real address is unknown; `0.0.0.0`
+        // is the canonical "unspecified" form.
+        assert_eq!(defaults::ORIGIN_ADDRESS, "0.0.0.0");
+        // Sanity: parseable as `Ipv4Addr::UNSPECIFIED`.
+        let parsed: std::net::Ipv4Addr = defaults::ORIGIN_ADDRESS
+            .parse()
+            .expect("ORIGIN_ADDRESS must parse as an Ipv4Addr");
+        assert_eq!(parsed, std::net::Ipv4Addr::UNSPECIFIED);
+    }
+
+    #[test]
+    fn defaults_multicast_ttl_is_64() {
+        assert_eq!(defaults::MULTICAST_TTL, 64);
+    }
+
+    /// Pins `gst-sdp`'s `SDPMedia::add_connection` behaviour so
+    /// `build_sdp` can pass `MULTICAST_TTL` unconditionally: the
+    /// emitter is expected to suppress the `/ttl` suffix for
+    /// unicast IPv4 destinations (per RFC 4566 §5.7) and to
+    /// emit it for multicast destinations. If a future
+    /// `gstreamer-sdp` release stops honouring that, this test
+    /// trips and we'll need to gate the call ourselves.
+    #[test]
+    fn gst_sdp_strips_ttl_for_unicast_c_lines() {
+        init_gst();
+        for (addr, expect_suffix) in [
+            ("239.1.1.1", true), // multicast — TTL required
+            ("192.0.2.10", false), // unicast — TTL must be omitted
+        ] {
+            let mut msg = SDPMessage::new();
+            msg.set_version("0");
+            let mut m = SDPMedia::new();
+            m.set_media("video");
+            m.set_proto("RTP/AVP");
+            m.set_port_info(5004, 1);
+            m.add_connection("IN", "IP4", addr, defaults::MULTICAST_TTL, 0);
+            msg.add_media(m);
+            let text = msg.as_text().unwrap();
+            let c_line = text
+                .lines()
+                .find(|l| l.starts_with("c="))
+                .expect("c= line must be present");
+            let suffix = format!("/{}", defaults::MULTICAST_TTL);
+            assert_eq!(
+                c_line.contains(&suffix),
+                expect_suffix,
+                "{addr}: expected suffix `{suffix}` presence = {expect_suffix}, got `{c_line}`",
+            );
+        }
+    }
+
+    /// Round-trip guard: parse a multicast fixture SDP through
+    /// `build_sdp` and confirm the `c=` line carries
+    /// `/MULTICAST_TTL`. If the constant is ever refactored
+    /// away from `add_connection` (e.g. accidentally back to a
+    /// literal), or the multicast detection breaks, this trips.
+    #[test]
+    fn defaults_build_sdp_emits_multicast_ttl_for_multicast_c_line() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let text = build_sdp(&media, test_session()).expect("build");
+        let expected = format!("/{}\r\n", defaults::MULTICAST_TTL);
+        assert!(
+            text.contains(&expected),
+            "build_sdp must emit `c=...<addr>/{}` for the multicast fixture; got: {text}",
+            defaults::MULTICAST_TTL,
+        );
     }
 
     /// 1920×1080p50 SMPTE ST 2110-20 / RFC 4175 SDP carrying
