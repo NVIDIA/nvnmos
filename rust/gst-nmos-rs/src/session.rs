@@ -227,13 +227,11 @@ pub(crate) struct CommonSettings {
     /// synthesised SDP (alongside [`caps`](Self::caps) and
     /// [`crate::sdp::defaults`]).
     ///
-    /// Consumed by the upcoming `splice_overrides_sdp` /
-    /// `synthesise_or_passthrough_udp` path; currently populated
-    /// by `From<Settings>` and dropped further down, so the
-    /// dead_code lint is suppressed until the consumer lands
-    /// (same "set-only, awaiting consumer" pattern as the IS-05
-    /// endpoint fields below).
-    #[allow(dead_code)]
+    /// Consumed at startup by [`property_overrides_udp`] (which
+    /// feeds the override-class slots into the splice helper)
+    /// and by [`sdp::cross_check_essence`] in
+    /// [`decide_inner_config_udp`]. A future caps-only SDP
+    /// synthesis path will also read this field.
     pub(crate) transport_caps: Option<gst::Caps>,
     /// Controls whether the resource advertises narrow or wide caps
     /// in IS-04. See [`CapsMode`] for the full semantics. Honoured
@@ -799,11 +797,17 @@ fn caps_format(settings: &CommonSettings) -> FlowFormat {
 ///   `source_port` is left unset (the IS-05 receiver schema
 ///   doesn't define a local source-port slot).
 ///
-/// `transport_caps`-driven overrides (audio clock-rate, ptime,
-/// pt) are **not** handled by this builder — they land in a
-/// follow-up that extends [`SdpOverrides`] with the scalar slots
-/// and the corresponding splice machinery (`m=` / `a=rtpmap:` /
-/// `a=fmtp:` rewrites).
+/// `transport_caps` populates the override-class slots
+/// (`payload_type`, `audio_clock_rate`, `a_ptime`,
+/// `a_maxptime`) by reading the corresponding fields from
+/// `application/x-rtp,...` caps. Out-of-range / missing values
+/// drop silently here — pt's RFC 3551 range check fires
+/// downstream in [`sdp::splice_overrides`], where the error
+/// can be attributed cleanly to the SDP transform rather than
+/// to a property-setter side-effect. Cross-check fields
+/// (`encoding-name`, video/ANC `clock-rate`, essence shape)
+/// don't pass through this builder — [`sdp::cross_check_essence`]
+/// reads them from `settings.transport_caps` directly.
 fn property_overrides_udp(settings: &CommonSettings) -> SdpOverrides<'_> {
     fn opt(s: &str) -> Option<&str> {
         if s.is_empty() { None } else { Some(s) }
@@ -827,6 +831,24 @@ fn property_overrides_udp(settings: &CommonSettings) -> SdpOverrides<'_> {
             None,
         ),
     };
+    let tc = settings
+        .transport_caps
+        .as_ref()
+        .and_then(|c| c.structure(0));
+    // pt is i32 on `application/x-rtp` caps per GStreamer
+    // convention; cast to u8 for the [`SdpOverrides`] slot.
+    // 0..=255 keeps the cast lossless and lets the
+    // RFC-3551-range check fire centrally in
+    // `sdp::splice_overrides`.
+    let payload_type = tc
+        .and_then(|s| s.get::<i32>("payload").ok())
+        .and_then(|pt| u8::try_from(pt).ok());
+    let audio_clock_rate = tc
+        .and_then(|s| s.get::<i32>("clock-rate").ok())
+        .and_then(|rate| u32::try_from(rate).ok());
+    let a_ptime = tc.and_then(|s| s.get::<&str>("a-ptime").ok());
+    let a_maxptime = tc.and_then(|s| s.get::<&str>("a-maxptime").ok());
+
     SdpOverrides {
         label: opt(&settings.label),
         description: opt(&settings.description),
@@ -836,6 +858,10 @@ fn property_overrides_udp(settings: &CommonSettings) -> SdpOverrides<'_> {
         destination_port: opt_port(settings.destination_port),
         source_ip,
         source_port,
+        payload_type,
+        audio_clock_rate,
+        a_ptime,
+        a_maxptime,
         caps_mode: settings.caps_mode,
     }
 }
@@ -2118,6 +2144,150 @@ mod tests {
                 resolve_inner_config_udp("nmossrc", &s, UdpVariant::V1, None).expect("no error");
             assert!(text.is_none(), "no input → no spliced output");
             assert!(matches!(inner, InnerConfig::Fake { .. }));
+        }
+
+        /// `transport-caps` carries the RTP payload-type
+        /// override (RFC 3551 §6 dynamic range 96..=127, all
+        /// essences); `property_overrides_udp` must read it
+        /// from the caps' `payload` i32 field and cast to u8.
+        #[test]
+        fn property_overrides_udp_reads_pt_from_transport_caps() {
+            let tc = gst::Caps::builder("application/x-rtp")
+                .field("payload", 99i32)
+                .build();
+            let s = CommonSettings {
+                transport_caps: Some(tc),
+                ..udp_settings(Side::Sender, Transport::Udp)
+            };
+            let o = property_overrides_udp(&s);
+            assert_eq!(o.payload_type, Some(99));
+        }
+
+        /// `transport-caps` carries the audio-only override
+        /// slots (clock-rate, a-ptime, a-maxptime). The
+        /// builder reads them blindly; the splice helper does
+        /// the audio-essence gating downstream.
+        #[test]
+        fn property_overrides_udp_reads_audio_overrides_from_transport_caps() {
+            let tc = gst::Caps::builder("application/x-rtp")
+                .field("clock-rate", 96_000i32)
+                .field("a-ptime", "1")
+                .field("a-maxptime", "2")
+                .build();
+            let s = CommonSettings {
+                transport_caps: Some(tc),
+                ..udp_settings(Side::Sender, Transport::Udp)
+            };
+            let o = property_overrides_udp(&s);
+            assert_eq!(o.audio_clock_rate, Some(96_000));
+            assert_eq!(o.a_ptime, Some("1"));
+            assert_eq!(o.a_maxptime, Some("2"));
+        }
+
+        /// No `transport-caps` → all four override slots are
+        /// `None`, even when the property layer hands us a
+        /// `CommonSettings` with the field defaulted.
+        #[test]
+        fn property_overrides_udp_no_transport_caps_leaves_override_slots_none() {
+            let s = udp_settings(Side::Sender, Transport::Udp);
+            assert!(s.transport_caps.is_none(), "fixture must default to None");
+            let o = property_overrides_udp(&s);
+            assert_eq!(o.payload_type, None);
+            assert_eq!(o.audio_clock_rate, None);
+            assert_eq!(o.a_ptime, None);
+            assert_eq!(o.a_maxptime, None);
+        }
+
+        /// End-to-end: an audio `transport-file` with a base
+        /// pt / clock-rate / ptime gets rewritten by
+        /// `resolve_inner_config_udp` to match the user's
+        /// `transport-caps`. Pins that the pt + clock-rate +
+        /// ptime path all the way from `Settings.transport_caps`
+        /// → `property_overrides_udp` → `sdp::splice_overrides`
+        /// → `build_sdp` actually changes the wire SDP.
+        #[test]
+        fn resolve_inner_config_udp_applies_transport_caps_audio_overrides() {
+            // 48 kHz L24 stereo, pt=97, ptime=0.125. The
+            // simplest audio SDP that exercises all four
+            // override slots in one pass.
+            const AUDIO_L24_SDP: &str = concat!(
+                "v=0\r\n",
+                "o=- 1 0 IN IP4 192.0.2.10\r\n",
+                "s=Example\r\n",
+                "t=0 0\r\n",
+                "m=audio 5004 RTP/AVP 97\r\n",
+                "c=IN IP4 239.2.2.2/64\r\n",
+                "a=rtpmap:97 L24/48000/2\r\n",
+                "a=ptime:0.125\r\n",
+                "a=mediaclk:direct=0\r\n",
+                "a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n",
+            );
+            let tc = gst::Caps::builder("application/x-rtp")
+                .field("payload", 100i32)
+                .field("clock-rate", 96_000i32)
+                .field("a-ptime", "1")
+                .field("a-maxptime", "1")
+                .build();
+            let s = CommonSettings {
+                side: Side::Receiver,
+                transport_caps: Some(tc),
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            let (_, spliced) = resolve_inner_config_udp(
+                "nmossrc",
+                &s,
+                UdpVariant::V1,
+                Some(AUDIO_L24_SDP.to_owned()),
+            )
+            .expect("splice + decide must succeed");
+            let spliced = spliced.expect("transport_file must round-trip");
+
+            assert!(spliced.contains("m=audio 5004 RTP/AVP 100"),
+                "pt override must hit m= line; got: {spliced}");
+            assert!(spliced.contains("a=rtpmap:100 L24/96000/2"),
+                "pt + clock-rate must land on rtpmap together; got: {spliced}");
+            assert!(spliced.contains("a=ptime:1\r\n"),
+                "a=ptime override; got: {spliced}");
+            assert!(spliced.contains("a=maxptime:1\r\n"),
+                "a=maxptime override; got: {spliced}");
+        }
+
+        /// An invalid pt in `transport-caps` causes
+        /// `resolve_inner_config_udp` to fail with the
+        /// SdpError surfaced through the `with_context`
+        /// chain. The element will then bail out of
+        /// NULL→READY rather than silently producing a
+        /// broken SDP.
+        #[test]
+        fn resolve_inner_config_udp_rejects_invalid_pt_in_transport_caps() {
+            const AUDIO_L24_SDP: &str = concat!(
+                "v=0\r\n",
+                "o=- 1 0 IN IP4 192.0.2.10\r\n",
+                "s=Example\r\n",
+                "t=0 0\r\n",
+                "m=audio 5004 RTP/AVP 97\r\n",
+                "c=IN IP4 239.2.2.2/64\r\n",
+                "a=rtpmap:97 L24/48000/2\r\n",
+            );
+            let tc = gst::Caps::builder("application/x-rtp")
+                .field("payload", 33i32) // legacy MP2T, outside dynamic range
+                .build();
+            let s = CommonSettings {
+                transport_caps: Some(tc),
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            let err = resolve_inner_config_udp(
+                "nmossrc",
+                &s,
+                UdpVariant::V1,
+                Some(AUDIO_L24_SDP.to_owned()),
+            )
+            .expect_err("must reject pt=33");
+            let chain = format!("{err:#}");
+            assert!(
+                chain.contains("96..=127") || chain.contains("dynamic range"),
+                "error must attribute the RFC 3551 range; got: {chain}",
+            );
         }
 
         /// Activation SDP is authoritative — property overrides

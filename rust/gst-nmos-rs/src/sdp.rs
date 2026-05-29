@@ -177,6 +177,11 @@ pub(crate) enum SdpError {
     BuildMediaFromCaps(String),
     #[error("`gst_sdp_message_as_text` failed to serialise the constructed SDP: {0}")]
     Serialise(String),
+    #[error(
+        "RTP payload-type override {0} is outside the RFC 3551 §6 dynamic range \
+         (96..=127); NMOS RTP transports only use dynamic payload types"
+    )]
+    InvalidPayloadType(u32),
 }
 
 /// Everything above the `m=` block of an SDP — i.e. the
@@ -581,7 +586,30 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
 ///   not here — by the time [`splice_overrides`] runs every
 ///   field already means what it does on [`UdpLeg`].
 ///
-/// `None` on a slot leaves the input SDP's value untouched.
+    /// * Transport-caps overrides (`payload_type`,
+    ///   `audio_clock_rate`, `a_ptime`, `a_maxptime`) cover the
+    ///   override-class fields of the `transport-caps` property
+    ///   (`application/x-rtp,...` GStreamer caps). Per the
+    ///   override-vs-cross-check rule on
+    ///   [`crate::session::CommonSettings::transport_caps`]:
+    ///   * `payload_type` (RFC 3551 dynamic range 96..=127)
+    ///     rewrites the `m=` line's first format token,
+    ///     `a=rtpmap:<pt>`, `a=fmtp:<pt>`, and `a=x-nvnmos-caps:<pt>`
+    ///     atomically — they're all driven from
+    ///     `media.primary.rtp_caps`'s `payload` field via
+    ///     `set_media_from_caps`. Applies to all essences.
+    ///   * `audio_clock_rate` rewrites `a=rtpmap:<pt> L24/<rate>/<n>`.
+    ///     Audio-only — silently ignored for video raw / ANC
+    ///     because those carry a fixed 90 kHz clock per RFC 4175 /
+    ///     RFC 8331 and the override category for fixed-clock
+    ///     essences is cross-check, not override.
+    ///   * `a_ptime` / `a_maxptime` rewrite `a=ptime:` /
+    ///     `a=maxptime:` (millisecond decimal string per the
+    ///     GStreamer `a-ptime` / `a-maxptime` caps convention).
+    ///     Audio-only — for the same reason: video raw / ANC
+    ///     don't carry packet-time metadata.
+    ///
+    /// `None` on a slot leaves the input SDP's value untouched.
 /// `Some(...)` replaces it. The split between "absent" and
 /// "explicit override to empty/zero" follows the MXL convention:
 /// callers map empty GObject string properties to `None` before
@@ -597,6 +625,28 @@ pub(crate) struct SdpOverrides<'a> {
     pub destination_port: Option<u16>,
     pub source_ip: Option<&'a str>,
     pub source_port: Option<u16>,
+    /// RTP payload type override (RFC 3551 §6 dynamic range
+    /// 96..=127). All essences honour this. Out-of-range
+    /// values are rejected by [`splice_overrides`] with
+    /// [`SdpError::InvalidPayloadType`] rather than silently
+    /// dropped — `transport-caps` is user-facing and a stale
+    /// pt is a misconfiguration worth surfacing.
+    pub payload_type: Option<u8>,
+    /// Audio clock-rate override (Hz). Honoured only for
+    /// audio essence (L16/L24); ignored for video raw / ANC
+    /// (those carry a fixed 90 kHz clock per RFC 4175 /
+    /// RFC 8331 and fall under the cross-check rule, not
+    /// override).
+    pub audio_clock_rate: Option<u32>,
+    /// `a=ptime:` override — millisecond decimal string per
+    /// the GStreamer `a-ptime` caps convention (e.g. `"0.125"`
+    /// for 125 µs, `"1"` for 1 ms). Audio-only.
+    pub a_ptime: Option<&'a str>,
+    /// `a=maxptime:` override — same string convention as
+    /// `a_ptime`. Audio-only. Independent slot per RFC 4566
+    /// — for ST 2110-30 typically equal to `a_ptime`, but
+    /// callers may set them distinctly.
+    pub a_maxptime: Option<&'a str>,
     /// Wide / narrow / auto resolution for the Receiver
     /// advertisement (`a=x-nvnmos-caps:` media-level attribute).
     /// Mirrors [`crate::flow_def::FlowDefOverrides::caps_mode`]
@@ -701,6 +751,19 @@ pub(crate) fn splice_overrides(
         media.primary.source_port = Some(port);
     }
 
+    // Apply transport-caps-driven overrides to the RTP caps
+    // (the `application/x-rtp,...` source of truth that
+    // `set_media_from_caps` re-emits as `m=` + `a=rtpmap:` +
+    // `a=fmtp:` + `a=ptime:` / `a=maxptime:`). Audio-only
+    // slots (`audio_clock_rate`, `a_ptime`, `a_maxptime`) are
+    // silently ignored for non-audio essences because their
+    // fixed clocks (90 kHz for video raw / ANC per RFC 4175 /
+    // RFC 8331) fall under the cross-check rule rather than
+    // override — see [`SdpOverrides`]'s doc and
+    // [`crate::session::CommonSettings::transport_caps`]'s
+    // override-vs-cross-check table.
+    apply_transport_caps_overrides(&mut media, overrides)?;
+
     // Apply session-level overrides, owning the strings on the
     // local stack so [`SdpSession`] can borrow them through the
     // [`build_sdp`] call.
@@ -738,6 +801,62 @@ pub(crate) fn splice_overrides(
         advertise_caps,
     };
     build_sdp(&media, session)
+}
+
+/// Apply [`SdpOverrides`]'s transport-caps-driven slots
+/// (`payload_type`, `audio_clock_rate`, `a_ptime`,
+/// `a_maxptime`) to `media.primary.rtp_caps`. The mutations land
+/// on the `application/x-rtp,...` caps so that
+/// [`build_sdp`]'s `set_media_from_caps` call re-emits the
+/// corresponding `m=` line PT, `a=rtpmap:`, `a=fmtp:`,
+/// `a=ptime:` and `a=maxptime:` attributes from a single source
+/// of truth.
+///
+/// Audio-only slots silently no-op for video raw / ANC essences
+/// — those carry a fixed 90 kHz clock and no packet-time
+/// metadata per RFC 4175 / RFC 8331, so the
+/// override-vs-cross-check rule on
+/// [`crate::session::CommonSettings::transport_caps`] puts them
+/// in the cross-check category instead. The cross-check itself
+/// lives in a follow-up commit; here we just refuse to apply
+/// the override.
+fn apply_transport_caps_overrides(
+    media: &mut UdpMedia,
+    overrides: &SdpOverrides<'_>,
+) -> Result<(), SdpError> {
+    let is_audio = media.format == FlowFormat::Audio;
+    let caps_mut = media.rtp_caps.make_mut();
+    let s = match caps_mut.structure_mut(0) {
+        Some(s) => s,
+        // `parse_sdp` always produces a non-empty caps with one
+        // structure; this branch only fires for hand-crafted
+        // [`UdpMedia`] values that bypass the parser. Treat as
+        // a no-op rather than erroring — overrides are layered,
+        // not load-bearing for the SDP roundtrip itself.
+        None => return Ok(()),
+    };
+
+    if let Some(pt) = overrides.payload_type {
+        if !(96..=127).contains(&pt) {
+            return Err(SdpError::InvalidPayloadType(u32::from(pt)));
+        }
+        s.set("payload", i32::from(pt));
+    }
+    if is_audio {
+        if let Some(rate) = overrides.audio_clock_rate {
+            // `clock-rate` is i32 in `application/x-rtp` caps
+            // per GStreamer convention. Cast is safe — audio
+            // sample rates fit in i32 with vast margin.
+            s.set("clock-rate", rate as i32);
+        }
+        if let Some(ptime) = overrides.a_ptime {
+            s.set("a-ptime", ptime);
+        }
+        if let Some(maxptime) = overrides.a_maxptime {
+            s.set("a-maxptime", maxptime);
+        }
+    }
+    Ok(())
 }
 
 /// Extract the single included source-IP from an RFC 4607
@@ -2005,6 +2124,172 @@ mod tests {
         let err = splice_overrides("not an SDP at all", &SdpOverrides::default())
             .expect_err("must error");
         assert!(matches!(err, SdpError::Parse(_) | SdpError::NoMedia));
+    }
+
+    // -- transport-caps overrides --------------------------------
+
+    /// Audio pt override: rewrite `m=audio … 97` → `… 99`,
+    /// `a=rtpmap:97 …` → `a=rtpmap:99 …`. The single mutation
+    /// to `rtp_caps.payload` flows through to all three slots
+    /// via `set_media_from_caps`.
+    #[test]
+    fn splice_overrides_audio_pt_override_rewrites_m_line_and_rtpmap() {
+        init_gst();
+        let spliced = splice_overrides(
+            AUDIO_L24_48K_STEREO_SDP,
+            &SdpOverrides {
+                payload_type: Some(99),
+                ..Default::default()
+            },
+        )
+        .expect("splice");
+        assert!(spliced.contains("m=audio 5004 RTP/AVP 99"),
+            "m= must carry new pt 99; got: {spliced}");
+        assert!(spliced.contains("a=rtpmap:99 L24/48000/2"),
+            "a=rtpmap must carry new pt 99; got: {spliced}");
+        assert!(spliced.contains("a=fmtp:99"),
+            "a=fmtp must be re-keyed to new pt 99; got: {spliced}");
+        // Re-parse to confirm the model round-trips.
+        let m = parse_sdp(&spliced).expect("re-parse");
+        let pt = m.rtp_caps.structure(0).and_then(|s| s.get::<i32>("payload").ok());
+        assert_eq!(pt, Some(99));
+    }
+
+    /// Audio clock-rate override: 48000 → 96000 rewrites the
+    /// `a=rtpmap:97 L24/48000/2` clock-rate token.
+    #[test]
+    fn splice_overrides_audio_clock_rate_override_rewrites_rtpmap() {
+        init_gst();
+        let spliced = splice_overrides(
+            AUDIO_L24_48K_STEREO_SDP,
+            &SdpOverrides {
+                audio_clock_rate: Some(96000),
+                ..Default::default()
+            },
+        )
+        .expect("splice");
+        assert!(spliced.contains("a=rtpmap:97 L24/96000/2"),
+            "a=rtpmap clock-rate must be 96000; got: {spliced}");
+        assert!(!spliced.contains("L24/48000/"),
+            "old 48000 must be gone; got: {spliced}");
+    }
+
+    /// Audio ptime + maxptime override: GStreamer convention
+    /// uses string values on the `a-ptime` / `a-maxptime` caps
+    /// fields (ms decimal), `set_media_from_caps` re-emits as
+    /// `a=ptime:` / `a=maxptime:` lines.
+    #[test]
+    fn splice_overrides_audio_ptime_and_maxptime_override() {
+        init_gst();
+        let spliced = splice_overrides(
+            AUDIO_L24_48K_STEREO_SDP,
+            &SdpOverrides {
+                a_ptime: Some("1"),
+                a_maxptime: Some("2"),
+                ..Default::default()
+            },
+        )
+        .expect("splice");
+        assert!(spliced.contains("a=ptime:1\r\n"),
+            "a=ptime must be 1ms; got: {spliced}");
+        assert!(spliced.contains("a=maxptime:2\r\n"),
+            "a=maxptime must be 2ms; got: {spliced}");
+        assert!(!spliced.contains("a=ptime:0.125"),
+            "old 0.125 ms ptime must be gone; got: {spliced}");
+    }
+
+    /// Audio-only slots silently no-op for video raw essence
+    /// (fixed 90 kHz clock-rate per RFC 4175, no packet-time
+    /// metadata). The video SDP must round-trip with its
+    /// 90000 / no-ptime shape intact even when the caller
+    /// passes `audio_clock_rate` / `a_ptime` /
+    /// `a_maxptime`.
+    #[test]
+    fn splice_overrides_audio_only_slots_silently_ignored_for_video() {
+        init_gst();
+        let spliced = splice_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides {
+                audio_clock_rate: Some(48000),
+                a_ptime: Some("0.125"),
+                a_maxptime: Some("0.125"),
+                ..Default::default()
+            },
+        )
+        .expect("splice");
+        // `caps_from_media` upper-cases the rtpmap
+        // encoding-name; match both forms.
+        assert!(
+            spliced.contains("a=rtpmap:96 RAW/90000")
+                || spliced.contains("a=rtpmap:96 raw/90000"),
+            "video clock-rate must stay 90000 (audio_clock_rate ignored); got: {spliced}",
+        );
+        assert!(!spliced.contains("a=ptime:"),
+            "video must have no a=ptime (audio-only slot ignored); got: {spliced}");
+    }
+
+    /// Video pt override: `m=video … 96` → `… 100`. Pt
+    /// override is essence-agnostic (RFC 3551 §6 dynamic
+    /// range applies to all RTP transports).
+    #[test]
+    fn splice_overrides_video_pt_override_works() {
+        init_gst();
+        let spliced = splice_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides {
+                payload_type: Some(100),
+                ..Default::default()
+            },
+        )
+        .expect("splice");
+        assert!(spliced.contains("m=video 5004 RTP/AVP 100"),
+            "m= must carry new pt 100; got: {spliced}");
+        // `caps_from_media` upper-cases the rtpmap
+        // encoding-name via `g_ascii_strup`; the round-trip
+        // through caps therefore emits `RAW`, not `raw`. Match
+        // both for resilience to future GStreamer changes.
+        assert!(
+            spliced.contains("a=rtpmap:100 RAW/90000")
+                || spliced.contains("a=rtpmap:100 raw/90000"),
+            "a=rtpmap must carry new pt 100; got: {spliced}"
+        );
+    }
+
+    /// Pt outside RFC 3551 §6 dynamic range (96..=127) is
+    /// rejected loudly rather than silently dropped, because
+    /// `transport-caps` is user-facing and a stale pt is a
+    /// misconfiguration worth surfacing. Tests the dynamic-
+    /// range lower (0, 95) and upper (128 via u8 max 255) edges.
+    #[test]
+    fn splice_overrides_invalid_pt_returns_error() {
+        init_gst();
+        for pt in [0u8, 33, 95, 128, 200, 255] {
+            let err = splice_overrides(
+                AUDIO_L24_48K_STEREO_SDP,
+                &SdpOverrides {
+                    payload_type: Some(pt),
+                    ..Default::default()
+                },
+            )
+            .expect_err(&format!("pt={pt} must be rejected"));
+            match err {
+                SdpError::InvalidPayloadType(p) => {
+                    assert_eq!(p, u32::from(pt), "error must echo the offending pt");
+                }
+                other => panic!("expected InvalidPayloadType({pt}), got {other:?}"),
+            }
+        }
+        // Sanity: 96 and 127 (the inclusive bounds) succeed.
+        for pt in [96, 127] {
+            splice_overrides(
+                AUDIO_L24_48K_STEREO_SDP,
+                &SdpOverrides {
+                    payload_type: Some(pt),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("pt={pt} must be valid: {e}"));
+        }
     }
 
     /// Variant of `VIDEO_YCBCR_422_10BIT_1080P50_SDP` with an
