@@ -58,7 +58,7 @@ use gstreamer as gst;
 use gstreamer_sdp as gst_sdp;
 use thiserror::Error;
 
-use crate::session::{UdpLeg, UdpMedia};
+use crate::session::{Side, UdpLeg, UdpMedia};
 use crate::types::{CapsMode, FlowFormat};
 
 /// Canonical default values for SDP synthesis, sourced from
@@ -1016,6 +1016,340 @@ fn cross_check_transport_caps(media: &UdpMedia, transport_caps: &gst::Caps) -> R
         });
     }
     Ok(())
+}
+
+/// Inputs to [`from_caps`]: everything needed to synthesise a
+/// configuring SDP from a caps-only Sender / Receiver
+/// configuration. Mirrors [`crate::flow_def::FlowDefBuildInput`]
+/// on the MXL path: the orchestrator snapshots GObject properties
+/// and `transport_caps` once per `validate_and_open` or
+/// `make_activation_plan` call and hands them in.
+///
+/// The struct does not carry [`UdpLeg`] directly because the
+/// per-side IS-05 ↔ SDP mapping (where `source_ip` means the
+/// local egress NIC on a Sender but the SSM include filter on a
+/// Receiver) is exactly the dispatch [`from_caps`] performs;
+/// callers stay in IS-05 vocabulary.
+///
+/// `destination_ip` here is the wire destination on the `m=` /
+/// `c=` lines:
+/// * Sender: the egress destination (unicast peer or multicast
+///   group) — `nmossink`'s `destination-ip` property.
+/// * Receiver: the multicast group to join (or unicast bind
+///   address) — `nmossrc`'s `multicast-ip` property. The two
+///   GObject property names differ but the SDP wire slot is the
+///   same.
+///
+/// `interface_ip` is the local NIC:
+/// * Sender: unused — Senders re-use `source_ip` as the egress
+///   NIC, so `interface_ip` should be empty.
+/// * Receiver: the IGMP join NIC — `nmossrc`'s `interface-ip`.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SdpBuildInput<'a> {
+    /// Essence caps (`video/x-raw,…` / `audio/x-raw,…` /
+    /// `meta/x-st-2038,…`). Drives essence-shape fmtp fields and
+    /// the `format` field of the returned [`UdpMedia`].
+    pub essence_caps: &'a gst::Caps,
+    /// Optional `application/x-rtp,…` caps supplying the
+    /// override-class fields (`payload`, audio `clock-rate`,
+    /// `a-ptime`, `a-maxptime`). Cross-check-class fields the
+    /// caps may also carry (`encoding-name`, video / ANC
+    /// `clock-rate`) are ignored on the synthesis side — they're
+    /// derived from `essence_caps` instead.
+    pub transport_caps: Option<&'a gst::Caps>,
+    /// Sender or Receiver — drives the per-side dispatch on
+    /// `source_ip` / `interface_ip` into the produced
+    /// [`UdpLeg`].
+    pub side: Side,
+    /// NMOS resource label → SDP `s=` line. Empty falls back to
+    /// `"nvnmos"`; RFC 4566 §5.3 requires `s=` to be non-empty.
+    pub label: &'a str,
+    /// NMOS resource description → SDP `i=` line. Empty omits
+    /// the `i=` line.
+    pub description: &'a str,
+    /// NMOS resource name → session-level `a=x-nvnmos-name:`.
+    /// Empty omits the attribute (libnvnmos then falls back to
+    /// the `s=` value at `get_session_description_resource_name`).
+    pub name: &'a str,
+    /// IS-05 `source_ip` — per-side meaning:
+    /// * Sender: local egress NIC IP. Drives both
+    ///   `a=source-filter:` include and the
+    ///   `a=x-nvnmos-iface-ip:` slot (duplication mirrors
+    ///   `property_overrides_udp`).
+    /// * Receiver: SSM include source (remote sender's IP).
+    pub source_ip: &'a str,
+    /// IS-05 `source_port` — Sender's RTP source port. 0 = unset
+    /// (Receiver should also pass 0).
+    pub source_port: u16,
+    /// IS-05 `destination_ip` — wire destination (see struct
+    /// docstring for per-side meaning).
+    pub destination_ip: &'a str,
+    /// IS-05 `destination_port` — wire destination port
+    /// (Sender egress port / Receiver bind port). 0 falls back to
+    /// [`defaults::RTP_PORT`].
+    pub destination_port: u16,
+    /// IS-05 `interface_ip` — Receiver-only local NIC. Empty on
+    /// Senders (per the struct docstring).
+    pub interface_ip: &'a str,
+    /// Whether the SDP advertises wide receiver-caps via
+    /// `a=x-nvnmos-caps:<pt>` at the media level. Caller
+    /// resolves `CapsMode::Auto` to `false` (the default
+    /// configuring SDP is narrow until something says
+    /// otherwise).
+    pub advertise_caps: bool,
+}
+
+/// Synthesise a full configuring SDP from caps-only
+/// configuration. UDP-transport counterpart of
+/// [`crate::flow_def::from_caps`] on the MXL path.
+///
+/// Sequence:
+///
+/// 1. Dispatch on `essence_caps`'s structure name to a
+///    [`FlowFormat`] and the matching `rtp_caps_from_raw_*`
+///    primitive.
+/// 2. Resolve override-class RTP parameters from
+///    `transport_caps` falling back to [`defaults`]: payload
+///    type (per essence default + RFC 3551 dynamic-range
+///    validation), audio `clock-rate`, `a-ptime`, `a-maxptime`.
+/// 3. Build the [`UdpMedia`] (with [`UdpLeg`] populated from the
+///    IS-05 endpoint fields via [`udp_leg_from_input`]) and the
+///    [`SdpSession`] (label → `s=`, description → `i=`, name →
+///    session-level `a=x-nvnmos-name`, `interface_ip` /
+///    `source_ip` → `o=` `<unicast-address>`).
+/// 4. Serialise via [`build_sdp`].
+///
+/// Returns [`SdpError::UnsupportedEssence`] when `essence_caps`
+/// is not one of the recognised essence shapes, or
+/// [`SdpError::InvalidPayloadType`] when `transport_caps` carries
+/// a payload-type outside RFC 3551's dynamic range.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
+    let format = essence_caps_format(input.essence_caps).ok_or_else(|| {
+        SdpError::UnsupportedEssence(format!("essence caps `{}`", input.essence_caps))
+    })?;
+
+    let payload_type = resolve_payload_type(format, input.transport_caps)?;
+
+    let rtp_caps = match format {
+        FlowFormat::Video => rtp_caps_from_raw_video(input.essence_caps, payload_type)?,
+        FlowFormat::Audio => {
+            let (ptime_ns, maxptime_ns) = resolve_audio_ptime(input.transport_caps);
+            let resolved = resolved_audio_caps(input.essence_caps, input.transport_caps)?;
+            rtp_caps_from_raw_audio(&resolved, payload_type, ptime_ns, maxptime_ns)?
+        }
+        FlowFormat::Data => rtp_caps_from_raw_data(input.essence_caps, payload_type)?,
+        FlowFormat::Unspecified => {
+            unreachable!("essence_caps_format never returns Unspecified")
+        }
+    };
+
+    let media = UdpMedia {
+        format,
+        primary: udp_leg_from_input(input),
+        secondary: None,
+        rtp_caps,
+        raw_caps: input.essence_caps.clone(),
+    };
+
+    let origin_address = if input.interface_ip.is_empty() {
+        if input.source_ip.is_empty() {
+            defaults::ORIGIN_ADDRESS
+        } else {
+            input.source_ip
+        }
+    } else {
+        input.interface_ip
+    };
+
+    let session_name = if input.label.is_empty() {
+        "nvnmos"
+    } else {
+        input.label
+    };
+    let description = if input.description.is_empty() {
+        None
+    } else {
+        Some(input.description)
+    };
+    let name = if input.name.is_empty() {
+        None
+    } else {
+        Some(input.name)
+    };
+
+    let session = SdpSession {
+        origin_address,
+        origin_session_id: "1",
+        session_name,
+        description,
+        name,
+        advertise_caps: input.advertise_caps,
+    };
+
+    build_sdp(&media, session)
+}
+
+/// Resolve the RTP payload type for a synthesis run: read
+/// `payload` from `transport_caps` if present, otherwise fall
+/// back to the per-essence default in [`defaults`]. The
+/// override is rejected with [`SdpError::InvalidPayloadType`]
+/// when outside RFC 3551 §6's dynamic range (`96..=127`),
+/// matching [`splice_overrides`]'s validation on the splice
+/// path.
+#[cfg_attr(not(test), allow(dead_code))]
+fn resolve_payload_type(
+    format: FlowFormat,
+    transport_caps: Option<&gst::Caps>,
+) -> Result<u8, SdpError> {
+    if let Some(caps) = transport_caps {
+        if let Some(s) = caps.structure(0) {
+            if let Ok(pt) = s.get::<i32>("payload") {
+                let pt_u32 = u32::try_from(pt).map_err(|_| SdpError::InvalidPayloadType(0))?;
+                if !(96..=127).contains(&pt_u32) {
+                    return Err(SdpError::InvalidPayloadType(pt_u32));
+                }
+                return Ok(pt_u32 as u8);
+            }
+        }
+    }
+    let default_pt = match format {
+        FlowFormat::Video => defaults::VIDEO_PAYLOAD_TYPE,
+        FlowFormat::Audio => defaults::AUDIO_PAYLOAD_TYPE,
+        FlowFormat::Data => defaults::ANC_PAYLOAD_TYPE,
+        FlowFormat::Unspecified => unreachable!(),
+    };
+    Ok(default_pt as u8)
+}
+
+/// Resolve audio `(ptime_ns, maxptime_ns)` from
+/// `transport_caps`'s `a-ptime` / `a-maxptime` string slots,
+/// falling back to [`defaults::AUDIO_PTIME_NS`] (1 ms) for
+/// `ptime` and `None` for `maxptime`. The string values are
+/// SDP wire form — decimal milliseconds per RFC 4566 §6
+/// (`"1"`, `"0.125"`, `"4"`, …); unparseable values fall
+/// back to the default rather than erroring, mirroring the
+/// splice path's tolerance.
+#[cfg_attr(not(test), allow(dead_code))]
+fn resolve_audio_ptime(transport_caps: Option<&gst::Caps>) -> (u64, Option<u64>) {
+    let mut ptime_ns = defaults::AUDIO_PTIME_NS;
+    let mut maxptime_ns = None;
+    if let Some(caps) = transport_caps {
+        if let Some(s) = caps.structure(0) {
+            if let Ok(v) = s.get::<&str>("a-ptime") {
+                if let Some(ns) = parse_ptime_ms_as_ns(v) {
+                    ptime_ns = ns;
+                }
+            }
+            if let Ok(v) = s.get::<&str>("a-maxptime") {
+                maxptime_ns = parse_ptime_ms_as_ns(v);
+            }
+        }
+    }
+    (ptime_ns, maxptime_ns)
+}
+
+/// Parse an SDP `a=ptime:` / `a=maxptime:` wire value (decimal
+/// milliseconds) into nanoseconds. Inverse of
+/// [`format_ptime_ns_as_ms`]; returns `None` for empty /
+/// non-numeric strings.
+#[cfg_attr(not(test), allow(dead_code))]
+fn parse_ptime_ms_as_ns(value: &str) -> Option<u64> {
+    let v = value.trim();
+    if v.is_empty() {
+        return None;
+    }
+    let ms: f64 = v.parse().ok()?;
+    if !ms.is_finite() || ms < 0.0 {
+        return None;
+    }
+    Some((ms * 1_000_000.0).round() as u64)
+}
+
+/// Clone `essence_caps` with the audio sample `rate` overridden
+/// by `transport_caps`'s `clock-rate` slot (audio's only
+/// override-class clock-rate field per RFC 3551). When
+/// `transport_caps` carries no `clock-rate`, returns
+/// `essence_caps` unchanged.
+///
+/// Per the override-vs-cross-check rule on
+/// [`crate::session::CommonSettings::transport_caps`], an audio
+/// `transport_caps.clock-rate` is an override (not a
+/// cross-check) — the synthesised SDP advertises the overridden
+/// rate via `a=rtpmap:<pt> L24/<rate>/<n>` even when it differs
+/// from `essence_caps`'s `rate`. The rest of the synthesis chain
+/// (especially [`rtp_caps_from_raw_audio`]) sees the overridden
+/// rate on `essence_caps` and emits matching `clock-rate=` /
+/// `rate=` on the produced caps.
+#[cfg_attr(not(test), allow(dead_code))]
+fn resolved_audio_caps(
+    essence_caps: &gst::Caps,
+    transport_caps: Option<&gst::Caps>,
+) -> Result<gst::Caps, SdpError> {
+    let Some(tc) = transport_caps else {
+        return Ok(essence_caps.clone());
+    };
+    let Some(ts) = tc.structure(0) else {
+        return Ok(essence_caps.clone());
+    };
+    let Ok(rate) = ts.get::<i32>("clock-rate") else {
+        return Ok(essence_caps.clone());
+    };
+    let mut cloned = essence_caps.clone();
+    let cm = cloned.make_mut();
+    if let Some(s) = cm.structure_mut(0) {
+        s.set("rate", rate);
+    }
+    Ok(cloned)
+}
+
+/// Build a [`UdpLeg`] from [`SdpBuildInput`]'s IS-05 endpoint
+/// fields, dispatching on `side` for the `source_ip` /
+/// `interface_ip` per-side meaning. Mirrors
+/// [`crate::session::property_overrides_udp`]'s per-side
+/// dispatch so the splice (parse + override) and synthesise
+/// paths populate `UdpLeg` identically.
+#[cfg_attr(not(test), allow(dead_code))]
+fn udp_leg_from_input(input: &SdpBuildInput<'_>) -> UdpLeg {
+    let destination_port = if input.destination_port == 0 {
+        defaults::RTP_PORT
+    } else {
+        input.destination_port
+    };
+    let source_ip = if input.source_ip.is_empty() {
+        None
+    } else {
+        Some(input.source_ip.to_owned())
+    };
+    let interface_ip = match input.side {
+        // Sender: the egress NIC IP comes in via `source_ip`
+        // and duplicates into `interface_ip` (mirrors
+        // `property_overrides_udp`'s Sender dispatch and
+        // produces `a=x-nvnmos-iface-ip:<sender's NIC>` in the
+        // emitted SDP).
+        Side::Sender => source_ip.clone(),
+        // Receiver: `interface_ip` is the join NIC, a distinct
+        // GObject property from `source_ip`.
+        Side::Receiver => {
+            if input.interface_ip.is_empty() {
+                None
+            } else {
+                Some(input.interface_ip.to_owned())
+            }
+        }
+    };
+    let source_port = match input.side {
+        Side::Sender if input.source_port != 0 => Some(input.source_port),
+        _ => None,
+    };
+    UdpLeg {
+        destination_ip: input.destination_ip.to_owned(),
+        destination_port,
+        interface_ip,
+        source_ip,
+        source_port,
+    }
 }
 
 /// Extract the single included source-IP from an RFC 4607
@@ -3681,5 +4015,419 @@ mod tests {
     fn defaults_st2110_20_pm_and_ssn_match_nmos_cpp() {
         assert_eq!(defaults::ST2110_20_PM, "2110GPM");
         assert_eq!(defaults::ST2110_20_SSN, "ST2110-20:2017");
+    }
+
+    // -- from_caps + helpers (resolve_payload_type,
+    //    resolve_audio_ptime, parse_ptime_ms_as_ns,
+    //    resolved_audio_caps, udp_leg_from_input)
+
+    fn build_input<'a>(
+        essence_caps: &'a gst::Caps,
+        side: Side,
+        transport_caps: Option<&'a gst::Caps>,
+    ) -> SdpBuildInput<'a> {
+        SdpBuildInput {
+            essence_caps,
+            transport_caps,
+            side,
+            label: "test-label",
+            description: "test-description",
+            name: "test-name",
+            source_ip: "192.0.2.10",
+            source_port: 5004,
+            destination_ip: "239.0.0.1",
+            destination_port: 5004,
+            interface_ip: "192.0.2.11",
+            advertise_caps: false,
+        }
+    }
+
+    #[test]
+    fn resolve_payload_type_falls_back_to_per_essence_defaults() {
+        assert_eq!(
+            resolve_payload_type(FlowFormat::Video, None).unwrap(),
+            defaults::VIDEO_PAYLOAD_TYPE as u8
+        );
+        assert_eq!(
+            resolve_payload_type(FlowFormat::Audio, None).unwrap(),
+            defaults::AUDIO_PAYLOAD_TYPE as u8
+        );
+        assert_eq!(
+            resolve_payload_type(FlowFormat::Data, None).unwrap(),
+            defaults::ANC_PAYLOAD_TYPE as u8
+        );
+    }
+
+    #[test]
+    fn resolve_payload_type_honours_transport_caps_override() {
+        init_gst();
+        let tc = gst::Caps::from_str("application/x-rtp,payload=(int)110").unwrap();
+        assert_eq!(resolve_payload_type(FlowFormat::Video, Some(&tc)).unwrap(), 110);
+    }
+
+    #[test]
+    fn resolve_payload_type_rejects_out_of_range_override() {
+        init_gst();
+        for pt in [0_i32, 95, 128, 200] {
+            let tc = gst::Caps::from_str(&format!("application/x-rtp,payload=(int){pt}")).unwrap();
+            let err = resolve_payload_type(FlowFormat::Audio, Some(&tc)).expect_err("reject");
+            assert!(
+                matches!(err, SdpError::InvalidPayloadType(_)),
+                "pt={pt} must be rejected, got {err:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn parse_ptime_ms_as_ns_round_trips_format_ptime_ns_as_ms() {
+        for ns in [125_000_u64, 250_000, 1_000_000, 4_000_000, 20_000_000] {
+            let s = format_ptime_ns_as_ms(ns);
+            assert_eq!(parse_ptime_ms_as_ns(&s), Some(ns), "round-trip {ns}ns -> {s}");
+        }
+    }
+
+    #[test]
+    fn parse_ptime_ms_as_ns_rejects_malformed() {
+        assert_eq!(parse_ptime_ms_as_ns(""), None);
+        assert_eq!(parse_ptime_ms_as_ns("oops"), None);
+        assert_eq!(parse_ptime_ms_as_ns("-1"), None);
+    }
+
+    #[test]
+    fn resolve_audio_ptime_falls_back_to_defaults() {
+        let (p, m) = resolve_audio_ptime(None);
+        assert_eq!(p, defaults::AUDIO_PTIME_NS);
+        assert_eq!(m, None);
+    }
+
+    #[test]
+    fn resolve_audio_ptime_reads_override_strings() {
+        init_gst();
+        let tc = gst::Caps::from_str(
+            "application/x-rtp,a-ptime=(string)0.125,a-maxptime=(string)4",
+        )
+        .unwrap();
+        let (p, m) = resolve_audio_ptime(Some(&tc));
+        assert_eq!(p, 125_000);
+        assert_eq!(m, Some(4_000_000));
+    }
+
+    #[test]
+    fn resolved_audio_caps_overrides_rate_from_transport_caps() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let tc = gst::Caps::from_str("application/x-rtp,clock-rate=(int)44100").unwrap();
+        let resolved = resolved_audio_caps(&essence, Some(&tc)).unwrap();
+        let s = resolved.structure(0).unwrap();
+        assert_eq!(s.get::<i32>("rate").unwrap(), 44_100);
+    }
+
+    #[test]
+    fn resolved_audio_caps_returns_essence_when_no_override() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let resolved = resolved_audio_caps(&essence, None).unwrap();
+        let s = resolved.structure(0).unwrap();
+        assert_eq!(s.get::<i32>("rate").unwrap(), 48_000);
+    }
+
+    #[test]
+    fn udp_leg_from_input_sender_duplicates_source_ip_into_interface_ip() {
+        init_gst();
+        let essence = raw_video_caps("UYVP", 1920, 1080, gst::Fraction::new(50, 1), None);
+        let mut input = build_input(&essence, Side::Sender, None);
+        input.interface_ip = "";
+        let leg = udp_leg_from_input(&input);
+        assert_eq!(leg.destination_ip, "239.0.0.1");
+        assert_eq!(leg.destination_port, 5004);
+        assert_eq!(leg.source_ip.as_deref(), Some("192.0.2.10"));
+        assert_eq!(
+            leg.interface_ip.as_deref(),
+            Some("192.0.2.10"),
+            "Sender's egress NIC duplicates source_ip into interface_ip",
+        );
+        assert_eq!(leg.source_port, Some(5004));
+    }
+
+    #[test]
+    fn udp_leg_from_input_receiver_keeps_source_ip_and_interface_ip_distinct() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let input = build_input(&essence, Side::Receiver, None);
+        let leg = udp_leg_from_input(&input);
+        assert_eq!(leg.source_ip.as_deref(), Some("192.0.2.10"));
+        assert_eq!(leg.interface_ip.as_deref(), Some("192.0.2.11"));
+        assert_eq!(leg.source_port, None, "Receiver carries no source_port");
+    }
+
+    #[test]
+    fn udp_leg_from_input_zero_destination_port_falls_back_to_rtp_default() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let mut input = build_input(&essence, Side::Sender, None);
+        input.destination_port = 0;
+        let leg = udp_leg_from_input(&input);
+        assert_eq!(leg.destination_port, defaults::RTP_PORT);
+    }
+
+    #[test]
+    fn udp_leg_from_input_zero_source_port_emits_none() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let mut input = build_input(&essence, Side::Sender, None);
+        input.source_port = 0;
+        let leg = udp_leg_from_input(&input);
+        assert_eq!(leg.source_port, None);
+    }
+
+    #[test]
+    fn from_caps_video_synthesises_st2110_20_sdp() {
+        init_gst();
+        let essence = raw_video_caps(
+            "UYVP",
+            1920,
+            1080,
+            gst::Fraction::new(50, 1),
+            Some("colorimetry=bt709,interlace-mode=progressive"),
+        );
+        let input = build_input(&essence, Side::Sender, None);
+        let text = from_caps(&input).expect("synth");
+
+        assert!(text.contains("s=test-label"), "s= carries label:\n{text}");
+        assert!(text.contains("i=test-description"), "i= carries description");
+        assert!(
+            text.contains("a=x-nvnmos-name:test-name"),
+            "session-level a=x-nvnmos-name carries the resource name",
+        );
+        assert!(text.contains("m=video 5004 RTP/AVP 96"), "m= line:\n{text}");
+        assert!(
+            text.contains("c=IN IP4 239.0.0.1/"),
+            "multicast c= keeps the TTL suffix:\n{text}",
+        );
+        assert!(
+            text.contains("a=rtpmap:96 RAW/90000"),
+            "rtpmap encoding-name + clock-rate:\n{text}",
+        );
+        assert!(text.contains("sampling=YCbCr-4:2:2"), "fmtp sampling:\n{text}");
+        assert!(text.contains("depth=10"), "fmtp depth=10 for UYVP:\n{text}");
+        assert!(text.contains("width=1920"));
+        assert!(text.contains("height=1080"));
+        assert!(text.contains("exactframerate=50"));
+        assert!(text.contains("colorimetry=BT709"));
+        // gst-sdp's `set_media_from_caps` preserves caps-field
+        // casing verbatim; our caps use lower-case `pm` / `ssn`
+        // (GStreamer convention), so the emitted fmtp slots are
+        // lower-case too. RFC 4566 §6 declares fmtp parameter
+        // names case-insensitive, so receivers handle either form.
+        assert!(text.contains("pm=2110GPM"), "ST 2110-20 PM:\n{text}");
+        assert!(text.contains("ssn=ST2110-20:2017"), "ST 2110-20 SSN:\n{text}");
+        assert!(
+            text.contains("a=source-filter: incl IN IP4 239.0.0.1 192.0.2.10"),
+            "Sender source-filter:\n{text}",
+        );
+        assert!(
+            text.contains("a=x-nvnmos-iface-ip:192.0.2.10"),
+            "Sender's iface-ip duplicates source_ip:\n{text}",
+        );
+        assert!(text.contains("a=x-nvnmos-src-port:5004"));
+        assert!(
+            !text.contains("a=x-nvnmos-caps"),
+            "narrow advertise_caps=false omits caps attribute:\n{text}",
+        );
+    }
+
+    #[test]
+    fn from_caps_audio_synthesises_st2110_30_sdp_with_default_ptime() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let input = build_input(&essence, Side::Receiver, None);
+        let text = from_caps(&input).expect("synth");
+        assert!(text.contains("m=audio 5004 RTP/AVP 97"));
+        assert!(text.contains("a=rtpmap:97 L24/48000/2"));
+        assert!(text.contains("a=ptime:1"), "default 1ms ptime:\n{text}");
+        assert!(
+            !text.contains("a=maxptime"),
+            "maxptime omitted when unset:\n{text}",
+        );
+        assert!(
+            text.contains("a=x-nvnmos-iface-ip:192.0.2.11"),
+            "Receiver iface-ip distinct from source_ip:\n{text}",
+        );
+    }
+
+    #[test]
+    fn from_caps_audio_honours_transport_caps_overrides() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let tc = gst::Caps::from_str(
+            "application/x-rtp,payload=(int)98,clock-rate=(int)96000,\
+             a-ptime=(string)0.125,a-maxptime=(string)4",
+        )
+        .unwrap();
+        let input = build_input(&essence, Side::Sender, Some(&tc));
+        let text = from_caps(&input).expect("synth");
+        assert!(text.contains("m=audio 5004 RTP/AVP 98"), "pt override:\n{text}");
+        assert!(
+            text.contains("a=rtpmap:98 L24/96000/2"),
+            "audio clock-rate override:\n{text}",
+        );
+        assert!(text.contains("a=ptime:0.125"));
+        assert!(text.contains("a=maxptime:4"));
+    }
+
+    #[test]
+    fn from_caps_data_synthesises_st2110_40_sdp() {
+        init_gst();
+        let essence = gst::Caps::from_str(
+            "meta/x-st-2038,alignment=frame,framerate=25/1",
+        )
+        .unwrap();
+        let input = build_input(&essence, Side::Sender, None);
+        let text = from_caps(&input).expect("synth");
+        assert!(text.contains("m=video 5004 RTP/AVP 100"), "ANC pt=100:\n{text}");
+        assert!(text.contains("a=rtpmap:100 SMPTE291/90000"));
+        assert!(text.contains("exactframerate=25"));
+    }
+
+    #[test]
+    fn from_caps_advertise_caps_emits_x_nvnmos_caps_with_pt() {
+        init_gst();
+        let essence = raw_audio_caps("S16BE", 48_000, 2);
+        let mut input = build_input(&essence, Side::Receiver, None);
+        input.advertise_caps = true;
+        let text = from_caps(&input).expect("synth");
+        assert!(
+            text.contains("a=x-nvnmos-caps:97"),
+            "wide caps advertised with bare pt:\n{text}",
+        );
+    }
+
+    #[test]
+    fn from_caps_rejects_unsupported_essence() {
+        init_gst();
+        let essence = gst::Caps::from_str("video/x-h264").unwrap();
+        let input = build_input(&essence, Side::Sender, None);
+        let err = from_caps(&input).expect_err("must reject");
+        assert!(matches!(err, SdpError::UnsupportedEssence(_)));
+    }
+
+    #[test]
+    fn from_caps_invalid_pt_override_propagates_invalid_payload_type() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let tc = gst::Caps::from_str("application/x-rtp,payload=(int)95").unwrap();
+        let input = build_input(&essence, Side::Sender, Some(&tc));
+        let err = from_caps(&input).expect_err("must reject");
+        assert!(matches!(err, SdpError::InvalidPayloadType(95)));
+    }
+
+    #[test]
+    fn from_caps_round_trips_through_parse_sdp_for_video() {
+        init_gst();
+        let essence = raw_video_caps(
+            "UYVP",
+            1920,
+            1080,
+            gst::Fraction::new(50, 1),
+            Some("colorimetry=bt709,interlace-mode=progressive"),
+        );
+        let input = build_input(&essence, Side::Sender, None);
+        let text = from_caps(&input).expect("synth");
+        let media = parse_sdp(&text).expect("round-trip parse");
+        assert_eq!(media.format, FlowFormat::Video);
+        assert_eq!(media.primary.destination_ip, "239.0.0.1");
+        assert_eq!(media.primary.destination_port, 5004);
+        assert_eq!(media.primary.source_ip.as_deref(), Some("192.0.2.10"));
+        assert_eq!(media.primary.interface_ip.as_deref(), Some("192.0.2.10"));
+        let rt_raw = media.raw_caps.structure(0).unwrap();
+        let orig_raw = essence.structure(0).unwrap();
+        assert_eq!(rt_raw.get::<&str>("format"), orig_raw.get::<&str>("format"));
+        assert_eq!(rt_raw.get::<i32>("width"), orig_raw.get::<i32>("width"));
+        assert_eq!(rt_raw.get::<i32>("height"), orig_raw.get::<i32>("height"));
+        assert_eq!(
+            rt_raw.get::<gst::Fraction>("framerate"),
+            orig_raw.get::<gst::Fraction>("framerate"),
+        );
+        assert_eq!(rt_raw.get::<&str>("colorimetry").unwrap(), "bt709");
+    }
+
+    #[test]
+    fn from_caps_round_trips_through_parse_sdp_for_audio() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let input = build_input(&essence, Side::Receiver, None);
+        let text = from_caps(&input).expect("synth");
+        let media = parse_sdp(&text).expect("round-trip parse");
+        assert_eq!(media.format, FlowFormat::Audio);
+        let rtp = media.rtp_caps.structure(0).unwrap();
+        assert_eq!(rtp.get::<&str>("encoding-name").unwrap(), "L24");
+        assert_eq!(rtp.get::<i32>("clock-rate").unwrap(), 48_000);
+        assert_eq!(rtp.get::<&str>("encoding-params").unwrap(), "2");
+        assert_eq!(rtp.get::<&str>("a-ptime").unwrap(), "1");
+    }
+
+    #[test]
+    fn from_caps_round_trips_through_parse_sdp_for_data() {
+        init_gst();
+        let essence = gst::Caps::from_str(
+            "meta/x-st-2038,alignment=frame,framerate=25/1",
+        )
+        .unwrap();
+        let input = build_input(&essence, Side::Sender, None);
+        let text = from_caps(&input).expect("synth");
+        let media = parse_sdp(&text).expect("round-trip parse");
+        assert_eq!(media.format, FlowFormat::Data);
+        let rt_raw = media.raw_caps.structure(0).unwrap();
+        assert_eq!(rt_raw.name().as_str(), "meta/x-st-2038");
+        assert_eq!(
+            rt_raw.get::<gst::Fraction>("framerate").unwrap(),
+            gst::Fraction::new(25, 1),
+        );
+    }
+
+    #[test]
+    fn from_caps_unicast_destination_omits_ttl_suffix() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let mut input = build_input(&essence, Side::Sender, None);
+        input.destination_ip = "192.0.2.99";
+        let text = from_caps(&input).expect("synth");
+        assert!(
+            text.contains("c=IN IP4 192.0.2.99\r\n") || text.contains("c=IN IP4 192.0.2.99\n"),
+            "unicast c= line omits /<ttl> suffix per RFC 4566 §5.7:\n{text}",
+        );
+    }
+
+    #[test]
+    fn from_caps_empty_label_falls_back_to_nvnmos() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let mut input = build_input(&essence, Side::Sender, None);
+        input.label = "";
+        let text = from_caps(&input).expect("synth");
+        assert!(text.contains("s=nvnmos"), "default session name:\n{text}");
+    }
+
+    #[test]
+    fn from_caps_empty_description_omits_information_line() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let mut input = build_input(&essence, Side::Sender, None);
+        input.description = "";
+        let text = from_caps(&input).expect("synth");
+        assert!(!text.contains("\r\ni="), "no i= line emitted:\n{text}");
+    }
+
+    #[test]
+    fn from_caps_empty_name_omits_x_nvnmos_name_attribute() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let mut input = build_input(&essence, Side::Sender, None);
+        input.name = "";
+        let text = from_caps(&input).expect("synth");
+        assert!(
+            !text.contains("a=x-nvnmos-name"),
+            "no a=x-nvnmos-name attribute emitted:\n{text}",
+        );
     }
 }
