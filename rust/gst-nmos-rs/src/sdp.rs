@@ -120,8 +120,14 @@ pub(crate) struct SdpSession<'a> {
     /// IS-04 publication.
     pub origin_session_id: &'a str,
     /// `s=` line session name (RFC 4566 §5.3). Typically the
-    /// Sender's NMOS `label`.
-    pub name: &'a str,
+    /// Sender's NMOS `label`; splices in via
+    /// [`SdpOverrides::label`] so the NMOS `label` property
+    /// reaches the configuring SDP. The field is `session_name`
+    /// (the precise SDP term) rather than `label`, because the
+    /// NMOS `label` is one possible value here and `s=` can in
+    /// principle carry anything; the override layer above
+    /// translates NMOS `label` → `session_name`.
+    pub session_name: &'a str,
     /// `i=` line session information (RFC 4566 §5.4). `None`
     /// suppresses the line entirely. Typically the Sender's NMOS
     /// `description`; flows through the same property override
@@ -130,12 +136,16 @@ pub(crate) struct SdpSession<'a> {
     pub description: Option<&'a str>,
     /// Media-level `a=x-nvnmos-name:` value (the nvds-nmos
     /// vendor attribute that carries the NMOS Sender / Receiver
-    /// `name`, distinct from the SDP-level `s=` label). `None`
-    /// suppresses the attribute entirely. Splices in via
+    /// `name`, distinct from the SDP-level `s=` session name).
+    /// `None` suppresses the attribute entirely. Splices in via
     /// [`SdpOverrides::name`] so the NMOS resource `name`
     /// property reaches the configuring SDP without colliding
-    /// with `label` → `s=`.
-    pub nmos_name: Option<&'a str>,
+    /// with `label` → `s=`. Field name matches
+    /// [`crate::flow_def::FlowDefOverrides::name`] (which lands
+    /// in the equivalent `tags["urn:x-nvnmos:tag:name"]` slot in
+    /// the MXL flow_def JSON) so the two transport paths read
+    /// the same.
+    pub name: Option<&'a str>,
 }
 
 /// Parse an SDP transport file into a [`UdpMedia`].
@@ -288,7 +298,7 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
 /// ```text
 /// v=0
 /// o=nvnmos <session.origin_session_id> 0 IN IP4 <session.origin_address>
-/// s=<session.name>
+/// s=<session.session_name>
 /// t=0 0
 /// m=<media> <destination_port> RTP/AVP <pt>
 /// c=IN IP4 <destination_ip>/64
@@ -302,7 +312,7 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
 pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<String, SdpError> {
     let mut msg = SDPMessage::new();
     msg.set_version("0");
-    msg.set_session_name(session.name);
+    msg.set_session_name(session.session_name);
     if let Some(description) = session.description {
         msg.set_information(description);
     }
@@ -333,7 +343,7 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     //   a=source-filter (RFC 4607 SSM include)
     //   a=x-nvnmos-iface-ip (egress / join NIC IP)
     //   a=x-nvnmos-src-port (sender RTP source port)
-    if let Some(name) = session.nmos_name {
+    if let Some(name) = session.name {
         m.add_attribute("x-nvnmos-name", Some(name));
     }
     if let Some(src) = leg.source_ip.as_deref() {
@@ -437,7 +447,7 @@ pub(crate) fn splice_overrides(
             )
         })
         .unwrap_or_else(|| (String::new(), "0".to_owned()));
-    let original_nmos_name = msg
+    let original_name = msg
         .media(0)
         .and_then(|m| m.attribute_val("x-nvnmos-name").map(str::to_owned));
 
@@ -467,7 +477,7 @@ pub(crate) fn splice_overrides(
     // Apply session-level overrides, owning the strings on the
     // local stack so [`SdpSession`] can borrow them through the
     // [`build_sdp`] call.
-    let name: String = overrides
+    let session_name: String = overrides
         .label
         .map(str::to_owned)
         .unwrap_or(original_session_name);
@@ -475,17 +485,17 @@ pub(crate) fn splice_overrides(
         Some(desc) => Some(desc.to_owned()),
         None => original_description,
     };
-    let nmos_name: Option<String> = match overrides.name {
+    let name: Option<String> = match overrides.name {
         Some(n) => Some(n.to_owned()),
-        None => original_nmos_name,
+        None => original_name,
     };
 
     let session = SdpSession {
         origin_address: &origin_address,
         origin_session_id: &origin_session_id,
-        name: &name,
+        session_name: &session_name,
         description: description.as_deref(),
-        nmos_name: nmos_name.as_deref(),
+        name: name.as_deref(),
     };
     build_sdp(&media, session)
 }
@@ -1297,9 +1307,9 @@ mod tests {
         SdpSession {
             origin_address: "192.0.2.10",
             origin_session_id: "1234567890",
-            name: "test session",
+            session_name: "test session",
             description: None,
-            nmos_name: None,
+            name: None,
         }
     }
 
@@ -1473,11 +1483,11 @@ mod tests {
         init_gst();
         let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
         let mut session = test_session();
-        session.nmos_name = Some("Camera 1");
+        session.name = Some("Camera 1");
         let text = build_sdp(&media, session).expect("build");
         assert!(
             text.contains("a=x-nvnmos-name:Camera 1"),
-            "a=x-nvnmos-name line missing when nmos_name is Some: {text}",
+            "a=x-nvnmos-name line missing when session.name is Some: {text}",
         );
     }
 
@@ -1488,7 +1498,7 @@ mod tests {
         let text = build_sdp(&media, test_session()).expect("build");
         assert!(
             !text.contains("x-nvnmos-name"),
-            "a=x-nvnmos-name line must not appear when nmos_name is None: {text}",
+            "a=x-nvnmos-name line must not appear when session.name is None: {text}",
         );
     }
 
