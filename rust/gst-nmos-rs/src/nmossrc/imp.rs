@@ -937,6 +937,7 @@ impl From<Settings> for crate::session::CommonSettings {
             label: s.label,
             description: s.description,
             caps: s.caps,
+            transport_caps: s.transport_caps,
             caps_mode: s.receiver_caps_mode,
             source_ip: s.source_ip,
             interface_ip: s.interface_ip,
@@ -990,5 +991,26 @@ mod tests {
         assert_eq!(cs.destination_port, 0);
         assert_eq!(cs.source_port, 0);
         assert_eq!(cs.destination_ip, "");
+        assert_eq!(cs.transport_caps, None);
+    }
+
+    /// Pins that the `transport-caps` property — previously dead-end
+    /// at the `From<Settings>` boundary — now propagates into
+    /// `CommonSettings` so the upcoming splice / synth path can read
+    /// it for pt / audio clock-rate / ptime overrides + essence
+    /// cross-check.
+    #[test]
+    fn from_settings_forwards_transport_caps() {
+        use std::str::FromStr;
+        let _ = gst::init();
+        let caps =
+            gst::Caps::from_str("application/x-rtp,media=audio,payload=99,clock-rate=48000")
+                .expect("valid caps");
+        let s = Settings {
+            transport_caps: Some(caps.clone()),
+            ..Settings::default()
+        };
+        let cs: CommonSettings = s.into();
+        assert_eq!(cs.transport_caps.as_ref(), Some(&caps));
     }
 }

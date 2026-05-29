@@ -205,6 +205,36 @@ pub(crate) struct CommonSettings {
     /// ignored; for `nmossrc` the caps-derived format is
     /// cross-checked against the file's `format` field.
     pub(crate) caps: Option<gst::Caps>,
+    /// Per-transport overrides (`application/x-rtp,…` shape for the
+    /// RTP transports; typically empty / unused for `mxl`). Carries
+    /// the parameters that the user wants to override on the wire —
+    /// principally RTP `payload`, audio `clock-rate`, and
+    /// `a-ptime` (in milliseconds) — per the
+    /// override-vs-cross-check rule agreed for startup-time SDP
+    /// resolution:
+    ///
+    /// * **Override** when `transport-file*` is also supplied:
+    ///   audio `clock-rate`, `a-ptime` / `a-maxptime`, and any
+    ///   payload-type in the RTP dynamic range (96..=127, all
+    ///   essence families). `transport-caps` wins; the file is
+    ///   rewritten by the splice helper.
+    /// * **Cross-check** when `transport-file*` is also supplied:
+    ///   `encoding-name`, video / ANC `clock-rate` (always
+    ///   90000), and any essence-shape parameter that also
+    ///   appears on `caps`. Mismatch is a hard error.
+    ///
+    /// On the no-transport-file path the same fields seed the
+    /// synthesised SDP (alongside [`caps`](Self::caps) and
+    /// [`crate::sdp::defaults`]).
+    ///
+    /// Consumed by the upcoming `splice_overrides_sdp` /
+    /// `synthesise_or_passthrough_udp` path; currently populated
+    /// by `From<Settings>` and dropped further down, so the
+    /// dead_code lint is suppressed until the consumer lands
+    /// (same "set-only, awaiting consumer" pattern as the IS-05
+    /// endpoint fields below).
+    #[allow(dead_code)]
+    pub(crate) transport_caps: Option<gst::Caps>,
     /// Controls whether the resource advertises narrow or wide caps
     /// in IS-04. See [`CapsMode`] for the full semantics. Honoured
     /// only when `side` is `Receiver` (driven by the
@@ -1488,6 +1518,7 @@ mod tests {
             label: String::new(),
             description: String::new(),
             caps: None,
+            transport_caps: None,
             caps_mode: CapsMode::Auto,
             // IS-05 RTP transport_params: unset/0 for MXL
             // tests (transport=Mxl above ignores them anyway);
