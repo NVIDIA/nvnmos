@@ -969,6 +969,24 @@ fn decide_inner_config_udp(
             settings.transport
         )
     })?;
+    // Cross-check the parsed SDP against the user-supplied
+    // `caps` (essence shape) and `transport-caps` (RTP-layer
+    // hints). The check fires after `splice_overrides` has
+    // applied the override-class fields, so an audio
+    // clock-rate that the user asked us to write into the
+    // SDP is implicit-OK while a video clock-rate disagreement
+    // (where clock-rate is cross-check, not override) surfaces
+    // as `SdpError::TransportCapsMismatch`. Mirrors
+    // `decide_inner_config_mxl`'s `resolve_mxl_flow_meta`
+    // cross-check pass.
+    sdp::cross_check_essence(&media, settings.caps.as_ref(), settings.transport_caps.as_ref())
+        .with_context(|| {
+            format!(
+                "{element}: cross-checking SDP against `caps` / `transport-caps` \
+                 for transport={:?}",
+                settings.transport
+            )
+        })?;
     Ok(InnerConfig::Real(TransportConfig::Udp {
         variant,
         media,
@@ -2288,6 +2306,126 @@ mod tests {
                 chain.contains("96..=127") || chain.contains("dynamic range"),
                 "error must attribute the RFC 3551 range; got: {chain}",
             );
+        }
+
+        // -- cross-check -------------------------------------------
+
+        /// Matching essence caps + matching transport caps
+        /// against a raw video SDP must pass through
+        /// `decide_inner_config_udp` cleanly. Pins the
+        /// happy-path: cross-check is opt-in (driven by user
+        /// supplying `caps` / `transport-caps`) and must not
+        /// regress the existing SDP-only path.
+        #[test]
+        fn decide_inner_config_udp_accepts_matching_caps() {
+            let s = CommonSettings {
+                caps: Some(
+                    gst::Caps::builder("video/x-raw")
+                        .field("width", 1920i32)
+                        .field("height", 1080i32)
+                        .build(),
+                ),
+                transport_caps: Some(
+                    gst::Caps::builder("application/x-rtp")
+                        .field("media", "video")
+                        .field("encoding-name", "RAW")
+                        .field("clock-rate", 90_000i32)
+                        .build(),
+                ),
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            decide_inner_config_udp("nmossrc", &s, UdpVariant::V1, Some(VIDEO_UDP_SDP))
+                .expect("matching caps + transport_caps → ok");
+        }
+
+        /// Format-family cross-check: `caps=audio/x-raw` on
+        /// an `nmossrc` configured to receive a video SDP is
+        /// a real misconfiguration → bail.
+        #[test]
+        fn decide_inner_config_udp_rejects_essence_caps_format_mismatch() {
+            let s = CommonSettings {
+                caps: Some(gst::Caps::builder("audio/x-raw").build()),
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            let err = decide_inner_config_udp(
+                "nmossrc",
+                &s,
+                UdpVariant::V1,
+                Some(VIDEO_UDP_SDP),
+            )
+            .expect_err("audio caps + video SDP must error");
+            let chain = format!("{err:#}");
+            assert!(
+                chain.contains("essence format mismatch")
+                    && chain.contains("cross-checking SDP"),
+                "error must attribute to cross-check; got: {chain}",
+            );
+        }
+
+        /// Video clock-rate cross-check: 48 kHz declared in
+        /// `transport-caps` against a 90 kHz video SDP must
+        /// error. Pins the override-vs-cross-check rule: video
+        /// clock-rate is cross-check, not override (audio is
+        /// the override case, covered by a separate test).
+        #[test]
+        fn decide_inner_config_udp_rejects_video_clock_rate_mismatch() {
+            let s = CommonSettings {
+                transport_caps: Some(
+                    gst::Caps::builder("application/x-rtp")
+                        .field("clock-rate", 48_000i32)
+                        .build(),
+                ),
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            let err = decide_inner_config_udp(
+                "nmossrc",
+                &s,
+                UdpVariant::V1,
+                Some(VIDEO_UDP_SDP),
+            )
+            .expect_err("video clock-rate mismatch must error");
+            let chain = format!("{err:#}");
+            assert!(
+                chain.contains("transport-caps mismatch"),
+                "error must attribute to cross-check; got: {chain}",
+            );
+        }
+
+        /// Activation SDP cross-check fires too: a video
+        /// `nmossink` element receiving an audio activation
+        /// surfaces `SdpError::FormatMismatch` via
+        /// `make_activation_plan`. The activation ack is
+        /// `Failure` with attribution.
+        #[test]
+        fn activation_udp_cross_check_failure_acks_failure() {
+            const AUDIO_ACTIVATION_SDP: &str = concat!(
+                "v=0\r\n",
+                "o=- 1 0 IN IP4 192.0.2.10\r\n",
+                "s=Example\r\n",
+                "t=0 0\r\n",
+                "m=audio 5004 RTP/AVP 97\r\n",
+                "c=IN IP4 239.2.2.2/64\r\n",
+                "a=rtpmap:97 L24/48000/2\r\n",
+            );
+            let s = CommonSettings {
+                caps: Some(gst::Caps::builder("video/x-raw").build()),
+                ..udp_settings(Side::Sender, Transport::Udp)
+            };
+            let plan = make_activation_plan(
+                &cat(),
+                "nmossink",
+                &s,
+                &req(Side::Sender, Some(AUDIO_ACTIVATION_SDP)),
+            );
+            assert!(matches!(plan.inner, InnerConfig::Fake { .. }));
+            match plan.ack {
+                ActivationAck::Failure { reason } => assert!(
+                    reason.contains("cross-checking SDP")
+                        && reason.contains("essence format mismatch"),
+                    "expected cross-check attribution; got: {reason}",
+                ),
+                ActivationAck::Success => panic!("expected Failure ack on cross-check fail"),
+            }
         }
 
         /// Activation SDP is authoritative — property overrides

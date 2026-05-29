@@ -182,6 +182,28 @@ pub(crate) enum SdpError {
          (96..=127); NMOS RTP transports only use dynamic payload types"
     )]
     InvalidPayloadType(u32),
+    // Cross-check error variants — mirror
+    // `FlowDefError::FormatMismatch` on the MXL path so both
+    // transport stacks reject the same misconfigurations with
+    // parallel attribution.
+    #[error(
+        "essence format mismatch: `caps` declares `{caps:?}` but SDP declares `{sdp:?}`"
+    )]
+    FormatMismatch { caps: FlowFormat, sdp: FlowFormat },
+    #[error(
+        "essence shape mismatch: `caps` `{caps}` does not intersect \
+         SDP-derived essence caps `{sdp}`"
+    )]
+    EssenceShapeMismatch { caps: String, sdp: String },
+    #[error(
+        "transport-caps mismatch: `{transport_caps}` does not intersect \
+         SDP-derived RTP caps `{sdp}` (override-class fields `payload`, \
+         `a-ptime`, `a-maxptime` excluded from the comparison)"
+    )]
+    TransportCapsMismatch {
+        transport_caps: String,
+        sdp: String,
+    },
 }
 
 /// Everything above the `m=` block of an SDP — i.e. the
@@ -855,6 +877,119 @@ fn apply_transport_caps_overrides(
         if let Some(maxptime) = overrides.a_maxptime {
             s.set("a-maxptime", maxptime);
         }
+    }
+    Ok(())
+}
+
+/// Cross-check the parsed [`UdpMedia`] (post-splice) against
+/// the user-supplied `caps` (essence shape) and
+/// `transport-caps` (RTP-layer hints). Mirrors
+/// [`crate::flow_def::resolve_mxl_flow_meta`]'s cross-check
+/// pass on the MXL path.
+///
+/// **Override-vs-cross-check rule** (per
+/// [`crate::session::CommonSettings::transport_caps`]):
+///
+/// | Field                      | Audio essence | Video / data |
+/// |----------------------------|---------------|--------------|
+/// | RTP `payload` (96..=127)   | Override      | Override     |
+/// | RTP `clock-rate`           | **Override**  | Cross-check  |
+/// | `a-ptime` / `a-maxptime`   | Override      | (Not present)|
+/// | RTP `encoding-name`        | Cross-check   | Cross-check  |
+/// | RTP `media` (`audio`/…)    | Cross-check   | Cross-check  |
+/// | `format` / `width` / `height` / `sampling` / `depth` / `channels` / `framerate` (essence shape) | Cross-check | Cross-check |
+///
+/// Implementation: because `splice_overrides` has *already*
+/// applied the override-class fields into
+/// `media.primary.rtp_caps` (audio clock-rate, payload, ptime,
+/// maxptime), the cross-check just intersects what's left with
+/// the user's `transport-caps`. Fields stripped from both
+/// sides before the intersect: `payload`, `a-ptime`,
+/// `a-maxptime` (always-override). Audio-only `clock-rate`
+/// override is implicit — the splice has copied the value over,
+/// so the intersect trivially passes; for video / data the
+/// `clock-rate` stays at the SDP's value and any mismatch
+/// against `transport-caps` surfaces as
+/// [`SdpError::TransportCapsMismatch`].
+///
+/// Essence-caps cross-check intersects `caps` against
+/// `media.raw_caps`; an empty intersection is
+/// [`SdpError::EssenceShapeMismatch`]. Format-family mismatches
+/// (e.g. audio caps + video SDP) surface as
+/// [`SdpError::FormatMismatch`] before the shape intersect runs
+/// so the error message is specific.
+pub(crate) fn cross_check_essence(
+    media: &UdpMedia,
+    essence_caps: Option<&gst::Caps>,
+    transport_caps: Option<&gst::Caps>,
+) -> Result<(), SdpError> {
+    if let Some(caps) = essence_caps {
+        cross_check_essence_caps(media, caps)?;
+    }
+    if let Some(caps) = transport_caps {
+        cross_check_transport_caps(media, caps)?;
+    }
+    Ok(())
+}
+
+/// Map the structure name of an essence caps (`video/x-raw`,
+/// `audio/x-raw`, `meta/x-st-2038`, …) to the corresponding
+/// [`FlowFormat`]. Used by [`cross_check_essence_caps`] to fire
+/// [`SdpError::FormatMismatch`] before the costlier shape
+/// intersect runs.
+fn essence_caps_format(caps: &gst::Caps) -> Option<FlowFormat> {
+    let s = caps.structure(0)?;
+    match s.name().as_str() {
+        "video/x-raw" => Some(FlowFormat::Video),
+        "audio/x-raw" => Some(FlowFormat::Audio),
+        "meta/x-st-2038" => Some(FlowFormat::Data),
+        _ => None,
+    }
+}
+
+fn cross_check_essence_caps(media: &UdpMedia, caps: &gst::Caps) -> Result<(), SdpError> {
+    if let Some(caps_format) = essence_caps_format(caps) {
+        if caps_format != media.format {
+            return Err(SdpError::FormatMismatch {
+                caps: caps_format,
+                sdp: media.format,
+            });
+        }
+    }
+    let intersect = caps.intersect(&media.raw_caps);
+    if intersect.is_empty() {
+        return Err(SdpError::EssenceShapeMismatch {
+            caps: caps.to_string(),
+            sdp: media.raw_caps.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn cross_check_transport_caps(media: &UdpMedia, transport_caps: &gst::Caps) -> Result<(), SdpError> {
+    // Strip always-override fields from both sides so the
+    // intersect only sees cross-check fields. The audio-only
+    // `clock-rate` override is implicit: `splice_overrides`
+    // has already copied the value into `media.rtp_caps` for
+    // audio essences, so the intersect on `clock-rate`
+    // trivially passes there; for video / data the field
+    // stays at the SDP's value and any mismatch surfaces here.
+    let mut tc = transport_caps.clone();
+    let mut rtp = media.rtp_caps.clone();
+    for caps in [&mut tc, &mut rtp] {
+        let caps_mut = caps.make_mut();
+        if let Some(s) = caps_mut.structure_mut(0) {
+            s.remove_field("payload");
+            s.remove_field("a-ptime");
+            s.remove_field("a-maxptime");
+        }
+    }
+    let intersect = tc.intersect(&rtp);
+    if intersect.is_empty() {
+        return Err(SdpError::TransportCapsMismatch {
+            transport_caps: tc.to_string(),
+            sdp: rtp.to_string(),
+        });
     }
     Ok(())
 }
@@ -2253,6 +2388,158 @@ mod tests {
                 || spliced.contains("a=rtpmap:100 raw/90000"),
             "a=rtpmap must carry new pt 100; got: {spliced}"
         );
+    }
+
+    // -- cross_check_essence -------------------------------------
+
+    /// No caps + no transport-caps → pass-through. Pins the
+    /// "user supplied neither hint" baseline: cross-check
+    /// can't reject what it wasn't asked to compare against.
+    #[test]
+    fn cross_check_essence_with_no_caps_is_noop() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        cross_check_essence(&media, None, None).expect("no caps → pass");
+    }
+
+    /// Matching essence caps (`video/x-raw` + 1920x1080) +
+    /// matching transport caps (`application/x-rtp` +
+    /// `encoding-name=RAW`) against a raw video SDP must pass.
+    #[test]
+    fn cross_check_essence_with_matching_caps_passes() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let essence = gst::Caps::builder("video/x-raw")
+            .field("width", 1920i32)
+            .field("height", 1080i32)
+            .build();
+        let transport = gst::Caps::builder("application/x-rtp")
+            .field("media", "video")
+            .field("encoding-name", "RAW")
+            .field("clock-rate", 90_000i32)
+            .build();
+        cross_check_essence(&media, Some(&essence), Some(&transport))
+            .expect("matching caps → pass");
+    }
+
+    /// Format-family mismatch (`audio/x-raw` declared on a
+    /// video raw SDP) fires `SdpError::FormatMismatch` before
+    /// the (necessarily empty) shape intersect runs, so the
+    /// error message names the specific axis (`Audio` vs
+    /// `Video`) rather than a generic shape blob.
+    #[test]
+    fn cross_check_essence_rejects_format_family_mismatch() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let audio_caps = gst::Caps::builder("audio/x-raw").build();
+        let err = cross_check_essence(&media, Some(&audio_caps), None)
+            .expect_err("format-family mismatch must error");
+        match err {
+            SdpError::FormatMismatch { caps, sdp } => {
+                assert_eq!(caps, FlowFormat::Audio);
+                assert_eq!(sdp, FlowFormat::Video);
+            }
+            other => panic!("expected FormatMismatch, got {other:?}"),
+        }
+    }
+
+    /// Same family, conflicting essence-shape fields:
+    /// `width=1280` vs SDP's `width=1920` → empty intersect →
+    /// `SdpError::EssenceShapeMismatch`.
+    #[test]
+    fn cross_check_essence_rejects_shape_mismatch() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let caps = gst::Caps::builder("video/x-raw")
+            .field("width", 1280i32)
+            .field("height", 720i32)
+            .build();
+        let err = cross_check_essence(&media, Some(&caps), None)
+            .expect_err("shape mismatch must error");
+        assert!(matches!(err, SdpError::EssenceShapeMismatch { .. }),
+            "got: {err:?}");
+    }
+
+    /// Transport-caps mismatch on a cross-check field
+    /// (`encoding-name=L24` against a raw-video SDP).
+    #[test]
+    fn cross_check_essence_rejects_transport_caps_encoding_name_mismatch() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let transport = gst::Caps::builder("application/x-rtp")
+            .field("encoding-name", "L24")
+            .build();
+        let err = cross_check_essence(&media, None, Some(&transport))
+            .expect_err("encoding-name mismatch must error");
+        assert!(matches!(err, SdpError::TransportCapsMismatch { .. }),
+            "got: {err:?}");
+    }
+
+    /// Video clock-rate is cross-check (not override): a
+    /// `transport-caps` claiming `clock-rate=48000` against a
+    /// 90 kHz video SDP must error.
+    #[test]
+    fn cross_check_essence_rejects_video_clock_rate_mismatch() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let transport = gst::Caps::builder("application/x-rtp")
+            .field("clock-rate", 48_000i32)
+            .build();
+        let err = cross_check_essence(&media, None, Some(&transport))
+            .expect_err("video clock-rate mismatch must error");
+        assert!(matches!(err, SdpError::TransportCapsMismatch { .. }),
+            "got: {err:?}");
+    }
+
+    /// Always-override fields (`payload`, `a-ptime`,
+    /// `a-maxptime`) are stripped from both sides before the
+    /// intersect, so a disagreement on those fields alone
+    /// does NOT trip the cross-check. The splice helper has
+    /// already aligned them; the cross-check is for the
+    /// genuinely-not-spliced fields.
+    #[test]
+    fn cross_check_essence_strips_override_fields_before_intersect() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let transport = gst::Caps::builder("application/x-rtp")
+            // Different pt than the SDP's 96 — but pt is override
+            // so the strip makes this disagreement invisible.
+            .field("payload", 99i32)
+            .field("a-ptime", "1")
+            .field("a-maxptime", "1")
+            // Matching cross-check fields:
+            .field("encoding-name", "RAW")
+            .field("clock-rate", 90_000i32)
+            .build();
+        cross_check_essence(&media, None, Some(&transport))
+            .expect("override-only disagreement must pass");
+    }
+
+    /// Audio essence: the splice has already copied a user-
+    /// supplied `clock-rate` override into `media.rtp_caps`,
+    /// so the cross-check intersect on `clock-rate` matches
+    /// implicitly. This pins the audio clock-rate override
+    /// path end-to-end (splice → cross-check both pass).
+    #[test]
+    fn cross_check_essence_audio_clock_rate_override_passes_after_splice() {
+        init_gst();
+        let transport = gst::Caps::builder("application/x-rtp")
+            .field("clock-rate", 96_000i32)
+            .build();
+        // 1. Splice the override into the audio SDP.
+        let spliced = splice_overrides(
+            AUDIO_L24_48K_STEREO_SDP,
+            &SdpOverrides {
+                audio_clock_rate: Some(96_000),
+                ..Default::default()
+            },
+        )
+        .expect("splice");
+        let media = parse_sdp(&spliced).expect("re-parse");
+        // 2. Cross-check matches because both now agree on
+        //    clock-rate=96000.
+        cross_check_essence(&media, None, Some(&transport))
+            .expect("audio override + cross-check → pass");
     }
 
     /// Pt outside RFC 3551 §6 dynamic range (96..=127) is
