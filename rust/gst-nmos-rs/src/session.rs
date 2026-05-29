@@ -211,6 +211,77 @@ pub(crate) struct CommonSettings {
     /// `receiver-caps-mode` property on `nmossrc`); `nmossink` leaves
     /// it at [`CapsMode::Auto`].
     pub(crate) caps_mode: CapsMode,
+    /// IS-05 RTP transport_params `source_ip` — string form. The
+    /// IS-05 spec assigns this slot different semantics per
+    /// resource:
+    ///
+    /// * Sender (`side == Sender`): local egress NIC IP. Emitted in
+    ///   the configuring SDP as both the `a=source-filter:`
+    ///   include-source (RFC 4607 SSM convention) and the
+    ///   `a=x-nvnmos-iface-ip:` attribute, so a single property
+    ///   value drives both wire slots.
+    /// * Receiver (`side == Receiver`): SSM include-source — the
+    ///   remote sender's IP. Emitted in the configuring SDP as the
+    ///   `a=source-filter:` include-source.
+    ///
+    /// Empty string = unset (let the daemon resolve from
+    /// `a=source-filter:` if present in `transport_file*`, else
+    /// leave as the IS-05 `auto` sentinel for the daemon to fill
+    /// at activation). Honoured only when `transport == Udp` /
+    /// `Udp2`; ignored on the MXL path.
+    ///
+    /// Consumed by the upcoming `splice_overrides_sdp` /
+    /// `synthesise_or_passthrough_udp` path; currently
+    /// populated by `From<Settings>` and dropped further down,
+    /// so the dead_code lint is suppressed until the consumer
+    /// lands.
+    #[allow(dead_code)]
+    pub(crate) source_ip: String,
+    /// IS-05 RTP sender transport_params `source_port` — Sender-
+    /// only. Local egress port for `udpsink` (drives both
+    /// `udpsink.bind-port` and the SDP `a=x-nvnmos-src-port:`
+    /// attribute). 0 = unset. Ignored on the Receiver side
+    /// (IS-05 receiver schema doesn't define this slot).
+    #[allow(dead_code)]
+    pub(crate) source_port: u16,
+    /// IS-05 RTP sender transport_params `destination_ip` —
+    /// Sender-only. Remote destination IP (unicast peer or
+    /// multicast group). Becomes the `c=` line address in the
+    /// configuring SDP and the `udpsink.host` property. Empty
+    /// string = unset. Ignored on the Receiver side (receivers
+    /// use `multicast_ip` + `interface_ip` instead).
+    #[allow(dead_code)]
+    pub(crate) destination_ip: String,
+    /// IS-05 RTP transport_params `destination_port`. Same name on
+    /// both sides but with different semantics:
+    ///
+    /// * Sender: remote destination port (becomes `udpsink.port`
+    ///   and the SDP `m=` port slot).
+    /// * Receiver: local listen port (becomes `udpsrc.port`).
+    ///
+    /// 0 = unset (falls back to the SDP `m=` port if a transport
+    /// file is supplied, else to [`crate::sdp::defaults::RTP_PORT`]).
+    #[allow(dead_code)]
+    pub(crate) destination_port: u16,
+    /// IS-05 RTP receiver transport_params `interface_ip` —
+    /// Receiver-only. Local NIC IP used for the IGMP join
+    /// (resolved to an interface name via
+    /// [`crate::iface::iface_name_for_ip`] and threaded into
+    /// `udpsrc.multicast-iface`). Also emitted in the configuring
+    /// SDP as the `a=x-nvnmos-iface-ip:` attribute. Empty string =
+    /// unset. Ignored on the Sender side (senders use `source_ip`
+    /// for the same wire concept).
+    #[allow(dead_code)]
+    pub(crate) interface_ip: String,
+    /// IS-05 RTP receiver transport_params `multicast_ip` —
+    /// Receiver-only. Multicast group to join (or empty for
+    /// unicast reception). Becomes the `c=` line address in the
+    /// configuring SDP and the `udpsrc.address` property. Empty
+    /// string = unset (unicast / let the SDP / daemon resolve).
+    /// Ignored on the Sender side (senders use `destination_ip`
+    /// for the same wire concept).
+    #[allow(dead_code)]
+    pub(crate) multicast_ip: String,
     /// Whether the element brings its inner `mxlsink` / `mxlsrc` up
     /// immediately at NULL→READY (or, for a deferred-mode sender,
     /// READY→PAUSED) once the configuring transport file has been
@@ -390,14 +461,20 @@ pub(crate) enum UdpVariant {
 /// Field names use NMOS / IS-05 terminology (`destination_ip`,
 /// `interface_ip`, `source_ip`, ...) for direction independence;
 /// the public element properties on `nmossrc` / `nmossink` use the
-/// underlying-element naming (`host` / `address` / `local-iface-ip`
-/// / `local-port` / `source-ip`) and are mapped onto these fields
-/// at property-set time. How the redundant secondary leg gets
-/// exposed on the property surface is a separate design decision —
-/// `nvdsudpsrc` for example overloads `local-iface-ip` into a
-/// comma-separated list and adds a combined `st2022-7-streams`
-/// property rather than `-2`-suffixed scalar twins — and is
-/// deferred until the redundancy work lands.
+/// IS-05 RTP transport_params vocabulary verbatim (`source-ip`,
+/// `source-port`, `destination-ip`, `destination-port`,
+/// `interface-ip`, `multicast-ip`), mapped onto these per-leg
+/// fields at property-set / SDP-splice time — see
+/// [`CommonSettings::source_ip`] et seq. for the per-side wire
+/// semantics. The mapping is 1:1 to IS-05 wire JSON, so a
+/// controller PATCHing `/single/senders/{id}/staged` reads
+/// straight into the same GObject property names. How the
+/// redundant secondary leg gets exposed on the property surface
+/// is a separate design decision — `nvdsudpsrc` for example
+/// overloads `local-iface-ip` into a comma-separated list and
+/// adds a combined `st2022-7-streams` property rather than
+/// `-2`-suffixed scalar twins — and is deferred until the
+/// redundancy work lands.
 #[derive(Debug, Clone)]
 pub(crate) struct UdpMedia {
     /// Essence family — selects the payloader / depayloader factory
@@ -1412,6 +1489,16 @@ mod tests {
             description: String::new(),
             caps: None,
             caps_mode: CapsMode::Auto,
+            // IS-05 RTP transport_params: unset/0 for MXL
+            // tests (transport=Mxl above ignores them anyway);
+            // UDP-side coverage of these fields lives in
+            // dedicated UDP tests.
+            source_ip: String::new(),
+            source_port: 0,
+            destination_ip: String::new(),
+            destination_port: 0,
+            interface_ip: String::new(),
+            multicast_ip: String::new(),
             // Defaults to false (matching CommonSettings's
             // documented default and the canonical NMOS flow).
             // Tests that exercise the eager-activation path

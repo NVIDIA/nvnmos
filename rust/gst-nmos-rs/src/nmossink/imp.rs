@@ -57,6 +57,22 @@ struct Settings {
     transport_file_path: String,
     caps: Option<gst::Caps>,
     transport_caps: Option<gst::Caps>,
+    /// IS-05 sender transport_params `source_ip` — local egress
+    /// NIC IP. See [`crate::session::CommonSettings::source_ip`]
+    /// for the per-side wire semantics; empty string = unset.
+    source_ip: String,
+    /// IS-05 sender transport_params `source_port` — local egress
+    /// port. 0 = unset.
+    source_port: u16,
+    /// IS-05 sender transport_params `destination_ip` — remote
+    /// destination (unicast peer or multicast group). Empty
+    /// string = unset.
+    destination_ip: String,
+    /// IS-05 sender transport_params `destination_port` — remote
+    /// destination port. 0 = unset (falls back to the transport
+    /// file's `m=` port or
+    /// [`crate::sdp::defaults::RTP_PORT`]).
+    destination_port: u16,
     auto_activate: bool,
 }
 
@@ -77,6 +93,10 @@ impl Default for Settings {
             transport_file_path: String::new(),
             caps: None,
             transport_caps: None,
+            source_ip: String::new(),
+            source_port: 0,
+            destination_ip: String::new(),
+            destination_port: 0,
             auto_activate: false,
         }
     }
@@ -229,6 +249,71 @@ impl ObjectImpl for NmosSink {
                     .blurb(crate::session::TRANSPORT_CAPS_BLURB)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecString::builder("source-ip")
+                    .nick("Source IP")
+                    .blurb(
+                        "IS-05 sender transport_params `source_ip`: \
+                         local egress NIC IP. Drives both the SDP \
+                         `a=source-filter:` include-source (RFC 4607 \
+                         SSM convention) and the `a=x-nvnmos-iface-ip:` \
+                         attribute, and `udpsink.bind-address` on the \
+                         RTP transports (`udp`, `udp2`, `nvdsudp`). \
+                         Empty = unset (leave the daemon / SDP / \
+                         IS-05 `auto` resolver to fill at activation \
+                         time). Honoured only on the RTP transports; \
+                         ignored on `mxl`.",
+                    )
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecUInt::builder("source-port")
+                    .nick("Source port")
+                    .blurb(
+                        "IS-05 sender transport_params `source_port`: \
+                         local egress port. Drives `udpsink.bind-port` \
+                         and the SDP `a=x-nvnmos-src-port:` attribute \
+                         on the RTP transports. 0 (the default) = \
+                         unset; the OS picks an ephemeral port. \
+                         Honoured only on the RTP transports; ignored \
+                         on `mxl`.",
+                    )
+                    .minimum(0)
+                    .maximum(65535)
+                    .default_value(0)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("destination-ip")
+                    .nick("Destination IP")
+                    .blurb(
+                        "IS-05 sender transport_params `destination_ip`: \
+                         remote destination (unicast peer or multicast \
+                         group). Becomes the configuring SDP `c=` line \
+                         address and `udpsink.host` on the RTP \
+                         transports. Empty = unset (use the transport \
+                         file's `c=` line if present; otherwise the \
+                         daemon fills the IS-05 `auto` sentinel). \
+                         Honoured only on the RTP transports; ignored \
+                         on `mxl`.",
+                    )
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecUInt::builder("destination-port")
+                    .nick("Destination port")
+                    .blurb(
+                        "IS-05 sender transport_params \
+                         `destination_port`: remote destination port. \
+                         Becomes the configuring SDP `m=` line port \
+                         and `udpsink.port` on the RTP transports. 0 \
+                         (the default) = unset; falls back to the \
+                         transport file's `m=` port if present, else \
+                         to the canonical RTP default 5004 \
+                         (`nmos-cpp` `auto_rtp_port`). Honoured only \
+                         on the RTP transports; ignored on `mxl`.",
+                    )
+                    .minimum(0)
+                    .maximum(65535)
+                    .default_value(0)
+                    .mutable_ready()
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -287,6 +372,20 @@ impl ObjectImpl for NmosSink {
             "transport-caps" => {
                 settings.transport_caps = value.get().expect("type checked upstream");
             }
+            "source-ip" => {
+                settings.source_ip = string_or_empty(value);
+            }
+            "source-port" => {
+                let v: u32 = value.get().expect("type checked upstream");
+                settings.source_port = u16::try_from(v).expect("range checked by ParamSpec");
+            }
+            "destination-ip" => {
+                settings.destination_ip = string_or_empty(value);
+            }
+            "destination-port" => {
+                let v: u32 = value.get().expect("type checked upstream");
+                settings.destination_port = u16::try_from(v).expect("range checked by ParamSpec");
+            }
             _ => unimplemented!("unknown property {}", pspec.name()),
         }
     }
@@ -309,6 +408,10 @@ impl ObjectImpl for NmosSink {
             "transport-file-path" => settings.transport_file_path.to_value(),
             "caps" => settings.caps.to_value(),
             "transport-caps" => settings.transport_caps.to_value(),
+            "source-ip" => settings.source_ip.to_value(),
+            "source-port" => u32::from(settings.source_port).to_value(),
+            "destination-ip" => settings.destination_ip.to_value(),
+            "destination-port" => u32::from(settings.destination_port).to_value(),
             _ => unimplemented!("unknown property {}", pspec.name()),
         }
     }
@@ -739,7 +842,57 @@ impl From<Settings> for crate::session::CommonSettings {
             description: s.description,
             caps: s.caps,
             caps_mode: crate::types::CapsMode::Auto,
+            source_ip: s.source_ip,
+            source_port: s.source_port,
+            destination_ip: s.destination_ip,
+            destination_port: s.destination_port,
+            // Receiver-only slots: empty/0 on the Sender side.
+            // `nmossrc::From<Settings>` populates these instead.
+            interface_ip: String::new(),
+            multicast_ip: String::new(),
             auto_activate: s.auto_activate,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::CommonSettings;
+
+    /// Pins the IS-05 Sender `transport_params` → `CommonSettings`
+    /// mapping. `nmossink` populates the sender-side slots
+    /// (`source_ip`, `source_port`, `destination_ip`,
+    /// `destination_port`) directly and zeros the receiver-only
+    /// slots (`interface_ip`, `multicast_ip`); the SDP splice
+    /// helper reads from there.
+    #[test]
+    fn from_settings_populates_is05_sender_transport_params() {
+        let s = Settings {
+            source_ip: "192.0.2.10".to_owned(),
+            source_port: 5005,
+            destination_ip: "239.1.1.1".to_owned(),
+            destination_port: 5004,
+            ..Settings::default()
+        };
+        let cs: CommonSettings = s.into();
+        assert_eq!(cs.source_ip, "192.0.2.10");
+        assert_eq!(cs.source_port, 5005);
+        assert_eq!(cs.destination_ip, "239.1.1.1");
+        assert_eq!(cs.destination_port, 5004);
+        assert_eq!(cs.interface_ip, "", "receiver-only on the Sender side must be empty");
+        assert_eq!(cs.multicast_ip, "", "receiver-only on the Sender side must be empty");
+        assert_eq!(cs.side, crate::session::Side::Sender);
+    }
+
+    #[test]
+    fn from_settings_defaults_leave_route_b_unset() {
+        let cs: CommonSettings = Settings::default().into();
+        assert_eq!(cs.source_ip, "");
+        assert_eq!(cs.source_port, 0);
+        assert_eq!(cs.destination_ip, "");
+        assert_eq!(cs.destination_port, 0);
+        assert_eq!(cs.interface_ip, "");
+        assert_eq!(cs.multicast_ip, "");
     }
 }
