@@ -59,7 +59,7 @@ use gstreamer_sdp as gst_sdp;
 use thiserror::Error;
 
 use crate::session::{UdpLeg, UdpMedia};
-use crate::types::FlowFormat;
+use crate::types::{CapsMode, FlowFormat};
 
 #[derive(Debug, Error)]
 pub(crate) enum SdpError {
@@ -158,6 +158,53 @@ pub(crate) struct SdpSession<'a> {
     /// field; SDP-only entry points would have failed with
     /// "Missing or empty x-nvnmos-name attribute in SDP".
     pub name: Option<&'a str>,
+    /// Whether to emit a media-level `a=x-nvnmos-caps:<pt>` line
+    /// for the resulting Receiver. `true` advertises *wide* caps
+    /// (the daemon registers the IS-04 Receiver with the
+    /// format-derived capability constraints omitted, so any
+    /// compatible Sender of the same media type can connect);
+    /// `false` advertises *narrow* caps (capability constraints
+    /// derived from `media.raw_caps` / `media.rtp_caps`).
+    ///
+    /// Semantics match [`crate::flow_def::FlowDefMeta::caps`] on
+    /// the MXL path. Wire form is canonical per
+    /// `nvnmos_impl.cpp:1727-1731`:
+    ///
+    /// ```text
+    /// a=x-nvnmos-caps:<pt> <constraints?>
+    /// ```
+    ///
+    /// where `<pt>` is the RTP payload type (matches
+    /// `a=rtpmap:<pt>` / `a=fmtp:<pt>`) and the constraints
+    /// suffix is omitted to indicate "fully flexible". The
+    /// daemon never synthesises this line itself — it only
+    /// edits existing SDPs — so [`build_sdp`] is the single
+    /// canonical writer in the system. libnvnmos's parser
+    /// (`has_session_description_caps`) is presence-only and
+    /// ignores the value, so the line is still parsed correctly
+    /// even if `payload` is absent from `media.rtp_caps` (the
+    /// fallback emits RFC 4566 flag form).
+    ///
+    /// On the MXL side, libnvnmos's `has_mxl_flow_def_caps`
+    /// checks `!empty(array)` on the tag value. The IS-04
+    /// `tags` schema (`resource_core.json`) doesn't enforce
+    /// `minItems` on the value arrays, but in practice NMOS
+    /// tag values are always non-empty (a key with no values
+    /// carries no information), so the `!empty(array)` check
+    /// is effectively a key-presence check under normal input.
+    /// Our `[""]` emission satisfies it. The header doc's
+    /// "presence-only" wording is shorthand for the same
+    /// convention.
+    ///
+    /// The override layer ([`SdpOverrides::caps_mode`] /
+    /// [`crate::types::CapsMode`]) resolves `Auto` against the
+    /// input SDP's attribute presence and writes the resulting
+    /// boolean here; callers who construct
+    /// [`SdpSession`] directly (e.g. the future
+    /// `synthesise_or_passthrough_udp`) set it from
+    /// `receiver-caps-mode` already resolved against `Narrow`
+    /// at no-transport-file time.
+    pub advertise_caps: bool,
 }
 
 /// Parse an SDP transport file into a [`UdpMedia`].
@@ -321,6 +368,7 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
 /// a=source-filter: incl IN IP4 <destination_ip> <source_ip>   ← if source_ip
 /// a=x-nvnmos-iface-ip:<interface_ip>                          ← if interface_ip
 /// a=x-nvnmos-src-port:<source_port>                           ← if source_port
+/// a=x-nvnmos-caps:<pt>                                        ← if session.advertise_caps
 /// ```
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<String, SdpError> {
@@ -367,6 +415,7 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     //   a=source-filter (RFC 4607 SSM include)
     //   a=x-nvnmos-iface-ip (egress / join NIC IP)
     //   a=x-nvnmos-src-port (sender RTP source port)
+    //   a=x-nvnmos-caps  (Receiver wide-caps advertisement)
     if let Some(src) = leg.source_ip.as_deref() {
         let value = format!(" incl IN IP4 {dest} {src}", dest = leg.destination_ip);
         m.add_attribute("source-filter", Some(&value));
@@ -376,6 +425,41 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     }
     if let Some(port) = leg.source_port {
         m.add_attribute("x-nvnmos-src-port", Some(&port.to_string()));
+    }
+    if session.advertise_caps {
+        // Canonical form per `nvnmos_impl.cpp:1727-1731`'s
+        // comment block:
+        //   a=x-nvnmos-caps:<format> <format-specific constraints>
+        // where `<format>` is the RTP payload type (matching
+        // `a=rtpmap:<pt>` / `a=fmtp:<pt>`) and the constraints
+        // section may be omitted to indicate "fully flexible /
+        // wide". libnvnmos's parser
+        // (`has_session_description_caps` at
+        // `nvnmos_impl.cpp:1742-1745`) is presence-only — it
+        // doesn't actually look at the value — but the daemon
+        // itself only ever *edits* existing SDPs and never
+        // synthesises this attribute from scratch, so we owe
+        // downstream consumers (and the comment block above)
+        // the documented form. Pt comes from `media.rtp_caps`'s
+        // `payload` field, which `parse_sdp` always populates
+        // (RFC 4566 requires the `m=` line's first format
+        // token to be the RTP pt) and `synthesise_or_passthrough
+        // _udp` will likewise populate when it lands.
+        let pt = media
+            .rtp_caps
+            .structure(0)
+            .and_then(|s| s.get::<i32>("payload").ok());
+        let value = match pt {
+            Some(pt) => pt.to_string(),
+            // Fallback: no pt available (shouldn't happen for
+            // SDPs that came through `parse_sdp`, but the type
+            // system doesn't enforce it). Emit RFC 4566 flag
+            // form via `Some("")` — `gstreamer-sdp` collapses
+            // that to `a=x-nvnmos-caps` on the wire which still
+            // satisfies libnvnmos's presence-only check.
+            None => String::new(),
+        };
+        m.add_attribute("x-nvnmos-caps", Some(&value));
     }
 
     msg.add_media(m);
@@ -425,6 +509,30 @@ pub(crate) struct SdpOverrides<'a> {
     pub destination_port: Option<u16>,
     pub source_ip: Option<&'a str>,
     pub source_port: Option<u16>,
+    /// Wide / narrow / auto resolution for the Receiver
+    /// advertisement (`a=x-nvnmos-caps:` media-level attribute).
+    /// Mirrors [`crate::flow_def::FlowDefOverrides::caps_mode`]
+    /// on the MXL path so callers can hand the same
+    /// `receiver-caps-mode` GObject property value to either
+    /// splice without translation:
+    ///
+    /// * [`CapsMode::Auto`] (default) — leave the input SDP's
+    ///   `a=x-nvnmos-caps:` attribute presence untouched. Narrow
+    ///   when the attribute is absent, wide when present.
+    /// * [`CapsMode::Narrow`] — strip `a=x-nvnmos-caps:` if the
+    ///   input SDP carries it; otherwise no-op.
+    /// * [`CapsMode::Wide`] — add `a=x-nvnmos-caps:` (empty
+    ///   value) if the input SDP doesn't carry it; otherwise
+    ///   no-op (the existing value is *not* preserved — see the
+    ///   [`SdpSession::advertise_caps`] doc for the canonical
+    ///   empty-value form).
+    ///
+    /// Field uses [`CapsMode`] directly (not `Option<CapsMode>`)
+    /// because `Auto` is already a "no override" sentinel; this
+    /// matches the MXL side where `flow_def::splice_overrides`
+    /// also takes the enum by value and reads `Auto` as "leave
+    /// it alone".
+    pub caps_mode: CapsMode,
 }
 
 /// Apply [`SdpOverrides`] to an existing SDP transport file,
@@ -469,6 +577,18 @@ pub(crate) fn splice_overrides(
         })
         .unwrap_or_else(|| (String::new(), "0".to_owned()));
     let original_name = msg.attribute_val("x-nvnmos-name").map(str::to_owned);
+    // libnvnmos's SDP parser
+    // (`has_session_description_caps` in `nvnmos_impl.cpp`)
+    // treats *presence* of media-level `a=x-nvnmos-caps:` as
+    // wide regardless of value (matching `nvnmos.h`'s
+    // "presence-only" doc). Mirror that read here so `Auto`
+    // preserves whatever the input asserts. `.is_some()`
+    // therefore covers both `a=x-nvnmos-caps:` (empty value)
+    // and `a=x-nvnmos-caps:foo` shapes.
+    let original_advertise_caps = msg
+        .media(0)
+        .and_then(|m| m.attribute_val("x-nvnmos-caps").map(|_| ()))
+        .is_some();
 
     // Second pass: parse into our [`UdpMedia`] model so the
     // existing [`build_sdp`] re-emits `m=` / `c=` / fmtp / etc.
@@ -508,6 +628,18 @@ pub(crate) fn splice_overrides(
         Some(n) => Some(n.to_owned()),
         None => original_name,
     };
+    // `CapsMode::Auto` defers to whatever the input asserted;
+    // `Narrow` and `Wide` override unconditionally. Resolution
+    // happens here (not inside [`build_sdp`]) because
+    // [`SdpSession::advertise_caps`] is a plain `bool` — the
+    // builder is rebuild-from-scratch and has no "leave it
+    // alone" sentinel. Mirrors `flow_def::splice_overrides`'s
+    // read-resolve-write pattern on the MXL path.
+    let advertise_caps = match overrides.caps_mode {
+        CapsMode::Auto => original_advertise_caps,
+        CapsMode::Narrow => false,
+        CapsMode::Wide => true,
+    };
 
     let session = SdpSession {
         origin_address: &origin_address,
@@ -515,6 +647,7 @@ pub(crate) fn splice_overrides(
         session_name: &session_name,
         description: description.as_deref(),
         name: name.as_deref(),
+        advertise_caps,
     };
     build_sdp(&media, session)
 }
@@ -1329,6 +1462,7 @@ mod tests {
             session_name: "test session",
             description: None,
             name: None,
+            advertise_caps: false,
         }
     }
 
@@ -1662,6 +1796,203 @@ mod tests {
         let err = splice_overrides("not an SDP at all", &SdpOverrides::default())
             .expect_err("must error");
         assert!(matches!(err, SdpError::Parse(_) | SdpError::NoMedia));
+    }
+
+    /// Variant of `VIDEO_YCBCR_422_10BIT_1080P50_SDP` with an
+    /// `a=x-nvnmos-caps:96` media-level attribute (canonical
+    /// form per `nvnmos_impl.cpp:1727-1731`: pt-only, no
+    /// constraints = fully flexible). Used by the `caps_mode`
+    /// splice tests below to exercise the "input already
+    /// carries the attribute" path. libnvnmos's parser is
+    /// presence-only so the value doesn't matter for parsing,
+    /// but this is the form [`build_sdp`] writes.
+    const VIDEO_YCBCR_422_10BIT_1080P50_WIDE_SDP: &str = concat!(
+        "v=0\r\n",
+        "o=- 1234567890 0 IN IP4 192.0.2.10\r\n",
+        "s=Example\r\n",
+        "t=0 0\r\n",
+        "m=video 5004 RTP/AVP 96\r\n",
+        "c=IN IP4 239.1.1.1/64\r\n",
+        "a=source-filter: incl IN IP4 239.1.1.1 192.0.2.20\r\n",
+        "a=rtpmap:96 raw/90000\r\n",
+        "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080; \
+         exactframerate=50; depth=10; TCS=SDR; colorimetry=BT709; \
+         PM=2110GPM; SSN=ST2110-20:2017; TP=2110TPN\r\n",
+        "a=mediaclk:direct=0\r\n",
+        "a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n",
+        "a=x-nvnmos-iface-ip:192.0.2.11\r\n",
+        "a=x-nvnmos-src-port:5005\r\n",
+        "a=x-nvnmos-caps:96\r\n",
+    );
+
+    /// Round-trip check: does the serialised SDP carry an
+    /// `a=x-nvnmos-caps` attribute at media level? Uses
+    /// `SDPMedia::attribute_val` so it works with both
+    /// `a=x-nvnmos-caps` (flag form) and `a=x-nvnmos-caps:`
+    /// (property form with empty value) — both parse to
+    /// `Some("")` and both signal wide to libnvnmos.
+    fn has_x_nvnmos_caps(sdp: &str) -> bool {
+        let msg = SDPMessage::parse_buffer(sdp.as_bytes()).expect("parse");
+        msg.media(0)
+            .and_then(|m| m.attribute_val("x-nvnmos-caps").map(|_| ()))
+            .is_some()
+    }
+
+    // `caps_mode` is the SDP-side override slot mirroring
+    // `flow_def::FlowDefOverrides::caps_mode`. Each test pins
+    // one (input-state, CapsMode) cell of the 2×3 matrix:
+    //
+    //               | Auto    | Narrow      | Wide
+    //   ------------+---------+-------------+-------------
+    //   absent      | absent  | absent      | present
+    //   present     | present | absent      | present
+    //
+    // `build_sdp_*` tests pin the [`SdpSession::advertise_caps`]
+    // boolean directly (no splice resolution involved).
+
+    #[test]
+    fn build_sdp_emits_x_nvnmos_caps_when_advertise_caps_true() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let mut session = test_session();
+        session.advertise_caps = true;
+        let text = build_sdp(&media, session).expect("build");
+        assert!(
+            has_x_nvnmos_caps(&text),
+            "advertise_caps=true must emit media-level `a=x-nvnmos-caps`: {text}",
+        );
+        // Canonical wire form per `nvnmos_impl.cpp:1727-1731`:
+        // pt-only (no constraints) means fully flexible. The
+        // fixture's `m=video … 96` line drives pt=96, so the
+        // serialised value must be exactly `96`.
+        assert!(
+            text.contains("\r\na=x-nvnmos-caps:96\r\n"),
+            "advertise_caps must emit canonical `a=x-nvnmos-caps:<pt>` form: {text}",
+        );
+        let attr_pos = text
+            .find("\r\na=x-nvnmos-caps")
+            .expect("x-nvnmos-caps line present");
+        let media_pos = text.find("\r\nm=").expect("m= line present");
+        assert!(
+            attr_pos > media_pos,
+            "a=x-nvnmos-caps must be media-level (after first m=): attr_pos={attr_pos} \
+             media_pos={media_pos}: {text}",
+        );
+    }
+
+    #[test]
+    fn build_sdp_omits_x_nvnmos_caps_when_advertise_caps_false() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let text = build_sdp(&media, test_session()).expect("build");
+        assert!(
+            !has_x_nvnmos_caps(&text),
+            "advertise_caps=false (test_session default) must omit `a=x-nvnmos-caps`: {text}",
+        );
+    }
+
+    #[test]
+    fn splice_overrides_caps_mode_auto_preserves_absent() {
+        init_gst();
+        let spliced = splice_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides { caps_mode: CapsMode::Auto, ..Default::default() },
+        )
+        .expect("splice");
+        assert!(
+            !has_x_nvnmos_caps(&spliced),
+            "input had no a=x-nvnmos-caps; Auto must leave it absent: {spliced}",
+        );
+    }
+
+    #[test]
+    fn splice_overrides_caps_mode_auto_preserves_present() {
+        init_gst();
+        let spliced = splice_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_WIDE_SDP,
+            &SdpOverrides { caps_mode: CapsMode::Auto, ..Default::default() },
+        )
+        .expect("splice");
+        assert!(
+            has_x_nvnmos_caps(&spliced),
+            "input had a=x-nvnmos-caps; Auto must preserve it: {spliced}",
+        );
+    }
+
+    #[test]
+    fn splice_overrides_caps_mode_narrow_strips_attribute() {
+        init_gst();
+        let spliced = splice_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_WIDE_SDP,
+            &SdpOverrides { caps_mode: CapsMode::Narrow, ..Default::default() },
+        )
+        .expect("splice");
+        assert!(
+            !has_x_nvnmos_caps(&spliced),
+            "Narrow must strip a=x-nvnmos-caps from a wide input: {spliced}",
+        );
+    }
+
+    #[test]
+    fn splice_overrides_caps_mode_narrow_no_op_when_absent() {
+        init_gst();
+        let spliced = splice_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides { caps_mode: CapsMode::Narrow, ..Default::default() },
+        )
+        .expect("splice");
+        assert!(
+            !has_x_nvnmos_caps(&spliced),
+            "Narrow on an already-narrow input must remain narrow: {spliced}",
+        );
+    }
+
+    #[test]
+    fn splice_overrides_caps_mode_wide_adds_attribute() {
+        init_gst();
+        let spliced = splice_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides { caps_mode: CapsMode::Wide, ..Default::default() },
+        )
+        .expect("splice");
+        assert!(
+            has_x_nvnmos_caps(&spliced),
+            "Wide must add a=x-nvnmos-caps to a narrow input: {spliced}",
+        );
+        // Canonical form: pt of the (single) media. Fixture pt
+        // is 96.
+        assert!(
+            spliced.contains("\r\na=x-nvnmos-caps:96\r\n"),
+            "Wide must emit canonical `a=x-nvnmos-caps:<pt>` form: {spliced}",
+        );
+    }
+
+    #[test]
+    fn splice_overrides_caps_mode_wide_idempotent_when_present() {
+        init_gst();
+        let spliced = splice_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_WIDE_SDP,
+            &SdpOverrides { caps_mode: CapsMode::Wide, ..Default::default() },
+        )
+        .expect("splice");
+        assert!(has_x_nvnmos_caps(&spliced));
+        // Re-emission collapses to the canonical `<pt>` form
+        // regardless of the input value (libnvnmos's parser is
+        // presence-only; we don't try to preserve constraint
+        // suffixes since `SdpSession.advertise_caps` is just a
+        // bool).
+        assert!(
+            spliced.contains("\r\na=x-nvnmos-caps:96\r\n"),
+            "Wide re-emit must normalise to canonical `<pt>` form: {spliced}",
+        );
+        // Exactly one `a=x-nvnmos-caps` line — guard against
+        // double-emission if a future change accidentally
+        // re-adds it on top of the parsed input.
+        let occurrences = spliced.matches("a=x-nvnmos-caps").count();
+        assert_eq!(
+            occurrences, 1,
+            "Wide on a present input must remain idempotent (single line): {spliced}",
+        );
     }
 
     /// 1920×1080p60 SMPTE ST 2110-40 ANC SDP. The `m=video` line
