@@ -64,12 +64,15 @@ impl Side {
 
 /// Translate the GObject `Transport` enum to the wire enum.
 ///
-/// `Transport::Mxl` is the only variant on this branch; new
-/// transport variants and their proto mappings are added by the
-/// follow-up branches that wire their inner chains in.
+/// `Transport::Mxl` is the only variant fully wired today; the
+/// others exist for ABI stability and never reach this helper at
+/// runtime because `validate_and_open` rejects them first. The
+/// arm is enumerated so `cargo check` enforces exhaustiveness when
+/// the next variant lands.
 pub(crate) fn transport_to_proto(t: Transport) -> ProtoTransport {
     match t {
         Transport::Mxl => ProtoTransport::Mxl,
+        Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => ProtoTransport::Rtp,
     }
 }
 
@@ -1022,6 +1025,36 @@ mod tests {
     const FLOW_ID_A: &str = "00000000-0000-0000-0000-000000000001";
     const FLOW_ID_B: &str = "00000000-0000-0000-0000-000000000002";
     const DOMAIN_ID: &str = "1ac254d9-c9be-475a-93a7-f80b9c1063a8";
+
+    /// Wire-enum mapping. Locks down the proto value each
+    /// [`Transport`] variant translates to so a refactor (e.g.
+    /// reordering the GObject enum, adding a new variant) doesn't
+    /// silently shift discriminants. Reordering the enum without
+    /// updating the proto mapping is otherwise an easy mistake to
+    /// make.
+    mod proto_mapping {
+        use super::*;
+
+        #[test]
+        fn mxl_maps_to_mxl_proto() {
+            assert_eq!(transport_to_proto(Transport::Mxl), ProtoTransport::Mxl);
+        }
+
+        #[test]
+        fn udp_maps_to_rtp_proto() {
+            assert_eq!(transport_to_proto(Transport::Udp), ProtoTransport::Rtp);
+        }
+
+        #[test]
+        fn udp2_maps_to_rtp_proto() {
+            assert_eq!(transport_to_proto(Transport::Udp2), ProtoTransport::Rtp);
+        }
+
+        #[test]
+        fn nvdsudp_maps_to_rtp_proto() {
+            assert_eq!(transport_to_proto(Transport::NvDsUdp), ProtoTransport::Rtp);
+        }
+    }
 
     fn cat() -> gst::DebugCategory {
         static INIT: std::sync::Once = std::sync::Once::new();

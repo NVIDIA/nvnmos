@@ -13,9 +13,14 @@ use gstreamer::glib;
 
 /// Transport family for the inner data path.
 ///
-/// Today only MXL shared-memory transport is wired up. Additional
-/// variants (UDP/RTP, nvdsudp/Rivermax) are added by follow-up
-/// branches as their inner chains land.
+/// Only [`Transport::Mxl`] is currently fully wired; the [`Transport::Udp`]
+/// and [`Transport::Udp2`] variants exist as ABI-stable enum values
+/// for the OSS UDP/RTP transport family (gst-plugins-good elements
+/// for `Udp`, gst-plugins-rs `udpsrc2` / `*pay2` / `*depay2` elements
+/// where available for `Udp2`) but are rejected at element
+/// construction time until the SDP parsing and chain factories are
+/// implemented. [`Transport::NvDsUdp`] is similarly reserved for the
+/// DeepStream `nvdsudp*` family; also rejected today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, glib::Enum)]
 #[repr(i32)]
 #[enum_type(name = "GstNmosTransport")]
@@ -24,6 +29,21 @@ pub enum Transport {
     #[default]
     #[enum_value(name = "MXL shared-memory transport", nick = "mxl")]
     Mxl = 0,
+    /// ST 2110 via OSS gst-plugins-good `udpsrc` / `udpsink` plus the
+    /// matching gst-plugins-good RTP (de)payloaders. Not implemented;
+    /// rejected today.
+    #[enum_value(name = "OSS udp + RTP via gst-plugins-good (not implemented)", nick = "udp")]
+    Udp = 1,
+    /// ST 2110 via gst-plugins-rs `udpsrc2` plus the matching
+    /// gst-plugins-rs `*pay2` / `*depay2` RTP elements where
+    /// available, falling back to gst-plugins-good for elements that
+    /// don't yet exist in v2 form (notably `udpsink`). Not
+    /// implemented; rejected today.
+    #[enum_value(name = "OSS udp + RTP via gst-plugins-rs (not implemented)", nick = "udp2")]
+    Udp2 = 2,
+    /// ST 2110 via DeepStream's `nvdsudp*`. Not implemented; rejected today.
+    #[enum_value(name = "NvDsUdp / Rivermax (not implemented)", nick = "nvdsudp")]
+    NvDsUdp = 3,
 }
 
 /// How a resource should advertise its capabilities in NMOS.
