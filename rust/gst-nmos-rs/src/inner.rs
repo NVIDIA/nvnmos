@@ -653,6 +653,27 @@ pub(crate) fn build_mxlsrc(
 /// unset and let the kernel's default-route pick" — that's the
 /// only safe answer when we can't prove which NIC was intended,
 /// and matches single-NIC hosts where there's only one choice.
+///
+/// **Why no symmetric capssetter fix-up on the sender side?**
+/// The receiver-side capssetter trick in [`build_udpsrc`]
+/// corrects fields that the V1 depayloader leaves at format
+/// defaults despite the SDP saying otherwise (`framerate=0/1`,
+/// `colorimetry=bt601` on UYVY, etc.). The sender side has the
+/// opposite gap: V1 `rtpvrawpay` omits `exactframerate` /
+/// `chroma-position` / `tcs` from the wire fmtp, and V1 / V2
+/// `rtpvrawpay` both omit `RANGE`. None of those omissions
+/// propagate to the receiver in our deployment model: the
+/// receiver gets its caps from the **SDP we publish** (which
+/// `parse_sdp` pins onto `udpsrc.caps` in [`build_udpsrc`]),
+/// not from any caps-on-the-wire mechanism. The payloader's
+/// `application/x-rtp` src caps are consumed only by `udpsink`,
+/// which doesn't care about anything beyond
+/// `application/x-rtp`. The only scenario where wire-caps gaps
+/// matter is the pending caps-only SDP synthesis path, where
+/// `build_sdp` will read the app's **input** caps to nmossink
+/// (which carry full GStreamer colorimetry including range,
+/// framerate, etc.) rather than the payloader output. So
+/// nothing to capssetter-fix here.
 pub(crate) fn build_udpsink(
     media: &UdpMedia,
     variant: UdpVariant,
@@ -1041,21 +1062,69 @@ pub(crate) fn build_udpsrc(
             .static_pad("src")
             .ok_or_else(|| anyhow!("depayloader `{depayloader_factory}` missing src pad"))?,
         Some(caps) => {
-            let capsfilter = gst::ElementFactory::make("capsfilter")
+            // V1 `rtpvrawdepay` (gst-plugins-good) hardcodes
+            // `framerate=0/1` on its src caps regardless of what the
+            // SDP `exactframerate` fmtp param says — see
+            // `gst_rtp_vraw_depay_setcaps` in
+            // `subprojects/gst-plugins-good/gst/rtp/gstrtpvrawdepay.c`
+            // (the `GST_VIDEO_INFO_FPS_N/D = 0/1` assignment is
+            // unconditional). It also leaves `colorimetry` at the
+            // format default (`bt601` for UYVY) regardless of the
+            // SDP fmtp `colorimetry=`, because `setcaps` calls
+            // `gst_video_info_set_format` and never overrides the
+            // resulting `VideoColorimetry` afterwards. A plain
+            // `capsfilter` carrying `advertise_caps` with the
+            // SDP-derived `framerate=25/1, colorimetry=bt709` then
+            // rejects the depayloader's output as not-negotiated.
+            //
+            // The V2 `rtpvrawdepay2` in gst-plugins-rs >= 0.15 reads
+            // both `exactframerate` and `colorimetry` from the RTP
+            // caps and emits them on output — see
+            // `net/rtp/src/raw_video/depay/imp.rs::set_sink_caps`
+            // — so no fix-up is needed there.
+            //
+            // We do NOT chain `capssetter` and `capsfilter` together.
+            // They're two different contracts:
+            //   * `capsfilter` is a *negotiation gate*: it intersects
+            //     upstream caps with its `caps` property and fails
+            //     with `not-negotiated` on mismatch. Right for V2 /
+            //     audio / ANC where the depayloader already produces
+            //     the shape we asked for; `advertise_caps` just
+            //     re-asserts that contract on the bin's src pad.
+            //   * `capssetter` is a *caps rewriter*: with the default
+            //     `replace=false, join=true` it merges its `caps`
+            //     property over the upstream caps without failing,
+            //     so SDP-derived fields override the depay's wrong
+            //     defaults and other fields pass through unchanged.
+            //     Right for V1 video raw where the depay actively
+            //     emits values that disagree with the SDP.
+            // Combining them would either be redundant (capsfilter
+            // after capssetter just re-asserts capssetter's already-
+            // fixed caps) or actively harmful (capsfilter *before*
+            // capssetter rejects exactly the V1 output we're trying
+            // to repair). Pick one per depay variant.
+            let needs_capssetter = depayloader_factory == "rtpvrawdepay";
+            let tail_factory = if needs_capssetter {
+                "capssetter"
+            } else {
+                "capsfilter"
+            };
+            let tail = gst::ElementFactory::make(tail_factory)
                 .name("nmossrc-caps")
                 .property("caps", caps)
                 .build()
                 .map_err(|e| {
-                    anyhow!("instantiating `capsfilter` for nmossrc caps advertisement: {e}")
+                    anyhow!(
+                        "instantiating `{tail_factory}` for nmossrc caps advertisement: {e}"
+                    )
                 })?;
-            bin.add(&capsfilter)
-                .map_err(|e| anyhow!("adding tail capsfilter to inner bin: {e}"))?;
+            bin.add(&tail)
+                .map_err(|e| anyhow!("adding tail {tail_factory} to inner bin: {e}"))?;
             depayloader
-                .link(&capsfilter)
-                .with_context(|| "linking depayloader to tail capsfilter")?;
-            capsfilter
-                .static_pad("src")
-                .ok_or_else(|| anyhow!("tail capsfilter missing src pad"))?
+                .link(&tail)
+                .with_context(|| format!("linking depayloader to tail {tail_factory}"))?;
+            tail.static_pad("src")
+                .ok_or_else(|| anyhow!("tail {tail_factory} missing src pad"))?
         }
     };
 
@@ -1682,17 +1751,56 @@ mod tests {
     }
 
     #[test]
-    fn build_udpsrc_pins_advertise_caps_via_tail_capsfilter() {
+    fn build_udpsrc_v1_video_pins_advertise_caps_via_capssetter() {
+        // V1 `rtpvrawdepay` hardcodes `framerate=0/1` on its src caps;
+        // see the doc-comment in `build_udpsrc` for the GStreamer-good
+        // source pointer. The tail therefore has to *override*
+        // framerate (and any other field the depay leaves wrong),
+        // not just intersect. `capssetter` is the gst-plugins-good
+        // element that does exactly that.
         let advertise = gst::Caps::from_str(
             "video/x-raw,format=UYVP,width=1920,height=1080,framerate=50/1",
         )
         .unwrap();
         let elem = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, Some(&advertise))
-            .expect("receiver chain with advertise_caps must construct");
+            .expect("V1 video receiver chain with advertise_caps must construct");
         let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
-        let capsfilter = child(&bin, "nmossrc-caps");
-        assert_eq!(capsfilter.factory().unwrap().name(), "capsfilter");
-        let pinned = capsfilter.property::<gst::Caps>("caps");
+        let tail = child(&bin, "nmossrc-caps");
+        assert_eq!(
+            tail.factory().unwrap().name(),
+            "capssetter",
+            "V1 video tail must be `capssetter` so it can override \
+             `rtpvrawdepay`'s hardcoded `framerate=0/1`",
+        );
+        let pinned = tail.property::<gst::Caps>("caps");
+        assert!(
+            pinned.can_intersect(&advertise),
+            "tail capssetter must carry the advertise_caps the caller passed in",
+        );
+    }
+
+    #[test]
+    fn build_udpsrc_audio_pins_advertise_caps_via_capsfilter() {
+        // Audio (rtpL24depay / rtpL16depay) emits correct caps already
+        // — clock-rate → rate, encoding-params → channels — so a passive
+        // capsfilter is the right contract. Pinning this here to make
+        // sure the V1-video-only capssetter workaround doesn't bleed
+        // into the audio path.
+        let advertise = gst::Caps::from_str(
+            "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved",
+        )
+        .unwrap();
+        let elem = build_udpsrc(&audio_l24_ptime_media(), UdpVariant::V1, Some(&advertise))
+            .expect("audio receiver chain with advertise_caps must construct");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let tail = child(&bin, "nmossrc-caps");
+        assert_eq!(
+            tail.factory().unwrap().name(),
+            "capsfilter",
+            "audio tail must remain `capsfilter`; the `rtpvrawdepay` \
+             V1 framerate quirk doesn't apply to audio depayloaders",
+        );
+        let pinned = tail.property::<gst::Caps>("caps");
         assert!(
             pinned.can_intersect(&advertise),
             "tail capsfilter must carry the advertise_caps the caller passed in",
