@@ -145,6 +145,30 @@ pub(crate) mod defaults {
     /// `gst_sdp_strips_ttl_for_unicast_c_lines`), so this
     /// constant only takes effect for multicast `c=` lines.
     pub(crate) const MULTICAST_TTL: u32 = 64;
+
+    /// RTP clock rate for RFC 4175 video (ST 2110-20 §6.2).
+    /// Fixed at 90 kHz regardless of frame rate, depth, or
+    /// sampling.
+    pub(crate) const VIDEO_CLOCK_RATE: i32 = 90_000;
+
+    /// RTP clock rate for RFC 8331 SMPTE 291 ANC
+    /// (ST 2110-40 §4.4). Locked to 90 kHz so the same RTP
+    /// timestamp lattice as the paired video flow is reused.
+    pub(crate) const ANC_CLOCK_RATE: i32 = 90_000;
+
+    /// ST 2110-20 §6.4 fmtp `PM=` slot. `2110GPM` is the
+    /// General Packing Mode and the only value emitted by
+    /// nmos-cpp's `make_video_sdp_parameters` /
+    /// `nvds_nmos_bin`'s `sdp_from_caps`. The alternate
+    /// `2110BPM` (Block Packing Mode) is technically valid
+    /// but unused in practice.
+    pub(crate) const ST2110_20_PM: &str = "2110GPM";
+
+    /// ST 2110-20 §6.4 fmtp `SSN=` slot. Identifies the SDP
+    /// specification revision the sender conforms to.
+    /// `ST2110-20:2017` is the only published value and what
+    /// nmos-cpp emits.
+    pub(crate) const ST2110_20_SSN: &str = "ST2110-20:2017";
 }
 
 #[derive(Debug, Error)]
@@ -1098,6 +1122,34 @@ fn caps_colorimetry_from_sdp(sdp: &str, depth: u32, tcs: Option<&str>) -> Option
     }
 }
 
+/// Inverse of [`caps_colorimetry_from_sdp`]: given a
+/// `video/x-raw,colorimetry=<preset>` GStreamer colorimetry
+/// preset, return the matching ST 2110-20 fmtp `colorimetry=`
+/// value and the optional `TCS=` companion.
+///
+/// The mapping is not strictly bijective: `bt2020` (8-bit) and
+/// `bt2020-10` (10-bit) both map back to SDP `BT2020`, with the
+/// bit-depth carried separately by the `depth=` fmtp parameter.
+/// `bt2100-pq` and `bt2100-hlg` differ only in the companion
+/// `TCS=` value, which we surface as the second tuple element.
+///
+/// Custom non-preset forms (e.g. `1:3:5:1`) and unrecognised
+/// presets return `None`, leaving the SDP without explicit
+/// `colorimetry=` / `TCS=` parameters; standards-compliant
+/// receivers then fall back to ST 2110-20's "unspecified" entry.
+#[cfg_attr(not(test), allow(dead_code))]
+fn sdp_colorimetry_from_caps(caps_colorimetry: &str) -> Option<(&'static str, Option<&'static str>)> {
+    match caps_colorimetry {
+        "bt601" => Some(("BT601", None)),
+        "bt709" => Some(("BT709", None)),
+        "smpte240m" => Some(("SMPTE240M", None)),
+        "bt2020" | "bt2020-10" => Some(("BT2020", None)),
+        "bt2100-pq" => Some(("BT2100", Some("PQ"))),
+        "bt2100-hlg" => Some(("BT2100", Some("HLG"))),
+        _ => None,
+    }
+}
+
 /// Derive `video/x-raw,...` caps from an `application/x-rtp,...`
 /// caps that describes an RFC 4175 video media.
 ///
@@ -1353,6 +1405,251 @@ fn parse_exact_framerate(value: &str) -> Option<(u32, u32)> {
         let num: u32 = value.parse().ok()?;
         Some((num, 1))
     }
+}
+
+/// Format a `(numerator, denominator)` framerate pair as the
+/// canonical SDP `exactframerate` value. Inverse of
+/// [`parse_exact_framerate`]: integer rates (`den == 1`) are
+/// emitted bare (`"50"`), and rationals as `"<num>/<den>"`
+/// (`"30000/1001"`).
+#[cfg_attr(not(test), allow(dead_code))]
+fn format_exact_framerate(num: u32, den: u32) -> String {
+    if den == 1 {
+        format!("{num}")
+    } else {
+        format!("{num}/{den}")
+    }
+}
+
+/// Format an `a=ptime:` (or `a=maxptime:`) value, given a
+/// duration in nanoseconds, as decimal milliseconds suitable
+/// for the SDP wire form. Whole-millisecond values render
+/// bare (`"1"`); sub-millisecond values render with the
+/// minimum fractional digits Rust's default `f64` `Display`
+/// produces (`"0.125"`).
+///
+/// nmos-cpp's `make_sdp_audio_parameters` uses the same
+/// "integer when whole, decimal otherwise" pattern; receivers
+/// in the wild handle both forms because RFC 4566 §6 defines
+/// the value as `<integer> | <floating-point>`.
+#[cfg_attr(not(test), allow(dead_code))]
+fn format_ptime_ns_as_ms(ns: u64) -> String {
+    if ns % 1_000_000 == 0 {
+        format!("{}", ns / 1_000_000)
+    } else {
+        let ms = ns as f64 / 1_000_000.0;
+        format!("{ms}")
+    }
+}
+
+/// Build an `application/x-rtp,...` caps describing an RFC 4175
+/// raw-video media that wraps the supplied `video/x-raw` caps.
+/// Inverse of [`raw_caps_from_rtp_video`]: the synthesised RTP
+/// caps round-trip back to an equivalent `video/x-raw` caps via
+/// the parse-direction helper (modulo preset-collapsing
+/// colorimetry — see [`sdp_colorimetry_from_caps`]).
+///
+/// Source `video/x-raw` fields consumed:
+///
+/// | `video/x-raw` field | `application/x-rtp` field           |
+/// |---|---|
+/// | `format` (`UYVY` / `UYVP`) | `sampling=YCbCr-4:2:2`, `depth=8` / `10` |
+/// | `width`             | `width`                             |
+/// | `height`            | `height`                            |
+/// | `framerate`         | `exactframerate`                    |
+/// | `interlace-mode`    | `interlace=1` (when `interleaved`)  |
+/// | `colorimetry`       | `colorimetry=` + optional `tcs=`    |
+///
+/// Always-emitted ST 2110-20 §6.4 fmtp slots: `pm=2110GPM` and
+/// `ssn=ST2110-20:2017` (see [`defaults::ST2110_20_PM`] /
+/// [`defaults::ST2110_20_SSN`]). nmos-cpp's
+/// `make_video_sdp_parameters` emits the same defaults so wire
+/// interop with senders/receivers driven by `libnvnmos` is
+/// preserved.
+///
+/// Returns [`SdpError::UnsupportedEssence`] for `format=` values
+/// outside the {`UYVY`, `UYVP`} subset [`raw_caps_from_rtp_video`]
+/// understands today; widening the matrix here without widening
+/// the inverse first would break the round-trip contract.
+#[cfg_attr(not(test), allow(dead_code))]
+fn rtp_caps_from_raw_video(raw_caps: &gst::Caps, payload_type: u8) -> Result<gst::Caps, SdpError> {
+    let s = raw_caps
+        .structure(0)
+        .ok_or_else(|| SdpError::UnsupportedEssence("raw video caps empty".to_owned()))?;
+    let format = s
+        .get::<&str>("format")
+        .map_err(|_| SdpError::UnsupportedEssence("raw video caps missing format".to_owned()))?;
+    let (sampling, depth) = match format {
+        "UYVY" => ("YCbCr-4:2:2", 8u32),
+        "UYVP" => ("YCbCr-4:2:2", 10u32),
+        other => {
+            return Err(SdpError::UnsupportedEssence(format!(
+                "video format={other}"
+            )));
+        }
+    };
+    let width = s
+        .get::<i32>("width")
+        .map_err(|_| SdpError::UnsupportedEssence("raw video caps missing width".to_owned()))?;
+    let height = s
+        .get::<i32>("height")
+        .map_err(|_| SdpError::UnsupportedEssence("raw video caps missing height".to_owned()))?;
+    let (fr_num, fr_den) = s
+        .get::<gst::Fraction>("framerate")
+        .map(|f| (f.numer() as u32, f.denom() as u32))
+        .map_err(|_| {
+            SdpError::UnsupportedEssence("raw video caps missing framerate".to_owned())
+        })?;
+    let exactframerate = format_exact_framerate(fr_num, fr_den);
+    let interlace_mode = s.get::<&str>("interlace-mode").unwrap_or("progressive");
+    let colorimetry_caps = s.get::<&str>("colorimetry").ok();
+    let colorimetry_sdp = colorimetry_caps.and_then(sdp_colorimetry_from_caps);
+
+    let mut caps_text = format!(
+        "application/x-rtp,\
+         media=(string)video,\
+         clock-rate=(int){clk},\
+         encoding-name=(string)RAW,\
+         payload=(int){pt},\
+         sampling=(string){sampling},\
+         depth=(string){depth},\
+         width=(string){width},\
+         height=(string){height},\
+         exactframerate=(string){exactframerate},\
+         pm=(string){pm},\
+         ssn=(string){ssn}",
+        clk = defaults::VIDEO_CLOCK_RATE,
+        pt = payload_type,
+        pm = defaults::ST2110_20_PM,
+        ssn = defaults::ST2110_20_SSN,
+    );
+    if interlace_mode == "interleaved" {
+        caps_text.push_str(",interlace=(string)1");
+    }
+    if let Some((colorimetry, tcs)) = colorimetry_sdp {
+        caps_text.push_str(&format!(",colorimetry=(string){colorimetry}"));
+        if let Some(tcs_value) = tcs {
+            caps_text.push_str(&format!(",tcs=(string){tcs_value}"));
+        }
+    }
+    gst::Caps::from_str(&caps_text)
+        .map_err(|e| SdpError::UnsupportedEssence(format!("constructing rtp caps: {e}")))
+}
+
+/// Build an `application/x-rtp,...` caps describing an
+/// ST 2110-30 audio media that wraps the supplied `audio/x-raw`
+/// caps. Inverse of [`raw_caps_from_rtp_audio`].
+///
+/// | `audio/x-raw` field | `application/x-rtp` field |
+/// |---|---|
+/// | `format=S16BE` | `encoding-name=L16` |
+/// | `format=S24BE` | `encoding-name=L24` |
+/// | `rate`         | `clock-rate`        |
+/// | `channels`     | `encoding-params`   |
+///
+/// `ptime_ns` and `maxptime_ns` are not part of `audio/x-raw`;
+/// the caller threads them through from `transport_caps` /
+/// [`defaults::AUDIO_PTIME_NS`]. They land as `a-ptime` /
+/// `a-maxptime` *string* caps fields that [`build_sdp`]'s
+/// `set_media_from_caps` re-emits as standalone `a=ptime:` /
+/// `a=maxptime:` lines.
+///
+/// Returns [`SdpError::UnsupportedEssence`] for `format=` values
+/// outside ST 2110-30's {`S16BE`, `S24BE`} restriction. RFC 3551
+/// L8, μ-law, A-law, etc. are out of scope.
+#[cfg_attr(not(test), allow(dead_code))]
+fn rtp_caps_from_raw_audio(
+    raw_caps: &gst::Caps,
+    payload_type: u8,
+    ptime_ns: u64,
+    maxptime_ns: Option<u64>,
+) -> Result<gst::Caps, SdpError> {
+    let s = raw_caps
+        .structure(0)
+        .ok_or_else(|| SdpError::UnsupportedEssence("raw audio caps empty".to_owned()))?;
+    let format = s
+        .get::<&str>("format")
+        .map_err(|_| SdpError::UnsupportedEssence("raw audio caps missing format".to_owned()))?;
+    let encoding = match format {
+        "S16BE" => "L16",
+        "S24BE" => "L24",
+        other => {
+            return Err(SdpError::UnsupportedEssence(format!(
+                "audio format={other}"
+            )));
+        }
+    };
+    let rate = s
+        .get::<i32>("rate")
+        .map_err(|_| SdpError::UnsupportedEssence("raw audio caps missing rate".to_owned()))?;
+    let channels = s
+        .get::<i32>("channels")
+        .map_err(|_| SdpError::UnsupportedEssence("raw audio caps missing channels".to_owned()))?;
+
+    let ptime = format_ptime_ns_as_ms(ptime_ns);
+    let mut caps_text = format!(
+        "application/x-rtp,\
+         media=(string)audio,\
+         clock-rate=(int){rate},\
+         encoding-name=(string){encoding},\
+         payload=(int){pt},\
+         encoding-params=(string){channels},\
+         a-ptime=(string){ptime}",
+        pt = payload_type,
+    );
+    if let Some(max) = maxptime_ns {
+        let maxptime = format_ptime_ns_as_ms(max);
+        caps_text.push_str(&format!(",a-maxptime=(string){maxptime}"));
+    }
+    gst::Caps::from_str(&caps_text)
+        .map_err(|e| SdpError::UnsupportedEssence(format!("constructing rtp caps: {e}")))
+}
+
+/// Build an `application/x-rtp,...` caps describing an RFC 8331 /
+/// SMPTE ST 2110-40 ancillary-data media that wraps the supplied
+/// `meta/x-st-2038` caps. Inverse of [`raw_caps_from_rtp_data`].
+///
+/// | `meta/x-st-2038` field | `application/x-rtp` field |
+/// |---|---|
+/// | (fixed)                | `media=video`, `encoding-name=SMPTE291` |
+/// | `framerate` (optional) | `exactframerate`                        |
+///
+/// ANC is carried on `m=video` per RFC 8331 §3; the dispatch
+/// over to ANC handling is keyed off `encoding-name=SMPTE291`
+/// in [`parse_sdp`].
+///
+/// `framerate` is propagated to fmtp `exactframerate` when
+/// present (it is on `nmossrc`'s `caps` property when the user
+/// wants ANC clocked to a specific video frame rate) and
+/// omitted otherwise — RFC 8331 / ST 2110-40 §6.4 makes the
+/// parameter optional and the depayloader does not require it.
+#[cfg_attr(not(test), allow(dead_code))]
+fn rtp_caps_from_raw_data(raw_caps: &gst::Caps, payload_type: u8) -> Result<gst::Caps, SdpError> {
+    let s = raw_caps
+        .structure(0)
+        .ok_or_else(|| SdpError::UnsupportedEssence("ANC caps empty".to_owned()))?;
+    if s.name() != "meta/x-st-2038" {
+        return Err(SdpError::UnsupportedEssence(format!(
+            "ANC essence={}",
+            s.name()
+        )));
+    }
+    let framerate = s.get::<gst::Fraction>("framerate").ok();
+    let mut caps_text = format!(
+        "application/x-rtp,\
+         media=(string)video,\
+         clock-rate=(int){clk},\
+         encoding-name=(string)SMPTE291,\
+         payload=(int){pt}",
+        clk = defaults::ANC_CLOCK_RATE,
+        pt = payload_type,
+    );
+    if let Some(f) = framerate {
+        let exactframerate = format_exact_framerate(f.numer() as u32, f.denom() as u32);
+        caps_text.push_str(&format!(",exactframerate=(string){exactframerate}"));
+    }
+    gst::Caps::from_str(&caps_text)
+        .map_err(|e| SdpError::UnsupportedEssence(format!("constructing rtp caps: {e}")))
 }
 
 #[cfg(test)]
@@ -2922,5 +3219,467 @@ mod tests {
         assert_eq!(parse_exact_framerate("oops"), None);
         assert_eq!(parse_exact_framerate("30000/0"), None);
         assert_eq!(parse_exact_framerate("30/abc"), None);
+    }
+
+    // -- synthesis-side helpers: format_exact_framerate +
+    //    format_ptime_ns_as_ms + sdp_colorimetry_from_caps
+
+    #[test]
+    fn format_exact_framerate_emits_bare_integer_when_denominator_is_one() {
+        assert_eq!(format_exact_framerate(50, 1), "50");
+        assert_eq!(format_exact_framerate(25, 1), "25");
+    }
+
+    #[test]
+    fn format_exact_framerate_emits_rational_for_non_unit_denominator() {
+        assert_eq!(format_exact_framerate(30_000, 1_001), "30000/1001");
+        assert_eq!(format_exact_framerate(60_000, 1_001), "60000/1001");
+    }
+
+    #[test]
+    fn format_exact_framerate_round_trips_parse_exact_framerate() {
+        for (num, den) in [(25_u32, 1_u32), (50, 1), (30_000, 1_001), (60_000, 1_001)] {
+            let s = format_exact_framerate(num, den);
+            assert_eq!(parse_exact_framerate(&s), Some((num, den)), "round-trip {s}");
+        }
+    }
+
+    #[test]
+    fn format_ptime_ns_as_ms_emits_bare_integer_for_whole_milliseconds() {
+        assert_eq!(format_ptime_ns_as_ms(1_000_000), "1");
+        assert_eq!(format_ptime_ns_as_ms(4_000_000), "4");
+        assert_eq!(format_ptime_ns_as_ms(20_000_000), "20");
+    }
+
+    #[test]
+    fn format_ptime_ns_as_ms_emits_decimal_for_sub_millisecond() {
+        assert_eq!(format_ptime_ns_as_ms(125_000), "0.125");
+        assert_eq!(format_ptime_ns_as_ms(250_000), "0.25");
+        assert_eq!(format_ptime_ns_as_ms(500_000), "0.5");
+    }
+
+    #[test]
+    fn format_ptime_ns_as_ms_pins_st2110_30_canonical_values() {
+        assert_eq!(format_ptime_ns_as_ms(defaults::AUDIO_PTIME_NS), "1");
+        assert_eq!(format_ptime_ns_as_ms(125_000), "0.125");
+    }
+
+    #[test]
+    fn sdp_colorimetry_from_caps_pins_each_preset() {
+        assert_eq!(
+            sdp_colorimetry_from_caps("bt601"),
+            Some(("BT601", None)),
+        );
+        assert_eq!(
+            sdp_colorimetry_from_caps("bt709"),
+            Some(("BT709", None)),
+        );
+        assert_eq!(
+            sdp_colorimetry_from_caps("smpte240m"),
+            Some(("SMPTE240M", None)),
+        );
+    }
+
+    #[test]
+    fn sdp_colorimetry_from_caps_collapses_bt2020_depth_variants_to_one_sdp_value() {
+        assert_eq!(
+            sdp_colorimetry_from_caps("bt2020"),
+            Some(("BT2020", None)),
+        );
+        assert_eq!(
+            sdp_colorimetry_from_caps("bt2020-10"),
+            Some(("BT2020", None)),
+        );
+    }
+
+    #[test]
+    fn sdp_colorimetry_from_caps_splits_bt2100_via_tcs() {
+        assert_eq!(
+            sdp_colorimetry_from_caps("bt2100-pq"),
+            Some(("BT2100", Some("PQ"))),
+        );
+        assert_eq!(
+            sdp_colorimetry_from_caps("bt2100-hlg"),
+            Some(("BT2100", Some("HLG"))),
+        );
+    }
+
+    #[test]
+    fn sdp_colorimetry_from_caps_unrecognised_inputs_yield_none() {
+        assert_eq!(sdp_colorimetry_from_caps(""), None);
+        assert_eq!(sdp_colorimetry_from_caps("1:3:5:1"), None);
+        assert_eq!(sdp_colorimetry_from_caps("sRGB"), None);
+    }
+
+    // -- rtp_caps_from_raw_video
+
+    /// Build a synthetic `video/x-raw` caps with the supplied
+    /// parameters; helper for the synthesis tests below.
+    fn raw_video_caps(
+        format: &str,
+        width: i32,
+        height: i32,
+        framerate: gst::Fraction,
+        extras: Option<&str>,
+    ) -> gst::Caps {
+        let extras = extras.map(|s| format!(",{s}")).unwrap_or_default();
+        gst::Caps::from_str(&format!(
+            "video/x-raw,format={format},width={width},height={height},\
+             framerate={n}/{d}{extras}",
+            n = framerate.numer(),
+            d = framerate.denom(),
+        ))
+        .expect("raw video caps")
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_video_uyvy_maps_to_ycbcr422_depth8() {
+        init_gst();
+        let raw = raw_video_caps("UYVY", 1920, 1080, gst::Fraction::new(50, 1), None);
+        let rtp = rtp_caps_from_raw_video(&raw, 96).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(s.name().as_str(), "application/x-rtp");
+        assert_eq!(s.get::<&str>("media").unwrap(), "video");
+        assert_eq!(s.get::<i32>("clock-rate").unwrap(), defaults::VIDEO_CLOCK_RATE);
+        assert_eq!(s.get::<&str>("encoding-name").unwrap(), "RAW");
+        assert_eq!(s.get::<i32>("payload").unwrap(), 96);
+        assert_eq!(s.get::<&str>("sampling").unwrap(), "YCbCr-4:2:2");
+        assert_eq!(s.get::<&str>("depth").unwrap(), "8");
+        assert_eq!(s.get::<&str>("width").unwrap(), "1920");
+        assert_eq!(s.get::<&str>("height").unwrap(), "1080");
+        assert_eq!(s.get::<&str>("exactframerate").unwrap(), "50");
+        assert_eq!(s.get::<&str>("pm").unwrap(), defaults::ST2110_20_PM);
+        assert_eq!(s.get::<&str>("ssn").unwrap(), defaults::ST2110_20_SSN);
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_video_uyvp_maps_to_ycbcr422_depth10() {
+        init_gst();
+        let raw = raw_video_caps("UYVP", 1920, 1080, gst::Fraction::new(50, 1), None);
+        let rtp = rtp_caps_from_raw_video(&raw, 96).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(s.get::<&str>("sampling").unwrap(), "YCbCr-4:2:2");
+        assert_eq!(s.get::<&str>("depth").unwrap(), "10");
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_video_emits_fractional_exactframerate() {
+        init_gst();
+        let raw = raw_video_caps(
+            "UYVP",
+            1920,
+            1080,
+            gst::Fraction::new(30_000, 1_001),
+            None,
+        );
+        let rtp = rtp_caps_from_raw_video(&raw, 96).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(s.get::<&str>("exactframerate").unwrap(), "30000/1001");
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_video_emits_interlace_only_when_interleaved() {
+        init_gst();
+        let progressive = raw_video_caps(
+            "UYVP",
+            1920,
+            1080,
+            gst::Fraction::new(50, 1),
+            Some("interlace-mode=progressive"),
+        );
+        let rtp = rtp_caps_from_raw_video(&progressive, 96).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert!(
+            s.get::<&str>("interlace").is_err(),
+            "progressive must omit `interlace=`",
+        );
+
+        let interleaved = raw_video_caps(
+            "UYVP",
+            1920,
+            1080,
+            gst::Fraction::new(25, 1),
+            Some("interlace-mode=interleaved"),
+        );
+        let rtp = rtp_caps_from_raw_video(&interleaved, 96).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(
+            s.get::<&str>("interlace").unwrap(),
+            "1",
+            "interleaved must emit `interlace=1` per RFC 4175 §6.1",
+        );
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_video_emits_colorimetry_for_recognised_preset() {
+        init_gst();
+        let raw = raw_video_caps(
+            "UYVP",
+            1920,
+            1080,
+            gst::Fraction::new(50, 1),
+            Some("colorimetry=bt709"),
+        );
+        let rtp = rtp_caps_from_raw_video(&raw, 96).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(s.get::<&str>("colorimetry").unwrap(), "BT709");
+        assert!(
+            s.get::<&str>("tcs").is_err(),
+            "non-BT2100 presets must not emit `tcs=`",
+        );
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_video_emits_tcs_for_bt2100_presets() {
+        init_gst();
+        let pq = raw_video_caps(
+            "UYVP",
+            1920,
+            1080,
+            gst::Fraction::new(50, 1),
+            Some("colorimetry=bt2100-pq"),
+        );
+        let rtp = rtp_caps_from_raw_video(&pq, 96).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(s.get::<&str>("colorimetry").unwrap(), "BT2100");
+        assert_eq!(s.get::<&str>("tcs").unwrap(), "PQ");
+
+        let hlg = raw_video_caps(
+            "UYVP",
+            1920,
+            1080,
+            gst::Fraction::new(50, 1),
+            Some("colorimetry=bt2100-hlg"),
+        );
+        let rtp = rtp_caps_from_raw_video(&hlg, 96).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(s.get::<&str>("colorimetry").unwrap(), "BT2100");
+        assert_eq!(s.get::<&str>("tcs").unwrap(), "HLG");
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_video_skips_unrecognised_colorimetry() {
+        init_gst();
+        let raw = raw_video_caps(
+            "UYVP",
+            1920,
+            1080,
+            gst::Fraction::new(50, 1),
+            Some("colorimetry=1:3:5:1"),
+        );
+        let rtp = rtp_caps_from_raw_video(&raw, 96).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert!(
+            s.get::<&str>("colorimetry").is_err(),
+            "non-preset colorimetry must be silently dropped, \
+             not emitted as fmtp `colorimetry=`",
+        );
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_video_rejects_unsupported_format() {
+        init_gst();
+        let raw = raw_video_caps("RGBA", 1920, 1080, gst::Fraction::new(50, 1), None);
+        let err = rtp_caps_from_raw_video(&raw, 96).expect_err("must reject");
+        assert!(matches!(err, SdpError::UnsupportedEssence(ref m) if m.contains("RGBA")));
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_video_round_trips_through_raw_caps_from_rtp_video() {
+        init_gst();
+        let original = raw_video_caps(
+            "UYVP",
+            1920,
+            1080,
+            gst::Fraction::new(50, 1),
+            Some("interlace-mode=progressive,colorimetry=bt2020-10"),
+        );
+        let rtp = rtp_caps_from_raw_video(&original, 96).expect("synth");
+        let round_tripped = raw_caps_from_rtp_video(&rtp).expect("parse back");
+        let rt = round_tripped.structure(0).expect("rt raw");
+        let orig = original.structure(0).expect("orig raw");
+        assert_eq!(rt.name(), orig.name());
+        assert_eq!(rt.get::<&str>("format"), orig.get::<&str>("format"));
+        assert_eq!(rt.get::<i32>("width"), orig.get::<i32>("width"));
+        assert_eq!(rt.get::<i32>("height"), orig.get::<i32>("height"));
+        assert_eq!(
+            rt.get::<gst::Fraction>("framerate"),
+            orig.get::<gst::Fraction>("framerate"),
+        );
+        // bt2020-10 collapses to BT2020 on the synthesise side
+        // (depth carries the bit-depth distinction) and then
+        // expands back to bt2020-10 on the parse side because
+        // depth=10 is in the RTP caps.
+        assert_eq!(
+            rt.get::<&str>("colorimetry").unwrap(),
+            "bt2020-10",
+        );
+    }
+
+    // -- rtp_caps_from_raw_audio
+
+    fn raw_audio_caps(format: &str, rate: i32, channels: i32) -> gst::Caps {
+        gst::Caps::from_str(&format!(
+            "audio/x-raw,format={format},rate={rate},channels={channels},\
+             layout=interleaved",
+        ))
+        .expect("raw audio caps")
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_audio_s24be_maps_to_l24() {
+        init_gst();
+        let raw = raw_audio_caps("S24BE", 48_000, 2);
+        let rtp =
+            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(s.get::<&str>("media").unwrap(), "audio");
+        assert_eq!(s.get::<&str>("encoding-name").unwrap(), "L24");
+        assert_eq!(s.get::<i32>("clock-rate").unwrap(), 48_000);
+        assert_eq!(s.get::<i32>("payload").unwrap(), 97);
+        assert_eq!(s.get::<&str>("encoding-params").unwrap(), "2");
+        assert_eq!(s.get::<&str>("a-ptime").unwrap(), "1");
+        assert!(
+            s.get::<&str>("a-maxptime").is_err(),
+            "no maxptime requested means no `a-maxptime` field",
+        );
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_audio_s16be_maps_to_l16() {
+        init_gst();
+        let raw = raw_audio_caps("S16BE", 48_000, 2);
+        let rtp =
+            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(s.get::<&str>("encoding-name").unwrap(), "L16");
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_audio_emits_decimal_ptime_for_sub_millisecond() {
+        init_gst();
+        let raw = raw_audio_caps("S24BE", 48_000, 2);
+        let rtp = rtp_caps_from_raw_audio(&raw, 97, 125_000, None).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(
+            s.get::<&str>("a-ptime").unwrap(),
+            "0.125",
+            "ST 2110-30 low-latency ptime must round-trip as `0.125`",
+        );
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_audio_emits_a_maxptime_when_supplied() {
+        init_gst();
+        let raw = raw_audio_caps("S24BE", 48_000, 2);
+        let rtp =
+            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, Some(4_000_000))
+                .expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(s.get::<&str>("a-maxptime").unwrap(), "4");
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_audio_rejects_unsupported_format() {
+        init_gst();
+        let raw = raw_audio_caps("S32LE", 48_000, 2);
+        let err =
+            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None).expect_err("reject");
+        assert!(matches!(err, SdpError::UnsupportedEssence(ref m) if m.contains("S32LE")));
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_audio_round_trips_through_raw_caps_from_rtp_audio() {
+        init_gst();
+        let original = raw_audio_caps("S24BE", 48_000, 2);
+        let rtp =
+            rtp_caps_from_raw_audio(&original, 97, defaults::AUDIO_PTIME_NS, None).expect("synth");
+        let round_tripped = raw_caps_from_rtp_audio(&rtp).expect("parse back");
+        let rt = round_tripped.structure(0).expect("rt raw");
+        let orig = original.structure(0).expect("orig");
+        assert_eq!(rt.name(), orig.name());
+        assert_eq!(rt.get::<&str>("format"), orig.get::<&str>("format"));
+        assert_eq!(rt.get::<i32>("rate"), orig.get::<i32>("rate"));
+        assert_eq!(rt.get::<i32>("channels"), orig.get::<i32>("channels"));
+    }
+
+    // -- rtp_caps_from_raw_data
+
+    #[test]
+    fn rtp_caps_from_raw_data_minimal_meta_x_st_2038() {
+        init_gst();
+        let raw = gst::Caps::from_str("meta/x-st-2038,alignment=frame").expect("data caps");
+        let rtp = rtp_caps_from_raw_data(&raw, 100).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(s.get::<&str>("media").unwrap(), "video");
+        assert_eq!(s.get::<&str>("encoding-name").unwrap(), "SMPTE291");
+        assert_eq!(s.get::<i32>("clock-rate").unwrap(), defaults::ANC_CLOCK_RATE);
+        assert_eq!(s.get::<i32>("payload").unwrap(), 100);
+        assert!(
+            s.get::<&str>("exactframerate").is_err(),
+            "ANC without framerate must omit `exactframerate=`",
+        );
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_data_propagates_framerate() {
+        init_gst();
+        let raw = gst::Caps::from_str("meta/x-st-2038,alignment=frame,framerate=25/1")
+            .expect("data caps");
+        let rtp = rtp_caps_from_raw_data(&raw, 100).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(s.get::<&str>("exactframerate").unwrap(), "25");
+
+        let fractional = gst::Caps::from_str(
+            "meta/x-st-2038,alignment=frame,framerate=30000/1001",
+        )
+        .expect("data caps");
+        let rtp = rtp_caps_from_raw_data(&fractional, 100).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(s.get::<&str>("exactframerate").unwrap(), "30000/1001");
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_data_rejects_non_anc_essence() {
+        init_gst();
+        let raw = gst::Caps::from_str("video/x-raw,format=UYVY").expect("not ANC");
+        let err = rtp_caps_from_raw_data(&raw, 100).expect_err("must reject");
+        assert!(matches!(err, SdpError::UnsupportedEssence(ref m) if m.contains("video/x-raw")));
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_data_round_trips_through_raw_caps_from_rtp_data() {
+        init_gst();
+        let original = gst::Caps::from_str(
+            "meta/x-st-2038,alignment=frame,framerate=25/1",
+        )
+        .expect("data caps");
+        let rtp = rtp_caps_from_raw_data(&original, 100).expect("synth");
+        let round_tripped = raw_caps_from_rtp_data(&rtp).expect("parse back");
+        let rt = round_tripped.structure(0).expect("rt raw");
+        let orig = original.structure(0).expect("orig");
+        assert_eq!(rt.name(), orig.name());
+        assert_eq!(
+            rt.get::<gst::Fraction>("framerate"),
+            orig.get::<gst::Fraction>("framerate"),
+        );
+    }
+
+    // -- defaults: synthesis-specific additions
+
+    #[test]
+    fn defaults_video_and_anc_clock_rates_are_90khz() {
+        // RFC 4175 §5.5 fixes RTP raw-video clock-rate at 90 kHz
+        // regardless of frame rate / depth / sampling; RFC 8331 /
+        // ST 2110-40 §4.4 likewise locks ANC to 90 kHz so its RTP
+        // timestamps share the paired video flow's lattice.
+        assert_eq!(defaults::VIDEO_CLOCK_RATE, 90_000);
+        assert_eq!(defaults::ANC_CLOCK_RATE, 90_000);
+    }
+
+    #[test]
+    fn defaults_st2110_20_pm_and_ssn_match_nmos_cpp() {
+        assert_eq!(defaults::ST2110_20_PM, "2110GPM");
+        assert_eq!(defaults::ST2110_20_SSN, "ST2110-20:2017");
     }
 }
