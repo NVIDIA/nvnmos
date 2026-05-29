@@ -122,6 +122,20 @@ pub(crate) struct SdpSession<'a> {
     /// `s=` line session name (RFC 4566 §5.3). Typically the
     /// Sender's NMOS `label`.
     pub name: &'a str,
+    /// `i=` line session information (RFC 4566 §5.4). `None`
+    /// suppresses the line entirely. Typically the Sender's NMOS
+    /// `description`; flows through the same property override
+    /// path as `flow_def`'s `description` tag in
+    /// [`crate::flow_def::FlowDefOverrides`].
+    pub description: Option<&'a str>,
+    /// Media-level `a=x-nvnmos-name:` value (the nvds-nmos
+    /// vendor attribute that carries the NMOS Sender / Receiver
+    /// `name`, distinct from the SDP-level `s=` label). `None`
+    /// suppresses the attribute entirely. Splices in via
+    /// [`SdpOverrides::name`] so the NMOS resource `name`
+    /// property reaches the configuring SDP without colliding
+    /// with `label` → `s=`.
+    pub nmos_name: Option<&'a str>,
 }
 
 /// Parse an SDP transport file into a [`UdpMedia`].
@@ -289,6 +303,9 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     let mut msg = SDPMessage::new();
     msg.set_version("0");
     msg.set_session_name(session.name);
+    if let Some(description) = session.description {
+        msg.set_information(description);
+    }
     msg.set_origin(
         "nvnmos",
         session.origin_session_id,
@@ -310,6 +327,15 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     m.set_media_from_caps(&media.rtp_caps)
         .map_err(|e| SdpError::BuildMediaFromCaps(e.to_string()))?;
 
+    // Attribute order matches the canonical configuring-SDP order
+    // emitted by `nvds_nmos_bin::sdp_from_caps`:
+    //   a=x-nvnmos-name (resource name)
+    //   a=source-filter (RFC 4607 SSM include)
+    //   a=x-nvnmos-iface-ip (egress / join NIC IP)
+    //   a=x-nvnmos-src-port (sender RTP source port)
+    if let Some(name) = session.nmos_name {
+        m.add_attribute("x-nvnmos-name", Some(name));
+    }
     if let Some(src) = leg.source_ip.as_deref() {
         let value = format!(" incl IN IP4 {dest} {src}", dest = leg.destination_ip);
         m.add_attribute("source-filter", Some(&value));
@@ -324,6 +350,144 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     msg.add_media(m);
 
     msg.as_text().map_err(|e| SdpError::Serialise(e.to_string()))
+}
+
+/// Scalar overrides applied to an SDP transport file during
+/// [`splice_overrides`]. Mirrors
+/// [`crate::flow_def::FlowDefOverrides`]'s field shape on the
+/// MXL path so the two splice call sites read identically:
+///
+/// * Top-level descriptors (`label`, `description`, `name`) cover
+///   the NMOS Sender / Receiver resource metadata that also lands
+///   in the IS-04 publication. `label` ↔ `s=`, `description` ↔
+///   `i=`, `name` ↔ media-level `a=x-nvnmos-name` (the
+///   nvds-nmos vendor attribute that carries the NMOS resource
+///   `name`, distinct from `label`).
+/// * IS-05 RTP transport_params slots (`interface_ip`,
+///   `destination_ip`, `destination_port`, `source_ip`,
+///   `source_port`) cover the GObject properties that operators
+///   can set directly on `nmossink` / `nmossrc` without rewriting
+///   the configuring SDP by hand. Names follow the IS-05 RTP
+///   transport_params schema verbatim (sender semantic):
+///   `source_ip` is the *local egress NIC*, `destination_ip` is
+///   the *remote / multicast group*, etc. On a Receiver,
+///   `source_ip` instead carries the SSM include filter
+///   (remote sender's address); the conversion from
+///   IS-05-sender-vocabulary to the [`UdpLeg`] field names
+///   happens at the property layer in `nmossink` / `nmossrc`,
+///   not here — by the time [`splice_overrides`] runs every
+///   field already means what it does on [`UdpLeg`].
+///
+/// `None` on a slot leaves the input SDP's value untouched.
+/// `Some(...)` replaces it. The split between "absent" and
+/// "explicit override to empty/zero" follows the MXL convention:
+/// callers map empty GObject string properties to `None` before
+/// constructing the struct.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct SdpOverrides<'a> {
+    pub label: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub name: Option<&'a str>,
+    pub interface_ip: Option<&'a str>,
+    pub destination_ip: Option<&'a str>,
+    pub destination_port: Option<u16>,
+    pub source_ip: Option<&'a str>,
+    pub source_port: Option<u16>,
+}
+
+/// Apply [`SdpOverrides`] to an existing SDP transport file,
+/// returning the rewritten text.
+///
+/// UDP counterpart of [`crate::flow_def::splice_overrides`].
+/// Implementation contract mirrors MXL: parse the input, apply
+/// non-`None` overrides in place on the parsed model, serialise
+/// the result via [`build_sdp`]. Fields the input carries but
+/// our model doesn't (RTCP attributes, RFC 5888 `a=group:`
+/// session-level grouping, vendor `a=…` attributes outside the
+/// `x-nvnmos-*` family, etc.) are not round-tripped — same
+/// limitation as the MXL JSON splice, which only preserves the
+/// `flow_def` schema fields. Future work can switch to a
+/// mutate-in-place serializer if a real configuring SDP needs
+/// such attributes preserved.
+///
+/// Single-media SDPs only today. ST 2022-7 redundancy inputs
+/// (`m=` block twice) bubble back as
+/// [`SdpError::MultipleMedia`] from [`parse_sdp`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn splice_overrides(
+    text: &str,
+    overrides: &SdpOverrides<'_>,
+) -> Result<String, SdpError> {
+    // First pass: capture session-level fields that `parse_sdp`
+    // doesn't surface on [`UdpMedia`] (`o=`, `s=`, `i=`, media-
+    // level `a=x-nvnmos-name`). We need owned strings because
+    // [`SdpSession`] takes borrows and the parsed `SDPMessage`
+    // would otherwise be dropped before [`build_sdp`] runs.
+    let msg = SDPMessage::parse_buffer(text.as_bytes())
+        .map_err(|e| SdpError::Parse(e.to_string()))?;
+    let original_session_name = msg.session_name().unwrap_or("").to_owned();
+    let original_description = msg.information().map(str::to_owned);
+    let (origin_address, origin_session_id) = msg
+        .origin()
+        .map(|o| {
+            (
+                o.addr().unwrap_or("").to_owned(),
+                o.sess_id().unwrap_or("0").to_owned(),
+            )
+        })
+        .unwrap_or_else(|| (String::new(), "0".to_owned()));
+    let original_nmos_name = msg
+        .media(0)
+        .and_then(|m| m.attribute_val("x-nvnmos-name").map(str::to_owned));
+
+    // Second pass: parse into our [`UdpMedia`] model so the
+    // existing [`build_sdp`] re-emits `m=` / `c=` / fmtp / etc.
+    // from the same source of truth used elsewhere in the crate.
+    let mut media = parse_sdp(text)?;
+
+    // Apply leg-level overrides. Each `Some(...)` replaces
+    // whatever [`parse_sdp`] populated; `None` is no-op.
+    if let Some(ip) = overrides.interface_ip {
+        media.primary.interface_ip = Some(ip.to_owned());
+    }
+    if let Some(ip) = overrides.destination_ip {
+        media.primary.destination_ip = ip.to_owned();
+    }
+    if let Some(port) = overrides.destination_port {
+        media.primary.destination_port = port;
+    }
+    if let Some(ip) = overrides.source_ip {
+        media.primary.source_ip = Some(ip.to_owned());
+    }
+    if let Some(port) = overrides.source_port {
+        media.primary.source_port = Some(port);
+    }
+
+    // Apply session-level overrides, owning the strings on the
+    // local stack so [`SdpSession`] can borrow them through the
+    // [`build_sdp`] call.
+    let name: String = overrides
+        .label
+        .map(str::to_owned)
+        .unwrap_or(original_session_name);
+    let description: Option<String> = match overrides.description {
+        Some(desc) => Some(desc.to_owned()),
+        None => original_description,
+    };
+    let nmos_name: Option<String> = match overrides.name {
+        Some(n) => Some(n.to_owned()),
+        None => original_nmos_name,
+    };
+
+    let session = SdpSession {
+        origin_address: &origin_address,
+        origin_session_id: &origin_session_id,
+        name: &name,
+        description: description.as_deref(),
+        nmos_name: nmos_name.as_deref(),
+    };
+    build_sdp(&media, session)
 }
 
 /// Extract the single included source-IP from an RFC 4607
@@ -1134,6 +1298,8 @@ mod tests {
             origin_address: "192.0.2.10",
             origin_session_id: "1234567890",
             name: "test session",
+            description: None,
+            nmos_name: None,
         }
     }
 
@@ -1276,6 +1442,176 @@ mod tests {
             !text.contains("x-nvnmos-src-port"),
             "built SDP must not include x-nvnmos-src-port when source_port is None: {text}",
         );
+    }
+
+    #[test]
+    fn build_sdp_emits_i_line_when_description_set() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let mut session = test_session();
+        session.description = Some("Test camera feed");
+        let text = build_sdp(&media, session).expect("build");
+        assert!(
+            text.contains("\r\ni=Test camera feed\r\n"),
+            "i= line missing when description is Some: {text}",
+        );
+    }
+
+    #[test]
+    fn build_sdp_omits_i_line_when_description_unset() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let text = build_sdp(&media, test_session()).expect("build");
+        assert!(
+            !text.contains("\r\ni="),
+            "i= line must not appear when description is None: {text}",
+        );
+    }
+
+    #[test]
+    fn build_sdp_emits_x_nvnmos_name_when_set() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let mut session = test_session();
+        session.nmos_name = Some("Camera 1");
+        let text = build_sdp(&media, session).expect("build");
+        assert!(
+            text.contains("a=x-nvnmos-name:Camera 1"),
+            "a=x-nvnmos-name line missing when nmos_name is Some: {text}",
+        );
+    }
+
+    #[test]
+    fn build_sdp_omits_x_nvnmos_name_when_unset() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let text = build_sdp(&media, test_session()).expect("build");
+        assert!(
+            !text.contains("x-nvnmos-name"),
+            "a=x-nvnmos-name line must not appear when nmos_name is None: {text}",
+        );
+    }
+
+    // `splice_overrides` is the UDP analogue of
+    // `flow_def::splice_overrides`; the test naming mirrors that
+    // module's `splice_overrides_*` block. Each test pins one
+    // override slot at a time, then a final "all-None preserves
+    // input" + "rejects malformed" complete the matrix — same
+    // shape as the MXL splice tests.
+
+    #[test]
+    fn splice_overrides_label_replaces_session_name() {
+        init_gst();
+        let spliced = splice_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides { label: Some("new label"), ..Default::default() },
+        )
+        .expect("splice");
+        let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse");
+        assert_eq!(msg.session_name().unwrap(), "new label");
+    }
+
+    #[test]
+    fn splice_overrides_description_replaces_i_line() {
+        init_gst();
+        // The fixture has no `i=` line; splice should add one.
+        let spliced = splice_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides {
+                description: Some("Studio A camera"),
+                ..Default::default()
+            },
+        )
+        .expect("splice");
+        let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse");
+        assert_eq!(msg.information().unwrap(), "Studio A camera");
+    }
+
+    #[test]
+    fn splice_overrides_name_replaces_x_nvnmos_name() {
+        init_gst();
+        // The fixture has no `a=x-nvnmos-name`; splice should add one.
+        let spliced = splice_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides { name: Some("Camera 1"), ..Default::default() },
+        )
+        .expect("splice");
+        let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse");
+        let media = msg.media(0).expect("media");
+        assert_eq!(media.attribute_val("x-nvnmos-name").unwrap(), "Camera 1");
+    }
+
+    #[test]
+    fn splice_overrides_leg_fields_replace_udp_media() {
+        init_gst();
+        let spliced = splice_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides {
+                destination_ip: Some("239.99.99.99"),
+                destination_port: Some(5555),
+                interface_ip: Some("192.0.2.99"),
+                source_ip: Some("192.0.2.30"),
+                source_port: Some(5556),
+                ..Default::default()
+            },
+        )
+        .expect("splice");
+        // Re-parse via the canonical `parse_sdp` path rather than
+        // raw `SDPMessage` to assert all five overrides land where
+        // the rest of the crate reads them from.
+        let media = parse_sdp(&spliced).expect("re-parse");
+        assert_eq!(media.primary.destination_ip, "239.99.99.99");
+        assert_eq!(media.primary.destination_port, 5555);
+        assert_eq!(media.primary.interface_ip.as_deref(), Some("192.0.2.99"));
+        assert_eq!(media.primary.source_ip.as_deref(), Some("192.0.2.30"));
+        assert_eq!(media.primary.source_port, Some(5556));
+    }
+
+    #[test]
+    fn splice_overrides_all_none_preserves_input_legs() {
+        init_gst();
+        let original = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let spliced =
+            splice_overrides(VIDEO_YCBCR_422_10BIT_1080P50_SDP, &SdpOverrides::default())
+                .expect("splice");
+        let after = parse_sdp(&spliced).expect("re-parse");
+        // Leg fields must round-trip unchanged.
+        assert_eq!(after.primary.destination_ip, original.primary.destination_ip);
+        assert_eq!(
+            after.primary.destination_port,
+            original.primary.destination_port
+        );
+        assert_eq!(after.primary.interface_ip, original.primary.interface_ip);
+        assert_eq!(after.primary.source_ip, original.primary.source_ip);
+        assert_eq!(after.primary.source_port, original.primary.source_port);
+        // Session name preserved (input had `s=Example`).
+        let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse msg");
+        assert_eq!(msg.session_name().unwrap(), "Example");
+    }
+
+    #[test]
+    fn splice_overrides_preserves_origin_address_and_session_id() {
+        init_gst();
+        // The fixture sets `o=- 1234567890 0 IN IP4 192.0.2.10`.
+        // With no `label` / `description` / `name` override and no
+        // leg overrides, the splice must keep the same `o=`
+        // address and session-id (the daemon may rely on these
+        // being stable across the configuring-SDP lifecycle).
+        let spliced =
+            splice_overrides(VIDEO_YCBCR_422_10BIT_1080P50_SDP, &SdpOverrides::default())
+                .expect("splice");
+        let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse");
+        let origin = msg.origin().expect("origin");
+        assert_eq!(origin.addr().unwrap(), "192.0.2.10");
+        assert_eq!(origin.sess_id().unwrap(), "1234567890");
+    }
+
+    #[test]
+    fn splice_overrides_invalid_input_propagates_parse_error() {
+        init_gst();
+        let err = splice_overrides("not an SDP at all", &SdpOverrides::default())
+            .expect_err("must error");
+        assert!(matches!(err, SdpError::Parse(_) | SdpError::NoMedia));
     }
 
     /// 1920×1080p60 SMPTE ST 2110-40 ANC SDP. The `m=video` line
