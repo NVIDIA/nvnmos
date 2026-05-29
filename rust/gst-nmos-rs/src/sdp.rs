@@ -37,7 +37,13 @@
 //!   * Audio: ST 2110-30 / RFC 3190 `L24` (→ `S24BE`) and
 //!     RFC 3551 `L16` (→ `S16BE`); `L8` is intentionally
 //!     unsupported (out of scope for ST 2110-30).
-//!   * ANC `smpte291` essence is not yet handled.
+//!   * ANC: RFC 8331 `encoding-name=SMPTE291` over
+//!     `m=video` (SMPTE ST 2110-40), producing
+//!     `meta/x-st-2038, alignment=frame[, framerate=N/D]`.
+//!     Conversion happens via the
+//!     [`rtpsmpte291pay`](https://gstreamer.freedesktop.org/documentation/rsrtp/rtpsmpte291pay.html)
+//!     / `rtpsmpte291depay` elements from `gst-plugins-rs`'
+//!     `rsrtp` plugin; there is no gst-plugins-good equivalent.
 //!
 //! `a=ptime:` / `a=maxptime:` are surfaced on the RTP caps as
 //! `a-ptime` / `a-maxptime` so that `set_media_from_caps`
@@ -81,8 +87,9 @@ pub(crate) enum SdpError {
     #[error(
         "unsupported essence shape: {0}; today RFC 4175 \
          `encoding-name=RAW, sampling=YCbCr-4:2:2` (`depth=10` → \
-         `UYVP`, `depth=8` → `UYVY`) and ST 2110-30 / RFC 3551 \
-         L24 / L16 audio are recognised"
+         `UYVP`, `depth=8` → `UYVY`), ST 2110-30 / RFC 3551 \
+         L24 / L16 audio, and RFC 8331 / ST 2110-40 \
+         `encoding-name=SMPTE291` ANC are recognised"
     )]
     UnsupportedEssence(String),
     #[error("`set_media_from_caps` rejected the supplied RTP caps: {0}")]
@@ -178,20 +185,34 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
     let media_kind = structure
         .get::<&str>("media")
         .map_err(|_| SdpError::MissingMediaField)?;
-    let format = match media_kind {
-        "video" => FlowFormat::Video,
-        "audio" => FlowFormat::Audio,
-        other => return Err(SdpError::UnsupportedEssence(format!("media={other}"))),
+    // `caps_from_media` upper-cases the rtpmap encoding-name via
+    // `g_ascii_strup` (gstsdpmessage.c) so the match arms below
+    // can use the canonical upper-case form. An absent field falls
+    // through to "" which doesn't match any arm — the inner
+    // `derive_raw_caps_*` then surfaces the precise reason.
+    let encoding_name = structure.get::<&str>("encoding-name").unwrap_or("");
+    let format = match (media_kind, encoding_name) {
+        // RFC 8331 / ST 2110-40 carries SMPTE 291 ANC under
+        // `m=video`; only `encoding-name=SMPTE291` distinguishes it
+        // from RFC 4175 raw video, so the dispatch has to be
+        // (media, encoding-name)-keyed rather than media-keyed.
+        ("video", enc) if enc.eq_ignore_ascii_case("SMPTE291") => FlowFormat::Data,
+        ("video", _) => FlowFormat::Video,
+        ("audio", _) => FlowFormat::Audio,
+        (other, _) => {
+            return Err(SdpError::UnsupportedEssence(format!(
+                "media={other}, encoding-name={encoding_name}",
+            )));
+        }
     };
 
     let raw_caps = match format {
         FlowFormat::Video => derive_raw_caps_video(&rtp_caps)?,
         FlowFormat::Audio => derive_raw_caps_audio(&rtp_caps)?,
-        FlowFormat::Data | FlowFormat::Unspecified => {
-            return Err(SdpError::UnsupportedEssence(format!(
-                "essence format {format:?} is not yet handled by parse_sdp",
-            )));
-        }
+        FlowFormat::Data => derive_raw_caps_data(&rtp_caps)?,
+        FlowFormat::Unspecified => unreachable!(
+            "format dispatch above never produces FlowFormat::Unspecified"
+        ),
     };
 
     let connection = media
@@ -353,7 +374,7 @@ fn extract_source_ip_from_filter(value: &str) -> Option<String> {
 /// | `YCbCr-4:2:2` | `10` | `UYVP` |
 ///
 /// Other RFC 4175 samplings (RGB / RGBA / BGR / BGRA / YCbCr-4:4:4 /
-/// 4:2:0 / 4:1:1) land in a follow-up; see
+/// 4:2:0 / 4:1:1) are not yet handled; see
 /// `nvds_nmos_bin/src/helpers/sdp_caps_to_raw_caps.cpp::get_raw_video_caps_from_sdp_caps`
 /// for the reference mapping table.
 fn derive_raw_caps_video(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
@@ -464,6 +485,49 @@ fn derive_raw_caps_audio(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
     );
     gst::Caps::from_str(&caps_text)
         .map_err(|e| SdpError::UnsupportedEssence(format!("constructing raw caps: {e}")))
+}
+
+/// Derive `meta/x-st-2038,...` caps from an `application/x-rtp,...`
+/// caps that describes an RFC 8331 / SMPTE ST 2110-40 ANC media.
+///
+/// The produced caps match the sink-pad template of `gst-plugins-rs`'
+/// `rtpsmpte291pay` (and the src-pad template of `rtpsmpte291depay`)
+/// and the existing `meta/x-st-2038, framerate=N/D` convention used
+/// by [`crate::flow_def::build_data_body`]:
+///
+/// ```text
+/// meta/x-st-2038, alignment=frame[, framerate=N/D]
+/// ```
+///
+/// `framerate` is hoisted from the `exactframerate` token on the
+/// `a=fmtp:` line — ST 2110-40 §6.4 reuses the same fmtp convention
+/// as ST 2110-20 / RFC 4175 video rather than RFC 4566's separate
+/// `a=framerate:` attribute, so the value flows through
+/// `caps_from_media` onto `rtp_caps` as a string we just parse with
+/// [`parse_exact_framerate`]. Absent `exactframerate` is fine: ANC
+/// is clocked from the paired video flow at runtime and the caller
+/// (typically the element's `caps` property or the caps-merge on the
+/// `nmossrc` ghost src pad) supplies the framerate downstream.
+fn derive_raw_caps_data(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
+    let s = rtp_caps
+        .structure(0)
+        .ok_or_else(|| SdpError::CapsFromMedia("rtp caps empty".to_owned()))?;
+    let encoding = s.get::<&str>("encoding-name").unwrap_or("");
+    if !encoding.eq_ignore_ascii_case("SMPTE291") {
+        return Err(SdpError::UnsupportedEssence(format!(
+            "data encoding-name={encoding}",
+        )));
+    }
+    let framerate = s
+        .get::<&str>("exactframerate")
+        .ok()
+        .and_then(parse_exact_framerate);
+    let mut caps_text = String::from("meta/x-st-2038,alignment=frame");
+    if let Some((num, den)) = framerate {
+        caps_text.push_str(&format!(",framerate={num}/{den}"));
+    }
+    gst::Caps::from_str(&caps_text)
+        .map_err(|e| SdpError::UnsupportedEssence(format!("constructing data caps: {e}")))
 }
 
 /// Parse an SDP `exactframerate` value into a (numerator,
@@ -964,6 +1028,139 @@ mod tests {
         assert!(
             !text.contains("x-nvnmos-src-port"),
             "built SDP must not include x-nvnmos-src-port when source_port is None: {text}",
+        );
+    }
+
+    /// 1920×1080p60 SMPTE ST 2110-40 ANC SDP. The `m=video` line
+    /// is correct per RFC 8331 §3 (ANC RTP rides on the video
+    /// media type, not `data` / `application`); `encoding-name=
+    /// SMPTE291` and `exactframerate` in the `a=fmtp:` line are
+    /// the only essence-shape signals on the wire. `VPID_Code` is
+    /// an optional ST 2110-40 fmtp parameter and is included here
+    /// to cover the `caps_from_media` round-trip.
+    const ANC_SMPTE291_1080P60_SDP: &str = concat!(
+        "v=0\r\n",
+        "o=- 1234567890 0 IN IP4 192.0.2.10\r\n",
+        "s=Example ANC\r\n",
+        "t=0 0\r\n",
+        "m=video 5006 RTP/AVP 100\r\n",
+        "c=IN IP4 239.1.1.10/64\r\n",
+        "a=source-filter: incl IN IP4 239.1.1.10 192.0.2.20\r\n",
+        "a=rtpmap:100 smpte291/90000\r\n",
+        "a=fmtp:100 exactframerate=60; VPID_Code=132\r\n",
+        "a=mediaclk:direct=0\r\n",
+        "a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n",
+        "a=x-nvnmos-iface-ip:192.0.2.11\r\n",
+        "a=x-nvnmos-src-port:5007\r\n",
+    );
+
+    #[test]
+    fn anc_smpte291_happy_path() {
+        init_gst();
+        let media = parse_sdp(ANC_SMPTE291_1080P60_SDP).expect("parse");
+        assert_eq!(
+            media.format,
+            FlowFormat::Data,
+            "RFC 8331 SMPTE 291 ANC must map to FlowFormat::Data even though \
+             the SDP `m=` line says `video` (RFC 8331 §3 explicitly carries \
+             ANC under the video media type and only `encoding-name=SMPTE291` \
+             distinguishes it from RFC 4175)",
+        );
+        assert_eq!(media.primary.destination_ip, "239.1.1.10");
+        assert_eq!(media.primary.destination_port, 5006);
+        assert_eq!(media.primary.interface_ip.as_deref(), Some("192.0.2.11"));
+        assert_eq!(media.primary.source_ip.as_deref(), Some("192.0.2.20"));
+        assert_eq!(media.primary.source_port, Some(5007));
+
+        let rtp_s = media.rtp_caps.structure(0).expect("rtp caps");
+        assert_eq!(rtp_s.name().as_str(), "application/x-rtp");
+        assert_eq!(rtp_s.get::<&str>("media").unwrap(), "video");
+        assert_eq!(rtp_s.get::<&str>("encoding-name").unwrap(), "SMPTE291");
+        assert_eq!(rtp_s.get::<i32>("clock-rate").unwrap(), 90_000);
+        assert_eq!(rtp_s.get::<i32>("payload").unwrap(), 100);
+
+        let raw_s = media.raw_caps.structure(0).expect("raw caps");
+        assert_eq!(
+            raw_s.name().as_str(),
+            "meta/x-st-2038",
+            "ANC raw caps must match the `rtpsmpte291*` element's pad template \
+             and the existing `flow_def::build_data_body` convention",
+        );
+        assert_eq!(
+            raw_s.get::<&str>("alignment").unwrap(),
+            "frame",
+            "`alignment=frame` matches `rtpsmpte291pay`'s sink pad template",
+        );
+        assert_eq!(
+            raw_s.get::<gst::Fraction>("framerate").unwrap(),
+            gst::Fraction::new(60, 1),
+            "`exactframerate=60` from a=fmtp: must surface as framerate=60/1",
+        );
+    }
+
+    #[test]
+    fn anc_smpte291_fractional_exactframerate() {
+        init_gst();
+        let sdp = ANC_SMPTE291_1080P60_SDP.replace("exactframerate=60;", "exactframerate=30000/1001;");
+        let media = parse_sdp(&sdp).expect("parse");
+        let raw_s = media.raw_caps.structure(0).expect("raw caps");
+        assert_eq!(
+            raw_s.get::<gst::Fraction>("framerate").unwrap(),
+            gst::Fraction::new(30_000, 1_001),
+            "fractional `exactframerate` (NTSC-like rates) must round-trip",
+        );
+    }
+
+    #[test]
+    fn anc_smpte291_without_exactframerate_omits_framerate() {
+        init_gst();
+        // Drop the fmtp line entirely — ANC SDPs in the wild often
+        // don't carry it because the rate is implicit from the
+        // paired video flow.
+        let sdp = ANC_SMPTE291_1080P60_SDP
+            .replace("a=fmtp:100 exactframerate=60; VPID_Code=132\r\n", "");
+        let media = parse_sdp(&sdp).expect("parse");
+        let raw_s = media.raw_caps.structure(0).expect("raw caps");
+        assert!(
+            raw_s.get::<gst::Fraction>("framerate").is_err(),
+            "framerate must be absent on raw_caps when SDP carries no \
+             exactframerate; downstream caps-merge (element property / \
+             paired-flow context) fills it in",
+        );
+        assert_eq!(
+            raw_s.get::<&str>("alignment").unwrap(),
+            "frame",
+            "alignment=frame must still be present without exactframerate",
+        );
+    }
+
+    #[test]
+    fn build_sdp_anc_round_trip() {
+        init_gst();
+        let original = parse_sdp(ANC_SMPTE291_1080P60_SDP).expect("parse original");
+        let text = build_sdp(&original, test_session()).expect("build");
+        // The rebuilt SDP must round-trip through parse_sdp back to
+        // an equivalent UdpMedia. `set_media_from_caps` consumes the
+        // RTP caps and produces `a=rtpmap:` + `a=fmtp:` lines, so
+        // `encoding-name=SMPTE291` and `exactframerate` survive
+        // intact even though build_sdp doesn't know anything about
+        // ANC specifically.
+        let round_tripped = parse_sdp(&text).expect("parse round-tripped");
+        assert_eq!(round_tripped.format, FlowFormat::Data);
+        assert_eq!(
+            round_tripped.primary.destination_ip,
+            original.primary.destination_ip,
+        );
+        let orig_raw = original.raw_caps.structure(0).unwrap();
+        let rt_raw = round_tripped.raw_caps.structure(0).unwrap();
+        assert_eq!(rt_raw.name(), orig_raw.name());
+        assert_eq!(
+            rt_raw.get::<&str>("alignment"),
+            orig_raw.get::<&str>("alignment"),
+        );
+        assert_eq!(
+            rt_raw.get::<gst::Fraction>("framerate"),
+            orig_raw.get::<gst::Fraction>("framerate"),
         );
     }
 

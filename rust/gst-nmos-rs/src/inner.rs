@@ -741,14 +741,14 @@ pub(crate) fn build_udpsink(
     Ok(bin.upcast())
 }
 
-/// Look up the v1 (`gst-plugins-good`) factory name for an
+/// Look up the GStreamer factory name for an
 /// `rtp<essence><suffix>` element pair, optionally upgrading to the
-/// v2 (`gst-plugins-rs`) sibling when [`UdpVariant::V2`] is
-/// requested.
+/// `gst-plugins-rs` `*pay2` / `*depay2` sibling when
+/// [`UdpVariant::V2`] is requested.
 ///
 /// `suffix` is `"pay"` for senders or `"depay"` for receivers;
-/// `stem` is `"rtpvraw"` / `"rtpL24"` / `"rtpL16"` based on the
-/// essence shape (FlowFormat + RTP encoding-name).
+/// `stem` is one of `"rtpvraw"` / `"rtpL24"` / `"rtpL16"` /
+/// `"rtpsmpte291"`, chosen from `(FlowFormat, encoding-name)`.
 ///
 /// `encoding_name` is matched ASCII-case-insensitively. The SDP
 /// parser already upper-cases `encoding-name` (GStreamer's
@@ -763,7 +763,11 @@ pub(crate) fn build_udpsink(
 /// sibling isn't present — `gst-plugins-rs` ships v2 forms
 /// piecemeal (e.g. `rtpvrawpay2` lands separately from
 /// `rtpL24pay2`) so the V2 dispatch shouldn't break in environments
-/// that have only some of them.
+/// that have only some of them. For RFC 8331 SMPTE 291 ANC there is
+/// no V1 (`gst-plugins-good`) equivalent at all — the only element
+/// is `gst-plugins-rs`' `rtpsmpte291pay` / `rtpsmpte291depay`, and
+/// both [`UdpVariant::V1`] and [`UdpVariant::V2`] resolve to the
+/// same name. The variant choice is essence-orthogonal for ANC.
 fn select_rtp_factory(
     suffix: &str,
     format: FlowFormat,
@@ -775,17 +779,20 @@ fn select_rtp_factory(
         (FlowFormat::Video, "RAW") => "rtpvraw",
         (FlowFormat::Audio, "L24") => "rtpL24",
         (FlowFormat::Audio, "L16") => "rtpL16",
+        (FlowFormat::Data, "SMPTE291") => "rtpsmpte291",
         _ => bail!(
             "unsupported essence for UDP/RTP `{suffix}`: format={format:?}, \
-             encoding-name=`{encoding_name}` (today RFC 4175 `RAW` video and \
-             ST 2110-30 `L24` / `L16` audio are supported)"
+             encoding-name=`{encoding_name}` (today RFC 4175 `RAW` video, \
+             ST 2110-30 `L24` / `L16` audio, and RFC 8331 / ST 2110-40 \
+             `SMPTE291` ANC are supported)"
         ),
     };
     let v1 = format!("{stem}{suffix}");
     if gst::ElementFactory::find(&v1).is_none() {
         bail!(
-            "GStreamer factory `{v1}` not found; install `gst-plugins-good` and \
-             ensure it's on `GST_PLUGIN_PATH`"
+            "GStreamer factory `{v1}` not found; install `{package}` and \
+             ensure it's on `GST_PLUGIN_PATH`",
+            package = package_hint_for_stem(stem),
         );
     }
     match variant {
@@ -798,6 +805,20 @@ fn select_rtp_factory(
                 Ok(v1)
             }
         }
+    }
+}
+
+/// Best-guess package hint for a missing-factory error message.
+///
+/// `rtpsmpte291` only exists in `gst-plugins-rs`' `rsrtp` plugin —
+/// suggesting `gst-plugins-good` for that one would send the user
+/// hunting in the wrong package. Everything else
+/// ([`select_rtp_factory`] knows about today) lives in
+/// `gst-plugins-good`.
+fn package_hint_for_stem(stem: &str) -> &'static str {
+    match stem {
+        "rtpsmpte291" => "gst-plugins-rs (`rsrtp` plugin)",
+        _ => "gst-plugins-good",
     }
 }
 
@@ -1101,6 +1122,48 @@ mod tests {
         }
     }
 
+    /// SMPTE ST 2110-40 ANC at 60 Hz, mirroring what
+    /// `sdp::parse_sdp` produces from an RFC 8331 SDP. Note that
+    /// `media=video` on the RTP caps even though `FlowFormat::Data`
+    /// is the essence kind — that's per RFC 8331 §3 (ANC rides on
+    /// the video media type and only `encoding-name=SMPTE291`
+    /// disambiguates).
+    fn anc_smpte291_media() -> UdpMedia {
+        init_gst();
+        UdpMedia {
+            format: FlowFormat::Data,
+            primary: UdpLeg {
+                destination_ip: "239.1.1.10".to_owned(),
+                destination_port: 5006,
+                interface_ip: None,
+                source_ip: None,
+                source_port: None,
+            },
+            secondary: None,
+            rtp_caps: gst::Caps::from_str(
+                "application/x-rtp,media=video,clock-rate=90000,\
+                 encoding-name=SMPTE291,payload=100",
+            )
+            .expect("static rtp caps parse"),
+            raw_caps: gst::Caps::from_str(
+                "meta/x-st-2038,alignment=frame,framerate=60/1",
+            )
+            .expect("static raw caps parse"),
+        }
+    }
+
+    /// `true` iff `gst-plugins-rs`' `rtpsmpte291*` element pair is
+    /// installed on the host running the test. Tests that exercise
+    /// the ANC chain factories soft-skip when this returns `false`
+    /// because the elements live in `gst-plugins-rs`' `rsrtp`
+    /// plugin which isn't installed everywhere; the SDP-level
+    /// parsing tests don't depend on it.
+    fn rtpsmpte291_available() -> bool {
+        init_gst();
+        gst::ElementFactory::find("rtpsmpte291pay").is_some()
+            && gst::ElementFactory::find("rtpsmpte291depay").is_some()
+    }
+
     /// L24 stereo 48 kHz with `a-ptime=0.125` already hoisted onto
     /// `rtp_caps` (mirroring what `sdp::parse_sdp` produces for an
     /// SDP carrying `a=ptime:0.125`). 0.125 ms = 125 µs = 125_000 ns
@@ -1257,13 +1320,74 @@ mod tests {
         )
         .expect("static rtp caps parse");
         let err = build_udpsink(&media, UdpVariant::V1)
-            .expect_err("H264 must be rejected (today only RAW/L24/L16 are supported)");
+            .expect_err("H264 must be rejected (today only RAW/L24/L16/SMPTE291 are supported)");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("unsupported essence")
                 && msg.contains("encoding-name=`H264`"),
             "expected unsupported-essence attribution: {msg}",
         );
+    }
+
+    #[test]
+    fn package_hint_for_stem_routes_anc_to_plugins_rs() {
+        // ANC `rtpsmpte291*` lives only in `gst-plugins-rs` —
+        // suggesting `gst-plugins-good` for that one would send the
+        // user hunting in the wrong package.
+        assert_eq!(
+            package_hint_for_stem("rtpsmpte291"),
+            "gst-plugins-rs (`rsrtp` plugin)",
+        );
+        // Everything else `select_rtp_factory` knows about today
+        // lives in `gst-plugins-good`.
+        assert_eq!(package_hint_for_stem("rtpvraw"), "gst-plugins-good");
+        assert_eq!(package_hint_for_stem("rtpL24"), "gst-plugins-good");
+        assert_eq!(package_hint_for_stem("rtpL16"), "gst-plugins-good");
+    }
+
+    #[test]
+    fn build_udpsink_anc_uses_rtpsmpte291pay() {
+        if !rtpsmpte291_available() {
+            // `gst-plugins-rs` `rsrtp` plugin isn't installed on this
+            // host; the SDP-level ANC parsing already has full
+            // coverage in `sdp::tests::anc_smpte291_*`. Soft-skip the
+            // chain construction rather than failing the suite.
+            return;
+        }
+        let elem = build_udpsink(&anc_smpte291_media(), UdpVariant::V1)
+            .expect("ANC sender chain must construct when rtpsmpte291pay is available");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let pay = child(&bin, "nmossink-payloader");
+        assert_eq!(
+            pay.factory().expect("payloader has a factory").name(),
+            "rtpsmpte291pay",
+            "ANC sender chain must use `gst-plugins-rs`' rtpsmpte291pay; \
+             there is no `gst-plugins-good` equivalent",
+        );
+        assert_eq!(pay.property::<u32>("pt"), 100);
+    }
+
+    #[test]
+    fn build_udpsink_anc_works_with_both_udp_variants() {
+        if !rtpsmpte291_available() {
+            return;
+        }
+        // The `rtpsmpte291` essence lives only in `gst-plugins-rs`;
+        // both UdpVariant::V1 and UdpVariant::V2 must resolve to the
+        // same `rtpsmpte291pay` element (no v2 sibling exists). The
+        // variant choice is essence-orthogonal for ANC, unlike RAW
+        // / L16 / L24 where V2 prefers the `*pay2` form.
+        for variant in [UdpVariant::V1, UdpVariant::V2] {
+            let elem = build_udpsink(&anc_smpte291_media(), variant)
+                .unwrap_or_else(|e| panic!("ANC sender chain must construct for {variant:?}: {e:#}"));
+            let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+            let pay = child(&bin, "nmossink-payloader");
+            assert_eq!(
+                pay.factory().expect("payloader has a factory").name(),
+                "rtpsmpte291pay",
+                "{variant:?} must resolve to rtpsmpte291pay for ANC",
+            );
+        }
     }
 
     #[test]
@@ -1526,13 +1650,51 @@ mod tests {
         )
         .expect("static rtp caps parse");
         let err = build_udpsrc(&media, UdpVariant::V1, None)
-            .expect_err("H264 must be rejected (today only RAW/L24/L16 are supported)");
+            .expect_err("H264 must be rejected (today only RAW/L24/L16/SMPTE291 are supported)");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("unsupported essence")
                 && msg.contains("encoding-name=`H264`"),
             "expected unsupported-essence attribution: {msg}",
         );
+    }
+
+    #[test]
+    fn build_udpsrc_anc_uses_rtpsmpte291depay() {
+        if !rtpsmpte291_available() {
+            return;
+        }
+        let elem = build_udpsrc(&anc_smpte291_media(), UdpVariant::V1, None)
+            .expect("ANC receiver chain must construct when rtpsmpte291depay is available");
+        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let depay = child(&bin, "nmossrc-depayloader");
+        assert_eq!(
+            depay.factory().expect("depayloader has a factory").name(),
+            "rtpsmpte291depay",
+        );
+    }
+
+    #[test]
+    fn build_udpsrc_anc_works_with_both_udp_variants() {
+        if !rtpsmpte291_available() {
+            return;
+        }
+        // Symmetric with `build_udpsink_anc_works_with_both_udp_variants`:
+        // ANC has no V2 sibling so both variants resolve to the same
+        // element. Pinning this here so a future refactor doesn't
+        // accidentally route ANC down a variant-suffixed path that
+        // doesn't exist.
+        for variant in [UdpVariant::V1, UdpVariant::V2] {
+            let elem = build_udpsrc(&anc_smpte291_media(), variant, None)
+                .unwrap_or_else(|e| panic!("ANC receiver chain must construct for {variant:?}: {e:#}"));
+            let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+            let depay = child(&bin, "nmossrc-depayloader");
+            assert_eq!(
+                depay.factory().expect("depayloader has a factory").name(),
+                "rtpsmpte291depay",
+                "{variant:?} must resolve to rtpsmpte291depay for ANC",
+            );
+        }
     }
 
     #[test]
