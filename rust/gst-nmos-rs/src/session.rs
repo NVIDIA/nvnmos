@@ -228,10 +228,12 @@ pub(crate) struct CommonSettings {
     /// [`crate::sdp::defaults`]).
     ///
     /// Consumed at startup by [`property_overrides_udp`] (which
-    /// feeds the override-class slots into the splice helper)
-    /// and by [`sdp::cross_check_essence`] in
-    /// [`decide_inner_config_udp`]. A future caps-only SDP
-    /// synthesis path will also read this field.
+    /// feeds the override-class slots into the splice helper),
+    /// by [`sdp::cross_check_essence`] in
+    /// [`decide_inner_config_udp`], and by
+    /// [`synthesise_or_passthrough_udp`] on the caps-only
+    /// synthesis path (which threads it into
+    /// [`sdp::from_caps`]'s `transport_caps` slot).
     pub(crate) transport_caps: Option<gst::Caps>,
     /// Controls whether the resource advertises narrow or wide caps
     /// in IS-04. See [`CapsMode`] for the full semantics. Honoured
@@ -585,12 +587,20 @@ pub(crate) fn validate_and_open(
         Transport::Mxl => {
             resolve_inner_config_mxl(cat, element, settings, resolved_transport_file)?
         }
-        Transport::Udp => {
-            resolve_inner_config_udp(element, settings, UdpVariant::V1, resolved_transport_file)?
-        }
-        Transport::Udp2 => {
-            resolve_inner_config_udp(element, settings, UdpVariant::V2, resolved_transport_file)?
-        }
+        Transport::Udp => resolve_inner_config_udp(
+            cat,
+            element,
+            settings,
+            UdpVariant::V1,
+            resolved_transport_file,
+        )?,
+        Transport::Udp2 => resolve_inner_config_udp(
+            cat,
+            element,
+            settings,
+            UdpVariant::V2,
+            resolved_transport_file,
+        )?,
         Transport::NvDsUdp => bail!(
             "{element}: transport=nvdsudp is not yet implemented — strict \
              ST 2110 receive/send via DeepStream's `nvdsudp` elements is \
@@ -745,6 +755,94 @@ fn synthesise_or_passthrough_mxl(
                 settings.side,
             );
             Ok(Some(json))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+/// UDP counterpart of [`synthesise_or_passthrough_mxl`]:
+/// produce a configuring SDP at startup time, either by
+/// passing through a user-supplied `transport-file*` or by
+/// synthesising one from `caps` + `transport-caps` +
+/// IS-05 endpoint properties + [`sdp::defaults`].
+///
+/// Returns `Ok(Some(text))` when either path produces an SDP,
+/// `Ok(None)` when neither is possible (no transport file
+/// **and** no `caps`) — the element then opens the session
+/// without one and runs on the fake chain until an IS-05
+/// activation arrives.
+///
+/// Precedence is identical to the MXL path: an explicit
+/// transport file beats `caps`-driven synthesis, mirroring
+/// the user spec "transport-file* takes priority over caps
+/// at startup; activation-SDP wins over both at PATCH time
+/// (handled in [`make_activation_plan`])".
+///
+/// Caps-only synthesis composes [`sdp::from_caps`] with the
+/// CommonSettings snapshot, mapping the per-side IS-05
+/// property vocabulary (Sender's `destination_ip` vs
+/// Receiver's `multicast_ip`; Sender's `source_ip`-as-NIC vs
+/// Receiver's distinct `interface_ip`) into the unified
+/// [`sdp::SdpBuildInput`] vocabulary that
+/// [`sdp::from_caps`] consumes.
+fn synthesise_or_passthrough_udp(
+    cat: &gst::DebugCategory,
+    element: &str,
+    settings: &CommonSettings,
+    resolved: Option<String>,
+) -> Result<Option<String>, anyhow::Error> {
+    match (resolved, settings.caps.as_ref()) {
+        (Some(text), Some(_)) => {
+            gst::debug!(
+                cat,
+                "{element}: SDP transport-file set; `caps` will be cross-checked against the file's essence shape",
+            );
+            Ok(Some(text))
+        }
+        (Some(text), None) => Ok(Some(text)),
+        (None, Some(essence_caps)) => {
+            // Per-side dispatch on the IS-05 destination slot:
+            // Senders carry it as `destination_ip`, Receivers
+            // as `multicast_ip`. The single wire slot on the
+            // SDP `m=` / `c=` line is named `destination_ip`
+            // on `sdp::SdpBuildInput`.
+            let destination_ip = match settings.side {
+                Side::Sender => settings.destination_ip.as_str(),
+                Side::Receiver => settings.multicast_ip.as_str(),
+            };
+            let advertise_caps = match settings.caps_mode {
+                // Auto resolves to narrow for synthesised
+                // SDPs — the splice path can promote to wide
+                // later if `receiver-caps-mode=Wide` is set.
+                // (For synthesis we always know
+                // `caps_mode` directly, so we can apply it
+                // here without going through the splice's
+                // text-rewrite.)
+                CapsMode::Auto | CapsMode::Narrow => false,
+                CapsMode::Wide => true,
+            };
+            let input = sdp::SdpBuildInput {
+                essence_caps,
+                transport_caps: settings.transport_caps.as_ref(),
+                side: settings.side,
+                label: &settings.label,
+                description: &settings.description,
+                name: &settings.name,
+                source_ip: &settings.source_ip,
+                source_port: settings.source_port,
+                destination_ip,
+                destination_port: settings.destination_port,
+                interface_ip: &settings.interface_ip,
+                advertise_caps,
+            };
+            let text = sdp::from_caps(&input)
+                .with_context(|| format!("{element}: synthesising SDP from caps"))?;
+            gst::info!(
+                cat,
+                "{element}: synthesised SDP from `caps` (side={:?})",
+                settings.side,
+            );
+            Ok(Some(text))
         }
         (None, None) => Ok(None),
     }
@@ -1090,23 +1188,41 @@ fn resolve_inner_config_mxl(
 }
 
 /// Transport-specific setup-time work for [`Transport::Udp`] /
-/// [`Transport::Udp2`]: parse the SDP transport file (if any) and
+/// [`Transport::Udp2`]: synthesise (or pass through) an SDP via
+/// [`synthesise_or_passthrough_udp`], splice property overrides
+/// via [`sdp::splice_overrides`], parse the result via
+/// [`sdp::parse_sdp`] inside [`decide_inner_config_udp`], and
 /// package the resulting [`UdpMedia`] into a
 /// [`TransportConfig::Udp`].
 ///
-/// Unlike the MXL path, no transport-file synthesis from `caps` is
-/// attempted here — SDP synthesis for UDP senders is a separate
-/// feature (BCP-006-02-style transmitter-side SDP generation) that
-/// lands when the chain factories do. With no transport file the
-/// resolved config is [`InnerConfig::Fake`] for both sides,
-/// deferring real chain construction until an IS-05 PATCH supplies
-/// the SDP.
+/// Precedence mirrors the MXL path:
+///
+/// * Explicit `transport-file*` → passthrough (caps cross-check
+///   against the file's essence shape via
+///   [`sdp::cross_check_essence`] in [`decide_inner_config_udp`]).
+/// * `caps` only (no `transport-file*`) → synthesise an SDP from
+///   `caps` + `transport_caps` + IS-05 endpoint properties +
+///   [`sdp::defaults`] via [`sdp::from_caps`].
+/// * Neither → no SDP; [`decide_inner_config_udp`] returns
+///   [`InnerConfig::Fake`] so the element waits for an IS-05
+///   PATCH to supply everything.
+///
+/// Activation-time SDP supersedes both at PATCH time
+/// (see [`make_activation_plan`]).
 fn resolve_inner_config_udp(
+    cat: &gst::DebugCategory,
     element: &str,
     settings: &CommonSettings,
     variant: UdpVariant,
     resolved_transport_file: Option<String>,
 ) -> Result<(InnerConfig, Option<String>), anyhow::Error> {
+    // Synthesise an SDP from caps when no transport-file*
+    // is supplied; pass through the transport-file* otherwise.
+    // Mirrors `resolve_inner_config_mxl`'s
+    // `synthesise_or_passthrough_mxl` call.
+    let resolved_transport_file =
+        synthesise_or_passthrough_udp(cat, element, settings, resolved_transport_file)?;
+
     // Property-overrides splice: rewrite any user-set
     // identity / cosmetic / network properties (label,
     // description, name, IS-05 endpoints, caps_mode) into
@@ -1114,7 +1230,10 @@ fn resolve_inner_config_udp(
     // `resolve_inner_config_mxl`'s `flow_def::splice_overrides`
     // call. Activation-time SDP stays authoritative (see
     // `make_activation_plan`) — the splice runs at startup
-    // only.
+    // only. For synthesised SDPs the splice is mostly a
+    // no-op (all properties were baked in by
+    // `synthesise_or_passthrough_udp`); for passthrough SDPs
+    // the splice rewrites with property overrides.
     let resolved_transport_file = match resolved_transport_file {
         Some(text) => Some(
             sdp::splice_overrides(&text, &property_overrides_udp(settings))
@@ -1820,6 +1939,7 @@ mod tests {
     /// `Transport::NvDsUdp` is rejected before reaching either.
     mod udp_dispatch {
         use super::*;
+        use std::str::FromStr;
 
         /// Minimal valid UDP-RTP SDP for the dispatch tests. The
         /// detailed coverage of `parse_sdp`'s essence-mapping lives
@@ -2104,6 +2224,7 @@ mod tests {
                 ..udp_settings(Side::Receiver, Transport::Udp)
             };
             let (inner, spliced_text) = resolve_inner_config_udp(
+                &cat(),
                 "nmossrc",
                 &s,
                 UdpVariant::V1,
@@ -2145,23 +2266,174 @@ mod tests {
             }
         }
 
-        /// No `transport_file` supplied → splice is a no-op and
-        /// the existing deferred-fake path is preserved. Pins
-        /// that adding the splice doesn't change behaviour for
-        /// the caps-only case, which a future caps-only SDP
-        /// synthesis path will rework.
+        /// No `transport_file` and no `caps` → neither synthesis
+        /// nor splice fires; the deferred-fake path is preserved
+        /// for the "wait for IS-05 PATCH to provide everything"
+        /// case.
         #[test]
-        fn resolve_inner_config_udp_no_transport_file_remains_fake() {
+        fn resolve_inner_config_udp_no_transport_file_and_no_caps_remains_fake() {
             let s = CommonSettings {
-                // Properties set but no transport file —
-                // splice is skipped, no synth yet.
+                // IS-05 endpoint property set but no caps and no
+                // transport file — nothing to synthesise from.
                 multicast_ip: "232.0.0.1".to_owned(),
                 ..udp_settings(Side::Receiver, Transport::Udp)
             };
-            let (inner, text) =
-                resolve_inner_config_udp("nmossrc", &s, UdpVariant::V1, None).expect("no error");
-            assert!(text.is_none(), "no input → no spliced output");
+            let (inner, text) = resolve_inner_config_udp(
+                &cat(),
+                "nmossrc",
+                &s,
+                UdpVariant::V1,
+                None,
+            )
+            .expect("no error");
+            assert!(text.is_none(), "no input → no synth, no spliced output");
             assert!(matches!(inner, InnerConfig::Fake { .. }));
+        }
+
+        /// `caps` supplied but no transport_file →
+        /// `synthesise_or_passthrough_udp` builds an SDP from
+        /// caps + transport_caps + IS-05 endpoint properties.
+        /// The resolved config is now `Real`, not `Fake`.
+        #[test]
+        fn resolve_inner_config_udp_synthesises_sdp_from_caps_only() {
+            let essence = gst::Caps::from_str(
+                "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved",
+            )
+            .unwrap();
+            let s = CommonSettings {
+                caps: Some(essence),
+                multicast_ip: "232.99.99.1".to_owned(),
+                destination_port: 5004,
+                interface_ip: "192.0.2.30".to_owned(),
+                source_ip: "192.0.2.20".to_owned(),
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            let (inner, text) = resolve_inner_config_udp(
+                &cat(),
+                "nmossrc",
+                &s,
+                UdpVariant::V1,
+                None,
+            )
+            .expect("synth + splice + decide must succeed");
+            let text = text.expect("synthesised SDP must be returned");
+            assert!(text.contains("m=audio 5004 RTP/AVP 97"), "synthesised SDP:\n{text}");
+            assert!(text.contains("a=rtpmap:97 L24/48000/2"), "rtpmap:\n{text}");
+            assert!(text.contains("c=IN IP4 232.99.99.1/"), "multicast c=:\n{text}");
+            assert!(
+                text.contains("a=x-nvnmos-iface-ip:192.0.2.30"),
+                "Receiver iface-ip:\n{text}",
+            );
+            match inner {
+                InnerConfig::Real(TransportConfig::Udp { media, .. }) => {
+                    assert_eq!(media.format, FlowFormat::Audio);
+                    assert_eq!(media.primary.destination_ip, "232.99.99.1");
+                    assert_eq!(media.primary.destination_port, 5004);
+                }
+                other => panic!("expected Real(Udp) from caps-only synthesis, got {other:?}"),
+            }
+        }
+
+        /// Sender-side caps-only synthesis exercises the
+        /// per-side dispatch: `destination_ip` flows from
+        /// `settings.destination_ip` (not `multicast_ip`) and
+        /// `source_ip` duplicates into the SDP's
+        /// `a=x-nvnmos-iface-ip` slot via
+        /// `udp_leg_from_input`.
+        #[test]
+        fn resolve_inner_config_udp_sender_caps_only_synthesis() {
+            let essence = gst::Caps::from_str(
+                "video/x-raw,format=UYVP,width=1920,height=1080,\
+                 framerate=50/1,interlace-mode=progressive",
+            )
+            .unwrap();
+            let s = CommonSettings {
+                caps: Some(essence),
+                destination_ip: "239.99.99.1".to_owned(),
+                destination_port: 5008,
+                source_ip: "192.0.2.10".to_owned(),
+                source_port: 5008,
+                ..udp_settings(Side::Sender, Transport::Udp)
+            };
+            let (inner, text) = resolve_inner_config_udp(
+                &cat(),
+                "nmossink",
+                &s,
+                UdpVariant::V1,
+                None,
+            )
+            .expect("synth + splice + decide must succeed");
+            let text = text.expect("synthesised SDP");
+            assert!(text.contains("m=video 5008 RTP/AVP 96"), "Sender SDP:\n{text}");
+            assert!(text.contains("c=IN IP4 239.99.99.1/"), "Sender c=:\n{text}");
+            assert!(
+                text.contains("a=source-filter: incl IN IP4 239.99.99.1 192.0.2.10"),
+                "Sender source-filter:\n{text}",
+            );
+            assert!(
+                text.contains("a=x-nvnmos-iface-ip:192.0.2.10"),
+                "Sender iface-ip duplicates source_ip:\n{text}",
+            );
+            assert!(matches!(inner, InnerConfig::Real(_)));
+        }
+
+        /// `caps` and an explicit `transport-file*` both present
+        /// → the explicit file's *essence shape* (encoding-name +
+        /// clock-rate) survives even though caps could have
+        /// synthesised an L16 SDP if the passthrough path
+        /// hadn't taken over. Pins the precedence rule
+        /// "transport-file > caps synthesis at startup". The
+        /// destination address is then rewritten by the splice
+        /// (per `multicast_ip` property), which is a separate
+        /// layer that runs after passthrough.
+        #[test]
+        fn resolve_inner_config_udp_transport_file_beats_caps_synthesis() {
+            const AUDIO_L24_SDP: &str = concat!(
+                "v=0\r\n",
+                "o=- 1 0 IN IP4 192.0.2.10\r\n",
+                "s=Example\r\n",
+                "t=0 0\r\n",
+                "m=audio 5004 RTP/AVP 97\r\n",
+                "c=IN IP4 239.2.2.2/64\r\n",
+                "a=rtpmap:97 L24/48000/2\r\n",
+            );
+            // S24BE caps matches the passthrough SDP's L24
+            // encoding; if synthesis had run, the resulting
+            // SDP would have inherited the same shape — so
+            // the encoding-name alone can't tell us which
+            // path executed. The differentiator is the
+            // `a=fmtp:` line: synthesised SDPs emit
+            // `pm=2110GPM,ssn=ST2110-20:2017` on the fmtp
+            // line (because `rtp_caps_from_raw_video` always
+            // emits these defaults), but a passthrough SDP
+            // missing those slots stays missing them.
+            let essence = gst::Caps::builder("audio/x-raw")
+                .field("format", "S24BE")
+                .field("rate", 48_000_i32)
+                .field("channels", 2_i32)
+                .field("layout", "interleaved")
+                .build();
+            let s = CommonSettings {
+                caps: Some(essence),
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            let (_, text) = resolve_inner_config_udp(
+                &cat(),
+                "nmossrc",
+                &s,
+                UdpVariant::V1,
+                Some(AUDIO_L24_SDP.to_owned()),
+            )
+            .expect("passthrough must succeed");
+            let text = text.expect("transport_file passthrough");
+            // The passthrough SDP carries no `a=ptime:` line;
+            // synthesis would have emitted one (with
+            // `defaults::AUDIO_PTIME_NS` = 1ms). Absence pins
+            // that the synth path didn't execute.
+            assert!(
+                !text.contains("a=ptime"),
+                "synthesis would have emitted a=ptime:1 — but passthrough wins:\n{text}",
+            );
         }
 
         /// `transport-caps` carries the RTP payload-type
@@ -2252,6 +2524,7 @@ mod tests {
                 ..udp_settings(Side::Receiver, Transport::Udp)
             };
             let (_, spliced) = resolve_inner_config_udp(
+                &cat(),
                 "nmossrc",
                 &s,
                 UdpVariant::V1,
@@ -2295,6 +2568,7 @@ mod tests {
                 ..udp_settings(Side::Receiver, Transport::Udp)
             };
             let err = resolve_inner_config_udp(
+                &cat(),
                 "nmossrc",
                 &s,
                 UdpVariant::V1,

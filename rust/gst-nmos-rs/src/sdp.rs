@@ -86,13 +86,14 @@ use crate::types::{CapsMode, FlowFormat};
 /// Activation SDP supersedes Layers 1 + 2 at activation time.
 /// ```
 ///
-/// Each constant is currently consumed only by tests + the
-/// `MULTICAST_TTL` consumer in [`build_sdp`]; the
-/// `cfg_attr(not(test), allow(dead_code))` gate covers the
-/// rest until `synthesise_or_passthrough_udp` is wired up
-/// (mirrors the same pattern on
-/// [`SdpSession`] / [`SdpOverrides`]).
-#[cfg_attr(not(test), allow(dead_code))]
+/// Each constant is consumed somewhere in the synthesis
+/// stack: [`MULTICAST_TTL`](self::defaults::MULTICAST_TTL) by
+/// [`build_sdp`], the per-essence payload-type constants by
+/// [`resolve_payload_type`], [`AUDIO_PTIME_NS`](self::defaults::AUDIO_PTIME_NS)
+/// by [`resolve_audio_ptime`], [`RTP_PORT`](self::defaults::RTP_PORT)
+/// by [`udp_leg_from_input`], [`ORIGIN_ADDRESS`](self::defaults::ORIGIN_ADDRESS)
+/// by [`from_caps`], and the video / ANC constants by
+/// [`rtp_caps_from_raw_video`] / [`rtp_caps_from_raw_data`].
 pub(crate) mod defaults {
     /// Default RTP payload type for `video/x-raw` (RFC 4175,
     /// ST 2110-20). Matches the nmos-cpp default.
@@ -242,7 +243,6 @@ pub(crate) enum SdpError {
 /// `i=` (session information) and session-level `a=` attributes
 /// (e.g. `a=group:DUP` for ST 2022-7) will land here when the
 /// integration path needs them.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SdpSession<'a> {
     /// `o=` line `<unicast-address>` slot (RFC 4566 §5.2). For
@@ -507,7 +507,6 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
 /// a=x-nvnmos-src-port:<source_port>                           ← if source_port
 /// a=x-nvnmos-caps:<pt>                                        ← if session.advertise_caps
 /// ```
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<String, SdpError> {
     let mut msg = SDPMessage::new();
     msg.set_version("0");
@@ -660,7 +659,6 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
 /// "explicit override to empty/zero" follows the MXL convention:
 /// callers map empty GObject string properties to `None` before
 /// constructing the struct.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct SdpOverrides<'a> {
     pub label: Option<&'a str>,
@@ -737,7 +735,6 @@ pub(crate) struct SdpOverrides<'a> {
 /// Single-media SDPs only today. ST 2022-7 redundancy inputs
 /// (`m=` block twice) bubble back as
 /// [`SdpError::MultipleMedia`] from [`parse_sdp`].
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn splice_overrides(
     text: &str,
     overrides: &SdpOverrides<'_>,
@@ -1044,7 +1041,6 @@ fn cross_check_transport_caps(media: &UdpMedia, transport_caps: &gst::Caps) -> R
 /// * Sender: unused — Senders re-use `source_ip` as the egress
 ///   NIC, so `interface_ip` should be empty.
 /// * Receiver: the IGMP join NIC — `nmossrc`'s `interface-ip`.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SdpBuildInput<'a> {
     /// Essence caps (`video/x-raw,…` / `audio/x-raw,…` /
@@ -1124,7 +1120,6 @@ pub(crate) struct SdpBuildInput<'a> {
 /// is not one of the recognised essence shapes, or
 /// [`SdpError::InvalidPayloadType`] when `transport_caps` carries
 /// a payload-type outside RFC 3551's dynamic range.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
     let format = essence_caps_format(input.essence_caps).ok_or_else(|| {
         SdpError::UnsupportedEssence(format!("essence caps `{}`", input.essence_caps))
@@ -1198,7 +1193,6 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
 /// when outside RFC 3551 §6's dynamic range (`96..=127`),
 /// matching [`splice_overrides`]'s validation on the splice
 /// path.
-#[cfg_attr(not(test), allow(dead_code))]
 fn resolve_payload_type(
     format: FlowFormat,
     transport_caps: Option<&gst::Caps>,
@@ -1231,7 +1225,6 @@ fn resolve_payload_type(
 /// (`"1"`, `"0.125"`, `"4"`, …); unparseable values fall
 /// back to the default rather than erroring, mirroring the
 /// splice path's tolerance.
-#[cfg_attr(not(test), allow(dead_code))]
 fn resolve_audio_ptime(transport_caps: Option<&gst::Caps>) -> (u64, Option<u64>) {
     let mut ptime_ns = defaults::AUDIO_PTIME_NS;
     let mut maxptime_ns = None;
@@ -1254,7 +1247,6 @@ fn resolve_audio_ptime(transport_caps: Option<&gst::Caps>) -> (u64, Option<u64>)
 /// milliseconds) into nanoseconds. Inverse of
 /// [`format_ptime_ns_as_ms`]; returns `None` for empty /
 /// non-numeric strings.
-#[cfg_attr(not(test), allow(dead_code))]
 fn parse_ptime_ms_as_ns(value: &str) -> Option<u64> {
     let v = value.trim();
     if v.is_empty() {
@@ -1282,7 +1274,6 @@ fn parse_ptime_ms_as_ns(value: &str) -> Option<u64> {
 /// (especially [`rtp_caps_from_raw_audio`]) sees the overridden
 /// rate on `essence_caps` and emits matching `clock-rate=` /
 /// `rate=` on the produced caps.
-#[cfg_attr(not(test), allow(dead_code))]
 fn resolved_audio_caps(
     essence_caps: &gst::Caps,
     transport_caps: Option<&gst::Caps>,
@@ -1310,7 +1301,6 @@ fn resolved_audio_caps(
 /// [`crate::session::property_overrides_udp`]'s per-side
 /// dispatch so the splice (parse + override) and synthesise
 /// paths populate `UdpLeg` identically.
-#[cfg_attr(not(test), allow(dead_code))]
 fn udp_leg_from_input(input: &SdpBuildInput<'_>) -> UdpLeg {
     let destination_port = if input.destination_port == 0 {
         defaults::RTP_PORT
@@ -1471,7 +1461,6 @@ fn caps_colorimetry_from_sdp(sdp: &str, depth: u32, tcs: Option<&str>) -> Option
 /// presets return `None`, leaving the SDP without explicit
 /// `colorimetry=` / `TCS=` parameters; standards-compliant
 /// receivers then fall back to ST 2110-20's "unspecified" entry.
-#[cfg_attr(not(test), allow(dead_code))]
 fn sdp_colorimetry_from_caps(caps_colorimetry: &str) -> Option<(&'static str, Option<&'static str>)> {
     match caps_colorimetry {
         "bt601" => Some(("BT601", None)),
@@ -1746,7 +1735,6 @@ fn parse_exact_framerate(value: &str) -> Option<(u32, u32)> {
 /// [`parse_exact_framerate`]: integer rates (`den == 1`) are
 /// emitted bare (`"50"`), and rationals as `"<num>/<den>"`
 /// (`"30000/1001"`).
-#[cfg_attr(not(test), allow(dead_code))]
 fn format_exact_framerate(num: u32, den: u32) -> String {
     if den == 1 {
         format!("{num}")
@@ -1766,7 +1754,6 @@ fn format_exact_framerate(num: u32, den: u32) -> String {
 /// "integer when whole, decimal otherwise" pattern; receivers
 /// in the wild handle both forms because RFC 4566 §6 defines
 /// the value as `<integer> | <floating-point>`.
-#[cfg_attr(not(test), allow(dead_code))]
 fn format_ptime_ns_as_ms(ns: u64) -> String {
     if ns % 1_000_000 == 0 {
         format!("{}", ns / 1_000_000)
@@ -1805,7 +1792,6 @@ fn format_ptime_ns_as_ms(ns: u64) -> String {
 /// outside the {`UYVY`, `UYVP`} subset [`raw_caps_from_rtp_video`]
 /// understands today; widening the matrix here without widening
 /// the inverse first would break the round-trip contract.
-#[cfg_attr(not(test), allow(dead_code))]
 fn rtp_caps_from_raw_video(raw_caps: &gst::Caps, payload_type: u8) -> Result<gst::Caps, SdpError> {
     let s = raw_caps
         .structure(0)
@@ -1891,7 +1877,6 @@ fn rtp_caps_from_raw_video(raw_caps: &gst::Caps, payload_type: u8) -> Result<gst
 /// Returns [`SdpError::UnsupportedEssence`] for `format=` values
 /// outside ST 2110-30's {`S16BE`, `S24BE`} restriction. RFC 3551
 /// L8, μ-law, A-law, etc. are out of scope.
-#[cfg_attr(not(test), allow(dead_code))]
 fn rtp_caps_from_raw_audio(
     raw_caps: &gst::Caps,
     payload_type: u8,
@@ -1957,7 +1942,6 @@ fn rtp_caps_from_raw_audio(
 /// wants ANC clocked to a specific video frame rate) and
 /// omitted otherwise — RFC 8331 / ST 2110-40 §6.4 makes the
 /// parameter optional and the depayloader does not require it.
-#[cfg_attr(not(test), allow(dead_code))]
 fn rtp_caps_from_raw_data(raw_caps: &gst::Caps, payload_type: u8) -> Result<gst::Caps, SdpError> {
     let s = raw_caps
         .structure(0)
@@ -1999,8 +1983,8 @@ mod tests {
     // should change only when nmos-cpp's matching constant
     // changes. The tests are deliberately literal — they
     // exist to trip CI if a constant is bumped accidentally
-    // (which would otherwise propagate silently through
-    // `synthesise_or_passthrough_udp` once it's wired up).
+    // (which would otherwise propagate silently through the
+    // synthesis stack).
 
     #[test]
     fn defaults_payload_types_are_in_rfc_3551_dynamic_range() {

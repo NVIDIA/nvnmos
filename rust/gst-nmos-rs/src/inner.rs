@@ -669,11 +669,13 @@ pub(crate) fn build_mxlsrc(
 /// `application/x-rtp` src caps are consumed only by `udpsink`,
 /// which doesn't care about anything beyond
 /// `application/x-rtp`. The only scenario where wire-caps gaps
-/// matter is the pending caps-only SDP synthesis path, where
-/// `build_sdp` will read the app's **input** caps to nmossink
-/// (which carry full GStreamer colorimetry including range,
-/// framerate, etc.) rather than the payloader output. So
-/// nothing to capssetter-fix here.
+/// would matter is the caps-only SDP synthesis path: there
+/// [`crate::sdp::from_caps`] reads the app's **input** caps to
+/// `nmossink` (which carry full GStreamer colorimetry including
+/// range, framerate, etc.) rather than the payloader output,
+/// and `rtp_caps_from_raw_video` synthesises a self-consistent
+/// `application/x-rtp` view of those caps. So nothing to
+/// capssetter-fix here.
 pub(crate) fn build_udpsink(
     media: &UdpMedia,
     variant: UdpVariant,
