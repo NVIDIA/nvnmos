@@ -134,7 +134,7 @@ pub(crate) struct SdpSession<'a> {
     /// path as `flow_def`'s `description` tag in
     /// [`crate::flow_def::FlowDefOverrides`].
     pub description: Option<&'a str>,
-    /// Media-level `a=x-nvnmos-name:` value (the nvds-nmos
+    /// Session-level `a=x-nvnmos-name:` value (the nvds-nmos
     /// vendor attribute that carries the NMOS Sender / Receiver
     /// `name`, distinct from the SDP-level `s=` session name).
     /// `None` suppresses the attribute entirely. Splices in via
@@ -145,6 +145,18 @@ pub(crate) struct SdpSession<'a> {
     /// in the equivalent `tags["urn:x-nvnmos:tag:name"]` slot in
     /// the MXL flow_def JSON) so the two transport paths read
     /// the same.
+    ///
+    /// Placement note: `nvnmos.h` documents this as a
+    /// *session-level* attribute (see header lines 165, 341,
+    /// 391) and libnvnmos's parser
+    /// (`get_session_description_resource_name` in
+    /// `nvnmos_impl.cpp:1687-1701`) reads it exclusively from
+    /// `session_attributes`. Earlier revisions of this module
+    /// emitted it at media level, which the daemon ignored
+    /// silently because the gRPC `AddSender` / `AddReceiver`
+    /// path carries the resource name as a separate proto
+    /// field; SDP-only entry points would have failed with
+    /// "Missing or empty x-nvnmos-name attribute in SDP".
     pub name: Option<&'a str>,
 }
 
@@ -299,7 +311,9 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
 /// v=0
 /// o=nvnmos <session.origin_session_id> 0 IN IP4 <session.origin_address>
 /// s=<session.session_name>
+/// i=<session.description>                                     ← if Some
 /// t=0 0
+/// a=x-nvnmos-name:<session.name>                              ← if Some (session-level)
 /// m=<media> <destination_port> RTP/AVP <pt>
 /// c=IN IP4 <destination_ip>/64
 /// a=rtpmap:<pt> ...      ← from `set_media_from_caps`
@@ -325,6 +339,16 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
         session.origin_address,
     );
 
+    // Session-level `a=x-nvnmos-name:` — placement per
+    // `nvnmos.h` and the daemon's own SDP synthesis at
+    // `nvnmos_impl.cpp:1536` (`push_back(session_attributes, ...)`).
+    // libnvnmos's `get_session_description_resource_name` reads
+    // exclusively from `session_attributes`, so a media-level
+    // emission would be invisible to SDP-only entry points.
+    if let Some(name) = session.name {
+        msg.add_attribute("x-nvnmos-name", Some(name));
+    }
+
     let leg = &media.primary;
     let mut m = SDPMedia::new();
     m.set_proto("RTP/AVP");
@@ -337,15 +361,12 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     m.set_media_from_caps(&media.rtp_caps)
         .map_err(|e| SdpError::BuildMediaFromCaps(e.to_string()))?;
 
-    // Attribute order matches the canonical configuring-SDP order
-    // emitted by `nvds_nmos_bin::sdp_from_caps`:
-    //   a=x-nvnmos-name (resource name)
+    // Media-level attribute order matches the canonical
+    // configuring-SDP order emitted by
+    // `nvds_nmos_bin::sdp_from_caps` for the slots it covers:
     //   a=source-filter (RFC 4607 SSM include)
     //   a=x-nvnmos-iface-ip (egress / join NIC IP)
     //   a=x-nvnmos-src-port (sender RTP source port)
-    if let Some(name) = session.name {
-        m.add_attribute("x-nvnmos-name", Some(name));
-    }
     if let Some(src) = leg.source_ip.as_deref() {
         let value = format!(" incl IN IP4 {dest} {src}", dest = leg.destination_ip);
         m.add_attribute("source-filter", Some(&value));
@@ -370,7 +391,7 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
 /// * Top-level descriptors (`label`, `description`, `name`) cover
 ///   the NMOS Sender / Receiver resource metadata that also lands
 ///   in the IS-04 publication. `label` ↔ `s=`, `description` ↔
-///   `i=`, `name` ↔ media-level `a=x-nvnmos-name` (the
+///   `i=`, `name` ↔ session-level `a=x-nvnmos-name` (the
 ///   nvds-nmos vendor attribute that carries the NMOS resource
 ///   `name`, distinct from `label`).
 /// * IS-05 RTP transport_params slots (`interface_ip`,
@@ -430,7 +451,7 @@ pub(crate) fn splice_overrides(
     overrides: &SdpOverrides<'_>,
 ) -> Result<String, SdpError> {
     // First pass: capture session-level fields that `parse_sdp`
-    // doesn't surface on [`UdpMedia`] (`o=`, `s=`, `i=`, media-
+    // doesn't surface on [`UdpMedia`] (`o=`, `s=`, `i=`, session-
     // level `a=x-nvnmos-name`). We need owned strings because
     // [`SdpSession`] takes borrows and the parsed `SDPMessage`
     // would otherwise be dropped before [`build_sdp`] runs.
@@ -447,9 +468,7 @@ pub(crate) fn splice_overrides(
             )
         })
         .unwrap_or_else(|| (String::new(), "0".to_owned()));
-    let original_name = msg
-        .media(0)
-        .and_then(|m| m.attribute_val("x-nvnmos-name").map(str::to_owned));
+    let original_name = msg.attribute_val("x-nvnmos-name").map(str::to_owned);
 
     // Second pass: parse into our [`UdpMedia`] model so the
     // existing [`build_sdp`] re-emits `m=` / `c=` / fmtp / etc.
@@ -1540,15 +1559,36 @@ mod tests {
     #[test]
     fn splice_overrides_name_replaces_x_nvnmos_name() {
         init_gst();
-        // The fixture has no `a=x-nvnmos-name`; splice should add one.
+        // The fixture has no `a=x-nvnmos-name`; splice should add one
+        // *at the session level* (per `nvnmos.h` and what
+        // libnvnmos's parser reads). Asserts both:
+        //   1. `msg.attribute_val("x-nvnmos-name")` (session-level
+        //      query) returns the spliced value.
+        //   2. The line appears before the first `m=` in the
+        //      serialised text — guards against the placement
+        //      regression that earlier emitted it at media level.
         let spliced = splice_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides { name: Some("Camera 1"), ..Default::default() },
         )
         .expect("splice");
         let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse");
-        let media = msg.media(0).expect("media");
-        assert_eq!(media.attribute_val("x-nvnmos-name").unwrap(), "Camera 1");
+        assert_eq!(
+            msg.attribute_val("x-nvnmos-name"),
+            Some("Camera 1"),
+            "x-nvnmos-name must be readable at session level: {spliced}",
+        );
+        let name_pos = spliced
+            .find("a=x-nvnmos-name:")
+            .expect("a=x-nvnmos-name: line must be present");
+        let media_pos = spliced
+            .find("\r\nm=")
+            .expect("m= line must be present");
+        assert!(
+            name_pos < media_pos,
+            "a=x-nvnmos-name (offset {name_pos}) must appear before first m= (offset {media_pos}); \
+             session-level attributes precede the first media section per RFC 4566 §5: {spliced}",
+        );
     }
 
     #[test]
