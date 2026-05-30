@@ -83,10 +83,34 @@ DEMO_TRANSPORT=${DEMO_TRANSPORT:-mxl}
 # `interface-ip` (the IGMP-join interface, resolved to an iface name
 # for `udpsrc.multicast-iface`) and the sender's `source-ip`
 # (`udpsink.bind-address` plus the SDP `a=source-filter:`
-# include-source). Ignored when DEMO_TRANSPORT=mxl. Defaults to
-# `127.0.0.1` (loopback iface, multicast-capable on Linux): override
-# to a real NIC IP for cross-host runs.
-DEMO_NIC_IP=${DEMO_NIC_IP:-127.0.0.1}
+# include-source). Ignored when DEMO_TRANSPORT=mxl. Defaults to the
+# host's first non-loopback IPv4 address (typically `eth0` on
+# WSL / Docker; the primary physical NIC otherwise). libnvnmos
+# walks the host's iface list and skips `lo` when resolving the
+# SDP `a=x-nvnmos-iface-ip` attribute back to an iface, so anything
+# assigned to the loopback iface is rejected — including non-127.x
+# global-scope IPs like WSL2's quirky `10.255.255.254/32` on `lo`.
+_default_nic_ip() {
+    local addr
+    if command -v ip >/dev/null 2>&1; then
+        # `ip -4 -o addr show` prints one line per address; column
+        # 2 is the iface name, column 4 is the CIDR. Skip the
+        # loopback iface explicitly (WSL2 can land a global-scope
+        # IP on `lo`, so `scope global` alone isn't sufficient) and
+        # take the first surviving address.
+        addr=$(ip -4 -o addr show 2>/dev/null \
+            | awk '$2 != "lo" {print $4; exit}' \
+            | cut -d/ -f1)
+    fi
+    if [[ -z "${addr:-}" ]]; then
+        # Fallback: `hostname -I` (space-separated list, already
+        # excludes 127.0.0.1 by `hostname(1)` convention). Safety
+        # net for systems with iproute2 deinstalled / replaced.
+        addr=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    echo "${addr:-127.0.0.1}"
+}
+DEMO_NIC_IP=${DEMO_NIC_IP:-$(_default_nic_ip)}
 
 # Resolve the script's own directory so `REPO` works in any checkout
 # without an env override. Layout assumed: <repo>/rust/gst-nmos-rs/scripts/
@@ -127,14 +151,25 @@ NODE3_SEED=demo-node3; NODE3_PORT=18031
 # Per-flow identity. Each Flow has a transport-specific identifier
 # used to wire Senders to their Receiver counterparts:
 #   MXL:  `mxl-flow-id` (UUID), shared between sender + matching receivers.
-#   UDP:  destination multicast group + port (commit B), reachable by
-#         any receiver that joins the group on `DEMO_NIC_IP`.
-# The MXL ids stay stable here so the printed curl recipes are
-# deterministic; the UDP groups land in commit B.
+#   UDP:  destination multicast group + port, joined by any receiver
+#         that wants to subscribe.
+# The MXL ids and UDP groups / ports stay stable here so the printed
+# curl recipes are deterministic.
 FLOW_VIDEO_NODE1=11111111-aaaa-1111-aaaa-111111111111
 FLOW_AUDIO_NODE1=11111111-bbbb-1111-bbbb-111111111111
 FLOW_VIDEO_NODE3=33333333-aaaa-3333-aaaa-333333333333
 FLOW_AUDIO_NODE3=33333333-bbbb-3333-bbbb-333333333333
+
+# UDP multicast groups + ports, one per flow. Picked from the
+# AD-HOC III administratively-scoped block (232.0.0.0/8 — SSM)
+# so they don't collide with any well-known group. Per-flow ports
+# (rather than a single 5004 across the board) keep wireshark /
+# tcpdump filters one-line and make per-flow log lines easy to
+# tell apart.
+FLOW_VIDEO1_GROUP=232.99.99.1;     FLOW_VIDEO1_PORT=5004
+FLOW_AUDIO1_GROUP=232.99.99.2;     FLOW_AUDIO1_PORT=5006
+FLOW_VIDEO_OUT_GROUP=232.99.99.3;  FLOW_VIDEO_OUT_PORT=5008
+FLOW_AUDIO_OUT_GROUP=232.99.99.4;  FLOW_AUDIO_OUT_PORT=5010
 
 # Essence caps. Chosen per transport because each transport has its
 # own GStreamer raw-format vocabulary in this plugin:
@@ -143,15 +178,16 @@ FLOW_AUDIO_NODE3=33333333-bbbb-3333-bbbb-333333333333
 #   UDP: UYVY (8-bit 4:2:2 video) + S24BE (L24 audio) per the
 #        rtpvrawdepay / rtpL24depay common case. Resolution is
 #        smaller for UDP so a multicast loopback run stays well
-#        below 1 Gbps. Filled in for the UDP path in commit B.
+#        below 1 Gbps (UYVY 1280x720@25 ≈ 368 Mbps; UYVY 192x108@25
+#        ≈ 8 Mbps).
 case "$DEMO_TRANSPORT" in
     mxl)
         VIDEO_CAPS='video/x-raw,format=v210,width=1920,height=1080,framerate=60000/1001,interlace-mode=progressive'
         AUDIO_CAPS='audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved'
         ;;
     udp|udp2)
-        echo "[error] DEMO_TRANSPORT=$DEMO_TRANSPORT is not wired up yet — landing in the follow-up commit."
-        exit 1
+        VIDEO_CAPS='video/x-raw,format=UYVY,width=1280,height=720,framerate=25/1,interlace-mode=progressive'
+        AUDIO_CAPS='audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved'
         ;;
     *)
         echo "[error] DEMO_TRANSPORT=$DEMO_TRANSPORT not recognised; use one of mxl, udp, udp2"
@@ -170,15 +206,14 @@ esac
 # is enough for the daemon to wire a Sender to its matching Receivers.
 # On UDP the sender side emits `destination-ip` / `destination-port`
 # / `source-ip`, the receiver side emits `multicast-ip` /
-# `destination-port` / `interface-ip` / `source-ip` (lands in
-# commit B).
+# `destination-port` / `interface-ip` / `source-ip`.
 #
 # Output is one space-separated string. The caller inlines it via
 # unquoted command substitution so bash word-splits it into individual
 # `key=value` tokens for gst-launch.
 transport_sender_props() {
     local flow=$1
-    local flow_id=
+    local flow_id= group= port=
     case "$DEMO_TRANSPORT" in
         mxl)
             case "$flow" in
@@ -192,21 +227,46 @@ transport_sender_props() {
                 "$MXL_DOMAIN_ID" "$MXL_DOMAIN_PATH" "$flow_id"
             ;;
         udp|udp2)
-            echo "[error] transport_sender_props: udp/udp2 lands in the follow-up commit" >&2
-            return 1
+            case "$flow" in
+                video1)     group=$FLOW_VIDEO1_GROUP;     port=$FLOW_VIDEO1_PORT ;;
+                audio1)     group=$FLOW_AUDIO1_GROUP;     port=$FLOW_AUDIO1_PORT ;;
+                video-out)  group=$FLOW_VIDEO_OUT_GROUP;  port=$FLOW_VIDEO_OUT_PORT ;;
+                audio-out)  group=$FLOW_AUDIO_OUT_GROUP;  port=$FLOW_AUDIO_OUT_PORT ;;
+                *) echo "[error] transport_sender_props: unknown flow $flow" >&2; return 1 ;;
+            esac
+            # Sender-side IS-05 endpoint properties: destination = the
+            # multicast group this flow lands on; source-ip = the local
+            # NIC the egress packets leave on (drives udpsink.bind-address
+            # and the SDP `a=source-filter:` include-source).
+            printf 'destination-ip=%s destination-port=%d source-ip=%s' \
+                "$group" "$port" "$DEMO_NIC_IP"
             ;;
     esac
 }
 
 transport_receiver_props() {
     local flow=$1
+    local group= port=
     case "$DEMO_TRANSPORT" in
         mxl)
             transport_sender_props "$flow"
             ;;
         udp|udp2)
-            echo "[error] transport_receiver_props: udp/udp2 lands in the follow-up commit" >&2
-            return 1
+            case "$flow" in
+                video1)     group=$FLOW_VIDEO1_GROUP;     port=$FLOW_VIDEO1_PORT ;;
+                audio1)     group=$FLOW_AUDIO1_GROUP;     port=$FLOW_AUDIO1_PORT ;;
+                video-out)  group=$FLOW_VIDEO_OUT_GROUP;  port=$FLOW_VIDEO_OUT_PORT ;;
+                audio-out)  group=$FLOW_AUDIO_OUT_GROUP;  port=$FLOW_AUDIO_OUT_PORT ;;
+                *) echo "[error] transport_receiver_props: unknown flow $flow" >&2; return 1 ;;
+            esac
+            # Receiver-side IS-05 endpoint properties: multicast-ip =
+            # the group to JOIN; interface-ip = the local NIC the join
+            # is issued on (resolved to an iface name for
+            # udpsrc.multicast-iface); source-ip = SSM include-source
+            # (the sender's egress NIC, set equal to interface-ip in
+            # the demo since all four senders live on this host).
+            printf 'multicast-ip=%s destination-port=%d interface-ip=%s source-ip=%s' \
+                "$group" "$port" "$DEMO_NIC_IP" "$DEMO_NIC_IP"
             ;;
     esac
 }
@@ -219,9 +279,9 @@ transport_receiver_props() {
 #         differ slightly across sides on RTP transports).
 #   body: the raw JSON returned by /active.
 # Output examples:
-#   MXL:                     `flow=11111111-aaaa-1111-aaaa-111111111111`
-#   UDP sender (commit B):   `dest=232.99.99.1:5004`
-#   UDP receiver (commit B): `join=232.99.99.1:5004`
+#   MXL:          `flow=11111111-aaaa-1111-aaaa-111111111111`
+#   UDP sender:   `dest=232.99.99.1:5004`
+#   UDP receiver: `join=232.99.99.1:5004`
 transport_identity_from_active() {
     local side=$1 body=$2
     case "$DEMO_TRANSPORT" in
@@ -231,7 +291,22 @@ transport_identity_from_active() {
             printf 'flow=%s' "$flow"
             ;;
         udp|udp2)
-            printf 'flow=(udp identity print lands in commit B)'
+            local addr port
+            case "$side" in
+                sender)
+                    addr=$(jq -r '.transport_params[0].destination_ip // "n/a"' <<< "$body" 2>/dev/null)
+                    port=$(jq -r '.transport_params[0].destination_port // "n/a"' <<< "$body" 2>/dev/null)
+                    printf 'dest=%s:%s' "$addr" "$port"
+                    ;;
+                receiver)
+                    addr=$(jq -r '.transport_params[0].multicast_ip // "n/a"' <<< "$body" 2>/dev/null)
+                    port=$(jq -r '.transport_params[0].destination_port // "n/a"' <<< "$body" 2>/dev/null)
+                    printf 'join=%s:%s' "$addr" "$port"
+                    ;;
+                *)
+                    printf 'unknown-side=%s' "$side"
+                    ;;
+            esac
             ;;
     esac
 }
@@ -788,23 +863,53 @@ URL_NODE3_RECEIVER_AUDIO=${URLS[node3_receiver_audio]:-}
 URL_NODE3_SENDER_VIDEO=${URLS[node3_sender_video]:-}
 URL_NODE3_SENDER_AUDIO=${URLS[node3_sender_audio]:-}
 
+# ---- Per-transport heredoc substitutions --------------------------
+#
+# Pre-compute transport-keyed labels + PATCH bodies for the friendly
+# summary heredoc and the example PATCHes that follow it. Keeping
+# this here (rather than in the heredoc itself) keeps the heredoc a
+# single substitution-only block and lets the conditional logic stay
+# in one place. Both transports define every variable in this block.
+case "$DEMO_TRANSPORT" in
+    mxl)
+        LABEL_FLOW_VIDEO1="flow $FLOW_VIDEO_NODE1"
+        LABEL_FLOW_AUDIO1="flow $FLOW_AUDIO_NODE1"
+        LABEL_FLOW_VIDEO_OUT="flow $FLOW_VIDEO_NODE3"
+        LABEL_FLOW_AUDIO_OUT="flow $FLOW_AUDIO_NODE3"
+        LABEL_INNER_CHAIN="mxlsink / mxlsrc"
+        LABEL_PREWIRED="via mxl-flow-id"
+        REROUTE_VIDEO_BODY="{\"transport_params\": [{\"mxl_flow_id\": \"$FLOW_VIDEO_NODE3\"}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
+        REROUTE_AUDIO_BODY="{\"transport_params\": [{\"mxl_flow_id\": \"$FLOW_AUDIO_NODE3\"}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
+        ;;
+    udp|udp2)
+        LABEL_FLOW_VIDEO1="dest $FLOW_VIDEO1_GROUP:$FLOW_VIDEO1_PORT"
+        LABEL_FLOW_AUDIO1="dest $FLOW_AUDIO1_GROUP:$FLOW_AUDIO1_PORT"
+        LABEL_FLOW_VIDEO_OUT="dest $FLOW_VIDEO_OUT_GROUP:$FLOW_VIDEO_OUT_PORT"
+        LABEL_FLOW_AUDIO_OUT="dest $FLOW_AUDIO_OUT_GROUP:$FLOW_AUDIO_OUT_PORT"
+        LABEL_INNER_CHAIN="udpsink + RTP payloader / udpsrc + RTP depayloader"
+        LABEL_PREWIRED="via destination multicast group + port (interface $DEMO_NIC_IP)"
+        REROUTE_VIDEO_BODY="{\"transport_params\": [{\"source_ip\": \"$DEMO_NIC_IP\", \"multicast_ip\": \"$FLOW_VIDEO_OUT_GROUP\", \"interface_ip\": \"$DEMO_NIC_IP\", \"destination_port\": $FLOW_VIDEO_OUT_PORT, \"rtp_enabled\": true}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
+        REROUTE_AUDIO_BODY="{\"transport_params\": [{\"source_ip\": \"$DEMO_NIC_IP\", \"multicast_ip\": \"$FLOW_AUDIO_OUT_GROUP\", \"interface_ip\": \"$DEMO_NIC_IP\", \"destination_port\": $FLOW_AUDIO_OUT_PORT, \"rtp_enabled\": true}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
+        ;;
+esac
+
 # ---- Friendly summary ---------------------------------------------
 
 cat <<EOF
 
 ================================================================
-gst-nmos-rs three-Node interactive demo
+gst-nmos-rs three-Node interactive demo  (transport=$DEMO_TRANSPORT)
 ================================================================
 
 Topology:
 
   Node 1 (port $NODE1_PORT, seed $NODE1_SEED)  -- producer
-    audiotestsrc(440Hz)  -> nmossink Sender audio1 (flow $FLOW_AUDIO_NODE1)
-    videotestsrc(smpte)  -> nmossink Sender video1 (flow $FLOW_VIDEO_NODE1)
+    audiotestsrc(440Hz)  -> nmossink Sender audio1 ($LABEL_FLOW_AUDIO1)
+    videotestsrc(smpte)  -> nmossink Sender video1 ($LABEL_FLOW_VIDEO1)
 
   Node 3 (port $NODE3_PORT, seed $NODE3_SEED)  -- processor (two gst processes)
-    Receiver audio-in  --(volume 0.3)-->          Sender audio-out (flow $FLOW_AUDIO_NODE3)
-    Receiver video-in  --(videoflip h-flip)-->   Sender video-out (flow $FLOW_VIDEO_NODE3)
+    Receiver audio-in  --(volume 0.3)-->          Sender audio-out ($LABEL_FLOW_AUDIO_OUT)
+    Receiver video-in  --(videoflip h-flip)-->   Sender video-out ($LABEL_FLOW_VIDEO_OUT)
 
   Node 2 (port $NODE2_PORT, seed $NODE2_SEED)  -- consumer
     Receiver audio2  -> $AUDIO_SINK
@@ -813,17 +918,17 @@ Topology:
 Activation state out of the box:
 
   Node 1 / Node 2: \`auto-activate=true\` — the element brings its
-    inner mxlsink / mxlsrc up at NULL→READY and calls
+    inner $LABEL_INNER_CHAIN up at NULL→READY and calls
     SyncResourceState so the daemon's /single/{senders,receivers}/{id}/active
     reports master_enable: true with no PATCH required. The Node 2
-    Receivers are pre-wired to Node 1's flows via \`mxl-flow-id\`,
+    Receivers are pre-wired to Node 1's flows $LABEL_PREWIRED,
     so audio + video are flowing already.
 
   Node 3: \`auto-activate=false\` — the Receiver+Sender pairs are
     registered (visible on IS-04) but the data path stays on the
     caps-aware placeholder (an idle \`appsrc\` advertising the
     user-supplied caps so downstream negotiation completes) until
-    you PATCH /staged on the Connection API. Until then no MXL
+    you PATCH /staged on the Connection API. Until then no real
     writes / reads happen on Node 3 even though Node 1 is publishing
     the input flows. PATCH the Receiver(s) below and optionally the
     Sender(s) to flip Node 3 into a live processor.
@@ -880,8 +985,9 @@ Example PATCHes (copy/paste):
   # ---- Activate Node 3 (Receiver+Sender on each side) ----
   # By default Node 3 is registered but inactive (auto-activate=false).
   # PATCH each /staged endpoint with master_enable=true to bring the
-  # video processor live (the inner mxlsrc / mxlsink instantiate and
-  # data flows from Node 1 via Node 3's videoflip to Node 3's Sender):
+  # video processor live (the inner $LABEL_INNER_CHAIN instantiate
+  # and data flows from Node 1 via Node 3's videoflip to Node 3's
+  # Sender):
   curl -sS -X PATCH -H 'Content-Type: application/json' \\
     -d '{"master_enable": true, "activation": {"mode": "activate_immediate"}}' \\
     "$URL_NODE3_RECEIVER_VIDEO/staged"
@@ -902,12 +1008,12 @@ Example PATCHes (copy/paste):
   # active (above), switch Node 2 to consume Node 3's flipped /
   # attenuated outputs (the daemon synthesises a transport file from
   # the staged transport_params and the activation handler swaps the
-  # inner mxlsrc to the new flow id):
+  # inner receiver to the new $DEMO_TRANSPORT identity):
   curl -sS -X PATCH -H 'Content-Type: application/json' \\
-    -d '{"transport_params": [{"mxl_flow_id": "'"$FLOW_VIDEO_NODE3"'"}], "master_enable": true, "activation": {"mode": "activate_immediate"}}' \\
+    -d '$REROUTE_VIDEO_BODY' \\
     "$URL_NODE2_RECEIVER_VIDEO/staged"
   curl -sS -X PATCH -H 'Content-Type: application/json' \\
-    -d '{"transport_params": [{"mxl_flow_id": "'"$FLOW_AUDIO_NODE3"'"}], "master_enable": true, "activation": {"mode": "activate_immediate"}}' \\
+    -d '$REROUTE_AUDIO_BODY' \\
     "$URL_NODE2_RECEIVER_AUDIO/staged"
 
   # ---- Deactivate Node 2's video Receiver (back to placeholder) ----
@@ -1093,7 +1199,10 @@ patch_master_enable() {
     # present) but nmos-cpp's connection_api.cpp explicitly rejects any
     # PATCH that carries transport_file for an MXL receiver per BCP-007-03
     # (`Rejecting PATCH for MXL receiver with transport_file`, HTTP 400).
-    # See https://specs.amwa.tv/bcp-007-03/.
+    # See https://specs.amwa.tv/bcp-007-03/. RTP receivers DO accept
+    # `transport_file` PATCHes (it's the canonical IS-05 way to push an
+    # SDP at them), but a simple `master_enable` toggle has no reason to
+    # round-trip it, so the omission is fine for both transports.
     patch=$(jq -c --argjson enable "$enable" '
         {
             master_enable: $enable,
@@ -1122,6 +1231,36 @@ patch_master_enable() {
     echo "[ok] master_enable=$resp_enable"
 }
 
+# Translate sender-side transport_params into receiver-side
+# transport_params. The IS-05 schemas differ across sides on RTP
+# transports: senders carry `destination_ip` / `source_ip` /
+# `destination_port`, receivers carry `multicast_ip` / `source_ip`
+# (SSM include-source) / `interface_ip` / `destination_port`. MXL
+# uses the same field (`mxl_flow_id`) on both sides, so the
+# translation is a pass-through.
+#
+# Echoes a JSON value that can be plugged into the receiver's
+# `transport_params:` slot via `--argjson`.
+subscription_transport_params() {
+    local sender_transport_params=$1
+    case "$DEMO_TRANSPORT" in
+        mxl)
+            printf '%s' "$sender_transport_params"
+            ;;
+        udp|udp2)
+            jq -c \
+                --arg iface_ip "$DEMO_NIC_IP" \
+                '[ .[] | {
+                    source_ip:         (.source_ip      // null),
+                    multicast_ip:      (.destination_ip // null),
+                    interface_ip:      $iface_ip,
+                    destination_port:  (.destination_port // null),
+                    rtp_enabled:       true
+                } ]' <<< "$sender_transport_params"
+            ;;
+    esac
+}
+
 # Subscribe a Receiver to a Sender by lifting the Sender's `/active`
 # transport_params onto the Receiver's `/staged` along with the
 # Sender's id, master_enable=true, and an immediate activation. The
@@ -1134,7 +1273,7 @@ patch_master_enable() {
 connect_receiver_to_sender() {
     local receiver_url=$1 sender_url=$2
     local sender_id sender_active sender_status sender_body
-    local transport_params patch resp status body
+    local sender_params receiver_params patch resp status body
     local active_after active_status active_body
     local resp_enable resp_sender resp_identity friendly
 
@@ -1158,15 +1297,19 @@ connect_receiver_to_sender() {
         echo "$sender_body" | jq . 2>/dev/null || echo "$sender_body"
         return 1
     fi
-    transport_params=$(jq -c '.transport_params' <<< "$sender_body" 2>/dev/null)
-    if [[ -z "$transport_params" || "$transport_params" == "null" ]]; then
+    sender_params=$(jq -c '.transport_params' <<< "$sender_body" 2>/dev/null)
+    if [[ -z "$sender_params" || "$sender_params" == "null" ]]; then
         echo "[error] sender has no usable transport_params (is it enabled?)"
         echo "$sender_body" | jq . 2>/dev/null || echo "$sender_body"
         return 1
     fi
+    receiver_params=$(subscription_transport_params "$sender_params") || {
+        echo "[error] could not translate sender transport_params for the receiver"
+        return 1
+    }
 
     patch=$(jq -nc \
-        --argjson params "$transport_params" \
+        --argjson params "$receiver_params" \
         --arg sender_id "$sender_id" \
         '{sender_id: $sender_id, transport_params: $params, master_enable: true, activation: {mode: "activate_immediate"}}') || return 1
 
