@@ -29,11 +29,15 @@
 //! surface for the secondary leg is designed.
 //!
 //! Essence coverage so far:
-//!   * Video: RFC 4175 `encoding-name=RAW`,
+//!   * Video: RFC 4175 `encoding-name=raw`,
 //!     `sampling=YCbCr-4:2:2` at `depth=10` (→ `format=UYVP`) and
 //!     `depth=8` (→ `format=UYVY`); other samplings and bit-depths
 //!     (RGB/RGBA/BGR/BGRA, YCbCr-4:4:4, YCbCr-4:2:0, YCbCr-4:1:1)
-//!     are not yet handled.
+//!     are not yet handled. (The RFC 4175 §6.7 BNF spells the
+//!     encoding name lower-case; gst-sdp normalises rtpmap
+//!     encoding-name to upper-case on parse, so internal caps
+//!     carry `RAW` once a synthesised SDP has been round-tripped
+//!     through [`parse_sdp`].)
 //!   * Audio: ST 2110-30 / RFC 3190 `L24` (→ `S24BE`) and
 //!     RFC 3551 `L16` (→ `S16BE`); `L8` is intentionally
 //!     unsupported (out of scope for ST 2110-30).
@@ -51,9 +55,12 @@
 //! [`raw_caps_from_rtp_audio`] for the reasoning.
 
 
+use std::collections::HashSet;
 use std::str::FromStr;
+use std::sync::LazyLock;
 
-use gst_sdp::{SDPMedia, SDPMessage};
+use gst_sdp::{SDPAttribute, SDPMedia, SDPMessage};
+use unicase::Ascii;
 use gstreamer as gst;
 use gstreamer_sdp as gst_sdp;
 use thiserror::Error;
@@ -170,6 +177,23 @@ pub(crate) mod defaults {
     /// `ST2110-20:2017` is the only published value and what
     /// nmos-cpp emits.
     pub(crate) const ST2110_20_SSN: &str = "ST2110-20:2017";
+
+    /// ST 2110-20 §6.4 fmtp `colorimetry=` default. The
+    /// fmtp parameter is REQUIRED — nmos-cpp's
+    /// `get_video_raw_parameters` (`Development/nmos/sdp_utils.cpp`)
+    /// throws when absent and libnvnmos's
+    /// `add_nmos_sender_to_node_server` catches that and
+    /// silently returns `false`. When `from_caps`'s essence
+    /// caps don't carry an explicit colorimetry, we have to
+    /// pick one — ST 2110 SDR's BT709 is what nmos-cpp's
+    /// `make_video_sdp_parameters` picks for a Flow without a
+    /// colorimetry tag and what the SMPTE ST 2110-20 reference
+    /// SDPs use, so a synthesised SDP with this default plays
+    /// against both libnvnmos and any other ST 2110 peer.
+    /// Callers wanting BT2020 / BT2100 colorimetry need to set
+    /// it explicitly on the essence caps upstream of the
+    /// `nmossink`.
+    pub(crate) const ST2110_20_COLORIMETRY: &str = "BT709";
 }
 
 #[derive(Debug, Error)]
@@ -192,7 +216,7 @@ pub(crate) enum SdpError {
     MissingMediaField,
     #[error(
         "unsupported essence shape: {0}; today ST 2110-20 / RFC 4175 \
-         `encoding-name=RAW, sampling=YCbCr-4:2:2` (`depth=10` → \
+         `encoding-name=raw, sampling=YCbCr-4:2:2` (`depth=10` → \
          `UYVP`, `depth=8` → `UYVY`), ST 2110-30 / RFC 3551 \
          L24 / L16 audio, and ST 2110-40 / RFC 8331 \
          `encoding-name=SMPTE291` ANC are recognised"
@@ -546,6 +570,12 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     m.add_connection("IN", "IP4", &leg.destination_ip, defaults::MULTICAST_TTL, 0);
     m.set_media_from_caps(&media.rtp_caps)
         .map_err(|e| SdpError::BuildMediaFromCaps(e.to_string()))?;
+    // `gstreamer-sdp`'s SDP → caps direction (`caps_from_media`)
+    // upper-cases the rtpmap encoding-name and lower-cases every
+    // fmtp parameter key as an unconditional normalisation step.
+    // `nmos-cpp`'s `find_fmtp` / `get_format` parsers expect the
+    // canonical case.
+    canonicalise_st2110_wire_case(&mut m);
 
     // Media-level attribute order matches the canonical
     // configuring-SDP order emitted by
@@ -605,6 +635,94 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     msg.as_text().map_err(|e| SdpError::Serialise(e.to_string()))
 }
 
+/// Canonical wire-form spellings for ST 2110 `a=fmtp:` keys.
+/// `gstreamer-sdp`'s `caps_from_media` lower-cases every fmtp key
+/// and `nmos-cpp`'s `find_fmtp` is case-sensitive.
+static ST_2110_UPPERCASE_FMTP_KEYS: LazyLock<HashSet<Ascii<&'static str>>> = LazyLock::new(|| {
+    [
+        // ST 2110-20 §7.2 / §7.3
+        "PM", "SSN", "TCS", "RANGE", "PAR",
+        // ST 2110-21 §8.1 / §8.2 (also -40 for TROFF, TSMODE, TSDELAY)
+        "TP", "TROFF", "CMAX", "MAXUDP", "TSMODE", "TSDELAY",
+        // ST 2110-40 §6
+        "DID_SDID", "VPID_Code", "TM",
+    ]
+    .into_iter()
+    .map(Ascii::new)
+    .collect()
+});
+
+/// Canonical lower-case spellings for ST 2110 `a=rtpmap:`
+/// encoding-names. `gstreamer-sdp` upper-cases the encoding-name
+/// on the SDP → caps direction; `nmos-cpp`'s `get_format`
+/// expects the canonical case.
+static ST_2110_LOWERCASE_RTPMAP_NAMES: LazyLock<HashSet<Ascii<&'static str>>> = LazyLock::new(|| {
+    [
+        "raw",      // RFC 4175 / ST 2110-20
+        "jxsv",     // RFC 9134 / ST 2110-22
+        "smpte291", // RFC 8331 / ST 2110-40
+    ]
+    .into_iter()
+    .map(Ascii::new)
+    .collect()
+});
+
+
+/// Rewrite the `rtpmap` and `fmtp` attributes that
+/// `set_media_from_caps` just populated on `m` into the canonical
+/// wire-form expected by `nmos-cpp`'s case-sensitive parser.
+fn canonicalise_st2110_wire_case(m: &mut SDPMedia) {
+    for idx in 0..m.attributes_len() {
+        let rewrite = m.attribute(idx).and_then(|attr| {
+            let value = attr.value()?;
+            match attr.key() {
+                "rtpmap" => canonicalise_rtpmap_value(value).map(|v| ("rtpmap", v)),
+                "fmtp" => canonicalise_fmtp_value(value).map(|v| ("fmtp", v)),
+                _ => None,
+            }
+        });
+        if let Some((key, value)) = rewrite {
+            let _ = m.replace_attribute(idx, SDPAttribute::new(key, Some(&value)));
+        }
+    }
+}
+
+/// Rewrite the rtpmap attribute value
+/// (`<pt> <encoding-name>/<rate>[/<encoding-params>]`, RFC 4566
+/// §6) when the encoding-name is not in canonical case.
+/// Returns `None` when the value is already canonical (no rewrite
+/// needed).
+fn canonicalise_rtpmap_value(value: &str) -> Option<String> {
+    let (pt, rest) = value.split_once(' ')?;
+    let (encoding, after_slash) = rest.split_once('/')?;
+    let canonical = **ST_2110_LOWERCASE_RTPMAP_NAMES.get(&Ascii::new(encoding))?;
+    (canonical != encoding).then(|| format!("{pt} {canonical}/{after_slash}"))
+}
+
+/// Rewrite the fmtp attribute value
+/// (`<pt> <key>=<value>(;<key>=<value>)*`, RFC 4566 §6) when any
+/// key is not in canonical case. Values are preserved verbatim.
+/// Returns `None` when no key needs rewriting.
+fn canonicalise_fmtp_value(value: &str) -> Option<String> {
+    let (pt, rest) = value.split_once(' ')?;
+    let mut changed = false;
+    let fixed = rest
+        .split(';')
+        .map(|kv| {
+            let Some((key, val)) = kv.split_once('=') else { return kv.to_owned() };
+            match ST_2110_UPPERCASE_FMTP_KEYS.get(&Ascii::new(key)).map(|m| **m) {
+                Some(canonical) if canonical != key => {
+                    changed = true;
+                    format!("{canonical}={val}")
+                }
+                _ => kv.to_owned(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    changed.then(|| format!("{pt} {fixed}"))
+}
+
 /// Scalar overrides applied to an SDP transport file during
 /// [`splice_overrides`]. Mirrors
 /// [`crate::flow_def::FlowDefOverrides`]'s field shape on the
@@ -631,30 +749,30 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
 ///   not here — by the time [`splice_overrides`] runs every
 ///   field already means what it does on [`UdpLeg`].
 ///
-    /// * Transport-caps overrides (`payload_type`,
-    ///   `audio_clock_rate`, `a_ptime`, `a_maxptime`) cover the
-    ///   override-class fields of the `transport-caps` property
-    ///   (`application/x-rtp,...` GStreamer caps). Per the
-    ///   override-vs-cross-check rule on
-    ///   [`crate::session::CommonSettings::transport_caps`]:
-    ///   * `payload_type` (RFC 3551 dynamic range 96..=127)
-    ///     rewrites the `m=` line's first format token,
-    ///     `a=rtpmap:<pt>`, `a=fmtp:<pt>`, and `a=x-nvnmos-caps:<pt>`
-    ///     atomically — they're all driven from
-    ///     `media.primary.rtp_caps`'s `payload` field via
-    ///     `set_media_from_caps`. Applies to all essences.
-    ///   * `audio_clock_rate` rewrites `a=rtpmap:<pt> L24/<rate>/<n>`.
-    ///     Audio-only — silently ignored for video raw / ANC
-    ///     because those carry a fixed 90 kHz clock per RFC 4175 /
-    ///     RFC 8331 and the override category for fixed-clock
-    ///     essences is cross-check, not override.
-    ///   * `a_ptime` / `a_maxptime` rewrite `a=ptime:` /
-    ///     `a=maxptime:` (millisecond decimal string per the
-    ///     GStreamer `a-ptime` / `a-maxptime` caps convention).
-    ///     Audio-only — for the same reason: video raw / ANC
-    ///     don't carry packet-time metadata.
-    ///
-    /// `None` on a slot leaves the input SDP's value untouched.
+/// * Transport-caps overrides (`payload_type`,
+///   `audio_clock_rate`, `a_ptime`, `a_maxptime`) cover the
+///   override-class fields of the `transport-caps` property
+///   (`application/x-rtp,...` GStreamer caps). Per the
+///   override-vs-cross-check rule on
+///   [`crate::session::CommonSettings::transport_caps`]:
+///   * `payload_type` (RFC 3551 dynamic range 96..=127)
+///     rewrites the `m=` line's first format token,
+///     `a=rtpmap:<pt>`, `a=fmtp:<pt>`, and `a=x-nvnmos-caps:<pt>`
+///     atomically — they're all driven from
+///     `media.primary.rtp_caps`'s `payload` field via
+///     `set_media_from_caps`. Applies to all essences.
+///   * `audio_clock_rate` rewrites `a=rtpmap:<pt> L24/<rate>/<n>`.
+///     Audio-only — silently ignored for video raw / ANC
+///     because those carry a fixed 90 kHz clock per RFC 4175 /
+///     RFC 8331 and the override category for fixed-clock
+///     essences is cross-check, not override.
+///   * `a_ptime` / `a_maxptime` rewrite `a=ptime:` /
+///     `a=maxptime:` (millisecond decimal string per the
+///     GStreamer `a-ptime` / `a-maxptime` caps convention).
+///     Audio-only — for the same reason: video raw / ANC
+///     don't carry packet-time metadata.
+///
+/// `None` on a slot leaves the input SDP's value untouched.
 /// `Some(...)` replaces it. The split between "absent" and
 /// "explicit override to empty/zero" follows the MXL convention:
 /// callers map empty GObject string properties to `None` before
@@ -1436,12 +1554,8 @@ fn caps_colorimetry_from_sdp(sdp: &str, depth: u32, tcs: Option<&str>) -> Option
         "SMPTE240M" => Some("smpte240m"),
         "BT2020" if depth >= 10 => Some("bt2020-10"),
         "BT2020" => Some("bt2020"),
-        "BT2100" => match tcs.map(|t| t.to_ascii_uppercase()).as_deref() {
-            Some("HLG") => Some("bt2100-hlg"),
-            // `PQ`, missing, or any unknown TCS — assume PQ;
-            // see the docstring's note on the V2 typo.
-            _ => Some("bt2100-pq"),
-        },
+        "BT2100" if tcs.is_some_and(|t| t.eq_ignore_ascii_case("HLG")) => Some("bt2100-hlg"),
+        "BT2100" => Some("bt2100-pq"),
         _ => None,
     }
 }
@@ -1476,8 +1590,11 @@ fn sdp_colorimetry_from_caps(caps_colorimetry: &str) -> Option<(&'static str, Op
 /// Derive `video/x-raw,...` caps from an `application/x-rtp,...`
 /// caps that describes an RFC 4175 video media.
 ///
-/// Currently handles `encoding-name=RAW` with the YCbCr-4:2:2
-/// samplings the `rtpvrawpay` / `rtpvrawdepay` wire format exposes:
+/// Currently handles `encoding-name=raw` (case-insensitive
+/// match — gst-sdp upper-cases the rtpmap encoding-name on
+/// parse, so internal caps carry `RAW` after a round-trip
+/// through [`parse_sdp`]) with the YCbCr-4:2:2 samplings the
+/// `rtpvrawpay` / `rtpvrawdepay` wire format exposes:
 ///
 /// | SDP `sampling` | SDP `depth` | `video/x-raw` `format` |
 /// |---|---|---|
@@ -1825,19 +1942,22 @@ fn rtp_caps_from_raw_video(raw_caps: &gst::Caps, payload_type: u8) -> Result<gst
     let colorimetry_caps = s.get::<&str>("colorimetry").ok();
     let colorimetry_sdp = colorimetry_caps.and_then(sdp_colorimetry_from_caps);
 
+    // `encoding-name=raw` (RFC 4175 §6.7) and `PM=`/`SSN=`
+    // (ST 2110-20 §6.3) emitted in canonical wire case;
+    // `set_media_from_caps` passes caps fields through verbatim.
     let mut caps_text = format!(
         "application/x-rtp,\
          media=(string)video,\
          clock-rate=(int){clk},\
-         encoding-name=(string)RAW,\
+         encoding-name=(string)raw,\
          payload=(int){pt},\
          sampling=(string){sampling},\
          depth=(string){depth},\
          width=(string){width},\
          height=(string){height},\
          exactframerate=(string){exactframerate},\
-         pm=(string){pm},\
-         ssn=(string){ssn}",
+         PM=(string){pm},\
+         SSN=(string){ssn}",
         clk = defaults::VIDEO_CLOCK_RATE,
         pt = payload_type,
         pm = defaults::ST2110_20_PM,
@@ -1846,11 +1966,24 @@ fn rtp_caps_from_raw_video(raw_caps: &gst::Caps, payload_type: u8) -> Result<gst
     if interlace_mode == "interleaved" {
         caps_text.push_str(",interlace=(string)1");
     }
-    if let Some((colorimetry, tcs)) = colorimetry_sdp {
-        caps_text.push_str(&format!(",colorimetry=(string){colorimetry}"));
-        if let Some(tcs_value) = tcs {
-            caps_text.push_str(&format!(",tcs=(string){tcs_value}"));
-        }
+    // `colorimetry=` is REQUIRED by ST 2110-20 / RFC 4175 fmtp.
+    // nmos-cpp's `get_video_raw_parameters` throws if absent
+    // (see `nmos-cpp/Development/nmos/sdp_utils.cpp::get_video_raw_parameters`),
+    // and libnvnmos's `add_nmos_sender_to_node_server` catches
+    // the throw and silently returns `false`. When the caller's
+    // `video/x-raw` caps carry an explicit `colorimetry`, we
+    // round-trip it via [`sdp_colorimetry_from_caps`]; when
+    // they don't, we default to ST 2110 SDR's
+    // [`defaults::ST2110_20_COLORIMETRY`] (`BT709`) — the same
+    // value `nmos-cpp`'s `make_video_sdp_parameters` picks when
+    // a Flow has no colorimetry tag set and the value our test
+    // SDP fixtures use. Callers wanting BT2020 / BT2100 etc.
+    // need to set `colorimetry=` upstream of the `nmossink`.
+    let (colorimetry, tcs) =
+        colorimetry_sdp.unwrap_or((defaults::ST2110_20_COLORIMETRY, None));
+    caps_text.push_str(&format!(",colorimetry=(string){colorimetry}"));
+    if let Some(tcs_value) = tcs {
+        caps_text.push_str(&format!(",tcs=(string){tcs_value}"));
     }
     gst::Caps::from_str(&caps_text)
         .map_err(|e| SdpError::UnsupportedEssence(format!("constructing rtp caps: {e}")))
@@ -3659,15 +3792,20 @@ mod tests {
         assert_eq!(s.name().as_str(), "application/x-rtp");
         assert_eq!(s.get::<&str>("media").unwrap(), "video");
         assert_eq!(s.get::<i32>("clock-rate").unwrap(), defaults::VIDEO_CLOCK_RATE);
-        assert_eq!(s.get::<&str>("encoding-name").unwrap(), "RAW");
+        // Canonical wire-form case: RFC 4175 lower-case
+        // `raw`, ST 2110-20 upper-case `PM` / `SSN`. See
+        // the comment on the caps-text builder in
+        // `rtp_caps_from_raw_video` for the libnvnmos /
+        // nmos-cpp compatibility rationale.
+        assert_eq!(s.get::<&str>("encoding-name").unwrap(), "raw");
         assert_eq!(s.get::<i32>("payload").unwrap(), 96);
         assert_eq!(s.get::<&str>("sampling").unwrap(), "YCbCr-4:2:2");
         assert_eq!(s.get::<&str>("depth").unwrap(), "8");
         assert_eq!(s.get::<&str>("width").unwrap(), "1920");
         assert_eq!(s.get::<&str>("height").unwrap(), "1080");
         assert_eq!(s.get::<&str>("exactframerate").unwrap(), "50");
-        assert_eq!(s.get::<&str>("pm").unwrap(), defaults::ST2110_20_PM);
-        assert_eq!(s.get::<&str>("ssn").unwrap(), defaults::ST2110_20_SSN);
+        assert_eq!(s.get::<&str>("PM").unwrap(), defaults::ST2110_20_PM);
+        assert_eq!(s.get::<&str>("SSN").unwrap(), defaults::ST2110_20_SSN);
     }
 
     #[test]
@@ -3776,7 +3914,7 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_skips_unrecognised_colorimetry() {
+    fn rtp_caps_from_raw_video_falls_back_to_default_on_unrecognised_colorimetry() {
         init_gst();
         let raw = raw_video_caps(
             "UYVP",
@@ -3787,10 +3925,18 @@ mod tests {
         );
         let rtp = rtp_caps_from_raw_video(&raw, 96).expect("synth");
         let s = rtp.structure(0).expect("rtp");
-        assert!(
-            s.get::<&str>("colorimetry").is_err(),
-            "non-preset colorimetry must be silently dropped, \
-             not emitted as fmtp `colorimetry=`",
+        // `colorimetry=` is REQUIRED by nmos-cpp's
+        // `get_video_raw_parameters`; an unrecognised value on
+        // the essence caps doesn't translate to a known SDP
+        // colorimetry preset, but we still have to emit one or
+        // libnvnmos silently rejects the sender. Fall back to
+        // [`defaults::ST2110_20_COLORIMETRY`] (BT709) rather
+        // than dropping the field entirely.
+        assert_eq!(
+            s.get::<&str>("colorimetry").unwrap(),
+            defaults::ST2110_20_COLORIMETRY,
+            "unrecognised input colorimetry must fall back to the BT709 default, \
+             not drop the field (libnvnmos rejects SDPs without colorimetry)",
         );
     }
 
@@ -4001,6 +4147,17 @@ mod tests {
         assert_eq!(defaults::ST2110_20_SSN, "ST2110-20:2017");
     }
 
+    /// `colorimetry=` is REQUIRED by nmos-cpp's
+    /// `get_video_raw_parameters` and the SMPTE ST 2110-20
+    /// reference SDPs all use `BT709` for SDR. Keep the default
+    /// pinned so a synthesised SDP without an explicit
+    /// colorimetry on the essence caps still parses against
+    /// nmos-cpp / libnvnmos.
+    #[test]
+    fn defaults_st2110_20_colorimetry_is_bt709() {
+        assert_eq!(defaults::ST2110_20_COLORIMETRY, "BT709");
+    }
+
     // -- from_caps + helpers (resolve_payload_type,
     //    resolve_audio_ptime, parse_ptime_ms_as_ns,
     //    resolved_audio_caps, udp_leg_from_input)
@@ -4189,8 +4346,9 @@ mod tests {
             "multicast c= keeps the TTL suffix:\n{text}",
         );
         assert!(
-            text.contains("a=rtpmap:96 RAW/90000"),
-            "rtpmap encoding-name + clock-rate:\n{text}",
+            text.contains("a=rtpmap:96 raw/90000"),
+            "rtpmap encoding-name + clock-rate (lower-case per \
+             RFC 4175 §6.7 BNF; nmos-cpp matches it case-sensitively):\n{text}",
         );
         assert!(text.contains("sampling=YCbCr-4:2:2"), "fmtp sampling:\n{text}");
         assert!(text.contains("depth=10"), "fmtp depth=10 for UYVP:\n{text}");
@@ -4199,12 +4357,16 @@ mod tests {
         assert!(text.contains("exactframerate=50"));
         assert!(text.contains("colorimetry=BT709"));
         // gst-sdp's `set_media_from_caps` preserves caps-field
-        // casing verbatim; our caps use lower-case `pm` / `ssn`
-        // (GStreamer convention), so the emitted fmtp slots are
-        // lower-case too. RFC 4566 §6 declares fmtp parameter
-        // names case-insensitive, so receivers handle either form.
-        assert!(text.contains("pm=2110GPM"), "ST 2110-20 PM:\n{text}");
-        assert!(text.contains("ssn=ST2110-20:2017"), "ST 2110-20 SSN:\n{text}");
+        // casing verbatim. ST 2110-20 §6.3 mandates upper-case
+        // `PM` / `SSN` and nmos-cpp (`sdp::fields::packing_mode
+        // = U("PM")`, `smpte_standard_number = U("SSN")`)
+        // matches them case-sensitively, so the canonical wire
+        // case has to be set in our caps-text builder. See the
+        // comment on `rtp_caps_from_raw_video` for the full
+        // compat story (lower-case `raw` + upper-case `PM` /
+        // `SSN` is what libnvnmos accepts).
+        assert!(text.contains("PM=2110GPM"), "ST 2110-20 PM:\n{text}");
+        assert!(text.contains("SSN=ST2110-20:2017"), "ST 2110-20 SSN:\n{text}");
         assert!(
             text.contains("a=source-filter: incl IN IP4 239.0.0.1 192.0.2.10"),
             "Sender source-filter:\n{text}",
@@ -4269,7 +4431,19 @@ mod tests {
         let input = build_input(&essence, Side::Sender, None);
         let text = from_caps(&input).expect("synth");
         assert!(text.contains("m=video 5004 RTP/AVP 100"), "ANC pt=100:\n{text}");
-        assert!(text.contains("a=rtpmap:100 SMPTE291/90000"));
+        // RFC 8331 §5.1 / SMPTE ST 2110-40 §6 spell the encoding
+        // name lower-case (`smpte291`); `nmos-cpp`'s
+        // `media_types::video_smpte291` (`U("video/smpte291")`)
+        // and `get_format` match it case-sensitively. The
+        // canonicaliser at `build_sdp`'s tail lower-cases the
+        // gst-uppercased `SMPTE291` that
+        // [`rtp_caps_from_raw_data`] carries in the
+        // `application/x-rtp` caps (gst convention) so the wire
+        // form lands canonical.
+        assert!(
+            text.contains("a=rtpmap:100 smpte291/90000"),
+            "ANC rtpmap must be lower-case on the wire per RFC 8331 §5.1:\n{text}",
+        );
         assert!(text.contains("exactframerate=25"));
     }
 
@@ -4413,5 +4587,225 @@ mod tests {
             !text.contains("a=x-nvnmos-name"),
             "no a=x-nvnmos-name attribute emitted:\n{text}",
         );
+    }
+
+    /// Regression guard for the synthesised raw-video SDP wire
+    /// case. nmos-cpp's `make_video_raw_sdp_parameters` emits
+    /// the rtpmap encoding name lower-case (`raw`) and the
+    /// ST 2110-20 fmtp keys upper-case (`PM=`, `SSN=`); both
+    /// `get_format` and the fmtp parser are case-sensitive on
+    /// these tokens. If we slip back to upper-case `RAW` /
+    /// lower-case `pm` / `ssn`, libnvnmos's
+    /// `add_nmos_sender_to_node_server` silently returns
+    /// `false` (it catches all exceptions including the one
+    /// `get_format` throws when the encoding name doesn't
+    /// match), so this guard pins the on-wire form end-to-end.
+    #[test]
+    fn from_caps_video_raw_emits_canonical_wire_case() {
+        init_gst();
+        let essence = gst::Caps::from_str(
+            "video/x-raw,format=UYVY,width=1280,height=720,framerate=25/1,interlace-mode=progressive",
+        )
+        .expect("video caps");
+        let input = SdpBuildInput {
+            essence_caps: &essence,
+            transport_caps: None,
+            side: Side::Sender,
+            label: "video1",
+            description: "",
+            name: "video1",
+            source_ip: "192.0.2.10",
+            source_port: 0,
+            destination_ip: "232.99.99.1",
+            destination_port: 5004,
+            interface_ip: "",
+            advertise_caps: false,
+        };
+        let text = from_caps(&input).expect("synth");
+        assert!(
+            text.contains("a=rtpmap:96 raw/90000"),
+            "RFC 4175 §6.7 spells the encoding name lower-case; \
+             nmos-cpp's `get_format` matches `U(\"raw\")` \
+             case-sensitively:\n{text}",
+        );
+        assert!(
+            text.contains("PM=2110GPM"),
+            "ST 2110-20 §6.3 packing-mode key is upper-case:\n{text}",
+        );
+        assert!(
+            text.contains("SSN=ST2110-20:2017"),
+            "ST 2110-20 §6.3 SMPTE-standard-number key is upper-case:\n{text}",
+        );
+        assert!(
+            text.contains("colorimetry=BT709"),
+            "colorimetry is REQUIRED by nmos-cpp's `get_video_raw_parameters`; \
+             we default to ST 2110 SDR BT709 when essence caps don't supply one:\n{text}",
+        );
+    }
+
+    /// `splice_overrides` re-parses our caps-synthesised SDP and
+    /// runs it back through `build_sdp` to apply property
+    /// overrides. The intermediate `parse_sdp` → `set_media_from_caps`
+    /// hop normalises the encoding name to `RAW` and lowercases
+    /// fmtp parameter keys (gstreamer-sdp's convention), which
+    /// nmos-cpp rejects with a silent `node_implementation_exception`
+    /// because both `get_format`'s match against `media_types::video_raw`
+    /// (`U("video/raw")`) and `get_video_raw_parameters`'
+    /// `find_fmtp` lookup for `PM` / `SSN` are case-sensitive. Pin
+    /// the post-splice wire-form so the live `nmossink` path stays
+    /// canonical regardless of whether overrides were applied.
+    #[test]
+    fn splice_overrides_preserves_canonical_wire_case_for_video_raw() {
+        init_gst();
+        let essence = gst::Caps::from_str(
+            "video/x-raw,format=UYVY,width=1280,height=720,framerate=25/1,interlace-mode=progressive",
+        )
+        .expect("video caps");
+        let input = SdpBuildInput {
+            essence_caps: &essence,
+            transport_caps: None,
+            side: Side::Sender,
+            label: "video1",
+            description: "",
+            name: "video1",
+            source_ip: "192.0.2.10",
+            source_port: 0,
+            destination_ip: "232.99.99.1",
+            destination_port: 5004,
+            interface_ip: "",
+            advertise_caps: false,
+        };
+        let synthesised = from_caps(&input).expect("synth");
+        let spliced =
+            splice_overrides(&synthesised, &SdpOverrides::default()).expect("splice no-op");
+        assert!(
+            spliced.contains("a=rtpmap:96 raw/90000"),
+            "splice re-emit must preserve lower-case `raw`:\n{spliced}",
+        );
+        assert!(
+            spliced.contains("PM=2110GPM"),
+            "splice re-emit must preserve upper-case `PM=`:\n{spliced}",
+        );
+        assert!(
+            spliced.contains("SSN=ST2110-20:2017"),
+            "splice re-emit must preserve upper-case `SSN=`:\n{spliced}",
+        );
+        assert!(
+            !spliced.contains("RAW/"),
+            "splice re-emit must not re-introduce upper-case `RAW/`:\n{spliced}",
+        );
+        assert!(
+            !spliced.contains("pm=") && !spliced.contains("ssn="),
+            "splice re-emit must not re-introduce lower-case `pm=`/`ssn=`:\n{spliced}",
+        );
+    }
+
+    /// Exhaustive table-driven pin on every ST 2110 fmtp key the
+    /// canonicaliser is meant to preserve through the splice
+    /// round-trip. Feeds a hand-crafted SDP with all of
+    /// [`ST_2110_UPPERCASE_FMTP_KEYS`] (and the three lower-case
+    /// rtpmap encoding names in
+    /// [`ST_2110_LOWERCASE_RTPMAP_NAMES`]) on the wire, then
+    /// asserts each one survives `parse_sdp` → `build_sdp` with
+    /// its canonical case intact. If a future ST 2110 revision
+    /// adds a new upper-case fmtp key, extending the table makes
+    /// this test pass; nothing else should need editing.
+    #[test]
+    fn splice_overrides_preserves_all_st2110_uppercase_fmtp_keys() {
+        init_gst();
+        // The SDP below intentionally crams every upper-case
+        // fmtp key into a single (semantically nonsensical)
+        // `a=fmtp:` so we test the canonicaliser, not the spec
+        // parser. Values are picked from `nmos-cpp`'s own
+        // `sdp_utils_test.cpp` fixtures where possible.
+        let raw_sdp = "v=0\r\n\
+            o=- 1 0 IN IP4 192.0.2.10\r\n\
+            s=video1\r\n\
+            t=0 0\r\n\
+            m=video 5004 RTP/AVP 96\r\n\
+            c=IN IP4 232.99.99.1/64\r\n\
+            a=rtpmap:96 raw/90000\r\n\
+            a=fmtp:96 \
+            sampling=YCbCr-4:2:2;\
+            depth=10;\
+            width=1920;\
+            height=1080;\
+            exactframerate=50;\
+            colorimetry=BT709;\
+            PM=2110BPM;\
+            SSN=ST2110-20:2022;\
+            TCS=ST2115LOGS3;\
+            RANGE=FULLPROTECT;\
+            PAR=12:11;\
+            MAXUDP=1460;\
+            TSMODE=SAMP;\
+            TSDELAY=82;\
+            TP=2110TPW;\
+            TROFF=0;\
+            CMAX=42;\
+            DID_SDID={0x41,0x01};\
+            VPID_Code=133;\
+            TM=Async\r\n";
+        let spliced =
+            splice_overrides(raw_sdp, &SdpOverrides::default()).expect("splice no-op");
+        // rtpmap encoding-name must round-trip lower-case.
+        assert!(
+            spliced.contains("a=rtpmap:96 raw/90000"),
+            "rtpmap encoding-name must survive as lower-case `raw`:\n{spliced}",
+        );
+        // Pin every entry from the canonical table. Using
+        // `key=` (with the `=`) ensures we don't accidentally
+        // match a substring of a value
+        // (e.g. `RANGE=FULLPROTECT` contains `PR=` if you squint).
+        for entry in &*ST_2110_UPPERCASE_FMTP_KEYS {
+            let canonical: &'static str = **entry;
+            let needle = format!("{canonical}=");
+            assert!(
+                spliced.contains(&needle),
+                "ST 2110 fmtp key `{needle}` must survive splice round-trip \
+                 with canonical case:\n{spliced}",
+            );
+        }
+        // And nothing should leak the lower-cased form. `tm=`
+        // and `tp=` are too short for a `!spliced.contains`
+        // check (they'd match `BPM=`, `2110TPW`, etc.), so pin
+        // them with explicit leading-`;` / leading-` ` anchors.
+        for &canonical in &["PM", "SSN", "TCS", "RANGE", "PAR", "MAXUDP", "TSMODE",
+                             "TSDELAY", "TROFF", "CMAX", "DID_SDID", "VPID_Code"]
+        {
+            let lower = canonical.to_ascii_lowercase();
+            let needle = format!(";{lower}=");
+            assert!(
+                !spliced.contains(&needle),
+                "lower-cased `{lower}=` leaked into splice output:\n{spliced}",
+            );
+        }
+    }
+
+    /// Pin the rtpmap-encoding-name table for the JPEG-XS and
+    /// ANC essence shapes. The splice path produces these once
+    /// `nmossink`'s caps property accepts `video/x-jxsv` / the
+    /// `meta/x-st-2038` shape, but the canonicaliser already has
+    /// to do the right thing today because the table lives at
+    /// the build-sdp layer.
+    #[test]
+    fn canonicalise_rtpmap_value_lowercases_jxsv_and_smpte291() {
+        // Each input is what gst-sdp's `set_media_from_caps`
+        // would produce after `caps_from_media` upper-cased the
+        // encoding-name — i.e. the post-splice intermediate. We
+        // assert the canonicaliser returns the lower-case form.
+        assert_eq!(
+            canonicalise_rtpmap_value("96 JXSV/90000").as_deref(),
+            Some("96 jxsv/90000"),
+        );
+        assert_eq!(
+            canonicalise_rtpmap_value("100 SMPTE291/90000").as_deref(),
+            Some("100 smpte291/90000"),
+        );
+        // Already canonical → no rewrite (caller skips
+        // `replace_attribute`).
+        assert!(canonicalise_rtpmap_value("96 raw/90000").is_none());
+        // Audio token never matches → no rewrite.
+        assert!(canonicalise_rtpmap_value("97 L24/48000/2").is_none());
     }
 }
