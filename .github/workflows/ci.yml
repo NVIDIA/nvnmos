@@ -22,15 +22,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # DO NOT MERGE: build against jonathan-r-thorpe/nmos-cpp branch
-      # nmos-mxl-test until https://github.com/sony/nmos-cpp/pull/483
-      # is merged and a Conan Center release is published.
+      # build against a https://github.com/sony/nmos-cpp commit
+      # until a Conan Center release of nmos-cpp is published.
       - name: Clone nmos-cpp alongside nvnmos
+        env:
+          NMOS_CPP_REF: a8874989a7c40cb01d38cd19388af3f329e1421d
         run: |
           parent="$(dirname "${GITHUB_WORKSPACE}")"
-          git clone --depth 1 --branch nmos-mxl-test \
-            https://github.com/jonathan-r-thorpe/nmos-cpp.git \
-            "${parent}/nmos-cpp"
+          git init "${parent}/nmos-cpp"
+          git -C "${parent}/nmos-cpp" remote add origin https://github.com/sony/nmos-cpp.git
+          git -C "${parent}/nmos-cpp" fetch --depth 1 origin "${NMOS_CPP_REF}"
+          git -C "${parent}/nmos-cpp" checkout FETCH_HEAD
 
       - name: Install Conan
         run: pip install conan~=2.2 && conan profile detect
