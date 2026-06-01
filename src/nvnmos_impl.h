@@ -71,6 +71,7 @@ namespace nvnmos
 
         const web::json::field_as_value senders{ U("senders") }; // object with ids as keys
         const web::json::field_as_value receivers{ U("receivers") }; // object with ids as keys
+        const web::json::field_as_string transport{ U("transport") };
         const web::json::field_as_string transport_file{ U("transport_file") };
 
         const web::json::field_as_value clocks{ U("clocks") }; // object with clock names as keys
@@ -82,9 +83,10 @@ namespace nvnmos
         // for senders and receivers
         const utility::string_t name{ U("x-nvnmos-name") };
         const utility::string_t group_hint{ U("x-nvnmos-group-hint") };
-        const utility::string_t caps{ U("x-nvnmos-caps") };
-        // for receivers
         const utility::string_t interface_ip{ U("x-nvnmos-iface-ip") };
+        const utility::string_t interface{ U("x-nvnmos-iface") };
+        // for receivers
+        const utility::string_t caps{ U("x-nvnmos-caps") };
         // for senders
         const utility::string_t source_port{ U("x-nvnmos-src-port") };
     }

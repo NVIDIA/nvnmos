@@ -26,14 +26,19 @@
 #include "nvnmos_impl.h"
 
 #include <boost/algorithm/string/case_conv.hpp>
+#include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/replace.hpp>
+#include <boost/algorithm/string/split.hpp>
 #include <boost/asio/ip/address_v4.hpp>
 #include <boost/range/adaptor/filtered.hpp>
+#include <boost/range/adaptor/map.hpp>
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/algorithm/find.hpp>
 #include <boost/range/algorithm/find_if.hpp>
 #include <boost/range/irange.hpp>
 #include "cpprest/host_utils.h"
+#include "cpprest/regex_utils.h"
 #include "cpprest/uri_builder.h"
 #include "nmos/activation_mode.h"
 #include "nmos/activation_utils.h"
@@ -116,6 +121,19 @@ namespace nvnmos
         // find interface with the specified address
         std::vector<web::hosts::experimental::host_interface>::const_iterator find_interface(const std::vector<web::hosts::experimental::host_interface>& interfaces, const utility::string_t& address);
 
+        // parse an x-nvnmos-iface attribute value into node interface details
+        nmos::node_interface parse_iface(const utility::string_t& iface);
+        // format node interface details as an x-nvnmos-iface attribute value
+        utility::string_t make_iface(const nmos::node_interface& interface);
+        // parse x-nvnmos-iface from media legs that carry the attribute; legs is IS-05 transport leg count (0 to skip leg-count check)
+        std::vector<nmos::node_interface> get_session_description_interfaces(const web::json::value& session_description, size_t legs = 0);
+        // collect node interface details from configured RTP transport files in settings
+        std::map<utility::string_t, nmos::node_interface> get_interfaces(const nmos::settings& settings);
+        // make a sender/receiver settings entry
+        web::json::value make_connection_settings(const nmos::transport& transport, const utility::string_t& transport_file);
+        // resolve the IS-04 interface binding name from a transport param address via host_interfaces()
+        utility::string_t get_interface_name(const nmos::type& type, const web::json::value& transport_param, const std::vector<web::hosts::experimental::host_interface>& host_interfaces);
+
         // generate a repeatable source-specific multicast address for each leg of a sender
         utility::string_t make_source_specific_multicast_address_v4(const nmos::id& id, int leg);
 
@@ -142,7 +160,7 @@ namespace nvnmos
         void update_node_clock(nmos::resources& node_resources, const nmos::id& node_id, const web::json::value& clock);
 
         // modify node resource if necessary to include all of the specified interfaces that currently have interface_bindings in any senders or receivers
-        void update_node_interfaces(nmos::resources& node_resources, const nmos::id& node_id, const std::vector<web::hosts::experimental::host_interface>& host_interfaces);
+        void update_node_interfaces(nmos::resources& node_resources, const nmos::id& node_id, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, const nmos::settings& settings);
     }
 
     // forward declarations
@@ -239,19 +257,13 @@ namespace nvnmos
         const auto media_type = nmos::get_media_type(sdp_params);
         const auto format = impl::get_format(media_type);
 
+        const auto interfaces = impl::get_session_description_interfaces(sdp, transport_params.size());
         const auto interface_names = boost::copy_range<std::vector<utility::string_t>>(
-            transport_params.as_array() | boost::adaptors::transformed([&](const value& transport_param)
-        {
-            const auto& address = nmos::fields::source_ip(transport_param).as_string();
-            const auto interface = impl::find_interface(host_interfaces, address);
-            if (host_interfaces.end() == interface)
+            boost::irange(0, (int)transport_params.size()) | boost::adaptors::transformed([&](const int& leg)
             {
-                slog::log<slog::severities::severe>(gate, SLOG_FLF)
-                    << "No network interface corresponding to the connection address: " << address << " for: " << name;
-                throw node_implementation_exception();
-            }
-            return interface->name;
-        }));
+                if (!interfaces.empty()) return interfaces.at(leg).name;
+                return impl::get_interface_name(nmos::types::sender, transport_params.at(leg), host_interfaces);
+            }));
 
         nmos::resource source;
         nmos::resource flow;
@@ -399,7 +411,7 @@ namespace nvnmos
 
         // update node's interfaces
 
-        impl::update_node_interfaces(node_resources, node_id, host_interfaces);
+        impl::update_node_interfaces(node_resources, node_id, host_interfaces, settings);
 
         // update node's clocks
 
@@ -411,9 +423,7 @@ namespace nvnmos
 
         // insert into settings
 
-        nvnmos::fields::senders(settings)[sender_id] = value_of({
-            { nvnmos::fields::transport_file, utility::s2us(sdp_) }
-        });
+        nvnmos::fields::senders(settings)[sender_id] = impl::make_connection_settings(nmos::transports::rtp, utility::s2us(sdp_));
     }
 
     void node_implementation_add_rtp_receiver_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& sdp_, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
@@ -438,19 +448,13 @@ namespace nvnmos
         const auto format = impl::get_format(media_type);
         const auto want_caps = !impl::has_session_description_caps(sdp);
 
+        const auto interfaces = impl::get_session_description_interfaces(sdp, transport_params.size());
         const auto interface_names = boost::copy_range<std::vector<utility::string_t>>(
-            transport_params.as_array() | boost::adaptors::transformed([&](const value& transport_param)
-        {
-            const auto& address = nmos::fields::interface_ip(transport_param).as_string();
-            const auto interface = impl::find_interface(host_interfaces, address);
-            if (host_interfaces.end() == interface)
+            boost::irange(0, (int)transport_params.size()) | boost::adaptors::transformed([&](const int& leg)
             {
-                slog::log<slog::severities::severe>(gate, SLOG_FLF)
-                    << "No network interface corresponding to the connection address: " << address << " for: " << name;
-                throw node_implementation_exception();
-            }
-            return interface->name;
-        }));
+                if (!interfaces.empty()) return interfaces.at(leg).name;
+                return impl::get_interface_name(nmos::types::receiver, transport_params.at(leg), host_interfaces);
+            }));
 
         nmos::resource receiver;
 
@@ -589,13 +593,11 @@ namespace nvnmos
 
         // update node's interfaces
 
-        impl::update_node_interfaces(node_resources, node_id, host_interfaces);
+        impl::update_node_interfaces(node_resources, node_id, host_interfaces, settings);
 
         // insert into settings
 
-        nvnmos::fields::receivers(settings)[receiver_id] = value_of({
-            { nvnmos::fields::transport_file, utility::s2us(sdp_) }
-        });
+        nvnmos::fields::receivers(settings)[receiver_id] = impl::make_connection_settings(nmos::transports::rtp, utility::s2us(sdp_));
     }
 
     void node_implementation_add_mxl_sender_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& flow_def_, nmos::settings& settings, slog::base_gate& gate)
@@ -727,9 +729,7 @@ namespace nvnmos
 
         // insert into settings
 
-        nvnmos::fields::senders(settings)[sender_id] = value_of({
-            { nvnmos::fields::transport_file, utility::s2us(flow_def_) }
-        });
+        nvnmos::fields::senders(settings)[sender_id] = impl::make_connection_settings(nmos::transports::mxl, utility::s2us(flow_def_));
     }
 
     void node_implementation_add_mxl_receiver_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& flow_def_, nmos::settings& settings, slog::base_gate& gate)
@@ -859,9 +859,7 @@ namespace nvnmos
 
         // insert into settings
 
-        nvnmos::fields::receivers(settings)[receiver_id] = value_of({
-            { nvnmos::fields::transport_file, utility::s2us(flow_def_) }
-        });
+        nvnmos::fields::receivers(settings)[receiver_id] = impl::make_connection_settings(nmos::transports::mxl, utility::s2us(flow_def_));
     }
 
     void node_implementation_remove_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const nmos::type& type, const utility::string_t& name, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
@@ -925,7 +923,7 @@ namespace nvnmos
 
             // update node's interfaces
 
-            impl::update_node_interfaces(node_resources, node_id, host_interfaces);
+            impl::update_node_interfaces(node_resources, node_id, host_interfaces, settings);
 
             // erase from settings
 
@@ -1816,6 +1814,136 @@ namespace nvnmos
             });
         }
 
+        // validate a MAC address (hyphen or colon separators, any hex case) and format as IS-04 port_id
+        utility::string_t normalize_mac_address(const utility::string_t& value)
+        {
+            static const utility::regex_t pattern(U("^(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}$"), bst::regex_constants::icase);
+
+            if (!bst::regex_match(value, pattern))
+            {
+                throw std::invalid_argument("Invalid x-nvnmos-iface <port-id>: " + utility::us2s(value));
+            }
+
+            return boost::algorithm::to_lower_copy(boost::replace_all_copy(value, U(":"), U("-")));
+        }
+
+        nmos::node_interface parse_iface(const utility::string_t& value)
+        {
+            // <name> <port-id>
+            // <name> <chassis-id> <port-id>
+            // <name> <port-id> <attached-chassis-id> <attached-port-id>
+            // <name> <chassis-id> <port-id> <attached-chassis-id> <attached-port-id>
+
+            std::vector<utility::string_t> tokens;
+            boost::split(tokens, value, boost::is_any_of(U(" ")), boost::token_compress_on);
+            if (2 > tokens.size() || tokens.size() > 5)
+            {
+                throw std::invalid_argument("Invalid x-nvnmos-iface: " + utility::us2s(value) + ", expected: <interface-name> [<chassis-id>] <port-id> [<attached-chassis-id> <attached-port-id>]");
+            }
+
+            const auto has_chassis = 1 == (tokens.size() % 2);
+            const auto port_index = has_chassis ? 2 : 1;
+            const auto has_attached = tokens.size() >= 4;
+            return {
+                has_chassis ? tokens[1] : U(""),
+                normalize_mac_address(tokens[port_index]),
+                tokens[0],
+                has_attached ? tokens[port_index + 1] : U(""),
+                has_attached ? tokens[port_index + 2] : U("") // unnormalized even if MAC address
+            };
+        }
+
+        utility::string_t make_iface(const nmos::node_interface& node_interface)
+        {
+            utility::ostringstream_t os;
+            os << node_interface.name;
+            if (!node_interface.chassis_id.empty()) os << U(' ') << node_interface.chassis_id;
+            os << U(' ') << node_interface.port_id;
+            if (!node_interface.attached_chassis_id.empty() && !node_interface.attached_port_id.empty())
+            {
+                os << U(' ') << node_interface.attached_chassis_id << U(' ') << node_interface.attached_port_id;
+            }
+            return os.str();
+        }
+
+        std::vector<nmos::node_interface> get_session_description_interfaces(const web::json::value& session_description, size_t legs)
+        {
+            // hm, for now only supporting ST 2022-7 Separate Destination Addresses, i.e., a media description per leg,
+            // not ST 2022-7 Separate Source Addresses, i.e., a single media description with a=source-filter: with two
+            // source addresses and two a=ssrc:<ssrc-id> x-nvnmos-iface: attributes
+
+            const auto& media_descriptions = sdp::fields::media_descriptions(session_description);
+
+            auto interfaces = boost::copy_range<std::vector<nmos::node_interface>>(
+                media_descriptions.as_array()
+                | boost::adaptors::filtered([&](const web::json::value& media_description)
+                {
+                    const auto& media_attributes = sdp::fields::attributes(media_description).as_array();
+                    return media_attributes.end() != sdp::find_name(media_attributes, nvnmos::attributes::interface);
+                })
+                | boost::adaptors::transformed([&](const web::json::value& media_description)
+                {
+                    const auto& media_attributes = sdp::fields::attributes(media_description).as_array();
+                    const auto iface = sdp::find_name(media_attributes, nvnmos::attributes::interface);
+                    return parse_iface(sdp::fields::value(*iface).as_string());
+                }));
+
+            if (0 != legs && !interfaces.empty() && interfaces.size() != legs)
+            {
+                throw std::invalid_argument("Invalid x-nvnmos-iface: expected one per leg");
+            }
+
+            return interfaces;
+        }
+
+        web::json::value make_connection_settings(const nmos::transport& transport, const utility::string_t& transport_file)
+        {
+            using web::json::value_of;
+
+            return value_of({
+                { nvnmos::fields::transport, transport.name },
+                { nvnmos::fields::transport_file, transport_file }
+            });
+        }
+
+        std::map<utility::string_t, nmos::node_interface> get_interfaces(const nmos::settings& settings)
+        {
+            std::map<utility::string_t, nmos::node_interface> result;
+
+            const auto insert_interfaces = [&](const web::json::value& configs)
+            {
+                for (const auto& entry : configs.as_object() | boost::adaptors::map_values)
+                {
+                    if (nmos::transports::rtp != nmos::transport_base(nmos::transport{ nvnmos::fields::transport(entry) })) continue;
+
+                    for (const auto& interface : get_session_description_interfaces(sdp::parse_session_description(utility::us2s(nvnmos::fields::transport_file(entry)))))
+                    {
+                        const auto inserted = result.insert({ interface.name, interface });
+                        if (!inserted.second && inserted.first->second != interface)
+                        {
+                            throw std::invalid_argument("Conflicting x-nvnmos-iface details for interface name: " + utility::us2s(interface.name));
+                        }
+                    }
+                }
+            };
+
+            insert_interfaces(nvnmos::fields::senders(settings));
+            insert_interfaces(nvnmos::fields::receivers(settings));
+            return result;
+        }
+
+        utility::string_t get_interface_name(const nmos::type& type, const web::json::value& transport_param, const std::vector<web::hosts::experimental::host_interface>& host_interfaces)
+        {
+            const auto& address = (nmos::types::sender == type ? nmos::fields::source_ip : nmos::fields::interface_ip)(transport_param).as_string();
+            const auto interface = find_interface(host_interfaces, address);
+            if (host_interfaces.end() == interface)
+            {
+                throw std::invalid_argument("No network interface corresponding to the connection address: " + utility::us2s(address)
+                    + " (provide a=x-nvnmos-iface with IS-04 interface metadata)");
+            }
+            return interface->name;
+        }
+
         // generate repeatable ids for the node's resources
         nmos::id make_id(const nmos::id& seed_id, const nmos::type& type, const utility::string_t& name)
         {
@@ -1996,7 +2124,7 @@ namespace nvnmos
         }
 
         // modify node resource if necessary to include all of the specified interfaces that currently have interface_bindings in any senders or receivers
-        void update_node_interfaces(nmos::resources& node_resources, const nmos::id& node_id, const std::vector<web::hosts::experimental::host_interface>& host_interfaces)
+        void update_node_interfaces(nmos::resources& node_resources, const nmos::id& node_id, const std::vector<web::hosts::experimental::host_interface>& host_interfaces_, const nmos::settings& settings)
         {
             using web::json::value;
 
@@ -2025,11 +2153,19 @@ namespace nvnmos
                 }
             }
 
-            auto interfaces = nmos::make_node_interfaces(nmos::experimental::node_interfaces(boost::copy_range<std::vector<web::hosts::experimental::host_interface>>(host_interfaces
-                | boost::adaptors::filtered([&](const web::hosts::experimental::host_interface& interface)
-            {
-                return interface_names.end() != interface_names.find(interface.name);
-            }))));
+            const auto configured_interfaces = get_interfaces(settings);
+            const auto host_interfaces = nmos::experimental::node_interfaces(host_interfaces_);
+
+            const auto interfaces = nmos::make_node_interfaces(boost::copy_range<std::map<utility::string_t, nmos::node_interface>>(
+                interface_names | boost::adaptors::transformed([&](const utility::string_t& name)
+                {
+                    const auto configured = configured_interfaces.find(name);
+                    const auto host = host_interfaces.find(name);
+                    return std::make_pair(name, configured_interfaces.end() != configured ? configured->second
+                        : host_interfaces.end() != host ? host->second
+                        : nmos::node_interface{ {}, {}, name });
+                })
+            ));
 
             if (interfaces.as_array() != nmos::fields::interfaces(node->data))
             {
