@@ -204,6 +204,12 @@ pub(crate) enum SdpError {
     NoMedia,
     #[error("SDP has {0} media lines; multi-leg SDPs (ST 2022-7) are not yet supported")]
     MultipleMedia(usize),
+    #[error("SDP has {0} media lines; at most two same-essence legs are supported")]
+    TooManyMediaBlocks(usize),
+    #[error(
+        "SDP mixes media types across `m=` blocks (e.g. video + audio);          each element handles a single essence"
+    )]
+    MultiMediaMixedEssence,
     #[error("SDP media is missing a payload-type / format slot")]
     MissingPt,
     #[error(
@@ -2864,6 +2870,56 @@ mod tests {
             !text.contains("x-nvnmos-name"),
             "a=x-nvnmos-name line must not appear when session.name is None: {text}",
         );
+    }
+
+    #[test]
+    fn reject_unsupported_multi_media_accepts_single_block() {
+        init_gst();
+        let msg = SDPMessage::parse_buffer(VIDEO_YCBCR_422_10BIT_1080P50_SDP.as_bytes())
+            .expect("parse");
+        crate::sdp_passthrough::reject_unsupported_multi_media(&msg).expect("single media ok");
+    }
+
+    #[test]
+    fn reject_unsupported_multi_media_rejects_video_plus_audio() {
+        init_gst();
+        let sdp = format!(
+            "{}{}",
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            "m=audio 5004 RTP/AVP 97\r\n             c=IN IP4 239.2.2.2/64\r\n             a=rtpmap:97 L24/48000/2\r\n",
+        );
+        let msg = SDPMessage::parse_buffer(sdp.as_bytes()).expect("parse");
+        let err = crate::sdp_passthrough::reject_unsupported_multi_media(&msg)
+            .expect_err("mixed essence");
+        assert!(matches!(err, SdpError::MultiMediaMixedEssence));
+    }
+
+    #[test]
+    fn reject_unsupported_multi_media_rejects_three_blocks() {
+        init_gst();
+        let sdp = format!(
+            "{}{}",
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            "m=video 5006 RTP/AVP 96\r\n             c=IN IP4 239.1.1.2/64\r\n             a=rtpmap:96 raw/90000\r\n             m=video 5008 RTP/AVP 96\r\n             c=IN IP4 239.1.1.3/64\r\n             a=rtpmap:96 raw/90000\r\n",
+        );
+        let msg = SDPMessage::parse_buffer(sdp.as_bytes()).expect("parse");
+        let err = crate::sdp_passthrough::reject_unsupported_multi_media(&msg)
+            .expect_err("too many");
+        assert!(matches!(err, SdpError::TooManyMediaBlocks(3)));
+    }
+
+    #[test]
+    fn reject_unsupported_multi_media_rejects_two_same_type_blocks() {
+        init_gst();
+        let sdp = format!(
+            "{}{}",
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            "m=video 5006 RTP/AVP 96\r\n             c=IN IP4 239.1.1.2/64\r\n             a=rtpmap:96 raw/90000\r\n",
+        );
+        let msg = SDPMessage::parse_buffer(sdp.as_bytes()).expect("parse");
+        let err = crate::sdp_passthrough::reject_unsupported_multi_media(&msg)
+            .expect_err("dual leg");
+        assert!(matches!(err, SdpError::MultipleMedia(2)));
     }
 
     // `splice_overrides` is the UDP analogue of

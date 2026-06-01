@@ -138,6 +138,7 @@ mod nmossink;
 mod nmossrc;
 mod runtime;
 mod sdp;
+mod sdp_passthrough;
 mod session;
 mod types;
 
