@@ -525,7 +525,9 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
 /// o=nvnmos <session.origin_session_id> 0 IN IP4 <session.origin_address>
 /// s=<session.session_name>
 /// i=<session.description>                                     ← if Some
-/// t=0 0
+/// t=0 0                                                       ← implicit from
+///                                                             `gst_sdp_message_as_text`
+///                                                             when no `t=` block was added
 /// a=x-nvnmos-name:<session.name>                              ← if Some (session-level)
 /// m=<media> <destination_port> RTP/AVP <pt>
 /// c=IN IP4 <destination_ip>/64
@@ -551,6 +553,13 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
         "IP4",
         session.origin_address,
     );
+    // Do not call [`SDPMessage::add_time`] here. `gst_sdp_message_as_text`
+    // already emits `t=0 0` when the message carries no time blocks (see
+    // gst-plugins-base `gstsdpmessage.c`). An explicit `add_time("0", "0",
+    // &[])` from Rust has been observed to leave libgstsdp's internal time
+    // entry in a corrupt shape and crash inside `as_text()` during
+    // serialisation — see `build_sdp_emits_implicit_time_line_without_add_time`.
+
     // Session-level `a=x-nvnmos-name:` — placement per
     // `nvnmos.h` and the daemon's own SDP synthesis at
     // `nvnmos_impl.cpp:1536` (`push_back(session_attributes, ...)`).
@@ -846,65 +855,7 @@ pub(crate) struct SdpOverrides<'a> {
     pub caps_mode: CapsMode,
 }
 
-/// Apply [`SdpOverrides`]'s transport-caps-driven slots
-/// (`payload_type`, `audio_clock_rate`, `a_ptime`,
-/// `a_maxptime`) to `media.primary.rtp_caps`. The mutations land
-/// on the `application/x-rtp,...` caps so that
-/// [`build_sdp`]'s `set_media_from_caps` call re-emits the
-/// corresponding `m=` line PT, `a=rtpmap:`, `a=fmtp:`,
-/// `a=ptime:` and `a=maxptime:` attributes from a single source
-/// of truth.
-///
-/// Audio-only slots silently no-op for video raw / ANC essences
-/// — those carry a fixed 90 kHz clock and no packet-time
-/// metadata per RFC 4175 / RFC 8331, so the
-/// override-vs-cross-check rule on
-/// [`crate::session::CommonSettings::transport_caps`] puts them
-/// in the cross-check category instead. The cross-check itself
-/// lives in a follow-up commit; here we just refuse to apply
-/// the override.
-fn apply_transport_caps_overrides(
-    media: &mut UdpMedia,
-    overrides: &SdpOverrides<'_>,
-) -> Result<(), SdpError> {
-    let is_audio = media.format == FlowFormat::Audio;
-    let caps_mut = media.rtp_caps.make_mut();
-    let s = match caps_mut.structure_mut(0) {
-        Some(s) => s,
-        // `parse_sdp` always produces a non-empty caps with one
-        // structure; this branch only fires for hand-crafted
-        // [`UdpMedia`] values that bypass the parser. Treat as
-        // a no-op rather than erroring — overrides are layered,
-        // not load-bearing for the SDP roundtrip itself.
-        None => return Ok(()),
-    };
-
-    if let Some(pt) = overrides.payload_type {
-        if !(96..=127).contains(&pt) {
-            return Err(SdpError::InvalidPayloadType(u32::from(pt)));
-        }
-        s.set("payload", i32::from(pt));
-    }
-    if is_audio {
-        if let Some(rate) = overrides.audio_clock_rate {
-            // `clock-rate` is i32 in `application/x-rtp` caps
-            // per GStreamer convention. Cast is safe — audio
-            // sample rates fit in i32 with vast margin.
-            s.set("clock-rate", rate as i32);
-        }
-        if let Some(ptime) = overrides.a_ptime {
-            s.set("a-ptime", ptime);
-        }
-        if let Some(maxptime) = overrides.a_maxptime {
-            s.set("a-maxptime", maxptime);
-        }
-    }
-    Ok(())
-}
-
-pub(crate) use crate::sdp_passthrough::{
-    passthrough_with_overrides, reject_unsupported_multi_media,
-};
+pub(crate) use crate::sdp_passthrough::passthrough_with_overrides;
 
 /// Cross-check the parsed [`UdpMedia`] (post-splice) against
 /// the user-supplied `caps` (essence shape) and
@@ -1992,6 +1943,7 @@ fn rtp_caps_from_raw_data(raw_caps: &gst::Caps, payload_type: u8) -> Result<gst:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sdp_passthrough::reject_unsupported_multi_media;
 
     fn init_gst() {
         let _ = gst::init();
@@ -4617,48 +4569,24 @@ mod tests {
             "colorimetry is REQUIRED by nmos-cpp's `get_video_raw_parameters`; \
              we default to ST 2110 SDR BT709 when essence caps don't supply one:\n{text}",
         );
+        assert!(
+            text.contains("\r\nt=0 0\r\n"),
+            "gst-sdp emits the RFC 4566 default time line when no t= block was added:\n{text}",
+        );
     }
 
-    /// Caps-synthesised SDPs must emit canonical ST 2110 wire case from
-    /// [`build_sdp`] directly; transport-file passthrough never rewrites
-    /// attributes the user did not override.
+    /// Regression: do not call [`SDPMessage::add_time`] in [`build_sdp`].
+    /// Passing `repeat: &[]` from Rust can leave the internal time entry in a
+    /// shape that makes [`SDPMessage::as_text`] segfault inside libgstsdp.
+    /// Serialisation already injects `t=0 0` when the message has no time blocks.
     #[test]
-    fn build_sdp_preserves_canonical_wire_case_for_video_raw() {
+    fn build_sdp_emits_implicit_time_line_without_add_time() {
         init_gst();
-        let essence = gst::Caps::from_str(
-            "video/x-raw,format=UYVY,width=1280,height=720,framerate=25/1,interlace-mode=progressive",
-        )
-        .expect("video caps");
-        let input = SdpBuildInput {
-            essence_caps: &essence,
-            transport_caps: None,
-            side: Side::Sender,
-            label: "video1",
-            description: "",
-            name: "video1",
-            source_ip: "192.0.2.10",
-            source_port: 0,
-            destination_ip: "232.99.99.1",
-            destination_port: 5004,
-            interface_ip: "",
-            advertise_caps: false,
-        };
-        let text = from_caps(&input).expect("synth");
+        let media = parse_sdp(AUDIO_L24_48K_STEREO_SDP).expect("parse");
+        let text = build_sdp(&media, test_session()).expect("build must not crash");
         assert!(
-            text.contains("a=rtpmap:96 raw/90000"),
-            "build must emit lower-case `raw`:\n{text}",
-        );
-        assert!(
-            text.contains("PM=2110GPM"),
-            "build must emit upper-case `PM=`:\n{text}",
-        );
-        assert!(
-            text.contains("SSN=ST2110-20:2017"),
-            "build must emit upper-case `SSN=`:\n{text}",
-        );
-        assert!(
-            !text.contains("RAW/"),
-            "build must not emit upper-case `RAW/`:\n{text}",
+            text.contains("\r\nt=0 0\r\n"),
+            "built SDP must carry the default time line:\n{text}",
         );
     }
 
