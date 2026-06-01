@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "nvnmos"
+description = "Safe Rust bindings to the libnvnmos C API (NVIDIA Networked Media Open Specifications utility library)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lib]
+
+[dependencies]
+nvnmos-sys = { path = "../nvnmos-sys" }
+thiserror.workspace = true

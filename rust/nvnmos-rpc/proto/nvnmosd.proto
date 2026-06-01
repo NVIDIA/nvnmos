@@ -1,0 +1,374 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package nvnmos.daemon.v1;
+
+// The NvnmosDaemon gRPC service.
+//
+// Wire contract between `nvnmosd` and its clients.
+//
+// Naming convention:
+//
+// * `<thing>_id` — an NMOS resource UUID. Stable, derived deterministically
+//   from a seed, and what shows up in IS-04 (`/self/<id>`,
+//   `/senders/<id>`, `/receivers/<id>`).
+//
+// * `<thing>_handle` — a daemon-local opaque token. Issued by the daemon,
+//   meaningful only within this gRPC API, and not surfaced to NMOS
+//   controllers. Treat as opaque; do not parse.
+service NvnmosDaemon {
+  // -------- Node lifecycle (persistent Nodes) --------
+  //
+  // `AddNode` / `RemoveNode` manage persistent Nodes — Nodes that exist
+  // independently of any contributing session and that serve as
+  // discovery anchors in IS-04 even when no client process is currently
+  // attached. Sessions may still attach to a persistent Node via
+  // `OpenSession` and contribute senders/receivers to it.
+  //
+  // Most deployments don't need persistent Nodes; the implicit
+  // session-refcounted lifetime exposed by `OpenSession` is sufficient
+  // and avoids the explicit teardown step.
+
+  // Create a persistent Node bound to `node_config.seed`. Errors with
+  // `ALREADY_EXISTS` if a Node (persistent or session-refcounted)
+  // already exists for that seed.
+  rpc AddNode(AddNodeRequest) returns (AddNodeResponse);
+
+  // Tear down a persistent Node. Errors with `FAILED_PRECONDITION` if
+  // the Node was created by `OpenSession` (i.e. is session-refcounted,
+  // not persistent), or if any sessions are still attached — close
+  // them first.
+  rpc RemoveNode(RemoveNodeRequest) returns (Empty);
+
+  // -------- Sessions --------
+  //
+  // A session contributes resources to exactly one Node. Many sessions
+  // (across many client processes) may share a Node by reusing the
+  // same `seed`. The session handle distinguishes them so that the
+  // daemon can refcount Node lifetime correctly, route activations
+  // only to the session that registered the affected resource, and
+  // drop the right resources when a stream dies.
+
+  // Open a session on the Node identified by `node_config.seed`.
+  // Attaches to an existing Node (persistent or session-refcounted).
+  // If no Node currently exists for the seed, creates a
+  // session-refcounted Node from `node_config` and attaches to it.
+  // Returns a daemon-local session handle used to address all
+  // subsequent RPCs.
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+
+  // Close a session. Removes any resources the session contributed.
+  // Tears down the backing Node if the session was the last attached
+  // *and* the Node is session-refcounted (i.e. was not created by
+  // `AddNode`).
+  rpc CloseSession(CloseSessionRequest) returns (Empty);
+
+  // -------- Resource lifecycle --------
+  //
+  // `name` is the caller-chosen identifier for the sender or receiver,
+  // unique within the Node *per side*: a Sender and a Receiver are
+  // permitted to share a `name`, but two Senders or two Receivers may
+  // not. Together with the Node's seed and the resource side (Sender
+  // or Receiver), `name` deterministically identifies the NMOS
+  // `/senders/<id>` or `/receivers/<id>` UUID.
+  //
+  // `transport_file` carries the resource's transport definition: an
+  // SDP for `TRANSPORT_RTP`, or an MXL `flow_def` JSON for
+  // `TRANSPORT_MXL`. It **must** embed `name` as the session-level
+  // `a=x-nvnmos-name` attribute (SDP) or the `urn:x-nvnmos:tag:name` tag
+  // (MXL `flow_def`). The daemon rejects a mismatch with
+  // `INVALID_ARGUMENT`.
+  //
+  // The returned `resource_handle` is the daemon's local addressing
+  // token used for every later RPC on this resource. The corresponding
+  // NMOS `/senders/<id>` or `/receivers/<id>` UUID is returned in
+  // `resource_id` for the client's convenience (e.g. cross-referencing
+  // with controller logs).
+
+  rpc AddSender(AddSenderRequest) returns (AddResourceResponse);
+  rpc AddReceiver(AddReceiverRequest) returns (AddResourceResponse);
+  rpc RemoveResource(RemoveResourceRequest) returns (Empty);
+
+  // -------- Activation flow --------
+  //
+  // Long-lived server-streaming RPC. One stream per session, kept open for
+  // the session's lifetime. Each `ActivationEvent` reports a pending
+  // IS-05 activation (or deactivation) for one of the session's
+  // resources; the client applies (or refuses) it locally and replies
+  // with `AckActivation`. The IS-05 controller's request remains
+  // pending until the ack arrives.
+  rpc SubscribeActivations(SubscribeActivationsRequest) returns (stream ActivationEvent);
+
+  // Required after each `ActivationEvent`. The success/failure outcome
+  // and optional failure reason are propagated to the IS-05 controller
+  // as the activation response, and the IS-04 / IS-05 model is updated
+  // accordingly. (For state changes the client originated itself, see
+  // `SyncResourceState` instead.)
+  rpc AckActivation(AckActivationRequest) returns (Empty);
+
+  // -------- Out-of-band state sync --------
+  //
+  // Reports a data-plane state change for one of the session's resources
+  // that did not arrive via an IS-05 PATCH. Use this when the client
+  // adjusts its own data plane out-of-band and wants the IS-04 / IS-05
+  // model to reflect the new state. Set `transport_file` to the new
+  // transport file to (re)activate the resource, or leave it absent to
+  // deactivate it.
+  rpc SyncResourceState(SyncResourceStateRequest) returns (Empty);
+}
+
+// -------- Common --------
+
+message Empty {}
+
+// Transport family carried by a resource's `transport_file`.
+// `UNSPECIFIED` is the proto3 zero value and is an error from a client.
+enum Transport {
+  TRANSPORT_UNSPECIFIED = 0;
+  TRANSPORT_RTP = 1;
+  TRANSPORT_MXL = 2;
+}
+
+// Identifies a resource as either a Sender or a Receiver. Used on
+// `ActivationEvent` so the client knows which side of the connection
+// the activation applies to without having to consult its own
+// resource_handle table; the daemon already has the information.
+// `UNSPECIFIED` is the proto3 zero value and is never sent by the
+// daemon.
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_SENDER = 1;
+  SIDE_RECEIVER = 2;
+}
+
+// -------- Node config --------
+
+// Configuration for creating a Node (via `AddNode` for a persistent
+// Node, or via `OpenSession` for a session-refcounted Node). Unset
+// fields take the daemon's defaults (autodetect host name, autodetect
+// addresses, default port).
+message NodeConfig {
+  // Node seed. The daemon's multi-Node lookup key and the canonical
+  // Node identifier across every create / attach RPC. The NMOS
+  // `/self` `node_id` is a deterministic function of this seed; the
+  // same seed always yields the same `node_id`, whether the Node is
+  // created by `AddNode` or by the first `OpenSession`.
+  //
+  // Must be non-empty on `AddNode` and `OpenSession`; the daemon
+  // rejects an empty seed with `INVALID_ARGUMENT`.
+  string seed = 1;
+
+  string host_name = 2;
+  repeated string host_addresses = 3;
+  uint32 http_port = 4;
+
+  // Label and description for the Node. Empty falls back to a
+  // libnvnmos-synthesised value (using `asset_tags` when present).
+  string label = 5;
+  string description = 6;
+
+  // Optional BCP-002-02 Asset Distinguishing Information. See
+  // `AssetConfig` for partial-fill semantics.
+  AssetConfig asset_tags = 7;
+
+  // Optional network-services overrides. Unset means "use DNS-SD
+  // based on `host_name`".
+  NetworkServicesConfig network_services = 8;
+}
+
+// BCP-002-02 Asset Distinguishing Information. Either supply all four
+// fields (with `functions` non-empty) or omit the whole submessage —
+// the daemon rejects a partially-filled `AssetConfig` with
+// `INVALID_ARGUMENT`. An entirely-default `AssetConfig` (all strings
+// empty, no functions) is treated as absent.
+message AssetConfig {
+  string manufacturer = 1;
+  string product = 2;
+  string instance_id = 3;
+  repeated string functions = 4;
+}
+
+message NetworkServicesConfig {
+  // DNS domain; use "local" to force mDNS. Empty for automatic.
+  string domain = 1;
+
+  // Host name or IP of a fixed IS-04 Registration API. When set,
+  // DNS-SD is disabled and the Registration API below is used
+  // directly. Empty falls back to DNS-SD discovery.
+  string registration_address = 2;
+  // Port for the fixed IS-04 Registration API. 0 selects the protocol
+  // default (80 for HTTP).
+  uint32 registration_port = 3;
+  // Version of the fixed IS-04 Registration API. Empty selects the
+  // Node's default (`v1.3`).
+  string registration_version = 4;
+
+  // Host name or IP of a fixed IS-09 System API. Honoured only when
+  // `registration_address` is also set. Empty disables IS-09.
+  string system_address = 5;
+  // Port for the fixed IS-09 System API. 0 selects the protocol
+  // default (80 for HTTP).
+  uint32 system_port = 6;
+  // Version of the fixed IS-09 System API. Empty selects the Node's
+  // default (`v1.0`).
+  string system_version = 7;
+}
+
+// -------- Node lifecycle --------
+
+message AddNodeRequest {
+  // Node identity and configuration. `node_config.seed` is both the
+  // daemon's lookup key (so `RemoveNode.node_seed` can later refer to
+  // this Node) and the NMOS UUID derivation seed. Errors with
+  // `ALREADY_EXISTS` if a Node (persistent or session-refcounted) is
+  // already bound to that seed.
+  NodeConfig node_config = 1;
+}
+
+message AddNodeResponse {
+  // The NMOS `/self` UUID of the new Node — a deterministic function of
+  // `node_config.seed`. Informational; the daemon never accepts this as
+  // input.
+  string node_id = 1;
+}
+
+message RemoveNodeRequest {
+  // Identifies the persistent Node to tear down. Matched against the
+  // `seed` the Node was created with via `AddNode`.
+  string node_seed = 1;
+}
+
+// -------- Sessions --------
+
+message OpenSessionRequest {
+  // Identifies the Node to attach to (`node_config.seed`) and, when
+  // the daemon has to create a Node because none currently exists for
+  // that seed, supplies the rest of the configuration. The remaining
+  // fields are ignored when attaching to a pre-existing Node — once a
+  // Node exists its configuration is fixed, whether it was created by
+  // `AddNode` or by an earlier `OpenSession`. See
+  // `OpenSessionResponse.created_node` for which path was taken.
+  NodeConfig node_config = 1;
+}
+
+message OpenSessionResponse {
+  // Daemon-local session handle. Pass back to all subsequent RPCs.
+  string session_handle = 1;
+
+  // The NMOS `/self` UUID of the Node this session is attached to.
+  // Stable across sessions that share the same `node_config.seed`.
+  // Informational; the daemon never accepts this as input.
+  string node_id = 2;
+
+  // True iff this call constructed a new Node (which is necessarily
+  // session-refcounted). False if it attached to an existing Node —
+  // whether that Node was created by `AddNode` (persistent) or by an
+  // earlier `OpenSession` (session-refcounted). Lets the caller tell
+  // whether the rest of `OpenSessionRequest.node_config` was consulted.
+  bool created_node = 3;
+}
+
+message CloseSessionRequest {
+  string session_handle = 1;
+}
+
+// -------- Resources --------
+
+message AddSenderRequest {
+  string session_handle = 1;
+
+  // Caller-chosen name for the sender, unique among Senders on this
+  // Node (a Receiver on the same Node may share the same name). Must
+  // be non-empty and must equal the `name` embedded in
+  // `transport_file` (`a=x-nvnmos-name` for SDP, `urn:x-nvnmos:tag:name`
+  // for MXL `flow_def`). See the `Resource lifecycle` section above.
+  string name = 2;
+
+  Transport transport = 3;
+
+  // SDP (`TRANSPORT_RTP`) or MXL `flow_def` JSON (`TRANSPORT_MXL`).
+  string transport_file = 4;
+}
+
+message AddReceiverRequest {
+  string session_handle = 1;
+
+  // Caller-chosen name for the receiver, unique among Receivers on
+  // this Node (a Sender on the same Node may share the same name).
+  // Must be non-empty and must equal the `name` embedded in
+  // `transport_file` (`a=x-nvnmos-name` for SDP, `urn:x-nvnmos:tag:name`
+  // for MXL `flow_def`). See the `Resource lifecycle` section above.
+  string name = 2;
+
+  Transport transport = 3;
+
+  // SDP (`TRANSPORT_RTP`) or MXL `flow_def` JSON (`TRANSPORT_MXL`).
+  string transport_file = 4;
+}
+
+message AddResourceResponse {
+  // Daemon-local handle. Use in `RemoveResource` / `AckActivation` /
+  // `SyncResourceState` / `ActivationEvent.resource_handle`.
+  string resource_handle = 1;
+
+  // NMOS resource UUID (`/senders/<id>` or `/receivers/<id>`) — a
+  // deterministic function of the Node's seed and the resource's
+  // `name`.
+  string resource_id = 2;
+}
+
+message RemoveResourceRequest {
+  string session_handle = 1;
+  string resource_handle = 2;
+}
+
+// -------- Activations --------
+
+message SubscribeActivationsRequest {
+  string session_handle = 1;
+}
+
+message ActivationEvent {
+  // The resource the activation applies to.
+  string resource_handle = 1;
+
+  // Daemon-local handle for the activation; pass back unchanged in
+  // `AckActivationRequest.activation_handle`.
+  string activation_handle = 2;
+
+  // The updated transport_file in the same format as `AddSender` /
+  // `AddReceiver`. Absent means the resource is being deactivated.
+  // Symmetric with `SyncResourceStateRequest.transport_file`.
+  optional string transport_file = 3;
+
+  // Whether the resource is a Sender or a Receiver. Surfaces the same
+  // information the client supplied via the `AddSender` / `AddReceiver`
+  // RPC; redundant with the `resource_handle` mapping the client
+  // already holds, but lets the client dispatch on `(side, name)`
+  // without that lookup.
+  Side side = 4;
+}
+
+message AckActivationRequest {
+  string session_handle = 1;
+  string activation_handle = 2;
+
+  bool success = 3;
+
+  // Free-form failure reason, surfaced to the IS-05 controller. Set
+  // only when `success` is false.
+  string failure_reason = 4;
+}
+
+// -------- Out-of-band sync --------
+
+message SyncResourceStateRequest {
+  string session_handle = 1;
+  string resource_handle = 2;
+  // The new transport_file reflecting the out-of-band state. Same
+  // format as `AddSender` / `AddReceiver`. Absent means the resource
+  // is being deactivated. Symmetric with `ActivationEvent.transport_file`.
+  optional string transport_file = 3;
+}

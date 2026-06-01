@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "nvnmos-sys"
+description = "FFI bindings to libnvnmos (NVIDIA Networked Media Open Specifications utility library)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+links = "nvnmos"
+
+[lib]
+# Disable doctests for the bindgen-generated bindings. Bindgen translates
+# the libnvnmos Doxygen comments verbatim to Rust doc-comments, and
+# rustdoc's heuristic interprets their indented prose continuations as
+# fenced code blocks — which then fail to compile because the prose
+# contains single-quoted SDP/MXL attribute names (`'inactive'`,
+# `'x-nvnmos-name'`, ...) that rustc parses as malformed character
+# literals. The generated bindings themselves carry no real Rust
+# doctest content, so dropping doctests for this crate is safe.
+doctest = false
+
+[build-dependencies]
+bindgen.workspace = true
