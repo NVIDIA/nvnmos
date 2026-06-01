@@ -343,9 +343,15 @@ typedef struct _NvNmosReceiverConfig
         specify a group hint tag for the receiver.
         The 'x-nvnmos-iface-ip' media-level attribute is used to specify
         the interface IP address on which the stream is received.
+        The optional 'x-nvnmos-iface' media-level attribute supplies
+        IS-04 interface metadata; otherwise the library attempts to
+        resolve the interface IP automatically. The attribute value is:
+        <interface-name> [<chassis-id>] <port-id> [<attached-chassis-id>
+        <attached-port-id>]
         The 'x-nvnmos-caps' media-level attribute may be used to indicate
         that the receiver should be advertised with the format-derived
-        capabilities omitted (i.e. a more permissive receiver).
+        capabilities omitted (i.e. a more permissive receiver). The
+        attribute value is: <payload-type>
         The connection address and source filter are not used by the
         receiver itself (since the transport parameters are set
         dynamically by IS-05).
@@ -394,6 +400,13 @@ typedef struct _NvNmosSenderConfig
         specify a group hint tag for the sender.
         The 'x-nvnmos-src-port' media-level attribute is used to specify
         the source port from which the stream is transmitted.
+        The 'x-nvnmos-iface-ip' media-level attribute is used to specify
+        the interface IP address on which the stream is transmitted.
+        The optional 'x-nvnmos-iface' media-level attribute supplies
+        IS-04 interface metadata; otherwise the library attempts to
+        resolve the interface IP automatically. The attribute value is:
+        <interface-name> [<chassis-id>] <port-id> [<attached-chassis-id>
+        <attached-port-id>]
 
         For ::NVNMOS_TRANSPORT_MXL, this is an MXL flow definition (JSON)
         of the form consumed by the MXL library, with NvNmos extensions

@@ -79,7 +79,8 @@ NvNmos uses a small set of extensions in the transport file to convey configurat
 | Name                     | `a=x-nvnmos-name:<v>`      | `urn:x-nvnmos:tag:name`                 | Senders and Receivers (required)          | The application's caller-chosen name for the Sender or Receiver, unique within the Node for the given side (Sender or Receiver). A Sender and a Receiver may share the same name. Used in all NvNmos API callbacks (paired with the `NvNmosSide`) |
 | Group hint               | `a=x-nvnmos-group-hint:<v>`| standard `urn:x-nmos:tag:grouphint/v1.0`| Senders and Receivers (optional)          | A group hint tag advertised via `urn:x-nmos:tag:grouphint/v1.0` on the NMOS resource                                       |
 | Suppress narrow Receiver Caps | `a=x-nvnmos-caps:<v>` (media-level) | `urn:x-nvnmos:tag:caps` | Receivers (optional) | An empty string value selects a fully-flexible Receiver, with format-derived Capabilities omitted. Non-empty strings are reserved for future capability; today any value is treated the same.                                                                                                                                  |
-| Interface IP             | `a=x-nvnmos-iface-ip:<v>`  | n/a                                     | Receivers (RTP only)                      | The interface IP address on which the stream is received                                                                   |
+| Interface IP             | `a=x-nvnmos-iface-ip:<v>`  | n/a                                     | Senders and Receivers (RTP only)          | The interface IP address used for IS-05 transport parameters (`source_ip` / `interface_ip`)                                |
+| Interface metadata     | `a=x-nvnmos-iface:<name> [<chassis-id>] <port-id> [<attached-chassis-id> <attached-port-id>]` | n/a | Senders and Receivers (RTP only) | IS-04 `nmos::node_interface` fields for `interface_bindings` and Node `interfaces`; used when present in the transport file, otherwise the library derives the binding from host interfaces ([design](doc/designs/x-nvnmos-iface.md)) |
 | Source port              | `a=x-nvnmos-src-port:<v>`  | n/a                                     | Senders (RTP only)                        | The source port from which the stream is transmitted                                                                       |
 | MXL domain id            | n/a                        | `urn:x-nvnmos:tag:mxl-domain-id`        | Senders and Receivers (MXL only, required)| The MXL domain identity (UUID) for the Sender or Receiver; the IS-05 `mxl_domain_id` transport parameter defaults to `"auto"` and is resolved at activation time from this value |
 
@@ -137,6 +138,15 @@ All write a null-terminated UUID into a buffer of at least `NVNMOS_ID_LEN` bytes
 For `NVNMOS_TRANSPORT_MXL` the transport file is an MXL flow definition JSON (the form consumed by the MXL SDK), with NvNmos extensions carried as entries in the standard `tags` property keyed by `urn:x-nvnmos:tag:*` URN strings. See *NvNmos Extensions to the Transport File* above for the full set.
 
 For the full per-field documentation see [`src/nvnmos.h`](src/nvnmos.h).
+
+## API Changes for RTP Sender IS-05 Defaults
+
+On IS-05 activation, `"auto"` values for RTP Senders are now resolved based on the config SDP:
+
+- `source_ip` is resolved to the SDP `a=x-nvnmos-iface-ip:` or `a=source-filter:` source address as before.
+- `destination_ip` is resolved to the SDP `c=` connection address if not `0.0.0.0`; otherwise, a source-specific multicast address is generated as before.
+- `destination_port` is resolved to the SDP `m=` port if non-zero; otherwise, the IS-05 default (5004) is used as before.
+- `source_port` is resolved to the `a=x-nvnmos-src-port:` port if present; otherwise, the IS-05 default (5004) is used as before.
 
 ## Docker-Based Build
 
@@ -464,11 +474,13 @@ See [Download Bonjour Print Services for Windows v2.0.2](https://support.apple.c
 
 ### Starting the Example Application
 
-Run the nvnmos-example app specifying host name, port, IP address, and optionally a log level.
+Run the nvnmos-example app specifying host name and port, optionally an interface IP, and optionally a log level.
 
 For example:
 ```sh
 nvnmos-example nmos-api.local 8080 192.0.2.0
+nvnmos-example nmos-api.local 8080
+nvnmos-example nmos-api.local 8080 0
 ```
 
 The host name can be a .local name, in which case the Node will attempt to discover a Registry being advertised via multicast DNS-SD (mDNS).
@@ -476,7 +488,8 @@ When a fully-qualified domain name is specified, e.g. "api.example.com", the NMO
 
 The port is used to serve the HTTP APIs.
 
-The IP address identifies the interface to be used for the mock Senders and Receivers created by the nvnmos-example application.
+The IP address identifies the local interface to be used for the mock RTP Senders and Receivers.
+When omitted, the example uses documentation addresses and also emits `a=x-nvnmos-iface` interface metadata to populate Node interfaces.
 
 The log level ranges between -40 (most verbose) and 40 (least verbose), as per the NvNmos API.
 Values greater than zero are warnings and errors. Values less than zero are debugging or trace messages.
