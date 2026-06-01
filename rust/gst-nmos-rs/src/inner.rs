@@ -508,9 +508,46 @@ pub(crate) fn build_fake_src(
 /// [`wait_for_chain_state`] check passes, the probe is removed,
 /// and the next buffer pushed through the anchor triggers
 /// `set_caps` + `render()` in the expected order.
-pub(crate) fn build_mxlsink(domain_path: &str, flow_id: &str) -> Result<gst::Element, anyhow::Error> {
+#[derive(Debug)]
+pub(crate) struct MxlSinkChain {
+    /// Wrapper element added to the outer bin (`mxlsink` — depth 1).
+    pub bin: gst::Element,
+    /// Transport leaf (`mxlsink`; same object as [`Self::bin`]).
+    pub transport: gst::Element,
+}
+
+#[derive(Debug)]
+pub(crate) struct MxlSrcChain {
+    /// Wrapper element added to the outer bin (bare `mxlsrc` or a
+    /// sub-bin wrapping `mxlsrc ! capsfilter`).
+    pub bin: gst::Element,
+    /// Transport leaf (`mxlsrc` inside [`Self::bin`]).
+    pub transport: gst::Element,
+}
+
+#[derive(Debug)]
+pub(crate) struct UdpSinkChain {
+    /// Wrapper bin added to the outer bin (`nmossink-udp`).
+    pub bin: gst::Element,
+    /// RTP payloader leaf inside [`Self::bin`].
+    pub pay: gst::Element,
+    /// UDP transport leaf (`udpsink`) inside [`Self::bin`].
+    pub transport: gst::Element,
+}
+
+#[derive(Debug)]
+pub(crate) struct UdpSrcChain {
+    /// Wrapper bin added to the outer bin (`nmossrc-udp` or similar).
+    pub bin: gst::Element,
+    /// UDP transport leaf (`udpsrc` / `udpsrc2`) inside [`Self::bin`].
+    pub transport: gst::Element,
+    /// RTP depayloader leaf inside [`Self::bin`].
+    pub depay: gst::Element,
+}
+
+pub(crate) fn build_mxlsink(domain_path: &str, flow_id: &str) -> Result<MxlSinkChain, anyhow::Error> {
     require_mxl_factory("mxlsink")?;
-    gst::ElementFactory::make("mxlsink")
+    let transport = gst::ElementFactory::make("mxlsink")
         .name("nmossink-mxl")
         .property("domain", domain_path)
         .property("flow-id", flow_id)
@@ -520,7 +557,11 @@ pub(crate) fn build_mxlsink(domain_path: &str, flow_id: &str) -> Result<gst::Ele
             format!(
                 "instantiating `mxlsink` with domain={domain_path:?}, flow-id={flow_id}"
             )
-        })
+        })?;
+    Ok(MxlSinkChain {
+        bin: transport.clone(),
+        transport,
+    })
 }
 
 /// Build the inner `mxlsrc` for `nmossrc`. `format` picks which of
@@ -542,7 +583,7 @@ pub(crate) fn build_mxlsrc(
     flow_id: &str,
     format: FlowFormat,
     advertise_caps: Option<&gst::Caps>,
-) -> Result<gst::Element, anyhow::Error> {
+) -> Result<MxlSrcChain, anyhow::Error> {
     require_mxl_factory("mxlsrc")?;
     let prop = match format {
         FlowFormat::Video => "video-flow-id",
@@ -566,7 +607,10 @@ pub(crate) fn build_mxlsrc(
         })?;
 
     let Some(caps) = advertise_caps else {
-        return Ok(mxlsrc);
+        return Ok(MxlSrcChain {
+            bin: mxlsrc.clone(),
+            transport: mxlsrc,
+        });
     };
 
     let capsfilter = gst::ElementFactory::make("capsfilter")
@@ -594,7 +638,10 @@ pub(crate) fn build_mxlsrc(
         .map_err(|e| anyhow!("activating inner ghost src: {e}"))?;
     bin.add_pad(&ghost)
         .map_err(|e| anyhow!("adding ghost src to inner bin: {e}"))?;
-    Ok(bin.upcast())
+    Ok(MxlSrcChain {
+        bin: bin.upcast(),
+        transport: mxlsrc.clone(),
+    })
 }
 
 /// Build the inner UDP/RTP sink chain for `nmossink`. Always
@@ -679,7 +726,7 @@ pub(crate) fn build_mxlsrc(
 pub(crate) fn build_udpsink(
     media: &UdpMedia,
     variant: UdpVariant,
-) -> Result<gst::Element, anyhow::Error> {
+) -> Result<UdpSinkChain, anyhow::Error> {
     let rtp_s = media
         .rtp_caps
         .structure(0)
@@ -761,7 +808,11 @@ pub(crate) fn build_udpsink(
     bin.add_pad(&ghost)
         .map_err(|e| anyhow!("adding ghost sink to inner bin: {e}"))?;
 
-    Ok(bin.upcast())
+    Ok(UdpSinkChain {
+        bin: bin.upcast(),
+        pay: payloader,
+        transport: udpsink,
+    })
 }
 
 /// Look up the GStreamer factory name for an
@@ -991,7 +1042,7 @@ pub(crate) fn build_udpsrc(
     media: &UdpMedia,
     variant: UdpVariant,
     advertise_caps: Option<&gst::Caps>,
-) -> Result<gst::Element, anyhow::Error> {
+) -> Result<UdpSrcChain, anyhow::Error> {
     let rtp_s = media
         .rtp_caps
         .structure(0)
@@ -1142,7 +1193,11 @@ pub(crate) fn build_udpsrc(
     bin.add_pad(&ghost)
         .map_err(|e| anyhow!("adding ghost src to inner bin: {e}"))?;
 
-    Ok(bin.upcast())
+    Ok(UdpSrcChain {
+        bin: bin.upcast(),
+        transport: udpsrc,
+        depay: depayloader,
+    })
 }
 
 fn require_mxl_factory(name: &'static str) -> Result<(), anyhow::Error> {
@@ -1328,9 +1383,9 @@ mod tests {
 
     #[test]
     fn build_udpsink_video_v1_uses_rtpvrawpay_and_udpsink() {
-        let elem = build_udpsink(&minimal_udp_media(), UdpVariant::V1)
+        let chain = build_udpsink(&minimal_udp_media(), UdpVariant::V1)
             .expect("V1 video sender chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let pay = child(&bin, "nmossink-payloader");
         assert_eq!(
             pay.factory().expect("payloader has a factory").name(),
@@ -1356,9 +1411,9 @@ mod tests {
 
     #[test]
     fn build_udpsink_audio_l24_pins_min_max_ptime_ns() {
-        let elem = build_udpsink(&audio_l24_ptime_media(), UdpVariant::V1)
+        let chain = build_udpsink(&audio_l24_ptime_media(), UdpVariant::V1)
             .expect("L24 audio sender chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let pay = child(&bin, "nmossink-payloader");
         assert_eq!(
             pay.factory().expect("payloader has a factory").name(),
@@ -1390,8 +1445,8 @@ mod tests {
              encoding-params=(string)2,payload=98",
         )
         .expect("static rtp caps parse");
-        let elem = build_udpsink(&media, UdpVariant::V1).expect("L16 audio sender chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let chain = build_udpsink(&media, UdpVariant::V1).expect("L16 audio sender chain must construct");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let pay = child(&bin, "nmossink-payloader");
         assert_eq!(pay.factory().expect("payloader has a factory").name(), "rtpL16pay");
     }
@@ -1406,9 +1461,9 @@ mod tests {
         // never fails when V1 is present, even if no V2 sibling
         // is"; the test accepting either factory name keeps it
         // valid in both environments.
-        let elem = build_udpsink(&audio_l24_ptime_media(), UdpVariant::V2)
+        let chain = build_udpsink(&audio_l24_ptime_media(), UdpVariant::V2)
             .expect("V2 L24 chain must construct (picks `rtpL24pay2` if present, else `rtpL24pay`)");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let pay = child(&bin, "nmossink-payloader");
         let factory_name = pay.factory().expect("payloader has a factory").name();
         assert!(
@@ -1426,16 +1481,14 @@ mod tests {
              payload=97,encoding-params=(string)2,a-ptime=(string)0.125",
         )
         .expect("static rtp caps parse");
-        let elem = build_udpsink(&media, UdpVariant::V1).expect(
+        let chain = build_udpsink(&media, UdpVariant::V1).expect(
             "lower-case `encoding-name=l24` must be normalised to `L24` and accepted; \
              parse_sdp upper-cases via g_ascii_strup but build_udpsink must also \
              tolerate hand-built caps from non-SDP call sites",
         );
-        assert!(
-            elem.downcast_ref::<gst::Bin>()
-                .and_then(|b| b.by_name("nmossink-payloader"))
-                .map(|p| p.factory().map(|f| f.name().to_string()).unwrap_or_default())
-                .is_some_and(|n| n == "rtpL24pay"),
+        assert_eq!(
+            chain.pay.factory().map(|f| f.name().to_string()).unwrap_or_default(),
+            "rtpL24pay",
             "lower-case encoding-name must still resolve to `rtpL24pay`",
         );
     }
@@ -1482,9 +1535,9 @@ mod tests {
             // chain construction rather than failing the suite.
             return;
         }
-        let elem = build_udpsink(&anc_smpte291_media(), UdpVariant::V1)
+        let chain = build_udpsink(&anc_smpte291_media(), UdpVariant::V1)
             .expect("ANC sender chain must construct when rtpsmpte291pay is available");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let pay = child(&bin, "nmossink-payloader");
         assert_eq!(
             pay.factory().expect("payloader has a factory").name(),
@@ -1506,9 +1559,9 @@ mod tests {
         // variant choice is essence-orthogonal for ANC, unlike RAW
         // / L16 / L24 where V2 prefers the `*pay2` form.
         for variant in [UdpVariant::V1, UdpVariant::V2] {
-            let elem = build_udpsink(&anc_smpte291_media(), variant)
+            let chain = build_udpsink(&anc_smpte291_media(), variant)
                 .unwrap_or_else(|e| panic!("ANC sender chain must construct for {variant:?}: {e:#}"));
-            let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+            let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
             let pay = child(&bin, "nmossink-payloader");
             assert_eq!(
                 pay.factory().expect("payloader has a factory").name(),
@@ -1600,9 +1653,9 @@ mod tests {
 
     #[test]
     fn build_udpsink_pins_multicast_iface_when_destination_is_multicast() {
-        let elem = build_udpsink(&multicast_udp_media_with_loopback_iface(), UdpVariant::V1)
+        let chain = build_udpsink(&multicast_udp_media_with_loopback_iface(), UdpVariant::V1)
             .expect("multicast sender chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let udpsink = child(&bin, "nmossink-udpsink");
         let iface = udpsink.property::<String>("multicast-iface");
         assert!(
@@ -1618,9 +1671,9 @@ mod tests {
         let mut media = minimal_udp_media();
         media.primary.destination_ip = "192.0.2.50".to_owned();
         media.primary.interface_ip = Some("127.0.0.1".to_owned());
-        let elem = build_udpsink(&media, UdpVariant::V1)
+        let chain = build_udpsink(&media, UdpVariant::V1)
             .expect("unicast sender chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let udpsink = child(&bin, "nmossink-udpsink");
         assert_eq!(
             udpsink.property::<Option<String>>("multicast-iface"),
@@ -1632,9 +1685,9 @@ mod tests {
 
     #[test]
     fn build_udpsrc_video_v1_uses_rtpvrawdepay_and_udpsrc() {
-        let elem = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, None)
+        let chain = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, None)
             .expect("V1 video receiver chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let udpsrc = child(&bin, "nmossrc-udpsrc");
         assert_eq!(udpsrc.factory().expect("udpsrc has a factory").name(), "udpsrc");
         assert_eq!(udpsrc.property::<String>("address"), "239.1.1.1");
@@ -1659,9 +1712,9 @@ mod tests {
 
     #[test]
     fn build_udpsrc_audio_l24_uses_rtpl24depay() {
-        let elem = build_udpsrc(&audio_l24_ptime_media(), UdpVariant::V1, None)
+        let chain = build_udpsrc(&audio_l24_ptime_media(), UdpVariant::V1, None)
             .expect("L24 audio receiver chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let depay = child(&bin, "nmossrc-depayloader");
         assert_eq!(
             depay.factory().expect("depayloader has a factory").name(),
@@ -1678,9 +1731,9 @@ mod tests {
              encoding-params=(string)2,payload=97",
         )
         .expect("static rtp caps parse");
-        let elem = build_udpsrc(&media, UdpVariant::V1, None)
+        let chain = build_udpsrc(&media, UdpVariant::V1, None)
             .expect("L16 audio receiver chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let depay = child(&bin, "nmossrc-depayloader");
         assert_eq!(
             depay.factory().expect("depayloader has a factory").name(),
@@ -1690,9 +1743,9 @@ mod tests {
 
     #[test]
     fn build_udpsrc_pins_multicast_iface_when_destination_is_multicast() {
-        let elem = build_udpsrc(&multicast_udp_media_with_loopback_iface(), UdpVariant::V1, None)
+        let chain = build_udpsrc(&multicast_udp_media_with_loopback_iface(), UdpVariant::V1, None)
             .expect("multicast receiver chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let udpsrc = child(&bin, "nmossrc-udpsrc");
         let iface = udpsrc.property::<String>("multicast-iface");
         assert!(
@@ -1708,9 +1761,9 @@ mod tests {
         let mut media = minimal_udp_media();
         media.primary.destination_ip = "192.0.2.50".to_owned();
         media.primary.interface_ip = Some("127.0.0.1".to_owned());
-        let elem = build_udpsrc(&media, UdpVariant::V1, None)
+        let chain = build_udpsrc(&media, UdpVariant::V1, None)
             .expect("unicast receiver chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let udpsrc = child(&bin, "nmossrc-udpsrc");
         assert_eq!(
             udpsrc.property::<Option<String>>("multicast-iface"),
@@ -1722,9 +1775,9 @@ mod tests {
     fn build_udpsrc_pins_ssm_source_filter_via_multicast_source() {
         let mut media = multicast_udp_media_with_loopback_iface();
         media.primary.source_ip = Some("192.0.2.100".to_owned());
-        let elem = build_udpsrc(&media, UdpVariant::V1, None)
+        let chain = build_udpsrc(&media, UdpVariant::V1, None)
             .expect("SSM receiver chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let udpsrc = child(&bin, "nmossrc-udpsrc");
         assert_eq!(
             udpsrc.property::<String>("multicast-source"),
@@ -1739,9 +1792,9 @@ mod tests {
         let mut media = minimal_udp_media();
         media.primary.destination_ip = "192.0.2.50".to_owned();
         media.primary.source_ip = Some("192.0.2.100".to_owned());
-        let elem = build_udpsrc(&media, UdpVariant::V1, None)
+        let chain = build_udpsrc(&media, UdpVariant::V1, None)
             .expect("unicast receiver chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let udpsrc = child(&bin, "nmossrc-udpsrc");
         assert_eq!(
             udpsrc.property::<Option<String>>("multicast-source"),
@@ -1764,9 +1817,9 @@ mod tests {
             "video/x-raw,format=UYVP,width=1920,height=1080,framerate=50/1",
         )
         .unwrap();
-        let elem = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, Some(&advertise))
+        let chain = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, Some(&advertise))
             .expect("V1 video receiver chain with advertise_caps must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let tail = child(&bin, "nmossrc-caps");
         assert_eq!(
             tail.factory().unwrap().name(),
@@ -1792,9 +1845,9 @@ mod tests {
             "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved",
         )
         .unwrap();
-        let elem = build_udpsrc(&audio_l24_ptime_media(), UdpVariant::V1, Some(&advertise))
+        let chain = build_udpsrc(&audio_l24_ptime_media(), UdpVariant::V1, Some(&advertise))
             .expect("audio receiver chain with advertise_caps must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let tail = child(&bin, "nmossrc-caps");
         assert_eq!(
             tail.factory().unwrap().name(),
@@ -1831,9 +1884,9 @@ mod tests {
         if !rtpsmpte291_available() {
             return;
         }
-        let elem = build_udpsrc(&anc_smpte291_media(), UdpVariant::V1, None)
+        let chain = build_udpsrc(&anc_smpte291_media(), UdpVariant::V1, None)
             .expect("ANC receiver chain must construct when rtpsmpte291depay is available");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let depay = child(&bin, "nmossrc-depayloader");
         assert_eq!(
             depay.factory().expect("depayloader has a factory").name(),
@@ -1852,9 +1905,9 @@ mod tests {
         // accidentally route ANC down a variant-suffixed path that
         // doesn't exist.
         for variant in [UdpVariant::V1, UdpVariant::V2] {
-            let elem = build_udpsrc(&anc_smpte291_media(), variant, None)
+            let chain = build_udpsrc(&anc_smpte291_media(), variant, None)
                 .unwrap_or_else(|e| panic!("ANC receiver chain must construct for {variant:?}: {e:#}"));
-            let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+            let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
             let depay = child(&bin, "nmossrc-depayloader");
             assert_eq!(
                 depay.factory().expect("depayloader has a factory").name(),
@@ -1871,9 +1924,9 @@ mod tests {
         // pins the "V2 dispatch never fails when V1 is present"
         // semantic and accepts either factory so it stays valid
         // whether or not the V2 sibling is installed.
-        let elem = build_udpsrc(&audio_l24_ptime_media(), UdpVariant::V2, None)
+        let chain = build_udpsrc(&audio_l24_ptime_media(), UdpVariant::V2, None)
             .expect("V2 L24 receiver must construct (picks `rtpL24depay2` if present, else `rtpL24depay`)");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let depay = child(&bin, "nmossrc-depayloader");
         let factory_name = depay.factory().expect("depayloader has a factory").name();
         assert!(
@@ -1934,9 +1987,9 @@ mod tests {
         if !udpsrc2_available() {
             return;
         }
-        let elem = build_udpsrc(&minimal_udp_media(), UdpVariant::V2, None)
+        let chain = build_udpsrc(&minimal_udp_media(), UdpVariant::V2, None)
             .expect("V2 receiver must construct against udpsrc2");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let udpsrc = child(&bin, "nmossrc-udpsrc");
         assert_eq!(
             udpsrc.factory().expect("udpsrc has a factory").name(),
@@ -1963,9 +2016,9 @@ mod tests {
         }
         let mut media = multicast_udp_media_with_loopback_iface();
         media.primary.source_ip = Some("192.0.2.100".to_owned());
-        let elem = build_udpsrc(&media, UdpVariant::V2, None)
+        let chain = build_udpsrc(&media, UdpVariant::V2, None)
             .expect("V2 SSM receiver chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let udpsrc = child(&bin, "nmossrc-udpsrc");
         assert_eq!(
             udpsrc.factory().expect("udpsrc has a factory").name(),
@@ -2003,9 +2056,9 @@ mod tests {
         let mut media = minimal_udp_media();
         media.primary.destination_ip = "192.0.2.50".to_owned();
         media.primary.source_ip = Some("192.0.2.100".to_owned());
-        let elem = build_udpsrc(&media, UdpVariant::V2, None)
+        let chain = build_udpsrc(&media, UdpVariant::V2, None)
             .expect("V2 unicast receiver chain must construct");
-        let bin = elem.downcast::<gst::Bin>().expect("returned element is a Bin");
+        let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let udpsrc = child(&bin, "nmossrc-udpsrc");
         assert_eq!(udpsrc.factory().expect("udpsrc has a factory").name(), "udpsrc2");
         // `udpsrc2.source-filter` has no pspec default, so unset
@@ -2019,5 +2072,104 @@ mod tests {
              layer already filters by source and the property must \
              stay unset",
         );
+    }
+
+    #[test]
+    fn build_udpsink_returns_chain_with_distinct_pay_and_transport() {
+        let chain = build_udpsink(&minimal_udp_media(), UdpVariant::V1)
+            .expect("V1 video sender chain must construct");
+        assert_ne!(chain.pay.as_ptr(), chain.transport.as_ptr());
+        assert_ne!(chain.pay.as_ptr(), chain.bin.as_ptr());
+        assert_ne!(chain.transport.as_ptr(), chain.bin.as_ptr());
+    }
+
+    #[test]
+    fn build_udpsrc_returns_chain_with_distinct_transport_and_depay() {
+        let chain = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, None)
+            .expect("V1 video receiver chain must construct");
+        assert_ne!(chain.transport.as_ptr(), chain.depay.as_ptr());
+        assert_ne!(chain.transport.as_ptr(), chain.bin.as_ptr());
+        assert_ne!(chain.depay.as_ptr(), chain.bin.as_ptr());
+    }
+
+    #[test]
+    fn build_mxlsink_returns_chain_with_transport_equal_to_bin() {
+        init_gst();
+        if gst::ElementFactory::find("mxlsink").is_none() {
+            return;
+        }
+        let chain = build_mxlsink("/tmp/domain", "00000000-0000-0000-0000-000000000001")
+            .expect("mxlsink chain must construct when factory is present");
+        assert_eq!(chain.bin.as_ptr(), chain.transport.as_ptr());
+    }
+
+    #[test]
+    fn build_mxlsrc_without_advertise_caps_returns_chain_with_transport_equal_to_bin() {
+        init_gst();
+        if gst::ElementFactory::find("mxlsrc").is_none() {
+            return;
+        }
+        let chain = build_mxlsrc(
+            "/tmp/domain",
+            "00000000-0000-0000-0000-000000000002",
+            FlowFormat::Video,
+            None,
+        )
+        .expect("bare mxlsrc chain must construct when factory is present");
+        assert_eq!(chain.bin.as_ptr(), chain.transport.as_ptr());
+    }
+
+    #[test]
+    fn build_mxlsrc_with_advertise_caps_returns_chain_with_transport_inside_wrapper_bin() {
+        init_gst();
+        if gst::ElementFactory::find("mxlsrc").is_none() {
+            return;
+        }
+        let advertise = minimal_udp_media().raw_caps;
+        let Ok(chain) = build_mxlsrc(
+            "/tmp/domain",
+            "00000000-0000-0000-0000-000000000003",
+            FlowFormat::Video,
+            Some(&advertise),
+        ) else {
+            // mxlsrc is present but pad templates may not accept the
+            // synthetic UYVP caps in every test environment.
+            return;
+        };
+        assert_ne!(chain.bin.as_ptr(), chain.transport.as_ptr());
+        let wrapper = chain.bin.downcast_ref::<gst::Bin>().expect("wrapper is a Bin");
+        assert!(wrapper.by_name("nmossrc-mxl").is_some());
+    }
+
+    #[test]
+    fn chain_transport_factory_matches_expected_for_each_transport_family() {
+        init_gst();
+        let udp_sink = build_udpsink(&minimal_udp_media(), UdpVariant::V1)
+            .expect("udp sink chain must construct");
+        assert_eq!(
+            udp_sink.transport.factory().unwrap().name(),
+            "udpsink",
+        );
+        let udp_src = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, None)
+            .expect("udp src chain must construct");
+        assert_eq!(
+            udp_src.transport.factory().unwrap().name(),
+            "udpsrc",
+        );
+        if gst::ElementFactory::find("mxlsink").is_some() {
+            let mxl_sink = build_mxlsink("/tmp/domain", "00000000-0000-0000-0000-000000000004")
+                .expect("mxlsink chain must construct");
+            assert_eq!(mxl_sink.transport.factory().unwrap().name(), "mxlsink");
+        }
+        if gst::ElementFactory::find("mxlsrc").is_some() {
+            let mxl_src = build_mxlsrc(
+                "/tmp/domain",
+                "00000000-0000-0000-0000-000000000005",
+                FlowFormat::Video,
+                None,
+            )
+            .expect("mxlsrc chain must construct");
+            assert_eq!(mxl_src.transport.factory().unwrap().name(), "mxlsrc");
+        }
     }
 }

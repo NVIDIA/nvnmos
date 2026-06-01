@@ -553,7 +553,7 @@ impl NmosSrc {
                         transport_file,
                     } => {
                         let advertise_caps = derive_advertise_caps(transport_file.as_deref())?;
-                        inner::build_mxlsrc(domain_path, flow_id, *format, advertise_caps.as_ref())?
+                        inner::build_mxlsrc(domain_path, flow_id, *format, advertise_caps.as_ref())?.bin
                     }
                     TransportConfig::Udp { variant, media, .. } => {
                         // Receiver-side advertise_caps for UDP is the
@@ -565,7 +565,7 @@ impl NmosSrc {
                         // downstream caps queries see the concrete
                         // shape the flow will carry, mirroring the
                         // `mxlsrc ! capsfilter` sub-bin pattern.
-                        inner::build_udpsrc(media, *variant, Some(&media.raw_caps))?
+                        inner::build_udpsrc(media, *variant, Some(&media.raw_caps))?.bin
                     }
                 };
                 self.swap_inner(bin, &new_inner)?;
@@ -766,7 +766,7 @@ impl NmosSrc {
                     }
                 };
                 match inner::build_mxlsrc(domain_path, flow_id, *format, advertise_caps.as_ref()) {
-                    Ok(e) => e,
+                    Ok(chain) => chain.bin,
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!("nmossrc: building inner mxlsrc: {e:#}"),
@@ -776,7 +776,7 @@ impl NmosSrc {
             }
             InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
                 match inner::build_udpsrc(media, *variant, Some(&media.raw_caps)) {
-                    Ok(e) => e,
+                    Ok(chain) => chain.bin,
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!("nmossrc: building inner udpsrc: {e:#}"),

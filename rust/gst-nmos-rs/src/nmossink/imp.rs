@@ -536,10 +536,10 @@ impl NmosSink {
         };
         let new_inner = match transport {
             TransportConfig::Mxl { domain_path, flow_id, .. } => {
-                inner::build_mxlsink(domain_path, flow_id)?
+                inner::build_mxlsink(domain_path, flow_id)?.bin
             }
             TransportConfig::Udp { variant, media, .. } => {
-                inner::build_udpsink(media, *variant)?
+                inner::build_udpsink(media, *variant)?.bin
             }
         };
         self.swap_inner(bin, &new_inner)?;
@@ -750,7 +750,7 @@ impl NmosSink {
         let new_inner = match &plan.inner {
             InnerConfig::Real(TransportConfig::Mxl { domain_path, flow_id, .. }) => {
                 match inner::build_mxlsink(domain_path, flow_id) {
-                    Ok(e) => e,
+                    Ok(chain) => chain.bin,
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!("nmossink: building inner mxlsink: {e:#}"),
@@ -760,7 +760,7 @@ impl NmosSink {
             }
             InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
                 match inner::build_udpsink(media, *variant) {
-                    Ok(e) => e,
+                    Ok(chain) => chain.bin,
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!("nmossink: building inner udpsink: {e:#}"),
