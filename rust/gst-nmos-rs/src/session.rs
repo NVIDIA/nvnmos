@@ -910,7 +910,7 @@ fn caps_format(settings: &CommonSettings) -> FlowFormat {
 /// `a_maxptime`) by reading the corresponding fields from
 /// `application/x-rtp,...` caps. Out-of-range / missing values
 /// drop silently here — pt's RFC 3551 range check fires
-/// downstream in [`sdp::splice_overrides`], where the error
+/// downstream in [`sdp::passthrough_with_overrides`], where the error
 /// can be attributed cleanly to the SDP transform rather than
 /// to a property-setter side-effect. Cross-check fields
 /// (`encoding-name`, video/ANC `clock-rate`, essence shape)
@@ -946,8 +946,8 @@ fn property_overrides_udp(settings: &CommonSettings) -> SdpOverrides<'_> {
     // pt is i32 on `application/x-rtp` caps per GStreamer
     // convention; cast to u8 for the [`SdpOverrides`] slot.
     // 0..=255 keeps the cast lossless and lets the
-    // RFC-3551-range check fire centrally in
-    // `sdp::splice_overrides`.
+    // RFC-3551-range check fires centrally in
+    // `sdp::passthrough_with_overrides`.
     let payload_type = tc
         .and_then(|s| s.get::<i32>("payload").ok())
         .and_then(|pt| u8::try_from(pt).ok());
@@ -1079,7 +1079,7 @@ fn decide_inner_config_udp(
     })?;
     // Cross-check the parsed SDP against the user-supplied
     // `caps` (essence shape) and `transport-caps` (RTP-layer
-    // hints). The check fires after `splice_overrides` has
+    // hints). The check fires after property overrides have
     // applied the override-class fields, so an audio
     // clock-rate that the user asked us to write into the
     // SDP is implicit-OK while a video clock-rate disagreement
@@ -1200,7 +1200,8 @@ fn resolve_inner_config_mxl(
 /// Transport-specific setup-time work for [`Transport::Udp`] /
 /// [`Transport::Udp2`]: synthesise (or pass through) an SDP via
 /// [`synthesise_or_passthrough_udp`], splice property overrides
-/// via [`sdp::splice_overrides`], parse the result via
+/// via [`sdp::passthrough_with_overrides`] for user-supplied transport
+/// files, parse the result via
 /// [`sdp::parse_sdp`] inside [`decide_inner_config_udp`], and
 /// package the resulting [`UdpMedia`] into a
 /// [`TransportConfig::Udp`].
@@ -1230,26 +1231,27 @@ fn resolve_inner_config_udp(
     // is supplied; pass through the transport-file* otherwise.
     // Mirrors `resolve_inner_config_mxl`'s
     // `synthesise_or_passthrough_mxl` call.
+    let had_user_transport_file = resolved_transport_file.is_some();
     let resolved_transport_file =
         synthesise_or_passthrough_udp(cat, element, settings, resolved_transport_file)?;
 
-    // Property-overrides splice: rewrite any user-set
+    // Property-overrides passthrough: rewrite any user-set
     // identity / cosmetic / network properties (label,
     // description, name, IS-05 endpoints, caps_mode) into
-    // the SDP before the daemon sees it. Mirrors
-    // `resolve_inner_config_mxl`'s `flow_def::splice_overrides`
-    // call. Activation-time SDP stays authoritative (see
-    // `make_activation_plan`) — the splice runs at startup
-    // only. For synthesised SDPs the splice is mostly a
-    // no-op (all properties were baked in by
-    // `synthesise_or_passthrough_udp`); for passthrough SDPs
-    // the splice rewrites with property overrides.
+    // user-supplied transport files before the daemon sees them.
+    // Mirrors `resolve_inner_config_mxl`'s
+    // `flow_def::splice_overrides` call. Activation-time SDP stays
+    // authoritative (see `make_activation_plan`) — the passthrough
+    // runs at startup only. Synthesised SDPs already bake every
+    // property in via [`sdp::from_caps`]; skip the second pass.
     let resolved_transport_file = match resolved_transport_file {
-        Some(text) => Some(
-            sdp::splice_overrides(&text, &property_overrides_udp(settings))
-                .with_context(|| format!("{element}: splicing property overrides into SDP"))?,
+        Some(text) if had_user_transport_file => Some(
+            sdp::passthrough_with_overrides(&text, &property_overrides_udp(settings))
+                .with_context(|| {
+                    format!("{element}: applying property overrides to transport-file SDP")
+                })?,
         ),
-        None => None,
+        other => other,
     };
     let inner =
         decide_inner_config_udp(element, settings, variant, resolved_transport_file.as_deref())?;
@@ -2502,8 +2504,8 @@ mod tests {
         /// `resolve_inner_config_udp` to match the user's
         /// `transport-caps`. Pins that the pt + clock-rate +
         /// ptime path all the way from `Settings.transport_caps`
-        /// → `property_overrides_udp` → `sdp::splice_overrides`
-        /// → `build_sdp` actually changes the wire SDP.
+        /// → `property_overrides_udp` → `sdp::passthrough_with_overrides`
+        /// actually changes the wire SDP.
         #[test]
         fn resolve_inner_config_udp_applies_transport_caps_audio_overrides() {
             // 48 kHz L24 stereo, pt=97, ptime=0.125. The

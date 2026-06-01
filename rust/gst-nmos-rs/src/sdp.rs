@@ -59,7 +59,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-use gst_sdp::{SDPAttribute, SDPMedia, SDPMessage};
+use gst_sdp::{SDPAttribute, SDPMedia, SDPMediaRef, SDPMessage};
 use unicase::Ascii;
 use gstreamer as gst;
 use gstreamer_sdp as gst_sdp;
@@ -207,7 +207,8 @@ pub(crate) enum SdpError {
     #[error("SDP has {0} media lines; at most two same-essence legs are supported")]
     TooManyMediaBlocks(usize),
     #[error(
-        "SDP mixes media types across `m=` blocks (e.g. video + audio);          each element handles a single essence"
+        "SDP mixes media types across `m=` blocks (e.g. video + audio); \
+         each element handles a single essence"
     )]
     MultiMediaMixedEssence,
     #[error("SDP media is missing a payload-type / format slot")]
@@ -509,11 +510,9 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
 /// * Deferred-mode Sender (or any element with `caps + properties`
 ///   but no `transport-file*`) — synthesise the configuring SDP
 ///   directly from the resolved [`UdpMedia`].
-/// * Sender with `transport-file*` plus overriding scalar
-///   properties — parse the file with [`parse_sdp`], apply the
-///   overrides to the [`UdpMedia`] and the [`SdpSession`], then
-///   rebuild with this function to splice them back in (the SDP
-///   equivalent of [`crate::flow_def::splice_overrides`]).
+///
+/// User-supplied transport files are mutated in place via
+/// [`passthrough_with_overrides`] rather than rebuilt here.
 ///
 /// Today the module emits single-media SDPs only. The
 /// `media.secondary` leg is ignored if present; ST 2022-7
@@ -552,7 +551,6 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
         "IP4",
         session.origin_address,
     );
-
     // Session-level `a=x-nvnmos-name:` — placement per
     // `nvnmos.h` and the daemon's own SDP synthesis at
     // `nvnmos_impl.cpp:1536` (`push_back(session_attributes, ...)`).
@@ -679,17 +677,24 @@ static ST_2110_LOWERCASE_RTPMAP_NAMES: LazyLock<HashSet<Ascii<&'static str>>> = 
 /// wire-form expected by `nmos-cpp`'s case-sensitive parser.
 fn canonicalise_st2110_wire_case(m: &mut SDPMedia) {
     for idx in 0..m.attributes_len() {
-        let rewrite = m.attribute(idx).and_then(|attr| {
-            let value = attr.value()?;
-            match attr.key() {
-                "rtpmap" => canonicalise_rtpmap_value(value).map(|v| ("rtpmap", v)),
-                "fmtp" => canonicalise_fmtp_value(value).map(|v| ("fmtp", v)),
-                _ => None,
-            }
-        });
-        if let Some((key, value)) = rewrite {
-            let _ = m.replace_attribute(idx, SDPAttribute::new(key, Some(&value)));
+        canonicalise_media_attribute_at(m, idx);
+    }
+}
+
+/// Canonicalise a single media attribute we just wrote (rtpmap/fmtp
+/// wire case only). Used by the synthesis builder and the passthrough
+/// override path so user-supplied attributes are never rewritten.
+pub(crate) fn canonicalise_media_attribute_at(m: &mut SDPMediaRef, idx: u32) {
+    let rewrite = m.attribute(idx).and_then(|attr| {
+        let value = attr.value()?;
+        match attr.key() {
+            "rtpmap" => canonicalise_rtpmap_value(value).map(|v| ("rtpmap", v)),
+            "fmtp" => canonicalise_fmtp_value(value).map(|v| ("fmtp", v)),
+            _ => None,
         }
+    });
+    if let Some((key, value)) = rewrite {
+        let _ = m.replace_attribute(idx, SDPAttribute::new(key, Some(&value)));
     }
 }
 
@@ -730,7 +735,7 @@ fn canonicalise_fmtp_value(value: &str) -> Option<String> {
 }
 
 /// Scalar overrides applied to an SDP transport file during
-/// [`splice_overrides`]. Mirrors
+/// [`passthrough_with_overrides`]. Mirrors
 /// [`crate::flow_def::FlowDefOverrides`]'s field shape on the
 /// MXL path so the two splice call sites read identically:
 ///
@@ -752,7 +757,7 @@ fn canonicalise_fmtp_value(value: &str) -> Option<String> {
 ///   (remote sender's address); the conversion from
 ///   IS-05-sender-vocabulary to the [`UdpLeg`] field names
 ///   happens at the property layer in `nmossink` / `nmossrc`,
-///   not here — by the time [`splice_overrides`] runs every
+///   not here — by the time [`passthrough_with_overrides`] runs every
 ///   field already means what it does on [`UdpLeg`].
 ///
 /// * Transport-caps overrides (`payload_type`,
@@ -795,7 +800,7 @@ pub(crate) struct SdpOverrides<'a> {
     pub source_port: Option<u16>,
     /// RTP payload type override (RFC 3551 §6 dynamic range
     /// 96..=127). All essences honour this. Out-of-range
-    /// values are rejected by [`splice_overrides`] with
+    /// values are rejected by [`passthrough_with_overrides`] with
     /// [`SdpError::InvalidPayloadType`] rather than silently
     /// dropped — `transport-caps` is user-facing and a stale
     /// pt is a misconfiguration worth surfacing.
@@ -839,135 +844,6 @@ pub(crate) struct SdpOverrides<'a> {
     /// also takes the enum by value and reads `Auto` as "leave
     /// it alone".
     pub caps_mode: CapsMode,
-}
-
-/// Apply [`SdpOverrides`] to an existing SDP transport file,
-/// returning the rewritten text.
-///
-/// UDP counterpart of [`crate::flow_def::splice_overrides`].
-/// Implementation contract mirrors MXL: parse the input, apply
-/// non-`None` overrides in place on the parsed model, serialise
-/// the result via [`build_sdp`]. Fields the input carries but
-/// our model doesn't (RTCP attributes, RFC 5888 `a=group:`
-/// session-level grouping, vendor `a=…` attributes outside the
-/// `x-nvnmos-*` family, etc.) are not round-tripped — same
-/// limitation as the MXL JSON splice, which only preserves the
-/// `flow_def` schema fields. Future work can switch to a
-/// mutate-in-place serializer if a real configuring SDP needs
-/// such attributes preserved.
-///
-/// Single-media SDPs only today. ST 2022-7 redundancy inputs
-/// (`m=` block twice) bubble back as
-/// [`SdpError::MultipleMedia`] from [`parse_sdp`].
-pub(crate) fn splice_overrides(
-    text: &str,
-    overrides: &SdpOverrides<'_>,
-) -> Result<String, SdpError> {
-    // First pass: capture session-level fields that `parse_sdp`
-    // doesn't surface on [`UdpMedia`] (`o=`, `s=`, `i=`, session-
-    // level `a=x-nvnmos-name`). We need owned strings because
-    // [`SdpSession`] takes borrows and the parsed `SDPMessage`
-    // would otherwise be dropped before [`build_sdp`] runs.
-    let msg = SDPMessage::parse_buffer(text.as_bytes())
-        .map_err(|e| SdpError::Parse(e.to_string()))?;
-    let original_session_name = msg.session_name().unwrap_or("").to_owned();
-    let original_description = msg.information().map(str::to_owned);
-    let (origin_address, origin_session_id) = msg
-        .origin()
-        .map(|o| {
-            (
-                o.addr().unwrap_or("").to_owned(),
-                o.sess_id().unwrap_or("0").to_owned(),
-            )
-        })
-        .unwrap_or_else(|| (String::new(), "0".to_owned()));
-    let original_name = msg.attribute_val("x-nvnmos-name").map(str::to_owned);
-    // libnvnmos's SDP parser
-    // (`has_session_description_caps` in `nvnmos_impl.cpp`)
-    // treats *presence* of media-level `a=x-nvnmos-caps:` as
-    // wide regardless of value (matching `nvnmos.h`'s
-    // "presence-only" doc). Mirror that read here so `Auto`
-    // preserves whatever the input asserts. `.is_some()`
-    // therefore covers both `a=x-nvnmos-caps:` (empty value)
-    // and `a=x-nvnmos-caps:foo` shapes.
-    let original_advertise_caps = msg
-        .media(0)
-        .and_then(|m| m.attribute_val("x-nvnmos-caps").map(|_| ()))
-        .is_some();
-
-    // Second pass: parse into our [`UdpMedia`] model so the
-    // existing [`build_sdp`] re-emits `m=` / `c=` / fmtp / etc.
-    // from the same source of truth used elsewhere in the crate.
-    let mut media = parse_sdp(text)?;
-
-    // Apply leg-level overrides. Each `Some(...)` replaces
-    // whatever [`parse_sdp`] populated; `None` is no-op.
-    if let Some(ip) = overrides.interface_ip {
-        media.primary.interface_ip = Some(ip.to_owned());
-    }
-    if let Some(ip) = overrides.destination_ip {
-        media.primary.destination_ip = ip.to_owned();
-    }
-    if let Some(port) = overrides.destination_port {
-        media.primary.destination_port = port;
-    }
-    if let Some(ip) = overrides.source_ip {
-        media.primary.source_ip = Some(ip.to_owned());
-    }
-    if let Some(port) = overrides.source_port {
-        media.primary.source_port = Some(port);
-    }
-
-    // Apply transport-caps-driven overrides to the RTP caps
-    // (the `application/x-rtp,...` source of truth that
-    // `set_media_from_caps` re-emits as `m=` + `a=rtpmap:` +
-    // `a=fmtp:` + `a=ptime:` / `a=maxptime:`). Audio-only
-    // slots (`audio_clock_rate`, `a_ptime`, `a_maxptime`) are
-    // silently ignored for non-audio essences because their
-    // fixed clocks (90 kHz for video raw / ANC per RFC 4175 /
-    // RFC 8331) fall under the cross-check rule rather than
-    // override — see [`SdpOverrides`]'s doc and
-    // [`crate::session::CommonSettings::transport_caps`]'s
-    // override-vs-cross-check table.
-    apply_transport_caps_overrides(&mut media, overrides)?;
-
-    // Apply session-level overrides, owning the strings on the
-    // local stack so [`SdpSession`] can borrow them through the
-    // [`build_sdp`] call.
-    let session_name: String = overrides
-        .label
-        .map(str::to_owned)
-        .unwrap_or(original_session_name);
-    let description: Option<String> = match overrides.description {
-        Some(desc) => Some(desc.to_owned()),
-        None => original_description,
-    };
-    let name: Option<String> = match overrides.name {
-        Some(n) => Some(n.to_owned()),
-        None => original_name,
-    };
-    // `CapsMode::Auto` defers to whatever the input asserted;
-    // `Narrow` and `Wide` override unconditionally. Resolution
-    // happens here (not inside [`build_sdp`]) because
-    // [`SdpSession::advertise_caps`] is a plain `bool` — the
-    // builder is rebuild-from-scratch and has no "leave it
-    // alone" sentinel. Mirrors `flow_def::splice_overrides`'s
-    // read-resolve-write pattern on the MXL path.
-    let advertise_caps = match overrides.caps_mode {
-        CapsMode::Auto => original_advertise_caps,
-        CapsMode::Narrow => false,
-        CapsMode::Wide => true,
-    };
-
-    let session = SdpSession {
-        origin_address: &origin_address,
-        origin_session_id: &origin_session_id,
-        session_name: &session_name,
-        description: description.as_deref(),
-        name: name.as_deref(),
-        advertise_caps,
-    };
-    build_sdp(&media, session)
 }
 
 /// Apply [`SdpOverrides`]'s transport-caps-driven slots
@@ -1026,6 +902,10 @@ fn apply_transport_caps_overrides(
     Ok(())
 }
 
+pub(crate) use crate::sdp_passthrough::{
+    passthrough_with_overrides, reject_unsupported_multi_media,
+};
+
 /// Cross-check the parsed [`UdpMedia`] (post-splice) against
 /// the user-supplied `caps` (essence shape) and
 /// `transport-caps` (RTP-layer hints). Mirrors
@@ -1044,14 +924,14 @@ fn apply_transport_caps_overrides(
 /// | RTP `media` (`audio`/…)    | Cross-check   | Cross-check  |
 /// | `format` / `width` / `height` / `sampling` / `depth` / `channels` / `framerate` (essence shape) | Cross-check | Cross-check |
 ///
-/// Implementation: because `splice_overrides` has *already*
+/// Implementation: because [`passthrough_with_overrides`] has *already*
 /// applied the override-class fields into
 /// `media.primary.rtp_caps` (audio clock-rate, payload, ptime,
 /// maxptime), the cross-check just intersects what's left with
 /// the user's `transport-caps`. Fields stripped from both
 /// sides before the intersect: `payload`, `a-ptime`,
 /// `a-maxptime` (always-override). Audio-only `clock-rate`
-/// override is implicit — the splice has copied the value over,
+/// override is implicit — passthrough has copied the value over,
 /// so the intersect trivially passes; for video / data the
 /// `clock-rate` stays at the SDP's value and any mismatch
 /// against `transport-caps` surfaces as
@@ -1114,8 +994,8 @@ fn cross_check_essence_caps(media: &UdpMedia, caps: &gst::Caps) -> Result<(), Sd
 fn cross_check_transport_caps(media: &UdpMedia, transport_caps: &gst::Caps) -> Result<(), SdpError> {
     // Strip always-override fields from both sides so the
     // intersect only sees cross-check fields. The audio-only
-    // `clock-rate` override is implicit: `splice_overrides`
-    // has already copied the value into `media.rtp_caps` for
+    // `clock-rate` override is implicit: passthrough has already
+    // copied the value into `media.rtp_caps` for
     // audio essences, so the intersect on `clock-rate`
     // trivially passes there; for video / data the field
     // stays at the SDP's value and any mismatch surfaces here.
@@ -1315,8 +1195,8 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
 /// back to the per-essence default in [`defaults`]. The
 /// override is rejected with [`SdpError::InvalidPayloadType`]
 /// when outside RFC 3551 §6's dynamic range (`96..=127`),
-/// matching [`splice_overrides`]'s validation on the splice
-/// path.
+/// matching [`passthrough_with_overrides`]'s validation on the
+/// passthrough path.
 fn resolve_payload_type(
     format: FlowFormat,
     transport_caps: Option<&gst::Caps>,
@@ -2872,12 +2752,16 @@ mod tests {
         );
     }
 
+    // Property-override passthrough tests. Each test pins one
+    // override slot at a time, then a final "all-None preserves
+    // input" + "rejects malformed" complete the matrix.
+
     #[test]
     fn reject_unsupported_multi_media_accepts_single_block() {
         init_gst();
         let msg = SDPMessage::parse_buffer(VIDEO_YCBCR_422_10BIT_1080P50_SDP.as_bytes())
             .expect("parse");
-        crate::sdp_passthrough::reject_unsupported_multi_media(&msg).expect("single media ok");
+        reject_unsupported_multi_media(&msg).expect("single media ok");
     }
 
     #[test]
@@ -2886,11 +2770,12 @@ mod tests {
         let sdp = format!(
             "{}{}",
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
-            "m=audio 5004 RTP/AVP 97\r\n             c=IN IP4 239.2.2.2/64\r\n             a=rtpmap:97 L24/48000/2\r\n",
+            "m=audio 5004 RTP/AVP 97\r\n\
+             c=IN IP4 239.2.2.2/64\r\n\
+             a=rtpmap:97 L24/48000/2\r\n",
         );
         let msg = SDPMessage::parse_buffer(sdp.as_bytes()).expect("parse");
-        let err = crate::sdp_passthrough::reject_unsupported_multi_media(&msg)
-            .expect_err("mixed essence");
+        let err = reject_unsupported_multi_media(&msg).expect_err("mixed essence");
         assert!(matches!(err, SdpError::MultiMediaMixedEssence));
     }
 
@@ -2900,11 +2785,15 @@ mod tests {
         let sdp = format!(
             "{}{}",
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
-            "m=video 5006 RTP/AVP 96\r\n             c=IN IP4 239.1.1.2/64\r\n             a=rtpmap:96 raw/90000\r\n             m=video 5008 RTP/AVP 96\r\n             c=IN IP4 239.1.1.3/64\r\n             a=rtpmap:96 raw/90000\r\n",
+            "m=video 5006 RTP/AVP 96\r\n\
+             c=IN IP4 239.1.1.2/64\r\n\
+             a=rtpmap:96 raw/90000\r\n\
+             m=video 5008 RTP/AVP 96\r\n\
+             c=IN IP4 239.1.1.3/64\r\n\
+             a=rtpmap:96 raw/90000\r\n",
         );
         let msg = SDPMessage::parse_buffer(sdp.as_bytes()).expect("parse");
-        let err = crate::sdp_passthrough::reject_unsupported_multi_media(&msg)
-            .expect_err("too many");
+        let err = reject_unsupported_multi_media(&msg).expect_err("too many");
         assert!(matches!(err, SdpError::TooManyMediaBlocks(3)));
     }
 
@@ -2914,25 +2803,56 @@ mod tests {
         let sdp = format!(
             "{}{}",
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
-            "m=video 5006 RTP/AVP 96\r\n             c=IN IP4 239.1.1.2/64\r\n             a=rtpmap:96 raw/90000\r\n",
+            "m=video 5006 RTP/AVP 96\r\n\
+             c=IN IP4 239.1.1.2/64\r\n\
+             a=rtpmap:96 raw/90000\r\n",
         );
         let msg = SDPMessage::parse_buffer(sdp.as_bytes()).expect("parse");
-        let err = crate::sdp_passthrough::reject_unsupported_multi_media(&msg)
-            .expect_err("dual leg");
+        let err = reject_unsupported_multi_media(&msg).expect_err("dual leg");
         assert!(matches!(err, SdpError::MultipleMedia(2)));
     }
 
-    // `splice_overrides` is the UDP analogue of
-    // `flow_def::splice_overrides`; the test naming mirrors that
-    // module's `splice_overrides_*` block. Each test pins one
-    // override slot at a time, then a final "all-None preserves
-    // input" + "rejects malformed" complete the matrix — same
-    // shape as the MXL splice tests.
+    #[test]
+    fn passthrough_with_no_overrides_is_byte_identical_for_video() {
+        init_gst();
+        let out = passthrough_with_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides::default(),
+        )
+        .expect("passthrough");
+        assert_eq!(out, VIDEO_YCBCR_422_10BIT_1080P50_SDP);
+        assert!(out.contains("a=ts-refclk:"));
+        assert!(out.contains("a=mediaclk:"));
+    }
 
     #[test]
-    fn splice_overrides_label_replaces_session_name() {
+    fn passthrough_preserves_unknown_fmtp_keys() {
         init_gst();
-        let spliced = splice_overrides(
+        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace(
+            "PM=2110GPM;",
+            "PM=2110GPM; SomeFutureKey=Value;",
+        );
+        let out =
+            passthrough_with_overrides(&sdp, &SdpOverrides::default()).expect("passthrough");
+        assert!(
+            out.contains("SomeFutureKey=Value"),
+            "vendor/future fmtp keys must survive passthrough:\n{out}",
+        );
+    }
+
+    #[test]
+    fn passthrough_preserves_information_line() {
+        init_gst();
+        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace("s=Example\r\n", "s=Example\r\ni=Studio A\r\n");
+        let out =
+            passthrough_with_overrides(&sdp, &SdpOverrides::default()).expect("passthrough");
+        assert!(out.contains("i=Studio A"));
+    }
+
+    #[test]
+    fn passthrough_label_replaces_session_name() {
+        init_gst();
+        let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides { label: Some("new label"), ..Default::default() },
         )
@@ -2942,10 +2862,10 @@ mod tests {
     }
 
     #[test]
-    fn splice_overrides_description_replaces_i_line() {
+    fn passthrough_description_replaces_i_line() {
         init_gst();
         // The fixture has no `i=` line; splice should add one.
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides {
                 description: Some("Studio A camera"),
@@ -2958,7 +2878,7 @@ mod tests {
     }
 
     #[test]
-    fn splice_overrides_name_replaces_x_nvnmos_name() {
+    fn passthrough_name_replaces_x_nvnmos_name() {
         init_gst();
         // The fixture has no `a=x-nvnmos-name`; splice should add one
         // *at the session level* (per `nvnmos.h` and what
@@ -2968,7 +2888,7 @@ mod tests {
         //   2. The line appears before the first `m=` in the
         //      serialised text — guards against the placement
         //      regression that earlier emitted it at media level.
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides { name: Some("Camera 1"), ..Default::default() },
         )
@@ -2993,9 +2913,9 @@ mod tests {
     }
 
     #[test]
-    fn splice_overrides_leg_fields_replace_udp_media() {
+    fn passthrough_leg_fields_replace_udp_media() {
         init_gst();
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides {
                 destination_ip: Some("239.99.99.99"),
@@ -3019,11 +2939,11 @@ mod tests {
     }
 
     #[test]
-    fn splice_overrides_all_none_preserves_input_legs() {
+    fn passthrough_all_none_preserves_input_legs() {
         init_gst();
         let original = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
         let spliced =
-            splice_overrides(VIDEO_YCBCR_422_10BIT_1080P50_SDP, &SdpOverrides::default())
+            passthrough_with_overrides(VIDEO_YCBCR_422_10BIT_1080P50_SDP, &SdpOverrides::default())
                 .expect("splice");
         let after = parse_sdp(&spliced).expect("re-parse");
         // Leg fields must round-trip unchanged.
@@ -3041,7 +2961,7 @@ mod tests {
     }
 
     #[test]
-    fn splice_overrides_preserves_origin_address_and_session_id() {
+    fn passthrough_preserves_origin_address_and_session_id() {
         init_gst();
         // The fixture sets `o=- 1234567890 0 IN IP4 192.0.2.10`.
         // With no `label` / `description` / `name` override and no
@@ -3049,7 +2969,7 @@ mod tests {
         // address and session-id (the daemon may rely on these
         // being stable across the configuring-SDP lifecycle).
         let spliced =
-            splice_overrides(VIDEO_YCBCR_422_10BIT_1080P50_SDP, &SdpOverrides::default())
+            passthrough_with_overrides(VIDEO_YCBCR_422_10BIT_1080P50_SDP, &SdpOverrides::default())
                 .expect("splice");
         let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse");
         let origin = msg.origin().expect("origin");
@@ -3058,9 +2978,9 @@ mod tests {
     }
 
     #[test]
-    fn splice_overrides_invalid_input_propagates_parse_error() {
+    fn passthrough_invalid_input_propagates_parse_error() {
         init_gst();
-        let err = splice_overrides("not an SDP at all", &SdpOverrides::default())
+        let err = passthrough_with_overrides("not an SDP at all", &SdpOverrides::default())
             .expect_err("must error");
         assert!(matches!(err, SdpError::Parse(_) | SdpError::NoMedia));
     }
@@ -3072,9 +2992,9 @@ mod tests {
     /// to `rtp_caps.payload` flows through to all three slots
     /// via `set_media_from_caps`.
     #[test]
-    fn splice_overrides_audio_pt_override_rewrites_m_line_and_rtpmap() {
+    fn passthrough_audio_pt_override_rewrites_m_line_and_rtpmap() {
         init_gst();
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             AUDIO_L24_48K_STEREO_SDP,
             &SdpOverrides {
                 payload_type: Some(99),
@@ -3097,9 +3017,9 @@ mod tests {
     /// Audio clock-rate override: 48000 → 96000 rewrites the
     /// `a=rtpmap:97 L24/48000/2` clock-rate token.
     #[test]
-    fn splice_overrides_audio_clock_rate_override_rewrites_rtpmap() {
+    fn passthrough_audio_clock_rate_override_rewrites_rtpmap() {
         init_gst();
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             AUDIO_L24_48K_STEREO_SDP,
             &SdpOverrides {
                 audio_clock_rate: Some(96000),
@@ -3118,9 +3038,9 @@ mod tests {
     /// fields (ms decimal), `set_media_from_caps` re-emits as
     /// `a=ptime:` / `a=maxptime:` lines.
     #[test]
-    fn splice_overrides_audio_ptime_and_maxptime_override() {
+    fn passthrough_audio_ptime_and_maxptime_override() {
         init_gst();
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             AUDIO_L24_48K_STEREO_SDP,
             &SdpOverrides {
                 a_ptime: Some("1"),
@@ -3144,9 +3064,9 @@ mod tests {
     /// passes `audio_clock_rate` / `a_ptime` /
     /// `a_maxptime`.
     #[test]
-    fn splice_overrides_audio_only_slots_silently_ignored_for_video() {
+    fn passthrough_audio_only_slots_silently_ignored_for_video() {
         init_gst();
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides {
                 audio_clock_rate: Some(48000),
@@ -3171,9 +3091,9 @@ mod tests {
     /// override is essence-agnostic (RFC 3551 §6 dynamic
     /// range applies to all RTP transports).
     #[test]
-    fn splice_overrides_video_pt_override_works() {
+    fn passthrough_video_pt_override_works() {
         init_gst();
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides {
                 payload_type: Some(100),
@@ -3331,7 +3251,7 @@ mod tests {
             .field("clock-rate", 96_000i32)
             .build();
         // 1. Splice the override into the audio SDP.
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             AUDIO_L24_48K_STEREO_SDP,
             &SdpOverrides {
                 audio_clock_rate: Some(96_000),
@@ -3352,10 +3272,10 @@ mod tests {
     /// misconfiguration worth surfacing. Tests the dynamic-
     /// range lower (0, 95) and upper (128 via u8 max 255) edges.
     #[test]
-    fn splice_overrides_invalid_pt_returns_error() {
+    fn passthrough_invalid_pt_returns_error() {
         init_gst();
         for pt in [0u8, 33, 95, 128, 200, 255] {
-            let err = splice_overrides(
+            let err = passthrough_with_overrides(
                 AUDIO_L24_48K_STEREO_SDP,
                 &SdpOverrides {
                     payload_type: Some(pt),
@@ -3372,7 +3292,7 @@ mod tests {
         }
         // Sanity: 96 and 127 (the inclusive bounds) succeed.
         for pt in [96, 127] {
-            splice_overrides(
+            passthrough_with_overrides(
                 AUDIO_L24_48K_STEREO_SDP,
                 &SdpOverrides {
                     payload_type: Some(pt),
@@ -3477,9 +3397,9 @@ mod tests {
     }
 
     #[test]
-    fn splice_overrides_caps_mode_auto_preserves_absent() {
+    fn passthrough_caps_mode_auto_preserves_absent() {
         init_gst();
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides { caps_mode: CapsMode::Auto, ..Default::default() },
         )
@@ -3491,9 +3411,9 @@ mod tests {
     }
 
     #[test]
-    fn splice_overrides_caps_mode_auto_preserves_present() {
+    fn passthrough_caps_mode_auto_preserves_present() {
         init_gst();
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_WIDE_SDP,
             &SdpOverrides { caps_mode: CapsMode::Auto, ..Default::default() },
         )
@@ -3505,9 +3425,9 @@ mod tests {
     }
 
     #[test]
-    fn splice_overrides_caps_mode_narrow_strips_attribute() {
+    fn passthrough_caps_mode_narrow_strips_attribute() {
         init_gst();
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_WIDE_SDP,
             &SdpOverrides { caps_mode: CapsMode::Narrow, ..Default::default() },
         )
@@ -3519,9 +3439,9 @@ mod tests {
     }
 
     #[test]
-    fn splice_overrides_caps_mode_narrow_no_op_when_absent() {
+    fn passthrough_caps_mode_narrow_no_op_when_absent() {
         init_gst();
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides { caps_mode: CapsMode::Narrow, ..Default::default() },
         )
@@ -3533,9 +3453,9 @@ mod tests {
     }
 
     #[test]
-    fn splice_overrides_caps_mode_wide_adds_attribute() {
+    fn passthrough_caps_mode_wide_adds_attribute() {
         init_gst();
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides { caps_mode: CapsMode::Wide, ..Default::default() },
         )
@@ -3553,9 +3473,9 @@ mod tests {
     }
 
     #[test]
-    fn splice_overrides_caps_mode_wide_idempotent_when_present() {
+    fn passthrough_caps_mode_wide_idempotent_when_present() {
         init_gst();
-        let spliced = splice_overrides(
+        let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_WIDE_SDP,
             &SdpOverrides { caps_mode: CapsMode::Wide, ..Default::default() },
         )
@@ -4699,19 +4619,11 @@ mod tests {
         );
     }
 
-    /// `splice_overrides` re-parses our caps-synthesised SDP and
-    /// runs it back through `build_sdp` to apply property
-    /// overrides. The intermediate `parse_sdp` → `set_media_from_caps`
-    /// hop normalises the encoding name to `RAW` and lowercases
-    /// fmtp parameter keys (gstreamer-sdp's convention), which
-    /// nmos-cpp rejects with a silent `node_implementation_exception`
-    /// because both `get_format`'s match against `media_types::video_raw`
-    /// (`U("video/raw")`) and `get_video_raw_parameters`'
-    /// `find_fmtp` lookup for `PM` / `SSN` are case-sensitive. Pin
-    /// the post-splice wire-form so the live `nmossink` path stays
-    /// canonical regardless of whether overrides were applied.
+    /// Caps-synthesised SDPs must emit canonical ST 2110 wire case from
+    /// [`build_sdp`] directly; transport-file passthrough never rewrites
+    /// attributes the user did not override.
     #[test]
-    fn splice_overrides_preserves_canonical_wire_case_for_video_raw() {
+    fn build_sdp_preserves_canonical_wire_case_for_video_raw() {
         init_gst();
         let essence = gst::Caps::from_str(
             "video/x-raw,format=UYVY,width=1280,height=720,framerate=25/1,interlace-mode=progressive",
@@ -4731,28 +4643,22 @@ mod tests {
             interface_ip: "",
             advertise_caps: false,
         };
-        let synthesised = from_caps(&input).expect("synth");
-        let spliced =
-            splice_overrides(&synthesised, &SdpOverrides::default()).expect("splice no-op");
+        let text = from_caps(&input).expect("synth");
         assert!(
-            spliced.contains("a=rtpmap:96 raw/90000"),
-            "splice re-emit must preserve lower-case `raw`:\n{spliced}",
+            text.contains("a=rtpmap:96 raw/90000"),
+            "build must emit lower-case `raw`:\n{text}",
         );
         assert!(
-            spliced.contains("PM=2110GPM"),
-            "splice re-emit must preserve upper-case `PM=`:\n{spliced}",
+            text.contains("PM=2110GPM"),
+            "build must emit upper-case `PM=`:\n{text}",
         );
         assert!(
-            spliced.contains("SSN=ST2110-20:2017"),
-            "splice re-emit must preserve upper-case `SSN=`:\n{spliced}",
+            text.contains("SSN=ST2110-20:2017"),
+            "build must emit upper-case `SSN=`:\n{text}",
         );
         assert!(
-            !spliced.contains("RAW/"),
-            "splice re-emit must not re-introduce upper-case `RAW/`:\n{spliced}",
-        );
-        assert!(
-            !spliced.contains("pm=") && !spliced.contains("ssn="),
-            "splice re-emit must not re-introduce lower-case `pm=`/`ssn=`:\n{spliced}",
+            !text.contains("RAW/"),
+            "build must not emit upper-case `RAW/`:\n{text}",
         );
     }
 
@@ -4767,7 +4673,7 @@ mod tests {
     /// adds a new upper-case fmtp key, extending the table makes
     /// this test pass; nothing else should need editing.
     #[test]
-    fn splice_overrides_preserves_all_st2110_uppercase_fmtp_keys() {
+    fn passthrough_preserves_all_st2110_uppercase_fmtp_keys() {
         init_gst();
         // The SDP below intentionally crams every upper-case
         // fmtp key into a single (semantically nonsensical)
@@ -4803,7 +4709,7 @@ mod tests {
             VPID_Code=133;\
             TM=Async\r\n";
         let spliced =
-            splice_overrides(raw_sdp, &SdpOverrides::default()).expect("splice no-op");
+            passthrough_with_overrides(raw_sdp, &SdpOverrides::default()).expect("splice no-op");
         // rtpmap encoding-name must round-trip lower-case.
         assert!(
             spliced.contains("a=rtpmap:96 raw/90000"),
