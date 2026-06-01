@@ -141,6 +141,26 @@ pub(crate) const TRANSPORT_FILE_PATH_BLURB: &str =
 pub(crate) const TRANSPORT_CAPS_BLURB: &str =
     "Per-transport overrides (SDP fmtp-style). Typically empty for MXL.";
 
+pub(crate) const TRANSPORT_PROPERTIES_BLURB: &str =
+    "Overrides applied to the inner source or sink (`udpsrc`, `udpsink`, \
+     `mxlsrc`, or `mxlsink`) every time the data-path chain is built. \
+     Pass a `GstStructure` whose fields are GObject property names on that \
+     inner source or sink — for example `properties,buffer-size=26214400`. \
+     The structure name is not interpreted. Takes effect on the next chain \
+     build, not immediately on the one currently in the chain.";
+
+pub(crate) const PAY_PROPERTIES_BLURB: &str =
+    "Overrides applied to the inner RTP payloader every time the UDP sender \
+     chain is built. Same `GstStructure` syntax as `transport-properties`; \
+     ignored on non-UDP transports (a warning is logged if non-empty). Takes \
+     effect on the next chain build.";
+
+pub(crate) const DEPAY_PROPERTIES_BLURB: &str =
+    "Overrides applied to the inner RTP depayloader every time the UDP \
+     receiver chain is built. Same `GstStructure` syntax as \
+     `transport-properties`; ignored on non-UDP transports (a warning is \
+     logged if non-empty). Takes effect on the next chain build.";
+
 pub(crate) const AUTO_ACTIVATE_BLURB: &str =
     "Bring the inner `mxlsink` / `mxlsrc` up immediately at \
      NULL\u{2192}READY (or, for deferred-mode senders, READY\u{2192}PAUSED) \

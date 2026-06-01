@@ -84,6 +84,8 @@ struct Settings {
     /// port or [`crate::sdp::defaults::RTP_PORT`]).
     destination_port: u16,
     auto_activate: bool,
+    transport_properties: Option<gst::Structure>,
+    depay_properties: Option<gst::Structure>,
 }
 
 impl Default for Settings {
@@ -109,6 +111,8 @@ impl Default for Settings {
             multicast_ip: String::new(),
             destination_port: 0,
             auto_activate: false,
+            transport_properties: None,
+            depay_properties: None,
         }
     }
 }
@@ -264,6 +268,16 @@ impl ObjectImpl for NmosSrc {
                     .blurb(crate::session::TRANSPORT_CAPS_BLURB)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecBoxed::builder::<gst::Structure>("transport-properties")
+                    .nick("Transport source properties")
+                    .blurb(crate::session::TRANSPORT_PROPERTIES_BLURB)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecBoxed::builder::<gst::Structure>("depay-properties")
+                    .nick("Depayloader properties")
+                    .blurb(crate::session::DEPAY_PROPERTIES_BLURB)
+                    .mutable_ready()
+                    .build(),
                 glib::ParamSpecEnum::builder::<CapsMode>("receiver-caps-mode")
                     .nick("Receiver caps mode")
                     .blurb(
@@ -398,6 +412,12 @@ impl ObjectImpl for NmosSrc {
             "transport-caps" => {
                 settings.transport_caps = value.get().expect("type checked upstream");
             }
+            "transport-properties" => {
+                settings.transport_properties = value.get().expect("type checked upstream");
+            }
+            "depay-properties" => {
+                settings.depay_properties = value.get().expect("type checked upstream");
+            }
             "receiver-caps-mode" => {
                 settings.receiver_caps_mode = value.get().expect("type checked upstream");
             }
@@ -436,6 +456,8 @@ impl ObjectImpl for NmosSrc {
             "transport-file-path" => settings.transport_file_path.to_value(),
             "caps" => settings.caps.to_value(),
             "transport-caps" => settings.transport_caps.to_value(),
+            "transport-properties" => settings.transport_properties.to_value(),
+            "depay-properties" => settings.depay_properties.to_value(),
             "receiver-caps-mode" => settings.receiver_caps_mode.to_value(),
             "source-ip" => settings.source_ip.to_value(),
             "interface-ip" => settings.interface_ip.to_value(),
@@ -553,7 +575,23 @@ impl NmosSrc {
                         transport_file,
                     } => {
                         let advertise_caps = derive_advertise_caps(transport_file.as_deref())?;
-                        inner::build_mxlsrc(domain_path, flow_id, *format, advertise_caps.as_ref())?.bin
+                        {
+                            let chain = inner::build_mxlsrc(
+                                domain_path,
+                                flow_id,
+                                *format,
+                                advertise_caps.as_ref(),
+                            )?;
+                            let settings = self.settings.lock().unwrap();
+                            inner::apply_mxl_src_inner_properties(
+                                &CAT,
+                                "nmossrc",
+                                &chain,
+                                settings.transport_properties.as_ref(),
+                                settings.depay_properties.as_ref(),
+                            );
+                            chain.bin
+                        }
                     }
                     TransportConfig::Udp { variant, media, .. } => {
                         // Receiver-side advertise_caps for UDP is the
@@ -565,7 +603,22 @@ impl NmosSrc {
                         // downstream caps queries see the concrete
                         // shape the flow will carry, mirroring the
                         // `mxlsrc ! capsfilter` sub-bin pattern.
-                        inner::build_udpsrc(media, *variant, Some(&media.raw_caps))?.bin
+                        {
+                            let chain = inner::build_udpsrc(
+                                media,
+                                *variant,
+                                Some(&media.raw_caps),
+                            )?;
+                            let settings = self.settings.lock().unwrap();
+                            inner::apply_udp_src_inner_properties(
+                                &CAT,
+                                "nmossrc",
+                                &chain,
+                                settings.transport_properties.as_ref(),
+                                settings.depay_properties.as_ref(),
+                            );
+                            chain.bin
+                        }
                     }
                 };
                 self.swap_inner(bin, &new_inner)?;
@@ -765,8 +818,18 @@ impl NmosSrc {
                         };
                     }
                 };
+                let settings = self.settings.lock().unwrap();
                 match inner::build_mxlsrc(domain_path, flow_id, *format, advertise_caps.as_ref()) {
-                    Ok(chain) => chain.bin,
+                    Ok(chain) => {
+                        inner::apply_mxl_src_inner_properties(
+                            &CAT,
+                            "nmossrc",
+                            &chain,
+                            settings.transport_properties.as_ref(),
+                            settings.depay_properties.as_ref(),
+                        );
+                        chain.bin
+                    }
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!("nmossrc: building inner mxlsrc: {e:#}"),
@@ -775,8 +838,18 @@ impl NmosSrc {
                 }
             }
             InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
+                let settings = self.settings.lock().unwrap();
                 match inner::build_udpsrc(media, *variant, Some(&media.raw_caps)) {
-                    Ok(chain) => chain.bin,
+                    Ok(chain) => {
+                        inner::apply_udp_src_inner_properties(
+                            &CAT,
+                            "nmossrc",
+                            &chain,
+                            settings.transport_properties.as_ref(),
+                            settings.depay_properties.as_ref(),
+                        );
+                        chain.bin
+                    }
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!("nmossrc: building inner udpsrc: {e:#}"),
@@ -955,6 +1028,7 @@ impl From<Settings> for crate::session::CommonSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gstreamer::prelude::StaticType;
     use crate::session::CommonSettings;
 
     /// Pins the IS-05 Receiver `transport_params` →
@@ -1012,4 +1086,5 @@ mod tests {
         let cs: CommonSettings = s.into();
         assert_eq!(cs.transport_caps.as_ref(), Some(&caps));
     }
+
 }

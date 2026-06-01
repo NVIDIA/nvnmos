@@ -74,6 +74,8 @@ struct Settings {
     /// [`crate::sdp::defaults::RTP_PORT`]).
     destination_port: u16,
     auto_activate: bool,
+    transport_properties: Option<gst::Structure>,
+    pay_properties: Option<gst::Structure>,
 }
 
 impl Default for Settings {
@@ -98,6 +100,8 @@ impl Default for Settings {
             destination_ip: String::new(),
             destination_port: 0,
             auto_activate: false,
+            transport_properties: None,
+            pay_properties: None,
         }
     }
 }
@@ -249,6 +253,16 @@ impl ObjectImpl for NmosSink {
                     .blurb(crate::session::TRANSPORT_CAPS_BLURB)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecBoxed::builder::<gst::Structure>("transport-properties")
+                    .nick("Transport sink properties")
+                    .blurb(crate::session::TRANSPORT_PROPERTIES_BLURB)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecBoxed::builder::<gst::Structure>("pay-properties")
+                    .nick("Payloader properties")
+                    .blurb(crate::session::PAY_PROPERTIES_BLURB)
+                    .mutable_ready()
+                    .build(),
                 glib::ParamSpecString::builder("source-ip")
                     .nick("Source IP")
                     .blurb(
@@ -372,6 +386,12 @@ impl ObjectImpl for NmosSink {
             "transport-caps" => {
                 settings.transport_caps = value.get().expect("type checked upstream");
             }
+            "transport-properties" => {
+                settings.transport_properties = value.get().expect("type checked upstream");
+            }
+            "pay-properties" => {
+                settings.pay_properties = value.get().expect("type checked upstream");
+            }
             "source-ip" => {
                 settings.source_ip = string_or_empty(value);
             }
@@ -408,6 +428,8 @@ impl ObjectImpl for NmosSink {
             "transport-file-path" => settings.transport_file_path.to_value(),
             "caps" => settings.caps.to_value(),
             "transport-caps" => settings.transport_caps.to_value(),
+            "transport-properties" => settings.transport_properties.to_value(),
+            "pay-properties" => settings.pay_properties.to_value(),
             "source-ip" => settings.source_ip.to_value(),
             "source-port" => u32::from(settings.source_port).to_value(),
             "destination-ip" => settings.destination_ip.to_value(),
@@ -534,12 +556,29 @@ impl NmosSink {
         let InnerConfig::Real(transport) = outcome else {
             return Ok(());
         };
+        let settings = self.settings.lock().unwrap();
         let new_inner = match transport {
             TransportConfig::Mxl { domain_path, flow_id, .. } => {
-                inner::build_mxlsink(domain_path, flow_id)?.bin
+                let chain = inner::build_mxlsink(domain_path, flow_id)?;
+                inner::apply_mxl_sink_inner_properties(
+                    &CAT,
+                    "nmossink",
+                    &chain,
+                    settings.transport_properties.as_ref(),
+                    settings.pay_properties.as_ref(),
+                );
+                chain.bin
             }
             TransportConfig::Udp { variant, media, .. } => {
-                inner::build_udpsink(media, *variant)?.bin
+                let chain = inner::build_udpsink(media, *variant)?;
+                inner::apply_udp_sink_inner_properties(
+                    &CAT,
+                    "nmossink",
+                    &chain,
+                    settings.transport_properties.as_ref(),
+                    settings.pay_properties.as_ref(),
+                );
+                chain.bin
             }
         };
         self.swap_inner(bin, &new_inner)?;
@@ -749,8 +788,18 @@ impl NmosSink {
 
         let new_inner = match &plan.inner {
             InnerConfig::Real(TransportConfig::Mxl { domain_path, flow_id, .. }) => {
+                let settings = self.settings.lock().unwrap();
                 match inner::build_mxlsink(domain_path, flow_id) {
-                    Ok(chain) => chain.bin,
+                    Ok(chain) => {
+                        inner::apply_mxl_sink_inner_properties(
+                            &CAT,
+                            "nmossink",
+                            &chain,
+                            settings.transport_properties.as_ref(),
+                            settings.pay_properties.as_ref(),
+                        );
+                        chain.bin
+                    }
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!("nmossink: building inner mxlsink: {e:#}"),
@@ -759,8 +808,18 @@ impl NmosSink {
                 }
             }
             InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
+                let settings = self.settings.lock().unwrap();
                 match inner::build_udpsink(media, *variant) {
-                    Ok(chain) => chain.bin,
+                    Ok(chain) => {
+                        inner::apply_udp_sink_inner_properties(
+                            &CAT,
+                            "nmossink",
+                            &chain,
+                            settings.transport_properties.as_ref(),
+                            settings.pay_properties.as_ref(),
+                        );
+                        chain.bin
+                    }
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!("nmossink: building inner udpsink: {e:#}"),
@@ -859,6 +918,7 @@ impl From<Settings> for crate::session::CommonSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gstreamer::prelude::StaticType;
     use crate::session::CommonSettings;
 
     /// Pins the IS-05 Sender `transport_params` → `CommonSettings`
@@ -916,4 +976,5 @@ mod tests {
         let cs: CommonSettings = s.into();
         assert_eq!(cs.transport_caps.as_ref(), Some(&caps));
     }
+
 }

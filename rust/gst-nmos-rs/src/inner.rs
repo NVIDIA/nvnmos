@@ -512,7 +512,7 @@ pub(crate) fn build_fake_src(
 pub(crate) struct MxlSinkChain {
     /// Wrapper element added to the outer bin (`mxlsink` — depth 1).
     pub bin: gst::Element,
-    /// Transport leaf (`mxlsink`; same object as [`Self::bin`]).
+    /// Inner sink (`mxlsink`; same object as [`Self::bin`]).
     pub transport: gst::Element,
 }
 
@@ -521,7 +521,7 @@ pub(crate) struct MxlSrcChain {
     /// Wrapper element added to the outer bin (bare `mxlsrc` or a
     /// sub-bin wrapping `mxlsrc ! capsfilter`).
     pub bin: gst::Element,
-    /// Transport leaf (`mxlsrc` inside [`Self::bin`]).
+    /// Inner source (`mxlsrc` inside [`Self::bin`]).
     pub transport: gst::Element,
 }
 
@@ -529,9 +529,9 @@ pub(crate) struct MxlSrcChain {
 pub(crate) struct UdpSinkChain {
     /// Wrapper bin added to the outer bin (`nmossink-udp`).
     pub bin: gst::Element,
-    /// RTP payloader leaf inside [`Self::bin`].
+    /// RTP payloader inside [`Self::bin`].
     pub pay: gst::Element,
-    /// UDP transport leaf (`udpsink`) inside [`Self::bin`].
+    /// Inner sink (`udpsink`) inside [`Self::bin`].
     pub transport: gst::Element,
 }
 
@@ -539,15 +539,15 @@ pub(crate) struct UdpSinkChain {
 pub(crate) struct UdpSrcChain {
     /// Wrapper bin added to the outer bin (`nmossrc-udp` or similar).
     pub bin: gst::Element,
-    /// UDP transport leaf (`udpsrc` / `udpsrc2`) inside [`Self::bin`].
+    /// Inner source (`udpsrc` / `udpsrc2`) inside [`Self::bin`].
     pub transport: gst::Element,
-    /// RTP depayloader leaf inside [`Self::bin`].
+    /// RTP depayloader inside [`Self::bin`].
     pub depay: gst::Element,
 }
 
 pub(crate) fn build_mxlsink(domain_path: &str, flow_id: &str) -> Result<MxlSinkChain, anyhow::Error> {
     require_mxl_factory("mxlsink")?;
-    let transport = gst::ElementFactory::make("mxlsink")
+    let mxlsink = gst::ElementFactory::make("mxlsink")
         .name("nmossink-mxl")
         .property("domain", domain_path)
         .property("flow-id", flow_id)
@@ -559,8 +559,8 @@ pub(crate) fn build_mxlsink(domain_path: &str, flow_id: &str) -> Result<MxlSinkC
             )
         })?;
     Ok(MxlSinkChain {
-        bin: transport.clone(),
-        transport,
+        bin: mxlsink.clone(),
+        transport: mxlsink,
     })
 }
 
@@ -1267,9 +1267,96 @@ pub(crate) fn build_initial(
     Ok(ghost)
 }
 
+
+/// Apply a `GstStructure` bag of GObject property overrides to a freshly
+/// built inner source, sink, payloader, or depayloader. Unknown fields and type mismatches log a warning and
+/// are skipped; an absent or empty structure is a no-op.
+pub(crate) fn apply_properties_to_leaf(
+    cat: &gst::DebugCategory,
+    element: &str,
+    leaf: &gst::Element,
+    props: Option<&gst::Structure>,
+) {
+    let Some(props) = props else { return };
+    for (field_name, field_value) in props.iter() {
+        let Some(pspec) = leaf.class().find_property(field_name.as_ref()) else {
+            gst::warning!(
+                cat,
+                "{element}: ignoring unknown inner property `{field_name}` on `{}`",
+                leaf.name(),
+            );
+            continue;
+        };
+        if !field_value.type_().is_a(pspec.value_type()) {
+            gst::warning!(
+                cat,
+                "{element}: ignoring type-mismatched inner property `{field_name}` on `{}`",
+                leaf.name(),
+            );
+            continue;
+        }
+        leaf.set_property(field_name.as_ref(), field_value);
+    }
+}
+
+pub(crate) fn apply_udp_sink_inner_properties(
+    cat: &gst::DebugCategory,
+    element: &str,
+    chain: &UdpSinkChain,
+    transport_properties: Option<&gst::Structure>,
+    pay_properties: Option<&gst::Structure>,
+) {
+    apply_properties_to_leaf(cat, element, &chain.transport, transport_properties);
+    apply_properties_to_leaf(cat, element, &chain.pay, pay_properties);
+}
+
+pub(crate) fn apply_udp_src_inner_properties(
+    cat: &gst::DebugCategory,
+    element: &str,
+    chain: &UdpSrcChain,
+    transport_properties: Option<&gst::Structure>,
+    depay_properties: Option<&gst::Structure>,
+) {
+    apply_properties_to_leaf(cat, element, &chain.transport, transport_properties);
+    apply_properties_to_leaf(cat, element, &chain.depay, depay_properties);
+}
+
+pub(crate) fn apply_mxl_sink_inner_properties(
+    cat: &gst::DebugCategory,
+    element: &str,
+    chain: &MxlSinkChain,
+    transport_properties: Option<&gst::Structure>,
+    pay_properties: Option<&gst::Structure>,
+) {
+    apply_properties_to_leaf(cat, element, &chain.transport, transport_properties);
+    if pay_properties.is_some_and(|s| s.n_fields() > 0) {
+        gst::warning!(
+            cat,
+            "{element}: pay-properties set but this chain has no payloader; ignoring",
+        );
+    }
+}
+
+pub(crate) fn apply_mxl_src_inner_properties(
+    cat: &gst::DebugCategory,
+    element: &str,
+    chain: &MxlSrcChain,
+    transport_properties: Option<&gst::Structure>,
+    depay_properties: Option<&gst::Structure>,
+) {
+    apply_properties_to_leaf(cat, element, &chain.transport, transport_properties);
+    if depay_properties.is_some_and(|s| s.n_fields() > 0) {
+        gst::warning!(
+            cat,
+            "{element}: depay-properties set but this chain has no depayloader; ignoring",
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
     use crate::session::UdpLeg;
     use std::str::FromStr;
 
@@ -1278,6 +1365,17 @@ mod tests {
         INIT.call_once(|| {
             let _ = gst::init();
         });
+    }
+
+    fn test_log_cat() -> &'static gst::DebugCategory {
+        static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
+            gst::DebugCategory::new(
+                "nmos-inner-test",
+                gst::DebugColorFlags::empty(),
+                Some("inner property apply tests"),
+            )
+        });
+        &CAT
     }
 
     fn minimal_udp_media() -> UdpMedia {
@@ -2171,5 +2269,154 @@ mod tests {
             .expect("mxlsrc chain must construct");
             assert_eq!(mxl_src.transport.factory().unwrap().name(), "mxlsrc");
         }
+    }
+
+    #[test]
+    fn apply_properties_to_leaf_with_none_is_noop() {
+        init_gst();
+        let udpsrc = gst::ElementFactory::make("udpsrc")
+            .build()
+            .expect("udpsrc must construct");
+        let default = udpsrc.property::<i32>("buffer-size");
+        apply_properties_to_leaf(test_log_cat(), "nmossrc", &udpsrc, None);
+        assert_eq!(udpsrc.property::<i32>("buffer-size"), default);
+    }
+
+    #[test]
+    fn apply_properties_to_leaf_with_empty_structure_is_noop() {
+        init_gst();
+        let udpsrc = gst::ElementFactory::make("udpsrc")
+            .build()
+            .expect("udpsrc must construct");
+        let default = udpsrc.property::<i32>("buffer-size");
+        let empty = gst::Structure::new_empty("properties");
+        apply_properties_to_leaf(test_log_cat(), "nmossrc", &udpsrc, Some(&empty));
+        assert_eq!(udpsrc.property::<i32>("buffer-size"), default);
+    }
+
+    #[test]
+    fn apply_properties_to_leaf_sets_known_field() {
+        init_gst();
+        let udpsrc = gst::ElementFactory::make("udpsrc")
+            .build()
+            .expect("udpsrc must construct");
+        let mut props = gst::Structure::new_empty("properties");
+        props.set("buffer-size", 26214400i32);
+        apply_properties_to_leaf(test_log_cat(), "nmossrc", &udpsrc, Some(&props));
+        assert_eq!(udpsrc.property::<i32>("buffer-size"), 26214400);
+    }
+
+    #[test]
+    fn apply_properties_to_leaf_skips_unknown_field_but_applies_known_fields() {
+        init_gst();
+        let udpsrc = gst::ElementFactory::make("udpsrc")
+            .build()
+            .expect("udpsrc must construct");
+        let mut props = gst::Structure::new_empty("properties");
+        props.set("definitely-not-a-property", true);
+        props.set("buffer-size", 26214400i32);
+        apply_properties_to_leaf(test_log_cat(), "nmossrc", &udpsrc, Some(&props));
+        assert_eq!(udpsrc.property::<i32>("buffer-size"), 26214400);
+    }
+
+    #[test]
+    fn apply_properties_to_leaf_skips_type_mismatch() {
+        init_gst();
+        let udpsrc = gst::ElementFactory::make("udpsrc")
+            .build()
+            .expect("udpsrc must construct");
+        let default = udpsrc.property::<i32>("buffer-size");
+        let mut props = gst::Structure::new_empty("properties");
+        props.set("buffer-size", "foo");
+        apply_properties_to_leaf(test_log_cat(), "nmossrc", &udpsrc, Some(&props));
+        assert_eq!(udpsrc.property::<i32>("buffer-size"), default);
+    }
+
+    #[test]
+    fn nmossink_transport_properties_apply_to_udpsink_on_chain_build() {
+        let chain = build_udpsink(&minimal_udp_media(), UdpVariant::V1)
+            .expect("udp sink chain must construct");
+        let mut props = gst::Structure::new_empty("properties");
+        props.set("buffer-size", 26214400i32);
+        props.set("auto-multicast", false);
+        apply_udp_sink_inner_properties(test_log_cat(), "nmossink", &chain, Some(&props), None);
+        assert_eq!(chain.transport.property::<i32>("buffer-size"), 26214400);
+        assert!(!chain.transport.property::<bool>("auto-multicast"));
+    }
+
+    #[test]
+    fn nmossink_pay_properties_apply_to_payloader_on_chain_build() {
+        let chain = build_udpsink(&minimal_udp_media(), UdpVariant::V1)
+            .expect("udp sink chain must construct");
+        let mut props = gst::Structure::new_empty("properties");
+        props.set("perfect-rtptime", false);
+        apply_udp_sink_inner_properties(test_log_cat(), "nmossink", &chain, None, Some(&props));
+        assert!(!chain.pay.property::<bool>("perfect-rtptime"));
+    }
+
+    #[test]
+    fn nmossrc_depay_properties_apply_to_depayloader_on_chain_build() {
+        let chain = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, None)
+            .expect("udp src chain must construct");
+        let mut props = gst::Structure::new_empty("properties");
+        props.set("max-reorder", 200i32);
+        apply_udp_src_inner_properties(test_log_cat(), "nmossrc", &chain, None, Some(&props));
+        assert_eq!(chain.depay.property::<i32>("max-reorder"), 200);
+    }
+
+    #[test]
+    fn transport_properties_persist_across_simulated_reactivation() {
+        init_gst();
+        let mut props = gst::Structure::new_empty("properties");
+        props.set("buffer-size", 26214400i32);
+        let chain1 = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, None)
+            .expect("first chain must construct");
+        apply_udp_src_inner_properties(test_log_cat(), "nmossrc", &chain1, Some(&props), None);
+        assert_eq!(chain1.transport.property::<i32>("buffer-size"), 26214400);
+
+        let chain2 = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, None)
+            .expect("second chain must construct");
+        apply_udp_src_inner_properties(test_log_cat(), "nmossrc", &chain2, Some(&props), None);
+        assert_ne!(chain1.transport.as_ptr(), chain2.transport.as_ptr());
+        assert_eq!(chain2.transport.property::<i32>("buffer-size"), 26214400);
+    }
+
+    #[test]
+    fn transport_properties_cleared_between_rebuilds_revert_to_factory_default() {
+        init_gst();
+        let default_udpsrc = gst::ElementFactory::make("udpsrc")
+            .build()
+            .expect("udpsrc must construct");
+        let default_buffer_size = default_udpsrc.property::<i32>("buffer-size");
+        let mut props = gst::Structure::new_empty("properties");
+        props.set("buffer-size", 26214400i32);
+        let chain1 = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, None)
+            .expect("first chain must construct");
+        apply_udp_src_inner_properties(test_log_cat(), "nmossrc", &chain1, Some(&props), None);
+        assert_eq!(chain1.transport.property::<i32>("buffer-size"), 26214400);
+
+        let chain2 = build_udpsrc(&minimal_udp_media(), UdpVariant::V1, None)
+            .expect("second chain must construct");
+        apply_udp_src_inner_properties(test_log_cat(), "nmossrc", &chain2, None, None);
+        assert_eq!(chain2.transport.property::<i32>("buffer-size"), default_buffer_size);
+    }
+
+    #[test]
+    fn pay_properties_under_mxl_warns_once() {
+        init_gst();
+        if gst::ElementFactory::find("mxlsink").is_none() {
+            return;
+        }
+        let chain = build_mxlsink("/tmp/domain", "00000000-0000-0000-0000-000000000099")
+            .expect("mxlsink chain must construct");
+        let mut pay_props = gst::Structure::new_empty("properties");
+        pay_props.set("perfect-rtptime", false);
+        apply_mxl_sink_inner_properties(
+            test_log_cat(),
+            "nmossink",
+            &chain,
+            None,
+            Some(&pay_props),
+        );
     }
 }
