@@ -465,11 +465,13 @@ See [Download Bonjour Print Services for Windows v2.0.2](https://support.apple.c
 
 ### Starting the Example Application
 
-Run the nvnmos-example app specifying host name, port, IP address, and optionally a log level.
+Run the nvnmos-example app specifying host name and port, optionally an interface IP, and optionally a log level.
 
 For example:
 ```sh
 nvnmos-example nmos-api.local 8080 192.0.2.0
+nvnmos-example nmos-api.local 8080
+nvnmos-example nmos-api.local 8080 0
 ```
 
 The host name can be a .local name, in which case the Node will attempt to discover a Registry being advertised via multicast DNS-SD (mDNS).
@@ -477,7 +479,8 @@ When a fully-qualified domain name is specified, e.g. "api.example.com", the NMO
 
 The port is used to serve the HTTP APIs.
 
-The IP address identifies the interface to be used for the mock Senders and Receivers created by the nvnmos-example application.
+The IP address identifies the local interface to be used for the mock RTP Senders and Receivers.
+When omitted, the example uses documentation addresses and also emits `a=x-nvnmos-iface` interface metadata to populate Node interfaces.
 
 The log level ranges between -40 (most verbose) and 40 (least verbose), as per the NvNmos API.
 Values greater than zero are warnings and errors. Values less than zero are debugging or trace messages.

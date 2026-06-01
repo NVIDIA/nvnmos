@@ -18,6 +18,7 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include "nvnmos.h"
 
@@ -112,6 +113,28 @@
 #define CLK_PTP true
 #endif
 
+// RFC 5737 TEST-NET-1 and RFC 7042 documentation MACs for the x-nvnmos-iface example.
+// Senders use INTERFACE1*; receivers use INTERFACE2*.
+#ifndef INTERFACE1_IP
+#define INTERFACE1_IP "192.0.2.10"
+#endif
+#ifndef INTERFACE2_IP
+#define INTERFACE2_IP "192.0.2.11"
+#endif
+#ifndef INTERFACE1
+#define INTERFACE1 "example-net1 00-00-5e-00-53-00"
+#endif
+#ifndef INTERFACE2
+#define INTERFACE2 "example-net2 00-00-5e-00-53-01"
+#endif
+
+#ifndef IFACE1
+#define IFACE1 "a=x-nvnmos-iface:" INTERFACE1 "\r\n"
+#endif
+#ifndef IFACE2
+#define IFACE2 "a=x-nvnmos-iface:" INTERFACE2 "\r\n"
+#endif
+
 static void handle_log(
     NvNmosNodeServer *server,
     const char *categories,
@@ -141,6 +164,8 @@ static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
     const char* bandwidth = VIDEO_BANDWIDTH;
     const char* format_specific_parameters = VIDEO_FORMAT_SPECIFIC_PARAMETERS;
 
+    const char* iface_ip = interface_ip ? interface_ip : (sender ? INTERFACE1_IP : INTERFACE2_IP);
+    const char* iface = interface_ip ? "" : (sender ? IFACE1 : IFACE2);
     const char* multicast_ip = "233.252.0.0"; // MCAST-TEST-NET
     const char* source_ip = "192.0.2.0"; // TEST-NET-1
     int destination_port = 5020;
@@ -167,6 +192,7 @@ static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
         "%s"
         "a=source-filter: incl IN IP4 %s %s\r\n" // omit for any-source multicast for receiver
         "a=x-nvnmos-iface-ip:%s\r\n"
+        "%s"
         "a=x-nvnmos-src-port:%d\r\n" // not applicable for receiver
         "a=rtpmap:%d %s\r\n"
         "a=fmtp:%d %s\r\n"
@@ -174,7 +200,7 @@ static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
         "a=mediaclk:direct=0\r\n",
         ntp,
         ntp,
-        interface_ip,
+        iface_ip,
         label,
         description,
         name,
@@ -184,8 +210,9 @@ static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
         multicast_ip,
         bandwidth,
         multicast_ip,
-        sender ? interface_ip : source_ip,
-        interface_ip,
+        sender ? iface_ip : source_ip,
+        iface_ip,
+        iface,
         source_port,
         payload_type,
         encoding,
@@ -204,6 +231,8 @@ static bool init_audio_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
     const char* encoding = AUDIO_ENCODING_PARAMETERS;
     const char* format_specific_parameters = AUDIO_FORMAT_SPECIFIC_PARAMETERS;
 
+    const char* iface_ip = interface_ip ? interface_ip : (sender ? INTERFACE1_IP : INTERFACE2_IP);
+    const char* iface = interface_ip ? "" : (sender ? IFACE1 : IFACE2);
     const char* multicast_ip = "233.252.0.1"; // MCAST-TEST-NET
     const char* source_ip = "192.0.2.1"; // TEST-NET-1
     int destination_port = 5030;
@@ -230,6 +259,7 @@ static bool init_audio_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
         "c=IN IP4 %s/64\r\n"
         "a=source-filter: incl IN IP4 %s %s\r\n" // omitted for any-source multicast for receiver
         "a=x-nvnmos-iface-ip:%s\r\n"
+        "%s"
         "a=x-nvnmos-src-port:%d\r\n" // not applicable for receiver
         "a=rtpmap:%d %s\r\n"
         "a=fmtp:%d %s\r\n"
@@ -238,7 +268,7 @@ static bool init_audio_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
         "a=mediaclk:direct=0\r\n",
         ntp,
         ntp,
-        interface_ip,
+        iface_ip,
         label,
         description,
         name,
@@ -247,8 +277,9 @@ static bool init_audio_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
         payload_type,
         multicast_ip,
         multicast_ip,
-        sender ? interface_ip : source_ip,
-        interface_ip,
+        sender ? iface_ip : source_ip,
+        iface_ip,
+        iface,
         source_port,
         payload_type,
         encoding,
@@ -419,9 +450,9 @@ static void print_actual_ids(const NvNmosNodeServer *server)
 
 int main(int argc, char *argv[])
 {
-    if (argc < 4)
+    if (argc < 3)
     {
-        printf("Usage:\n%s host-name port iface-ip [log-level]\n", argv[0]);
+        printf("Usage:\n%s host-name port [iface-ip] [log-level]\n", argv[0]);
         return 1;
     }
 
@@ -451,7 +482,8 @@ int main(int argc, char *argv[])
     // GstSDPMessage could be used to create the SDP data to configure the NMOS
     // receivers and senders representing the GStreamer sources and sinks
 
-    const char* interface_ip = argv[3];
+    const char* interface_ip = argc > 3 && strchr(argv[3], '.') ? argv[3] : 0;
+    const int log_argn = interface_ip ? 4 : 3;
 
     char source_sdp[2][2048] = { 0 };
     if (!init_video_sdp(source_sdp[0], sizeof source_sdp[0], false, "source-0", interface_ip, "NvNmos Video Receiver", "rx-0:video")) return 1;
@@ -503,7 +535,7 @@ int main(int argc, char *argv[])
     node_config.connection_activated = &handle_connection_activated;
 
     node_config.log_callback = &handle_log;
-    node_config.log_level = argc > 4 ? atoi(argv[4]) : NVNMOS_LOG_ERROR;
+    node_config.log_level = argc > log_argn ? atoi(argv[log_argn]) : NVNMOS_LOG_ERROR;
 
     NvNmosNodeServer node_server = { 0 };
     // as an example, use user_data to make handle_connection_activated print the transport file
