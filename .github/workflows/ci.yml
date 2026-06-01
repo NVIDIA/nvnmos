@@ -69,6 +69,53 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cmake --build build --config=${{ matrix.config }} --parallel 2
+      # Upload the Linux shared library so the `rust` job can link against
+      # it without rebuilding the C side from scratch.
+      - name: Upload libnvnmos.so (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v6
+        with:
+          name: libnvnmos-linux
+          path: build/libnvnmos.so
+          if-no-files-found: error
+          retention-days: 1
+  rust:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download libnvnmos.so
+        uses: actions/download-artifact@v7
+        with:
+          name: libnvnmos-linux
+          path: build
+
+      # bindgen (nvnmos-sys) needs libclang.
+      - name: Install Rust system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang
+
+      # For now, use whatever Rust toolchain ships with the ubuntu-24.04 runner
+      - name: Print Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+
+      - name: Cargo clippy (workspace)
+        working-directory: rust
+        env:
+          NVNMOS_LIB_DIR: ${{ github.workspace }}/build
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
+
+      - name: Cargo test (workspace)
+        working-directory: rust
+        env:
+          NVNMOS_LIB_DIR: ${{ github.workspace }}/build
+          LD_LIBRARY_PATH: ${{ github.workspace }}/build
+        run: cargo test --workspace --locked --no-fail-fast
   license-check:
     runs-on: ubuntu-24.04
     steps:
