@@ -139,6 +139,15 @@ For `NVNMOS_TRANSPORT_MXL` the transport file is an MXL flow definition JSON (th
 
 For the full per-field documentation see [`src/nvnmos.h`](src/nvnmos.h).
 
+## API Changes for RTP Sender IS-05 Defaults
+
+On IS-05 activation, `"auto"` values for RTP Senders are now resolved based on the config SDP:
+
+- `source_ip` is resolved to the SDP `a=x-nvnmos-iface-ip:` or `a=source-filter:` source address as before.
+- `destination_ip` is resolved to the SDP `c=` connection address if not `0.0.0.0`; otherwise, a source-specific multicast address is generated as before.
+- `destination_port` is resolved to the SDP `m=` port if non-zero; otherwise, the IS-05 default (5004) is used as before.
+- `source_port` is resolved to the `a=x-nvnmos-src-port:` port if present; otherwise, the IS-05 default (5004) is used as before.
+
 ## Docker-Based Build
 
 A _Dockerfile_ is provided which builds, packages and tests the library and application from source.

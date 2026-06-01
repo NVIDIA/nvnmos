@@ -161,10 +161,10 @@ namespace nvnmos
 
         // modify node resource if necessary to include all of the specified interfaces that currently have interface_bindings in any senders or receivers
         void update_node_interfaces(nmos::resources& node_resources, const nmos::id& node_id, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, const nmos::settings& settings);
-    }
 
-    // forward declarations
-    nmos::connection_resource_auto_resolver make_node_implementation_auto_resolver();
+        // resolve "auto" in connection transport params
+        void resolve_auto(const nmos::resource& resource, const nmos::resource& connection_resource, web::json::value& transport_params, const utility::string_t& transport_file = {});
+    }
 
     namespace impl
     {
@@ -375,13 +375,13 @@ namespace nvnmos
         auto& constraints = connection_sender.data[nmos::fields::endpoint_constraints];
         for (int leg = 0; leg < (int)constraints.size(); ++leg)
         {
+            const auto& source_ip = nmos::fields::source_ip(transport_params.at(leg));
+            if (!source_ip.is_string()) throw std::invalid_argument("Missing x-nvnmos-iface-ip or source-filter attribute in SDP");
             constraints[leg][nmos::fields::source_ip] = value_of({
-                { nmos::fields::constraint_enum, value_of({ nmos::fields::source_ip(transport_params.at(leg)) }) }
+                { nmos::fields::constraint_enum, value_of({ source_ip }) }
             });
         }
-
-        const auto resolve_auto = make_node_implementation_auto_resolver();
-        resolve_auto(sender, connection_sender, connection_sender.data[nmos::fields::endpoint_active][nmos::fields::transport_params]);
+        impl::resolve_auto(sender, connection_sender, connection_sender.data[nmos::fields::endpoint_active][nmos::fields::transport_params], utility::s2us(sdp_));
 
         // override default label and description from model.settings
         sender.data[nmos::fields::label] = value::string(sdp_params.session_name);
@@ -564,8 +564,7 @@ namespace nvnmos
             });
         }
 
-        const auto resolve_auto = make_node_implementation_auto_resolver();
-        resolve_auto(receiver, connection_receiver, connection_receiver.data[nmos::fields::endpoint_active][nmos::fields::transport_params]);
+        impl::resolve_auto(receiver, connection_receiver, connection_receiver.data[nmos::fields::endpoint_active][nmos::fields::transport_params]);
 
         // override default label and description from settings
         receiver.data[nmos::fields::label] = value::string(sdp_params.session_name);
@@ -699,8 +698,7 @@ namespace nvnmos
 
         auto connection_sender = nmos::make_connection_mxl_sender(sender_id, mxl_domain_id, mxl_flow_id);
 
-        const auto resolve_auto = make_node_implementation_auto_resolver();
-        resolve_auto(sender, connection_sender, connection_sender.data[nmos::fields::endpoint_active][nmos::fields::transport_params]);
+        impl::resolve_auto(sender, connection_sender, connection_sender.data[nmos::fields::endpoint_active][nmos::fields::transport_params]);
 
         // label and description are required (per IS-04 v1.3); let the accessors propagate
         // json_exception if absent
@@ -831,8 +829,7 @@ namespace nvnmos
 
         auto connection_receiver = nmos::make_connection_mxl_receiver(receiver_id, mxl_domain_id);
 
-        const auto resolve_auto = make_node_implementation_auto_resolver();
-        resolve_auto(receiver, connection_receiver, connection_receiver.data[nmos::fields::endpoint_active][nmos::fields::transport_params]);
+        impl::resolve_auto(receiver, connection_receiver, connection_receiver.data[nmos::fields::endpoint_active][nmos::fields::transport_params]);
 
         // label and description are required (per IS-04 v1.3); let the accessors propagate
         // json_exception if absent
@@ -1100,13 +1097,12 @@ namespace nvnmos
         return {};
     }
 
-    // Connection API activation callback to resolve "auto" values when /staged is transitioned to /active
-    nmos::connection_resource_auto_resolver make_node_implementation_auto_resolver()
+    namespace impl
     {
-        using web::json::value;
-
-        return [](const nmos::resource& resource, const nmos::resource& connection_resource, value& transport_params)
+        void resolve_auto(const nmos::resource& resource, const nmos::resource& connection_resource, web::json::value& transport_params, const utility::string_t& transport_file)
         {
+            using web::json::value;
+
             const std::pair<nmos::id, nmos::type> id_type{ connection_resource.id, connection_resource.type };
             // this code relies on the specific constraints added by node_implementation_init
             const auto& constraints = nmos::fields::endpoint_constraints(connection_resource.data);
@@ -1119,10 +1115,14 @@ namespace nvnmos
             // See https://specs.amwa.tv/is-05/releases/v1.0.0/docs/2.2._APIs_-_Server_Side_Implementation.html#use-of-auto
             if (nmos::types::sender == id_type.second && is_rtp)
             {
+                const auto sdp = sdp::parse_session_description(utility::us2s(transport_file));
+                const auto auto_params = impl::get_session_description_transport_params(nmos::types::sender, sdp);
                 for (int leg = 0; leg < (int)constraints.size(); ++leg)
                 {
                     nmos::details::resolve_auto(transport_params[leg], nmos::fields::source_ip, [&] { return web::json::front(nmos::fields::constraint_enum(constraints.at(leg).at(nmos::fields::source_ip))); });
-                    nmos::details::resolve_auto(transport_params[leg], nmos::fields::destination_ip, [&] { return value::string(impl::make_source_specific_multicast_address_v4(id_type.first, leg)); });
+                    nmos::details::resolve_auto(transport_params[leg], nmos::fields::destination_ip, [&] { return U("auto") != nmos::fields::destination_ip(auto_params.at(leg)).as_string() ? nmos::fields::destination_ip(auto_params.at(leg)) : value::string(make_source_specific_multicast_address_v4(id_type.first, leg)); });
+                    nmos::details::resolve_auto(transport_params[leg], nmos::fields::destination_port, [&] { return nmos::fields::destination_port(auto_params.at(leg)).is_integer() ? nmos::fields::destination_port(auto_params.at(leg)) : value(5004); });
+                    nmos::details::resolve_auto(transport_params[leg], nmos::fields::source_port, [&] { return nmos::fields::source_port(auto_params.at(leg)).is_integer() ? nmos::fields::source_port(auto_params.at(leg)) : value(5004); });
                 }
                 // lastly, apply the specification defaults for any properties not handled above
                 nmos::resolve_rtp_auto(id_type.second, transport_params);
@@ -1147,6 +1147,20 @@ namespace nvnmos
                 // BCP-007-03: MXL has a single transport leg per receiver, and mxl_flow_id does not use "auto" (UUID or null only)
                 nmos::details::resolve_auto(transport_params[0], nmos::fields::mxl_domain_id, [&] { return web::json::front(nmos::fields::constraint_enum(constraints.at(0).at(nmos::fields::mxl_domain_id))); });
             }
+        }
+    }
+
+    // Connection API activation callback to resolve "auto" values when /staged is transitioned to /active
+    nmos::connection_resource_auto_resolver make_node_implementation_auto_resolver(const nmos::settings& settings)
+    {
+        using web::json::value;
+
+        return [&settings](const nmos::resource& resource, const nmos::resource& connection_resource, value& transport_params)
+        {
+            auto& configs = nmos::types::sender == resource.type ? nvnmos::fields::senders(settings) : nvnmos::fields::receivers(settings);
+            auto config = configs.as_object().find(resource.id);
+            if (configs.as_object().end() == config) return;
+            impl::resolve_auto(resource, connection_resource, transport_params, nvnmos::fields::transport_file(config->second));
         };
     }
 
@@ -1450,7 +1464,7 @@ namespace nvnmos
                 // nvnmos always associates an NMOS flow with every sender, and requires receivers
                 // to bind to a concrete MXL flow at activation time; to unbind, the application
                 // should deactivate (pass an empty transport_file) instead
-                if (mxl_flow_id.empty()) throw std::invalid_argument("Missing 'id' property in MXL flow definition for activation");
+                if (mxl_flow_id.empty()) throw std::invalid_argument("Missing id property in MXL flow definition for activation");
 
                 active[nmos::fields::transport_params] = value_of({
                     value_of({
@@ -1639,10 +1653,21 @@ namespace nvnmos
 
                 if (nmos::types::sender == type)
                 {
-                    auto destination_ip = transport_param[!transport_param[nmos::fields::multicast_ip].is_null() ? nmos::fields::multicast_ip : nmos::fields::interface_ip];
+                    // use multicast_ip if set, otherwise interface_ip if set and not "0.0.0.0", otherwise "auto"
+                    const auto& multicast_ip = nmos::fields::multicast_ip(transport_param);
+                    const auto& interface_ip = nmos::fields::interface_ip(transport_param);
+                    auto destination_ip = !multicast_ip.is_null()
+                        ? multicast_ip
+                        : interface_ip.is_string() && U("0.0.0.0") != interface_ip.as_string() ? interface_ip : value(U("auto"));
                     transport_param[nmos::fields::destination_ip] = std::move(destination_ip);
                     transport_param.erase(nmos::fields::multicast_ip);
                     transport_param.erase(nmos::fields::interface_ip);
+
+                    if (nmos::fields::destination_port(transport_param).is_integer() && 0 == nmos::fields::destination_port(transport_param).as_integer())
+                    {
+                        transport_param[nmos::fields::destination_port] = value(U("auto"));
+                    }
+
                     // hm, source port is unknown unless the custom SDP attribute is present...
                     // in the /active endpoint this could be indicated by unresolved "auto" or zero?
                     transport_param[nmos::fields::source_port] = value(U("auto"));
@@ -1650,31 +1675,37 @@ namespace nvnmos
 
                 const auto& media_description = media_descriptions.at(leg);
                 const auto& media_attributes = sdp::fields::attributes(media_description);
-                {
-                    const auto& ma = media_attributes.as_array();
+                const auto& ma = media_attributes.as_array();
 
+                if (nmos::types::sender == type)
+                {
                     auto interface_ip = sdp::find_name(ma, nvnmos::attributes::interface_ip);
                     if (ma.end() != interface_ip)
                     {
-                        transport_param[nmos::types::sender == type ? nmos::fields::source_ip : nmos::fields::interface_ip] = sdp::fields::value(*interface_ip);
+                        transport_param[nmos::fields::source_ip] = sdp::fields::value(*interface_ip);
                     }
 
-                    if (nmos::types::sender == type)
+                    auto source_port = sdp::find_name(ma, nvnmos::attributes::source_port);
+                    if (ma.end() != source_port)
                     {
-                        auto source_port = sdp::find_name(ma, nvnmos::attributes::source_port);
-                        if (ma.end() != source_port)
-                        {
-                            auto sp = utility::istringstreamed(sdp::fields::value(*source_port).as_string(), 0);
-                            transport_param[nmos::fields::source_port] = value(sp);
-                        }
+                        transport_param[nmos::fields::source_port] = value(utility::istringstreamed(sdp::fields::value(*source_port).as_string(), 0));
                     }
+                    // else leave "auto"
+                }
+                else // if (nmos::types::receiver == type)
+                {
+                    auto interface_ip = sdp::find_name(ma, nvnmos::attributes::interface_ip);
+                    if (ma.end() != interface_ip)
+                    {
+                        transport_param[nmos::fields::interface_ip] = sdp::fields::value(*interface_ip);
+                    }
+                }
 
-                    // set rtp_enabled to false in legs for media descriptions which include an 'a=inactive' attribute line
-                    auto inactive = sdp::find_name(ma, sdp::attributes::inactive);
-                    if (ma.end() != inactive)
-                    {
-                        transport_param[nmos::fields::rtp_enabled] = value::boolean(false);
-                    }
+                // set rtp_enabled to false in legs for media descriptions which include an 'a=inactive' attribute line
+                auto inactive = sdp::find_name(ma, sdp::attributes::inactive);
+                if (ma.end() != inactive)
+                {
+                    transport_param[nmos::fields::rtp_enabled] = value::boolean(false);
                 }
             }
 
@@ -2163,7 +2194,7 @@ namespace nvnmos
                     const auto host = host_interfaces.find(name);
                     return std::make_pair(name, configured_interfaces.end() != configured ? configured->second
                         : host_interfaces.end() != host ? host->second
-                        : nmos::node_interface{ {}, {}, name });
+                        : nmos::node_interface{ {}, {}, name, {}, {} });
                 })
             ));
 
@@ -2266,7 +2297,7 @@ namespace nvnmos
             .on_registration_changed(make_node_implementation_registration_handler(gate)) // may be omitted if not required
             .on_parse_transport_file(make_node_implementation_transport_file_parser()) // may be omitted if the default is sufficient
             .on_validate_connection_resource_patch(make_node_implementation_patch_validator()) // may be omitted if not required
-            .on_resolve_auto(make_node_implementation_auto_resolver())
+            .on_resolve_auto(make_node_implementation_auto_resolver(model.settings))
             .on_set_transportfile(make_node_implementation_transportfile_setter(model.node_resources, model.settings))
             .on_connection_activated(make_node_implementation_connection_activation_handler(std::move(connection_activated), model.settings, gate));
     }
