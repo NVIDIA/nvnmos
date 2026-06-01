@@ -64,6 +64,50 @@
 #define AUDIO_FORMAT_SPECIFIC_PARAMETERS "channel-order=SMPTE2110.(ST); "
 #endif
 
+// example MXL video flow definition parameters
+// video/v210 (YCbCr-4:2:2, 10 bit, progressive) is hard-coded
+#ifndef MXL_VIDEO_FLOW_ID
+#define MXL_VIDEO_FLOW_ID "5ede7baf-9dcf-4b80-9e44-bc0f615633b4"
+#endif
+#ifndef MXL_VIDEO_DESCRIPTION
+#define MXL_VIDEO_DESCRIPTION "YCbCr-4:2:2, 10 bit, 1920 x 1080, progressive, 59.94 Hz"
+#endif
+#ifndef MXL_VIDEO_GRAIN_RATE_NUM
+#define MXL_VIDEO_GRAIN_RATE_NUM 60000
+#endif
+#ifndef MXL_VIDEO_GRAIN_RATE_DEN
+#define MXL_VIDEO_GRAIN_RATE_DEN 1001
+#endif
+#ifndef MXL_VIDEO_FRAME_WIDTH
+#define MXL_VIDEO_FRAME_WIDTH 1920
+#endif
+#ifndef MXL_VIDEO_FRAME_HEIGHT
+#define MXL_VIDEO_FRAME_HEIGHT 1080
+#endif
+#ifndef MXL_VIDEO_COLORSPACE
+#define MXL_VIDEO_COLORSPACE "BT709"
+#endif
+#ifndef MXL_VIDEO_TRANSFER_CHARACTERISTIC
+#define MXL_VIDEO_TRANSFER_CHARACTERISTIC "SDR"
+#endif
+
+// example MXL audio flow definition parameters
+// audio/float32 at 48 kHz is hard-coded
+#ifndef MXL_AUDIO_FLOW_ID
+#define MXL_AUDIO_FLOW_ID "92029e8a-fb63-46d7-b2f4-abe2f8dbf083"
+#endif
+#ifndef MXL_AUDIO_DESCRIPTION
+#define MXL_AUDIO_DESCRIPTION "2 ch, 48 kHz, 32 bit"
+#endif
+#ifndef MXL_AUDIO_CHANNEL_COUNT
+#define MXL_AUDIO_CHANNEL_COUNT 2
+#endif
+
+// example MXL domain id (UUIDv4); see AMWA BCP-007-03
+#ifndef MXL_DOMAIN_ID
+#define MXL_DOMAIN_ID "212ba127-f746-43c5-87d4-3962ec7ff284"
+#endif
+
 #ifndef CLK_PTP
 #define CLK_PTP true
 #endif
@@ -77,18 +121,20 @@ static void handle_log(
     printf("%s [%d:%s]\n", message, level, categories);
 }
 
-static bool handle_rtp_connection_activated(
+static bool handle_connection_activated(
     NvNmosNodeServer *server,
-    const char *id,
-    const char *sdp)
+    NvNmosSide side,
+    const char *name,
+    const char *transport_file)
 {
-    printf("%s %s\n", id, sdp ? "activated via NMOS" : "deactivated via NMOS");
-    if (server->user_data && sdp) printf("%s\n", sdp);
+    const char *type = side == NVNMOS_SIDE_SENDER ? "sender" : "receiver";
+    printf("%s %s %s\n", type, name, transport_file ? "activated via NMOS" : "deactivated via NMOS");
+    if (server->user_data && transport_file) printf("%s\n", transport_file);
     return true;
 }
 
 // construct example SDP for video sender or receiver
-static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* id, const char* interface_ip, const char* label, const char* group_hint)
+static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* name, const char* interface_ip, const char* label, const char* group_hint)
 {
     const char* description = VIDEO_DESCRIPTION;
     const char* encoding = VIDEO_ENCODING_PARAMETERS;
@@ -114,7 +160,7 @@ static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
         "s=%s\r\n"
         "i=%s\r\n" // optional
         "t=0 0\r\n"
-        "a=x-nvnmos-id:%s\r\n"
+        "a=x-nvnmos-name:%s\r\n"
         "a=x-nvnmos-group-hint:%s\r\n" // optional
         "m=video %d RTP/AVP %d\r\n"
         "c=IN IP4 %s/64\r\n"
@@ -131,7 +177,7 @@ static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
         interface_ip,
         label,
         description,
-        id,
+        name,
         group_hint,
         destination_port,
         payload_type,
@@ -152,7 +198,7 @@ static bool init_video_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
 }
 
 // construct example SDP for audio sender or receiver
-static bool init_audio_sdp(char* sdp, size_t sdp_size, bool sender, const char* id, const char* interface_ip, const char* label, const char* group_hint)
+static bool init_audio_sdp(char* sdp, size_t sdp_size, bool sender, const char* name, const char* interface_ip, const char* label, const char* group_hint)
 {
     const char* description = AUDIO_DESCRIPTION;
     const char* encoding = AUDIO_ENCODING_PARAMETERS;
@@ -178,7 +224,7 @@ static bool init_audio_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
         "s=%s\r\n"
         "i=%s\r\n" // optional
         "t=0 0\r\n"
-        "a=x-nvnmos-id:%s\r\n"
+        "a=x-nvnmos-name:%s\r\n"
         "a=x-nvnmos-group-hint:%s\r\n" // optional
         "m=audio %d RTP/AVP %d\r\n"
         "c=IN IP4 %s/64\r\n"
@@ -195,7 +241,7 @@ static bool init_audio_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
         interface_ip,
         label,
         description,
-        id,
+        name,
         group_hint,
         destination_port,
         payload_type,
@@ -215,6 +261,81 @@ static bool init_audio_sdp(char* sdp, size_t sdp_size, bool sender, const char* 
     return 0 < result && (size_t)result < sdp_size;
 }
 
+// construct example MXL flow definition JSON for an uncompressed v210 video sender or receiver
+// see AMWA BCP-007-03 and the MXL library examples
+static bool init_video_flow_def(char* flow_def, size_t flow_def_size, bool sender, const char* name, const char* mxl_domain_id, const char* mxl_flow_id, const char* label, const char* group_hint)
+{
+    int result = snprintf(flow_def,
+        flow_def_size,
+        "{\n"
+        "  \"id\": \"%s\",\n"
+        "  \"label\": \"%s\",\n"
+        "  \"description\": \"" MXL_VIDEO_DESCRIPTION "\",\n"
+        "  \"tags\": {\n"
+        "    \"urn:x-nmos:tag:grouphint/v1.0\": [ \"%s\" ],\n"
+        "    \"urn:x-nvnmos:tag:name\": [ \"%s\" ],\n"
+        "    \"urn:x-nvnmos:tag:mxl-domain-id\": [ \"%s\" ]\n"
+        "  },\n"
+        "  \"format\": \"urn:x-nmos:format:video\",\n"
+        "  \"media_type\": \"video/v210\",\n"
+        "  \"grain_rate\": { \"numerator\": %d, \"denominator\": %d },\n"
+        "  \"frame_width\": %d,\n"
+        "  \"frame_height\": %d,\n"
+        "  \"interlace_mode\": \"progressive\",\n"
+        "  \"colorspace\": \"" MXL_VIDEO_COLORSPACE "\",\n"
+        "  \"transfer_characteristic\": \"" MXL_VIDEO_TRANSFER_CHARACTERISTIC "\",\n"
+        "  \"components\": [\n"
+        "    { \"name\": \"Y\",  \"width\": %d, \"height\": %d, \"bit_depth\": 10 },\n"
+        "    { \"name\": \"Cb\", \"width\": %d, \"height\": %d, \"bit_depth\": 10 },\n"
+        "    { \"name\": \"Cr\", \"width\": %d, \"height\": %d, \"bit_depth\": 10 }\n"
+        "  ]\n"
+        "}\n",
+        mxl_flow_id,
+        label,
+        group_hint,
+        name,
+        mxl_domain_id,
+        MXL_VIDEO_GRAIN_RATE_NUM, MXL_VIDEO_GRAIN_RATE_DEN,
+        MXL_VIDEO_FRAME_WIDTH, MXL_VIDEO_FRAME_HEIGHT,
+        MXL_VIDEO_FRAME_WIDTH, MXL_VIDEO_FRAME_HEIGHT,
+        MXL_VIDEO_FRAME_WIDTH / 2, MXL_VIDEO_FRAME_HEIGHT,
+        MXL_VIDEO_FRAME_WIDTH / 2, MXL_VIDEO_FRAME_HEIGHT
+    );
+
+    return 0 < result && (size_t)result < flow_def_size;
+}
+
+// construct example MXL flow definition JSON for an audio/float32 sender or receiver
+static bool init_audio_flow_def(char* flow_def, size_t flow_def_size, bool sender, const char* name, const char* mxl_domain_id, const char* mxl_flow_id, const char* label, const char* group_hint)
+{
+    int result = snprintf(flow_def,
+        flow_def_size,
+        "{\n"
+        "  \"id\": \"%s\",\n"
+        "  \"label\": \"%s\",\n"
+        "  \"description\": \"" MXL_AUDIO_DESCRIPTION "\",\n"
+        "  \"tags\": {\n"
+        "    \"urn:x-nmos:tag:grouphint/v1.0\": [ \"%s\" ],\n"
+        "    \"urn:x-nvnmos:tag:name\": [ \"%s\" ],\n"
+        "    \"urn:x-nvnmos:tag:mxl-domain-id\": [ \"%s\" ]\n"
+        "  },\n"
+        "  \"format\": \"urn:x-nmos:format:audio\",\n"
+        "  \"media_type\": \"audio/float32\",\n"
+        "  \"sample_rate\": { \"numerator\": 48000, \"denominator\": 1 },\n"
+        "  \"channel_count\": %d,\n"
+        "  \"bit_depth\": 32\n"
+        "}\n",
+        mxl_flow_id,
+        label,
+        group_hint,
+        name,
+        mxl_domain_id,
+        MXL_AUDIO_CHANNEL_COUNT
+    );
+
+    return 0 < result && (size_t)result < flow_def_size;
+}
+
 static bool get_continue(void)
 {
     printf("Continue ([y]/n)?\n");
@@ -223,6 +344,77 @@ static bool get_continue(void)
     while (c != '\n' && c != EOF)
         c = fgetc(stdin);
     return result;
+}
+
+static inline void print_id(const char *type, const char *name, const char *value)
+{
+    printf("  %-8s  %-12s  %s\n", type, name, value);
+}
+
+// demonstrate the seed-only ID accessors: pure functions of the
+// node seed string and (for sender/receiver) the name; useful
+// for tooling that wants the NMOS IDs without standing up a server
+static void print_expected_ids(const char *seed)
+{
+    char id[NVNMOS_ID_LEN];
+
+    printf("Expected NMOS IDs (computed from seed):\n");
+
+    {
+        const bool success = nmos_make_node_id(seed, id, sizeof id);
+        print_id("node", "", success ? id : "<error>");
+    }
+
+    static const char *const sender_names[] = {
+        "sink-0", "sink-1", "mxl-sink-0", "mxl-sink-1"
+    };
+    for (size_t i = 0; i < sizeof sender_names / sizeof sender_names[0]; ++i)
+    {
+        const bool success = nmos_make_sender_id(seed, sender_names[i], id, sizeof id);
+        print_id("sender", sender_names[i], success ? id : "<error>");
+    }
+
+    static const char *const receiver_names[] = {
+        "source-0", "source-1", "mxl-source-0", "mxl-source-1"
+    };
+    for (size_t i = 0; i < sizeof receiver_names / sizeof receiver_names[0]; ++i)
+    {
+        const bool success = nmos_make_receiver_id(seed, receiver_names[i], id, sizeof id);
+        print_id("receiver", receiver_names[i], success ? id : "<error>");
+    }
+}
+
+// demonstrate the server-based ID accessors: read what the running
+// node server actually advertises; sender/receiver lookups also act
+// as an existence check, so removed resources return false
+static void print_actual_ids(const NvNmosNodeServer *server)
+{
+    char id[NVNMOS_ID_LEN];
+
+    printf("Actual NMOS IDs (queried from server):\n");
+
+    {
+        const bool success = nmos_get_node_id(server, id, sizeof id);
+        print_id("node", "", success ? id : "<error>");
+    }
+
+    static const char *const sender_names[] = {
+        "sink-0", "sink-1", "mxl-sink-0", "mxl-sink-1"
+    };
+    for (size_t i = 0; i < sizeof sender_names / sizeof sender_names[0]; ++i)
+    {
+        const bool success = nmos_get_sender_id(server, sender_names[i], id, sizeof id);
+        print_id("sender", sender_names[i], success ? id : "<missing>");
+    }
+
+    static const char *const receiver_names[] = {
+        "source-0", "source-1", "mxl-source-0", "mxl-source-1"
+    };
+    for (size_t i = 0; i < sizeof receiver_names / sizeof receiver_names[0]; ++i)
+    {
+        const bool success = nmos_get_receiver_id(server, receiver_names[i], id, sizeof id);
+        print_id("receiver", receiver_names[i], success ? id : "<missing>");
+    }
 }
 
 int main(int argc, char *argv[])
@@ -269,53 +461,96 @@ int main(int argc, char *argv[])
     if (!init_video_sdp(sink_sdp[0], sizeof sink_sdp[0], true, "sink-0", interface_ip, "NvNmos Video Sender", "tx-0:video")) return 1;
     if (!init_audio_sdp(sink_sdp[1], sizeof sink_sdp[1], true, "sink-1", interface_ip, "NvNmos Audio Sender", "tx-0:audio")) return 1;
 
-    NvNmosReceiverConfig source_config[2] = { 0 };
+    // example MXL domain and per-flow ids (just hard-coded UUIDs for this example)
+    const char* mxl_domain_id = MXL_DOMAIN_ID;
 
-    source_config[0].sdp = source_sdp[0];
-    source_config[1].sdp = source_sdp[1];
+    char source_mxl[2][2048] = { 0 };
+    if (!init_video_flow_def(source_mxl[0], sizeof source_mxl[0], false, "mxl-source-0", mxl_domain_id, MXL_VIDEO_FLOW_ID, "NvNmos MXL Video Receiver", "rx-mxl-0:video")) return 1;
+    if (!init_audio_flow_def(source_mxl[1], sizeof source_mxl[1], false, "mxl-source-1", mxl_domain_id, MXL_AUDIO_FLOW_ID, "NvNmos MXL Audio Receiver", "rx-mxl-0:audio")) return 1;
+
+    char sink_mxl[2][2048] = { 0 };
+    if (!init_video_flow_def(sink_mxl[0], sizeof sink_mxl[0], true, "mxl-sink-0", mxl_domain_id, MXL_VIDEO_FLOW_ID, "NvNmos MXL Video Sender", "tx-mxl-0:video")) return 1;
+    if (!init_audio_flow_def(sink_mxl[1], sizeof sink_mxl[1], true, "mxl-sink-1", mxl_domain_id, MXL_AUDIO_FLOW_ID, "NvNmos MXL Audio Sender", "tx-mxl-0:audio")) return 1;
+
+    NvNmosReceiverConfig source_config[4] = { 0 };
+
+    source_config[0].transport = NVNMOS_TRANSPORT_RTP;
+    source_config[0].transport_file = source_sdp[0];
+    source_config[1].transport = NVNMOS_TRANSPORT_RTP;
+    source_config[1].transport_file = source_sdp[1];
+    source_config[2].transport = NVNMOS_TRANSPORT_MXL;
+    source_config[2].transport_file = source_mxl[0];
+    source_config[3].transport = NVNMOS_TRANSPORT_MXL;
+    source_config[3].transport_file = source_mxl[1];
 
     node_config.receivers = &source_config[0];
-    node_config.num_receivers = 2;
+    node_config.num_receivers = 4;
 
-    NvNmosSenderConfig sink_config[2] = { 0 };
+    NvNmosSenderConfig sink_config[4] = { 0 };
 
-    sink_config[0].sdp = sink_sdp[0];
-    sink_config[1].sdp = sink_sdp[1];
+    sink_config[0].transport = NVNMOS_TRANSPORT_RTP;
+    sink_config[0].transport_file = sink_sdp[0];
+    sink_config[1].transport = NVNMOS_TRANSPORT_RTP;
+    sink_config[1].transport_file = sink_sdp[1];
+    sink_config[2].transport = NVNMOS_TRANSPORT_MXL;
+    sink_config[2].transport_file = sink_mxl[0];
+    sink_config[3].transport = NVNMOS_TRANSPORT_MXL;
+    sink_config[3].transport_file = sink_mxl[1];
 
     node_config.senders = &sink_config[0];
-    node_config.num_senders = 2;
+    node_config.num_senders = 4;
 
-    node_config.rtp_connection_activated = &handle_rtp_connection_activated;
+    node_config.connection_activated = &handle_connection_activated;
 
     node_config.log_callback = &handle_log;
     node_config.log_level = argc > 4 ? atoi(argv[4]) : NVNMOS_LOG_ERROR;
 
     NvNmosNodeServer node_server = { 0 };
-    // as an example, use user_data to make handle_rtp_connection_activated print the SDP data
+    // as an example, use user_data to make handle_connection_activated print the transport file
     node_server.user_data = (void*)1;
+
+    print_expected_ids(seed);
 
     printf("Creating NvNmos server...\n");
     if (!create_nmos_node_server(&node_config, &node_server)) return 1;
+
+    print_actual_ids(&node_server);
+
     if (!get_continue()) goto cleanup;
     printf("Removing some senders and receivers...\n");
     if (!remove_nmos_receiver_from_node_server(&node_server, "source-0")) goto cleanup;
     if (!remove_nmos_sender_from_node_server(&node_server, "sink-1")) goto cleanup;
+    if (!remove_nmos_receiver_from_node_server(&node_server, "mxl-source-0")) goto cleanup;
+    if (!remove_nmos_sender_from_node_server(&node_server, "mxl-sink-1")) goto cleanup;
+
+    print_actual_ids(&node_server);
+
     if (!get_continue()) goto cleanup;
     printf("Adding back some senders and receivers...\n");
     if (!add_nmos_receiver_to_node_server(&node_server, &source_config[0])) goto cleanup;
     if (!add_nmos_sender_to_node_server(&node_server, &sink_config[1])) goto cleanup;
+    if (!add_nmos_receiver_to_node_server(&node_server, &source_config[2])) goto cleanup;
+    if (!add_nmos_sender_to_node_server(&node_server, &sink_config[3])) goto cleanup;
     if (!get_continue()) goto cleanup;
     printf("Activating senders and receivers...\n");
-    if (!nmos_connection_rtp_activate(&node_server, "source-0", source_config[0].sdp)) goto cleanup;
-    if (!nmos_connection_rtp_activate(&node_server, "source-1", source_config[1].sdp)) goto cleanup;
-    if (!nmos_connection_rtp_activate(&node_server, "sink-0", sink_config[0].sdp)) goto cleanup;
-    if (!nmos_connection_rtp_activate(&node_server, "sink-1", sink_config[1].sdp)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_RECEIVER, "source-0", source_config[0].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_RECEIVER, "source-1", source_config[1].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_SENDER, "sink-0", sink_config[0].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_SENDER, "sink-1", sink_config[1].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_RECEIVER, "mxl-source-0", source_config[2].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_RECEIVER, "mxl-source-1", source_config[3].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_SENDER, "mxl-sink-0", sink_config[2].transport_file)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_SENDER, "mxl-sink-1", sink_config[3].transport_file)) goto cleanup;
     if (!get_continue()) goto cleanup;
     printf("Deactivating senders and receivers...\n");
-    if (!nmos_connection_rtp_activate(&node_server, "source-0", 0)) goto cleanup;
-    if (!nmos_connection_rtp_activate(&node_server, "source-1", 0)) goto cleanup;
-    if (!nmos_connection_rtp_activate(&node_server, "sink-0", 0)) goto cleanup;
-    if (!nmos_connection_rtp_activate(&node_server, "sink-1", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_RECEIVER, "source-0", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_RECEIVER, "source-1", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_SENDER, "sink-0", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_SENDER, "sink-1", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_RECEIVER, "mxl-source-0", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_RECEIVER, "mxl-source-1", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_SENDER, "mxl-sink-0", 0)) goto cleanup;
+    if (!nmos_connection_activate(&node_server, NVNMOS_SIDE_SENDER, "mxl-sink-1", 0)) goto cleanup;
     if (!get_continue()) goto cleanup;
     printf("Destroying NvNmos server...\n");
     if (!destroy_nmos_node_server(&node_server)) return 1;

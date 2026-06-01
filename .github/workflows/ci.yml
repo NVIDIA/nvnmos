@@ -21,6 +21,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+
+      # build against a https://github.com/sony/nmos-cpp commit
+      # until a Conan Center release of nmos-cpp is published.
+      - name: Clone nmos-cpp alongside nvnmos
+        env:
+          NMOS_CPP_REF: a8874989a7c40cb01d38cd19388af3f329e1421d
+        run: |
+          parent="$(dirname "${GITHUB_WORKSPACE}")"
+          git init "${parent}/nmos-cpp"
+          git -C "${parent}/nmos-cpp" remote add origin https://github.com/sony/nmos-cpp.git
+          git -C "${parent}/nmos-cpp" fetch --depth 1 origin "${NMOS_CPP_REF}"
+          git -C "${parent}/nmos-cpp" checkout FETCH_HEAD
+
       - name: Install Conan
         run: pip install conan~=2.2 && conan profile detect
       - name: Install dependencies
@@ -29,13 +42,15 @@ jobs:
             --settings:all build_type=${{ matrix.config }} \
             --build=missing \
             --output-folder=src/conan \
-            --lockfile=src/conan.lock
+            --lockfile="" \
+            -o "&:nmos_cpp_from_source=True"
       - name: Generate nvnmos (Linux)
         if: runner.os == 'Linux'
         run: |
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
             -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
+            -DUSE_ADD_SUBDIRECTORY=ON \
             src
       - name: Generate nvnmos (Windows)
         if: runner.os == 'Windows'
@@ -43,15 +58,17 @@ jobs:
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.config }} \
+            -DUSE_ADD_SUBDIRECTORY=ON \
             src
       - name: Build nvnmos (Linux)
         if: runner.os == 'Linux'
         run: |
-          cmake --build build --parallel
+          # default -j$(nproc) causes out of memory on hosted runners (cc1plus killed).
+          cmake --build build --parallel 2
       - name: Build nvnmos (Windows)
         if: runner.os == 'Windows'
         run: |
-          cmake --build build --config=${{ matrix.config }} --parallel
+          cmake --build build --config=${{ matrix.config }} --parallel 2
   license-check:
     runs-on: ubuntu-24.04
     steps:
