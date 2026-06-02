@@ -26,7 +26,7 @@ jobs:
       # until a Conan Center release of nmos-cpp is published.
       - name: Clone nmos-cpp alongside nvnmos
         env:
-          NMOS_CPP_REF: a8874989a7c40cb01d38cd19388af3f329e1421d
+          NMOS_CPP_REF: 079620d88756aa138ede92d3f52a0102370307fe
         run: |
           parent="$(dirname "${GITHUB_WORKSPACE}")"
           git init "${parent}/nmos-cpp"
