@@ -20,36 +20,39 @@ ARG PIP_BREAK_SYSTEM_PACKAGES=1
 # Match .github/workflows/ci.yml until a Conan Center nmos-cpp release is published.
 ARG NMOS_CPP_REF=079620d88756aa138ede92d3f52a0102370307fe
 
-FROM ${BASE_IMAGE} as builder
-
-ARG BASE_IMAGE
-ARG DEBIAN_FRONTEND
-ARG PACKAGE_SUFFIX
-ARG PIP_BREAK_SYSTEM_PACKAGES
-ARG NMOS_CPP_REF
-
 # use pattern replacement to clean up '/' and ':'
-ENV _BASE_IMAGE=${BASE_IMAGE//\//-}
-ENV PACKAGE_NAME=nvnmos${PACKAGE_SUFFIX:--${_BASE_IMAGE//:/-}}
+ARG _BASE_IMAGE=${BASE_IMAGE//\//-}
+ARG PACKAGE_NAME=nvnmos${PACKAGE_SUFFIX:--${_BASE_IMAGE//:/-}}
 
-RUN apt update && apt install -y gcc git python3-pip doxygen graphviz
+# -----------------------------------------------------------------------------
+# C++ library (libnvnmos) — same layout as README / CI (repo root, build/ sibling of src/).
+# -----------------------------------------------------------------------------
+FROM ${BASE_IMAGE} AS cpp-builder
+
+ARG DEBIAN_FRONTEND
+ARG NMOS_CPP_REF
+ARG PACKAGE_NAME
+ARG PIP_BREAK_SYSTEM_PACKAGES
+
+ENV PIP_BREAK_SYSTEM_PACKAGES=${PIP_BREAK_SYSTEM_PACKAGES}
+
+RUN apt update && apt install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    git \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
 RUN pip install cmake~=3.17
 RUN pip install conan~=2.2 && conan profile detect
 
-# nmos-cpp alongside nvnmos (see src/CMakeLists.txt NMOS_CPP_DIRECTORY).
 RUN git init /nmos-cpp \
     && git -C /nmos-cpp remote add origin https://github.com/sony/nmos-cpp.git \
     && git -C /nmos-cpp fetch --depth 1 origin "${NMOS_CPP_REF}" \
     && git -C /nmos-cpp checkout FETCH_HEAD
 
-# Same layout as README / CI: repo root with src/ and build/ siblings.
 WORKDIR /nvnmos
 
 COPY src/ src/
-COPY entrypoint.sh LICENSE README.md Doxyfile ./
-COPY doc/doxygen doc/doxygen
-
-RUN chmod +x entrypoint.sh
 
 RUN conan install src \
     --settings:all build_type=Release \
@@ -70,27 +73,96 @@ RUN cmake --build build --parallel 2
 
 RUN cmake --install build --prefix=${PACKAGE_NAME}
 
-RUN cp src/conan.lock ${PACKAGE_NAME}/
+# -----------------------------------------------------------------------------
+# Rust workspace — links against libnvnmos from cpp-builder (CI NVNMOS_LIB_DIR layout).
+# -----------------------------------------------------------------------------
+FROM ${BASE_IMAGE} AS rust-builder
 
-RUN cp LICENSE README.md ${PACKAGE_NAME}/
+ARG DEBIAN_FRONTEND
 
+RUN apt update && apt install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    clang \
+    cmake \
+    curl \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    libgstreamer-plugins-base1.0-dev \
+    libgstreamer1.0-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain 1.85 --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /nvnmos
+
+COPY --from=cpp-builder /nvnmos/build /nvnmos/build
+COPY --from=cpp-builder /nvnmos/src /nvnmos/src
+COPY rust/ rust/
+
+RUN NVNMOS_LIB_DIR=/nvnmos/build cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
+
+# -----------------------------------------------------------------------------
+# Package tarball (C++ install tree + Rust artifacts + docs).
+# -----------------------------------------------------------------------------
+FROM ${BASE_IMAGE} AS package
+
+ARG DEBIAN_FRONTEND
+ARG PACKAGE_NAME
+
+RUN apt update && apt install -y --no-install-recommends \
+    doxygen \
+    graphviz \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /nvnmos
+
+COPY --from=cpp-builder /nvnmos/${PACKAGE_NAME} /nvnmos/${PACKAGE_NAME}
+COPY --from=cpp-builder /nvnmos/src /nvnmos/src
+COPY --from=cpp-builder /nvnmos/src/conan.lock /nvnmos/src/conan.lock
+COPY --from=rust-builder /nvnmos/rust/target/release/libgstnmos.so \
+    /nvnmos/${PACKAGE_NAME}/lib/
+COPY --from=rust-builder /nvnmos/rust/target/release/nvnmosd \
+    /nvnmos/${PACKAGE_NAME}/bin/
+COPY --from=rust-builder /nvnmos/rust/target/release/nvnmosd-example \
+    /nvnmos/${PACKAGE_NAME}/bin/
+
+COPY entrypoint.sh entrypoint-setup.sh LICENSE README.md Doxyfile ./
+COPY doc/doxygen doc/doxygen
+
+RUN chmod +x entrypoint.sh entrypoint-setup.sh \
+    && cp src/conan.lock ${PACKAGE_NAME}/ \
+    && cp LICENSE README.md ${PACKAGE_NAME}
 # Doxyfile paths assume CWD is src/ (INPUT, HTML_HEADER, etc.).
 RUN cd src && doxygen ../Doxyfile && mv html ../${PACKAGE_NAME}/
 
 RUN tar -cvzf ${PACKAGE_NAME}.tar.gz ${PACKAGE_NAME}
 
+# -----------------------------------------------------------------------------
+# Runtime image (tarball + entrypoint only).
+# -----------------------------------------------------------------------------
 FROM ${BASE_IMAGE}
 
-ARG BASE_IMAGE
-ARG PACKAGE_SUFFIX
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PACKAGE_NAME
+ENV PACKAGE_NAME=${PACKAGE_NAME}
 
-# use pattern replacement to clean up '/' and ':'
-ENV _BASE_IMAGE=${BASE_IMAGE//\//-}
-ENV PACKAGE_NAME=nvnmos${PACKAGE_SUFFIX:--${_BASE_IMAGE//:/-}}
+RUN apt update && apt install -y --no-install-recommends \
+    avahi-daemon \
+    avahi-utils \
+    dbus \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder \
+# Socket under /tmp so dbus-daemon does not need root. entrypoint-setup.sh binds here.
+# Derived images that start D-Bus differently must override this variable.
+ENV DBUS_SYSTEM_BUS_ADDRESS=unix:path=/tmp/dbus-system-bus-socket
+
+COPY --from=package \
     /nvnmos/${PACKAGE_NAME}.tar.gz \
     /nvnmos/entrypoint.sh \
+    /nvnmos/entrypoint-setup.sh \
     ./
 
 ENTRYPOINT ["/entrypoint.sh"]

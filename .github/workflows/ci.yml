@@ -125,6 +125,16 @@ jobs:
           NVNMOS_LIB_DIR: ${{ github.workspace }}/build
           LD_LIBRARY_PATH: ${{ github.workspace }}/build
         run: cargo test --workspace --locked --no-fail-fast
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build image
+        run: docker build -t nvnmos:ci .
+
+      - name: Run entrypoint smoke tests (non-root)
+        run: docker run --rm --user 1000:1000 --cap-drop=ALL nvnmos:ci true
   license-check:
     runs-on: ubuntu-24.04
     steps:
