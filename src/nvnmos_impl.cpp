@@ -2188,7 +2188,7 @@ namespace nvnmos
             const auto host_interfaces = nmos::experimental::node_interfaces(host_interfaces_);
 
             const auto interfaces = nmos::make_node_interfaces(boost::copy_range<std::map<utility::string_t, nmos::node_interface>>(
-                interface_names | boost::adaptors::transformed([&](const utility::string_t& name)
+                boost::make_iterator_range(interface_names) | boost::adaptors::transformed([&](const utility::string_t& name)
                 {
                     const auto configured = configured_interfaces.find(name);
                     const auto host = host_interfaces.find(name);

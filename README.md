@@ -178,7 +178,9 @@ The following build arguments are available.
 | --- | --- |
 | BASE_IMAGE | Controls the base container image and therefore the compatibility of the created package. Default is `ubuntu:24.04`. | 
 | PACKAGE_SUFFIX | Controls the package filename, which will be _nvnmos\<suffix\>.tar.gz_. Default is based on the base image, e.g. `-ubuntu-24.04`. |
-| USE_CONAN_LOCK | Controls whether the _conan.lock_ file is used to ensure reproducible dependencies, even when new versions are available. Default is `1` (on). |
+| NMOS_CPP_REF | Git commit of [sony/nmos-cpp](https://github.com/sony/nmos-cpp) to build via `add_subdirectory`. Default is the same hash pinned in `.github/workflows/ci.yml`. |
+
+The image clones that _nmos-cpp_ revision, runs `conan install` with `nmos_cpp_from_source=True` (no input lockfile), configures with `-DUSE_ADD_SUBDIRECTORY=ON`, and writes a fresh `conan.lock` into the package tarball from the resolved dependency graph.
 
 If this isn't sufficient for your purposes, read on for manual build instructions.
 
@@ -337,7 +339,7 @@ To install the dependencies using Conan, use the following command.
 
 > 💬 **Note:**
 > Replace `<Release-or-Debug>` with the necessary value.
-> Passing `--lockfile=src/conan.lock` pins dependency versions per _src/conan.lock_, matching the default _Dockerfile_ and GitHub Actions behaviour.
+> Passing `--lockfile=src/conan.lock` pins dependency versions per _src/conan.lock_ (Conan Center `nmos-cpp` package graph).
 > Do not pass `-g CMakeToolchain` or `-g CMakeDeps`; `src/conanfile.py` already generates them, and Conan fails if they are duplicated (for example when copying older command lines).
 
 ```sh
@@ -380,7 +382,7 @@ To install the dependencies using Conan, use the following command.
 > 💬 **Note:**
 > The `` ` `` is the PowerShell line continuation character. In the Windows command prompt, use `^` instead.
 > Replace `<Release-or-Debug>` with the necessary value.
-> Passing `--lockfile=src/conan.lock` pins dependency versions per _src/conan.lock_, matching the default _Dockerfile_ and GitHub Actions behaviour.
+> Passing `--lockfile=src/conan.lock` pins dependency versions per _src/conan.lock_ (Conan Center `nmos-cpp` package graph).
 > Do not pass `-g CMakeToolchain` or `-g CMakeDeps`; `src/conanfile.py` already generates them, and Conan fails if they are duplicated (for example when copying older command lines).
 
 ```PowerShell

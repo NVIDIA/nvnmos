@@ -17,7 +17,8 @@ ARG BASE_IMAGE=ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PACKAGE_SUFFIX
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
-ARG USE_CONAN_LOCK=1
+# Match .github/workflows/ci.yml until a Conan Center nmos-cpp release is published.
+ARG NMOS_CPP_REF=079620d88756aa138ede92d3f52a0102370307fe
 
 FROM ${BASE_IMAGE} as builder
 
@@ -25,46 +26,56 @@ ARG BASE_IMAGE
 ARG DEBIAN_FRONTEND
 ARG PACKAGE_SUFFIX
 ARG PIP_BREAK_SYSTEM_PACKAGES
-ARG USE_CONAN_LOCK
+ARG NMOS_CPP_REF
 
 # use pattern replacement to clean up '/' and ':'
 ENV _BASE_IMAGE=${BASE_IMAGE//\//-}
 ENV PACKAGE_NAME=nvnmos${PACKAGE_SUFFIX:--${_BASE_IMAGE//:/-}}
 
-RUN apt update && apt install -y gcc python3-pip doxygen graphviz
+RUN apt update && apt install -y gcc git python3-pip doxygen graphviz
 RUN pip install cmake~=3.17
 RUN pip install conan~=2.2 && conan profile detect
 
-WORKDIR /src
+# nmos-cpp alongside nvnmos (see src/CMakeLists.txt NMOS_CPP_DIRECTORY).
+RUN git init /nmos-cpp \
+    && git -C /nmos-cpp remote add origin https://github.com/sony/nmos-cpp.git \
+    && git -C /nmos-cpp fetch --depth 1 origin "${NMOS_CPP_REF}" \
+    && git -C /nmos-cpp checkout FETCH_HEAD
 
-COPY src/ .
+# Same layout as README / CI: repo root with src/ and build/ siblings.
+WORKDIR /nvnmos
 
-COPY entrypoint.sh LICENSE README.md Doxyfile /
+COPY src/ src/
+COPY entrypoint.sh LICENSE README.md Doxyfile ./
+COPY doc/doxygen doc/doxygen
 
-RUN chmod +x /entrypoint.sh
+RUN chmod +x entrypoint.sh
 
-RUN conan install . \
+RUN conan install src \
     --settings:all build_type=Release \
     --build=missing \
-    --output-folder=conan \
-    --lockfile=${USE_CONAN_LOCK:+conan.lock} \
-    --lockfile-out=conan.lock
+    --output-folder=src/conan \
+    --lockfile="" \
+    --lockfile-out=src/conan.lock \
+    -o "&:nmos_cpp_from_source=True"
 
 RUN cmake -B build \
     -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=ON \
-    .
+    -DUSE_ADD_SUBDIRECTORY=ON \
+    src
 
-RUN cmake --build build --parallel
+RUN cmake --build build --parallel 2
 
 RUN cmake --install build --prefix=${PACKAGE_NAME}
 
-RUN cp conan.lock ${PACKAGE_NAME}/
+RUN cp src/conan.lock ${PACKAGE_NAME}/
 
-RUN cp /LICENSE /README.md ${PACKAGE_NAME}/
+RUN cp LICENSE README.md ${PACKAGE_NAME}/
 
-RUN doxygen ../Doxyfile && mv html ${PACKAGE_NAME}/
+# Doxyfile paths assume CWD is src/ (INPUT, HTML_HEADER, etc.).
+RUN cd src && doxygen ../Doxyfile && mv html ../${PACKAGE_NAME}/
 
 RUN tar -cvzf ${PACKAGE_NAME}.tar.gz ${PACKAGE_NAME}
 
@@ -78,8 +89,8 @@ ENV _BASE_IMAGE=${BASE_IMAGE//\//-}
 ENV PACKAGE_NAME=nvnmos${PACKAGE_SUFFIX:--${_BASE_IMAGE//:/-}}
 
 COPY --from=builder \
-    /src/${PACKAGE_NAME}.tar.gz \
-    /entrypoint.sh \
+    /nvnmos/${PACKAGE_NAME}.tar.gz \
+    /nvnmos/entrypoint.sh \
     ./
 
 ENTRYPOINT ["/entrypoint.sh"]
