@@ -602,7 +602,7 @@ impl NmosSrc {
                         // the depayloader + a trailing capsfilter so
                         // downstream caps queries see the concrete
                         // shape the flow will carry, mirroring the
-                        // `mxlsrc ! capsfilter` sub-bin pattern.
+                        // `mxlsrc ! capssetter` sub-bin pattern.
                         {
                             let chain = inner::build_udpsrc(
                                 media,

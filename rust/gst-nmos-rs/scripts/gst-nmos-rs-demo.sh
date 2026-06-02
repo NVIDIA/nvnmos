@@ -597,7 +597,6 @@ launch_node3_video() {
                 label="Node 3 / video-in" \
                 auto-activate=false ! \
             videoconvert ! videoflip method=horizontal-flip ! videoconvert ! \
-                $VIDEO_CAPS ! \
                 nmossink \
                     daemon-uri="unix:$SOCK" \
                     transport="$DEMO_TRANSPORT" \
@@ -632,7 +631,6 @@ launch_node3_audio() {
                 label="Node 3 / audio-in" \
                 auto-activate=false ! \
             audioconvert ! volume volume=0.3 ! audioconvert ! \
-                $AUDIO_CAPS ! \
                 nmossink \
                     daemon-uri="unix:$SOCK" \
                     transport="$DEMO_TRANSPORT" \
@@ -852,7 +850,16 @@ collect_urls() {
     return 1
 }
 echo "[poll] waiting for all 8 IS-04 resources to register (timeout ${WAIT_TIMEOUT}s)..."
-collect_urls && echo "[poll] all resources visible"
+if ! collect_urls; then
+    echo "[poll] FAILED: not all resources registered within ${WAIT_TIMEOUT}s" >&2
+    exit 1
+fi
+echo "[poll] all resources visible"
+
+if [[ -n "${DEMO_SMOKE:-}" ]]; then
+    echo "[smoke] success; exiting (DEMO_SMOKE=1)"
+    exit 0
+fi
 
 URL_NODE1_SENDER_VIDEO=${URLS[node1_sender_video]:-}
 URL_NODE1_SENDER_AUDIO=${URLS[node1_sender_audio]:-}

@@ -15,7 +15,7 @@
 //!   sinks, `appsrc` for sources, both idle in PLAYING), or
 //! * a **real chain** for a specific transport (today only MXL:
 //!   `mxlsink` on the sink side; on the source side a sub-bin
-//!   wrapping `mxlsrc ! capsfilter`) once enough configuration is
+//!   wrapping `mxlsrc ! capssetter`) once enough configuration is
 //!   pinned to instantiate it.
 //!
 //! Future transports (NVDS-UDP, plain UDP/RTP, ...) plug in as
@@ -114,7 +114,7 @@ const STATE_WAIT: gst::ClockTime = gst::ClockTime::from_seconds(2);
 ///
 /// `pad_name` is the outer-facing pad name on `new_chain` —
 /// `"sink"` for sink-direction bins, `"src"` for source-direction
-/// bins. For wrapped sub-bins (e.g. the `mxlsrc ! capsfilter` bin
+/// bins. For wrapped sub-bins (e.g. the `mxlsrc ! capssetter` bin
 /// built by `build_mxlsrc` with `advertise_caps`) this is the
 /// ghosted outer pad name on the sub-bin, which is `"src"`.
 pub(crate) fn rebuild_chain(
@@ -464,7 +464,7 @@ pub(crate) fn build_fake_sink() -> Result<gst::Element, anyhow::Error> {
 /// no data flows; when `caps` is `Some` the appsrc also answers
 /// downstream caps queries with a concrete shape so negotiation
 /// completes. Replaced by a real chain (today `mxlsrc` in a
-/// `mxlsrc ! capsfilter` sub-bin) once an IS-05 activation pins a
+/// `mxlsrc ! capssetter` sub-bin) once an IS-05 activation pins a
 /// Flow id. The `-fake` suffix on the element name is what
 /// [`current_chain_is_real`] checks to decide whether to insert a
 /// fake hop on real → real activations.
@@ -519,7 +519,7 @@ pub(crate) struct MxlSinkChain {
 #[derive(Debug)]
 pub(crate) struct MxlSrcChain {
     /// Wrapper element added to the outer bin (bare `mxlsrc` or a
-    /// sub-bin wrapping `mxlsrc ! capsfilter`).
+    /// sub-bin wrapping `mxlsrc ! capssetter`).
     pub bin: gst::Element,
     /// Inner source (`mxlsrc` inside [`Self::bin`]).
     pub transport: gst::Element,
@@ -571,7 +571,7 @@ pub(crate) fn build_mxlsink(domain_path: &str, flow_id: &str) -> Result<MxlSinkC
 /// reaching this helper.
 ///
 /// When `advertise_caps` is `Some`, the returned element is a small
-/// `Bin` containing `mxlsrc ! capsfilter caps=advertise_caps` with
+/// `Bin` containing `mxlsrc ! capssetter caps=advertise_caps` with
 /// its src pad ghosted out; downstream caps queries against the
 /// outer bin's ghost pad then see the concrete essence caps the
 /// flow will carry, rather than `mxlsrc`'s broad pad template.
@@ -613,25 +613,25 @@ pub(crate) fn build_mxlsrc(
         });
     };
 
-    let capsfilter = gst::ElementFactory::make("capsfilter")
+    let capssetter = gst::ElementFactory::make("capssetter")
         .name("nmossrc-caps")
         .property("caps", caps)
         .build()
-        .map_err(|e| anyhow!("instantiating `capsfilter` for nmossrc caps advertisement: {e}"))?;
+        .map_err(|e| anyhow!("instantiating `capssetter` for nmossrc caps advertisement: {e}"))?;
     let bin = gst::Bin::with_name("nmossrc-inner");
-    bin.add_many([&mxlsrc, &capsfilter])
-        .map_err(|e| anyhow!("adding mxlsrc + capsfilter to inner bin: {e}"))?;
+    bin.add_many([&mxlsrc, &capssetter])
+        .map_err(|e| anyhow!("adding mxlsrc + capssetter to inner bin: {e}"))?;
     mxlsrc
-        .link(&capsfilter)
-        .with_context(|| "linking mxlsrc to inner capsfilter")?;
-    let capsfilter_src = capsfilter
+        .link(&capssetter)
+        .with_context(|| "linking mxlsrc to inner capssetter")?;
+    let capssetter_src = capssetter
         .static_pad("src")
-        .ok_or_else(|| anyhow!("capsfilter missing src pad"))?;
+        .ok_or_else(|| anyhow!("capssetter missing src pad"))?;
     let ghost = gst::GhostPad::builder(gst::PadDirection::Src)
         .name("src")
         .build();
     ghost
-        .set_target(Some(&capsfilter_src))
+        .set_target(Some(&capssetter_src))
         .map_err(|e| anyhow!("setting inner ghost src target: {e}"))?;
     ghost
         .set_active(true)
@@ -1115,53 +1115,15 @@ pub(crate) fn build_udpsrc(
             .static_pad("src")
             .ok_or_else(|| anyhow!("depayloader `{depayloader_factory}` missing src pad"))?,
         Some(caps) => {
-            // V1 `rtpvrawdepay` (gst-plugins-good) hardcodes
-            // `framerate=0/1` on its src caps regardless of what the
-            // SDP `exactframerate` fmtp param says — see
-            // `gst_rtp_vraw_depay_setcaps` in
-            // `subprojects/gst-plugins-good/gst/rtp/gstrtpvrawdepay.c`
-            // (the `GST_VIDEO_INFO_FPS_N/D = 0/1` assignment is
-            // unconditional). It also leaves `colorimetry` at the
-            // format default (`bt601` for UYVY) regardless of the
-            // SDP fmtp `colorimetry=`, because `setcaps` calls
-            // `gst_video_info_set_format` and never overrides the
-            // resulting `VideoColorimetry` afterwards. A plain
-            // `capsfilter` carrying `advertise_caps` with the
-            // SDP-derived `framerate=25/1, colorimetry=bt709` then
-            // rejects the depayloader's output as not-negotiated.
+            // For consistent "minimal essence advertisement" across
+            // transports, always use `capssetter` here. It merges the
+            // advertised essence caps over whatever the depayloader
+            // actually emits without failing negotiation.
             //
-            // The V2 `rtpvrawdepay2` in gst-plugins-rs >= 0.15 reads
-            // both `exactframerate` and `colorimetry` from the RTP
-            // caps and emits them on output — see
-            // `net/rtp/src/raw_video/depay/imp.rs::set_sink_caps`
-            // — so no fix-up is needed there.
-            //
-            // We do NOT chain `capssetter` and `capsfilter` together.
-            // They're two different contracts:
-            //   * `capsfilter` is a *negotiation gate*: it intersects
-            //     upstream caps with its `caps` property and fails
-            //     with `not-negotiated` on mismatch. Right for V2 /
-            //     audio / ANC where the depayloader already produces
-            //     the shape we asked for; `advertise_caps` just
-            //     re-asserts that contract on the bin's src pad.
-            //   * `capssetter` is a *caps rewriter*: with the default
-            //     `replace=false, join=true` it merges its `caps`
-            //     property over the upstream caps without failing,
-            //     so SDP-derived fields override the depay's wrong
-            //     defaults and other fields pass through unchanged.
-            //     Right for V1 video raw where the depay actively
-            //     emits values that disagree with the SDP.
-            // Combining them would either be redundant (capsfilter
-            // after capssetter just re-asserts capssetter's already-
-            // fixed caps) or actively harmful (capsfilter *before*
-            // capssetter rejects exactly the V1 output we're trying
-            // to repair). Pick one per depay variant.
-            let needs_capssetter = depayloader_factory == "rtpvrawdepay";
-            let tail_factory = if needs_capssetter {
-                "capssetter"
-            } else {
-                "capsfilter"
-            };
+            // This also fixes the long-standing V1 `rtpvrawdepay`
+            // mismatch where framerate/colorimetry defaults disagree
+            // with the SDP.
+            let tail_factory = "capssetter";
             let tail = gst::ElementFactory::make(tail_factory)
                 .name("nmossrc-caps")
                 .property("caps", caps)
@@ -1933,12 +1895,11 @@ mod tests {
     }
 
     #[test]
-    fn build_udpsrc_audio_pins_advertise_caps_via_capsfilter() {
-        // Audio (rtpL24depay / rtpL16depay) emits correct caps already
-        // — clock-rate → rate, encoding-params → channels — so a passive
-        // capsfilter is the right contract. Pinning this here to make
-        // sure the V1-video-only capssetter workaround doesn't bleed
-        // into the audio path.
+    fn build_udpsrc_audio_pins_advertise_caps_via_capssetter() {
+        // We use `capssetter` consistently for receiver-side caps
+        // advertisement. For audio this is effectively a no-op merge,
+        // but it keeps behaviour consistent across transports and
+        // tolerates upstream evolution.
         let advertise = gst::Caps::from_str(
             "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved",
         )
@@ -1949,14 +1910,13 @@ mod tests {
         let tail = child(&bin, "nmossrc-caps");
         assert_eq!(
             tail.factory().unwrap().name(),
-            "capsfilter",
-            "audio tail must remain `capsfilter`; the `rtpvrawdepay` \
-             V1 framerate quirk doesn't apply to audio depayloaders",
+            "capssetter",
+            "audio tail uses `capssetter` for consistent receiver-side advertisement",
         );
         let pinned = tail.property::<gst::Caps>("caps");
         assert!(
             pinned.can_intersect(&advertise),
-            "tail capsfilter must carry the advertise_caps the caller passed in",
+            "tail capssetter must carry the advertise_caps the caller passed in",
         );
     }
 
