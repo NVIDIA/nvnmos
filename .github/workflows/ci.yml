@@ -92,13 +92,17 @@ jobs:
           path: build
 
       # bindgen (nvnmos-sys) needs libclang; gst-nmos-rs links GStreamer 1.x.
+      # Unit tests instantiate real elements (udpsrc, rtpvrawdepay, …) from
+      # gst-plugins-base / gst-plugins-good — dev packages alone are not enough.
       - name: Install Rust system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             clang \
             libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev
+            libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good
 
       # For now, use whatever Rust toolchain ships with the ubuntu-24.04 runner
       - name: Print Rust toolchain
