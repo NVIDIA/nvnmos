@@ -112,6 +112,13 @@ _default_nic_ip() {
 }
 DEMO_NIC_IP=${DEMO_NIC_IP:-$(_default_nic_ip)}
 
+# Inner `udpsrc` / `udpsrc2` / `udpsink` SO_RCVBUF / SO_SNDBUF (bytes) on
+# **video** flows only (audio stays at the element default). Applied via
+# nmossrc/nmossink `transport-properties` on UDP transports. Must be <=
+# `net.core.rmem_max` / `wmem_max`; see the sysctl note at demo startup.
+# Default 16 MiB. `DEMO_UDP_BUFFER_SIZE` is a deprecated alias.
+DEMO_UDP_VIDEO_BUFFER_SIZE=${DEMO_UDP_VIDEO_BUFFER_SIZE:-${DEMO_UDP_BUFFER_SIZE:-16777216}}
+
 # Resolve the script's own directory so `REPO` works in any checkout
 # without an env override. Layout assumed: <repo>/rust/gst-nmos-rs/scripts/
 # i.e. three `..` to reach the repo root.
@@ -267,6 +274,18 @@ transport_receiver_props() {
             # the demo since all four senders live on this host).
             printf 'multicast-ip=%s destination-port=%d interface-ip=%s source-ip=%s' \
                 "$group" "$port" "$DEMO_NIC_IP" "$DEMO_NIC_IP"
+            ;;
+    esac
+}
+
+# `transport-properties` for video UDP sockets only. High-rate ST 2110-20
+# needs a large kernel receive buffer; ST 2110-30 audio does not. No-op
+# on MXL. Output is one gst-launch token (quoted value), or empty.
+udp_video_buffer_props() {
+    case "$DEMO_TRANSPORT" in
+        udp|udp2)
+            printf 'transport-properties="properties,buffer-size=%s"' \
+                "$DEMO_UDP_VIDEO_BUFFER_SIZE"
             ;;
     esac
 }
@@ -443,6 +462,29 @@ echo "[daemon] ready (pid $DAEMON_PID)"
 export GST_PLUGIN_PATH="$PLUGIN_DIR:$MXL_PLUGIN_DIR${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
 export LD_LIBRARY_PATH="$LIB:$MXL_RT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+case "$DEMO_TRANSPORT" in
+    udp|udp2)
+        echo "[udp] video socket buffer-size=$DEMO_UDP_VIDEO_BUFFER_SIZE (video flows only; override with DEMO_UDP_VIDEO_BUFFER_SIZE=...)"
+        if [[ -r /proc/sys/net/core/rmem_max ]]; then
+            _rmem_max=$(cat /proc/sys/net/core/rmem_max)
+            if (( DEMO_UDP_VIDEO_BUFFER_SIZE > _rmem_max )); then
+                echo "[udp] warning: DEMO_UDP_VIDEO_BUFFER_SIZE ($DEMO_UDP_VIDEO_BUFFER_SIZE) exceeds net.core.rmem_max ($_rmem_max);"
+                echo "[udp]          raise with: sudo sysctl -w net.core.rmem_max=$DEMO_UDP_VIDEO_BUFFER_SIZE"
+                echo "[udp]          (and optionally net.core.rmem_default=$DEMO_UDP_VIDEO_BUFFER_SIZE)"
+            fi
+        fi
+        if [[ "$DEMO_TRANSPORT" == udp2 ]]; then
+            if command -v gst-inspect-1.0 >/dev/null 2>&1 \
+                && gst-inspect-1.0 udpsrc2 >/dev/null 2>&1; then
+                echo "[udp2] gst-plugins-rs udpsrc2 is installed (nmossrc will prefer it over udpsrc)"
+            else
+                echo "[udp2] udpsrc2 not found — nmossrc falls back to gst-plugins-good udpsrc"
+                echo "[udp2] install gst-plugins-rs (GStreamer 1.30+) or use DEMO_TRANSPORT=udp"
+            fi
+        fi
+        ;;
+esac
+
 # ---- Per-pipeline lifecycle helpers --------------------------------
 #
 # Each `launch_*` function builds one of the demo's gst-launch
@@ -543,6 +585,7 @@ launch_node1() {
                     node-seed="$NODE1_SEED" \
                     sender-name=video1 \
                     $(transport_sender_props video1) \
+                    $(udp_video_buffer_props) \
                     caps="$VIDEO_CAPS" \
                     label="Node 1 / video1 (SMPTE bars, scrolling)" \
                     auto-activate=true \
@@ -593,6 +636,7 @@ launch_node3_video() {
                 node-seed="$NODE3_SEED" \
                 receiver-name=video-in \
                 $(transport_receiver_props video1) \
+                $(udp_video_buffer_props) \
                 caps="$VIDEO_CAPS" \
                 label="Node 3 / video-in" \
                 auto-activate=false ! \
@@ -604,6 +648,7 @@ launch_node3_video() {
                     node-seed="$NODE3_SEED" \
                     sender-name=video-out \
                     $(transport_sender_props video-out) \
+                    $(udp_video_buffer_props) \
                     caps="$VIDEO_CAPS" \
                     label="Node 3 / video-out (horizontal flip of video1)" \
                     auto-activate=false \
@@ -670,6 +715,7 @@ launch_node2() {
                 node-seed="$NODE2_SEED" \
                 receiver-name=video2 \
                 $(transport_receiver_props video1) \
+                $(udp_video_buffer_props) \
                 caps="$VIDEO_CAPS" \
                 label="Node 2 / video2" \
                 auto-activate=true ! \
@@ -893,8 +939,14 @@ case "$DEMO_TRANSPORT" in
         LABEL_FLOW_AUDIO1="dest $FLOW_AUDIO1_GROUP:$FLOW_AUDIO1_PORT"
         LABEL_FLOW_VIDEO_OUT="dest $FLOW_VIDEO_OUT_GROUP:$FLOW_VIDEO_OUT_PORT"
         LABEL_FLOW_AUDIO_OUT="dest $FLOW_AUDIO_OUT_GROUP:$FLOW_AUDIO_OUT_PORT"
-        LABEL_INNER_CHAIN="udpsink + RTP payloader / udpsrc + RTP depayloader"
-        LABEL_PREWIRED="via destination multicast group + port (interface $DEMO_NIC_IP)"
+        if [[ "$DEMO_TRANSPORT" == udp2 ]] \
+            && command -v gst-inspect-1.0 >/dev/null 2>&1 \
+            && gst-inspect-1.0 udpsrc2 >/dev/null 2>&1; then
+            LABEL_INNER_CHAIN="udpsink + RTP payloader / udpsrc2 + RTP depayloader (gst-plugins-rs)"
+        else
+            LABEL_INNER_CHAIN="udpsink + RTP payloader / udpsrc + RTP depayloader"
+        fi
+        LABEL_PREWIRED="via destination multicast group + port (interface $DEMO_NIC_IP); video udpsrc buffer-size=$DEMO_UDP_VIDEO_BUFFER_SIZE"
         REROUTE_VIDEO_BODY="{\"transport_params\": [{\"source_ip\": \"$DEMO_NIC_IP\", \"multicast_ip\": \"$FLOW_VIDEO_OUT_GROUP\", \"interface_ip\": \"$DEMO_NIC_IP\", \"destination_port\": $FLOW_VIDEO_OUT_PORT, \"rtp_enabled\": true}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
         REROUTE_AUDIO_BODY="{\"transport_params\": [{\"source_ip\": \"$DEMO_NIC_IP\", \"multicast_ip\": \"$FLOW_AUDIO_OUT_GROUP\", \"interface_ip\": \"$DEMO_NIC_IP\", \"destination_port\": $FLOW_AUDIO_OUT_PORT, \"rtp_enabled\": true}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
         ;;
