@@ -103,7 +103,7 @@
 //! a flow_def synthesised from `caps + mxl-flow-id`, or the
 //! daemon-spliced internal transport file at activation). The
 //! flow_def is reverse-mapped via [`flow_def::caps_from`]
-//! and pinned by an internal `mxlsrc ! capsfilter` chain so
+//! and pinned by an internal `mxlsrc ! capssetter` chain so
 //! downstream caps queries see the concrete shape the flow will
 //! carry — the canonical `nmossrc ! transform ! nmossink` pipeline
 //! then resolves end-to-end at READY→PAUSED: the deferred
@@ -132,10 +132,13 @@ use gstreamer as gst;
 mod daemon;
 mod domain;
 mod flow_def;
+mod iface;
 mod inner;
 mod nmossink;
 mod nmossrc;
 mod runtime;
+mod sdp;
+mod sdp_passthrough;
 mod session;
 mod types;
 

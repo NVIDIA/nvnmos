@@ -636,7 +636,7 @@ pub(crate) fn caps_from(text: &str) -> Result<gst::Caps, FlowDefCapsError> {
                 .field("height", height)
                 .field("framerate", framerate);
             if let Some(im) = raw.interlace_mode {
-                builder = builder.field("interlace-mode", im);
+                builder = builder.field("interlace-mode", im.as_str());
             }
             Ok(builder.build())
         }
@@ -1075,7 +1075,7 @@ mod tests {
     #[test]
     fn build_video_v210_with_interlace_mode_label_and_description() {
         let caps = caps_from_str(
-            "video/x-raw,format=v210,width=720,height=486,framerate=30000/1001,interlace-mode=interlaced-tff",
+            "video/x-raw,format=v210,width=720,height=486,framerate=30000/1001,interlace-mode=interlaced_tff",
         );
         let json = from_caps(&FlowDefBuildInput {
             label: "Studio A v210",
@@ -1086,7 +1086,7 @@ mod tests {
         let v = parse(&json);
         assert_eq!(v["label"], "Studio A v210", "property wins over name fallback");
         assert_eq!(v["description"], "long description goes here");
-        assert_eq!(v["interlace_mode"], "interlaced-tff");
+        assert_eq!(v["interlace_mode"], "interlaced_tff");
     }
 
     #[test]
@@ -1225,6 +1225,28 @@ mod tests {
             let fr = s.get::<gst::Fraction>("framerate").unwrap();
             assert_eq!((fr.numer(), fr.denom()), (60000, 1001));
             assert!(s.get::<String>("interlace-mode").is_err());
+            assert!(
+                s.get::<String>("colorimetry").is_err(),
+                "caps_from() should only carry minimal essence fields; colorimetry is optional",
+            );
+        }
+
+        #[test]
+        fn video_v210_colorspace_is_ignored_for_minimal_caps() {
+            ensure_gst_initialised();
+            let json = r#"{
+                "format": "urn:x-nmos:format:video",
+                "media_type": "video/v210",
+                "grain_rate": { "numerator": 25, "denominator": 1 },
+                "frame_width": 1280, "frame_height": 720,
+                "colorspace": "BT2020"
+            }"#;
+            let caps = super::caps_from(json).unwrap();
+            let s = caps.structure(0).expect("structure");
+            assert!(
+                s.get::<String>("colorimetry").is_err(),
+                "caps_from() should not synthesise colorimetry from flow_def colorspace",
+            );
         }
 
         #[test]
@@ -1261,6 +1283,10 @@ mod tests {
             assert_eq!(s.get::<i32>("rate").unwrap(), 48000);
             assert_eq!(s.get::<i32>("channels").unwrap(), 2);
             assert_eq!(s.get::<String>("layout").unwrap(), "interleaved");
+            assert!(
+                s.get::<gst::Bitmask>("channel-mask").is_err(),
+                "caps_from() should only carry minimal essence fields; channel-mask is optional",
+            );
         }
 
         #[test]

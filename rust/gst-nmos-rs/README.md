@@ -21,16 +21,15 @@ Both elements:
 | `daemon-uri`     | string  | optional  | gRPC endpoint. Only `unix:/path/to/sock` is currently supported. Default `unix:/tmp/nvnmosd.sock`. |
 | `node-seed`      | string  | required  | NvNmos Node seed; sessions sharing this seed share a Node. |
 | `http-port`      | uint (0–65535) | optional  | TCP port for libnvnmos's NMOS HTTP APIs (`node_config.http_port`). `0` (the default) leaves libnvnmos on the nmos-cpp per-API defaults (Node API on 3212, Connection API on 3215). Non-zero collapses every HTTP API onto this single port — handy for firewalled / port-mapped environments where one port is much easier to expose. Honoured only by the `OpenSession` that actually creates the Node; ignored (along with the rest of `node_config`) when this element attaches to a pre-existing Node (e.g. another `nmossink`/`nmossrc` opened first with the same `node-seed`). |
-| `transport`      | enum    | required  | Only `mxl` is currently supported. |
-| `transport-file` | string  | route-dependent | Literal contents of the NvNmos transport file (MXL `flow_def` JSON today; SDP later) the daemon will register with the resource and re-publish into IS-05. Pass text, not a path. Convenient for programmatic callers; gst-launch users want `transport-file-path` instead. Mutually exclusive with `transport-file-path`. May be substituted by `caps` (+ `mxl-flow-id`) on either element. |
+| `transport`      | enum    | required  | Inner data path family: `mxl` (MXL shared-memory, the `mxlsrc` / `mxlsink` chain), `udp` (ST 2110 over RTP/UDP via gst-plugins-good `udpsrc` / `udpsink` + the `rtp*pay` / `rtp*depay` line-up), `udp2` (same but preferring gst-plugins-rs's `udpsrc2` + `rtp*pay2` / `rtp*depay2` where available, falling back to gst-plugins-good per-element). `nvdsudp` is reserved for the DeepStream `nvdsudp*` family and is rejected today (gated on ConnectX / Rivermax hardware). |
+| `transport-file` | string  | route-dependent | Literal contents of the NvNmos transport file the daemon will register with the resource and re-publish into IS-05: MXL `flow_def` JSON for `transport=mxl`, SDP text for `transport=udp` / `udp2`. Pass text, not a path. Convenient for programmatic callers; gst-launch users want `transport-file-path` instead. Mutually exclusive with `transport-file-path`. May be substituted by `caps` (+ `mxl-flow-id` on MXL, or `transport-caps` and the IS-05 endpoint properties — `destination-ip` / `destination-port` / `interface-ip` / `multicast-ip` / `source-ip` / `source-port` — on RTP) on either element. |
 | `transport-file-path` | string | route-dependent | Filesystem path read at NULL→READY into `transport-file`. Convenience for `gst-launch-1.0`, whose pipeline parser doesn't cope with multi-line / quote-heavy property values. Mutually exclusive with `transport-file`. |
 | `label`          | string  | optional  | NMOS label for this Sender/Receiver (not the Node). Overrides the transport file's top-level `label` when both are supplied. |
 | `description`    | string  | optional  | NMOS description for this Sender/Receiver. Overrides the transport file's top-level `description` when both are supplied. |
-| `caps`           | GstCaps | required when `transport-file*` is unset | Essence caps. Supported shapes (mirroring `mxlsink`'s pad template): `video/x-raw,format=v210,width=…,height=…,framerate=…[,interlace-mode=…]`; `audio/x-raw,format=F32LE,rate=…,channels=…`; `meta/x-st-2038,framerate=…` (the framerate must be present — set it upstream with a `capsfilter caps="meta/x-st-2038,framerate=30/1"` if needed). On both elements, drives flow_def JSON synthesis when `transport-file*` is unset and `mxl-flow-id` is set (the Sender's flow_def describes the Flow it produces; the Receiver's *configuring* flow_def describes the essence shape this Receiver accepts, which the daemon advertises as BCP-004-01 narrow Receiver Caps on IS-04 — with `urn:x-nvnmos:tag:caps` driven by `receiver-caps-mode` to indicate narrow vs wide). On `nmossrc`, the media-type structure name (`video/x-raw` / `audio/x-raw` / `meta/x-st-2038`) also picks the `mxlsrc.{video,audio,data}-flow-id=` slot. Cross-checked against the transport file's `format` field when both are supplied. |
-| `transport-caps` | GstCaps | optional  | Typically empty for MXL. |
-| `mxl-domain-path` | string | required for MXL | Local filesystem path identifying the MXL Domain on this host; fed into the inner `mxlsink` / `mxlsrc` `domain=` property. If a `domain_def.json` is present in the directory its `id` is used to populate or cross-check `mxl-domain-id` (see below). |
-| `mxl-domain-id`  | string  | required for MXL (may be omitted if `mxl-domain-path` supplies it) | MXL Domain id (UUID) advertised in NMOS as `urn:x-nvnmos:tag:mxl-domain-id`. If `mxl-domain-path` points at a directory containing a `domain_def.json` (AMWA BCP-007-03 WIP) the file's `id` is used to populate this property when unset, or cross-checked against it when both are supplied (mismatch is an error — this is host-level identity). Overrides the transport file's tag when both are supplied. |
-| `mxl-flow-id`    | string  | optional  | MXL flow id (UUID) — on `nmossink` fed into `mxlsink.flow-id=`, on `nmossrc` into the matching `mxlsrc.{video,audio,data}-flow-id=` slot picked from `caps`. Overrides the transport file's top-level `id` when both are supplied — same property-override rule as `label` / `description`. |
+| `caps`           | GstCaps | required when `transport-file*` is unset | Essence caps. Supported shapes: `video/x-raw,format=…,width=…,height=…,framerate=…[,interlace-mode=…]` (MXL: `v210`; RTP/UDP: RFC 4175 8-bit `UYVY` and 10-bit `UYVP`); `audio/x-raw,format=…,rate=…,channels=…` (MXL: `F32LE`; RTP/UDP: ST 2110-30 `S24BE` (L24) and `S16BE` (L16)); `meta/x-st-2038,framerate=…` (the framerate must be present — set it upstream with a `capsfilter caps="meta/x-st-2038,framerate=30/1"` if needed). On both elements, drives `transport-file` synthesis when `transport-file*` is unset: on `transport=mxl` a MXL `flow_def` JSON document (requires `mxl-flow-id`); on `transport=udp` / `udp2` an SDP description (requires the relevant IS-05 endpoint properties — `destination-ip` etc.). On `nmossrc` the synthesised file describes the essence shape this Receiver accepts, which the daemon advertises as BCP-004-01 narrow Receiver Caps on IS-04 (with `urn:x-nvnmos:tag:caps` driven by `receiver-caps-mode` to indicate narrow vs wide). On `nmossrc` with `transport=mxl`, the media-type structure name (`video/x-raw` / `audio/x-raw` / `meta/x-st-2038`) also picks the `mxlsrc.{video,audio,data}-flow-id=` slot. Cross-checked against the transport file's `format` (MXL) / `m=` line (SDP) when both are supplied. |
+| `transport-caps` | GstCaps | optional  | RTP-only transport-layer overrides applied to the synthesised or supplied SDP, expressed as an `application/x-rtp` caps structure. Recognised fields: `payload` (dynamic RTP payload type, 96–127), `clock-rate` (audio only — video / ANC are pinned to 90000), `ptime` / `maxptime` (audio packetisation interval in ms, packed into SDP `a=ptime:` / `a=maxptime:`). Ignored on `transport=mxl`. |
+| `transport-properties` | GstStructure | optional | Overrides applied to the inner source or sink (`udpsrc` / `udpsink` / `mxlsrc` / `mxlsink`) every time the data-path chain is built. Pass a `GstStructure` whose fields are GObject property names on that inner element — for example `properties,buffer-size=26214400`. The structure name is not interpreted. Takes effect on the next chain build, not immediately on the one currently in the chain. Unknown fields log a warning and are skipped. |
+| `mxl-domain-path` | string | required for MXL | Local filesystem path identifying the MXL Domain on this host; fed into the inner `mxlsink` / `mxlsrc` `domain=` property. If a `domain_def.json` is present in the directory its `id` is used to populate or cross-check `mxl-domain-id` (mismatch is an error — this is host-level identity). |
 | `auto-activate`  | boolean | optional, default `false` | When `false` the element registers the resource so it appears on IS-04 and IS-05 but leaves the inner data path on the fake chain until an IS-05 PATCH activates it (`master_enable: true` on `/single/{senders,receivers}/{id}/active`). When `true` the element brings the inner `mxlsink` / `mxlsrc` up immediately once the configuring flow_def has been resolved at NULL→READY (or, for a deferred-mode sender, at READY→PAUSED) *and* calls `SyncResourceState` to push the daemon's IS-04/IS-05 view to active — i.e. it's a no-controller shortcut for development pipelines and for setups where flow identity comes entirely from properties / `transport-file*`. Orthogonal to how the flow_def itself becomes available: property override of `mxl-flow-id`, supplied `transport-file*`, and caps→flow_def synthesis all feed the same gate. |
 
 `nmossink`-only:
@@ -38,13 +37,27 @@ Both elements:
 | Property      | Type   | Required? | Notes |
 | ------------- | ------ | --------- | ----- |
 | `sender-name` | string | required  | NMOS Sender name within the Node (`x-nvnmos-name` SDP attribute or `urn:x-nvnmos:tag:name` flow-def tag). Unique among Senders on the Node; a Receiver on the same Node may share the same name (the daemon's `by_name` index is keyed on `(node_seed, side, name)`). Overrides the transport file's name tag when both are supplied. |
+| `mxl-domain-id`  | string  | required for MXL (may be omitted if `mxl-domain-path` supplies it) | MXL Domain ID (UUID) carried in the MXL `flow_def` tags as `urn:x-nvnmos:tag:mxl-domain-id`. If `mxl-domain-path` points at a directory containing a `domain_def.json` (AMWA BCP-007-03 WIP) the file's `id` is used to populate this property when unset, or cross-checked against it when both are supplied (mismatch is an error — this is host-level identity). Overrides the transport file's tag when both are supplied. |
+| `mxl-flow-id`    | string  | optional  | MXL Flow ID (UUID). Fed into the inner `mxlsink.flow-id=` and used as the `flow_def` top-level `id` when synthesising a transport file from `caps`. Overrides the transport file's top-level `id` when both are supplied — same property-override rule as `label` / `description`. |
+| `source-ip`   | string | optional, RTP transports only | IS-05 sender `transport_params.source_ip` (verbatim — same name as in an IS-05 PATCH against `/single/senders/{id}/staged`). Local egress NIC IP. Drives both the configuring SDP `a=source-filter:` include-source (RFC 4607 SSM convention) and the `a=x-nvnmos-iface-ip:` attribute, and `udpsink.bind-address` on the inner chain. Empty = unset (let the daemon / SDP / IS-05 `auto` resolver fill at activation time). Honoured only on the RTP transports (`udp`, `udp2`, `nvdsudp`); ignored on `mxl`. |
+| `source-port` | uint (0–65535) | optional, RTP transports only | IS-05 sender `transport_params.source_port`. Local egress port. Drives `udpsink.bind-port` and the SDP `a=x-nvnmos-src-port:` attribute. `0` (the default) = unset; the OS picks an ephemeral port. RTP-only. |
+| `destination-ip` | string | optional, RTP transports only | IS-05 sender `transport_params.destination_ip`. Remote destination (unicast peer or multicast group). Becomes the configuring SDP `c=` line address and `udpsink.host`. Empty = unset (use the transport file's `c=` line if present; else daemon `auto`). RTP-only. |
+| `destination-port` | uint (0–65535) | optional, RTP transports only | IS-05 sender `transport_params.destination_port`. Remote destination port. Becomes the SDP `m=` port slot and `udpsink.port`. `0` (the default) = unset; falls back to the transport file's `m=` port, else to the canonical RTP default 5004 (`nmos-cpp::auto_rtp_port`). RTP-only. |
+| `pay-properties` | GstStructure | optional | Overrides applied to the inner RTP payloader every time the UDP sender chain is built. Same `GstStructure` syntax as `transport-properties`; ignored on non-UDP transports (a warning is logged if non-empty). Takes effect on the next chain build. |
 
 `nmossrc`-only:
 
 | Property          | Type   | Required? | Notes |
 | ----------------- | ------ | --------- | ----- |
 | `receiver-name`   | string | required  | NMOS Receiver name within the Node (`x-nvnmos-name` SDP attribute or `urn:x-nvnmos:tag:name` flow-def tag). Unique among Receivers on the Node; a Sender on the same Node may share the same name. Overrides the transport file's name tag when both are supplied. |
+| `mxl-domain-id`  | string  | required for MXL (may be omitted if `mxl-domain-path` supplies it) | MXL Domain ID (UUID) carried in the MXL `flow_def` tags as `urn:x-nvnmos:tag:mxl-domain-id`. If `mxl-domain-path` points at a directory containing a `domain_def.json` (AMWA BCP-007-03 WIP) the file's `id` is used to populate this property when unset, or cross-checked against it when both are supplied (mismatch is an error — this is host-level identity). Overrides the transport file's tag when both are supplied. |
+| `mxl-flow-id`    | string  | optional  | MXL Flow ID (UUID). Fed into the matching `mxlsrc.{video,audio,data}-flow-id=` slot picked from `caps` and used as the `flow_def` top-level `id` when synthesising a transport file from `caps`. Overrides the transport file's top-level `id` when both are supplied — same property-override rule as `label` / `description`. |
 | `receiver-caps-mode` | enum (`auto`/`narrow`/`wide`) | optional | Controls whether the Receiver published to IS-04 advertises narrow or wide Receiver Caps, via the presence of the `urn:x-nvnmos:tag:caps` flow-def tag (libnvnmos's rule: present + non-empty array means wide; absent or empty means narrow). `auto` (default) leaves the tag untouched in the spliced transport file: narrow when the transport file is present and the tag is absent, wide when the tag is already there. `narrow` strips the tag if present; `wide` ensures it is present with a non-empty marker. |
+| `source-ip`       | string | optional, RTP transports only | IS-05 receiver `transport_params.source_ip`. **Different semantics from the sender-side property of the same name**: SSM include-source — the remote sender's IP. Drives the configuring SDP `a=source-filter:` include-source. On the `udp2` variant (gst-plugins-rs `udpsrc2`) this translates to `source-filter`; on the `udp` variant (gst-plugins-good `udpsrc`) it translates to `multicast-source`. Empty = unset (any-source multicast / unicast). RTP-only. |
+| `interface-ip`    | string | optional, RTP transports only | IS-05 receiver `transport_params.interface_ip`. Local NIC IP used for the IGMP join; resolved to an interface name and fed into `udpsrc.multicast-iface`. Also emitted in the configuring SDP as `a=x-nvnmos-iface-ip:`. Empty = unset (let the kernel pick). RTP-only. |
+| `multicast-ip`    | string | optional, RTP transports only | IS-05 receiver `transport_params.multicast_ip`. Multicast group to join. Becomes `udpsrc.address` and the SDP `c=` line address. Empty = unset (unicast reception). RTP-only. |
+| `destination-port` | uint (0–65535) | optional, RTP transports only | IS-05 receiver `transport_params.destination_port`. **Different semantics from the sender-side property of the same name**: local listen port. Becomes `udpsrc.port` and the SDP `m=` port slot. `0` (the default) = unset; falls back to the transport file's `m=` port, else to 5004. RTP-only. |
+| `depay-properties` | GstStructure | optional | Overrides applied to the inner RTP depayloader every time the UDP receiver chain is built. Same `GstStructure` syntax as `transport-properties`; ignored on non-UDP transports (a warning is logged if non-empty). Takes effect on the next chain build. |
 
 ### Property interaction with `transport-file`
 
@@ -57,7 +70,7 @@ built with these rules:
 | Identity / cosmetic | `sender-name` / `receiver-name`, `mxl-flow-id`, `mxl-domain-id`, `label`, `description`, `receiver-caps-mode` | **Property overrides file.** The element rewrites the file's matching field/tag to the property value before the daemon sees it. |
 | Essence shape | `caps`, `transport-caps` | **Cross-check.** Property must agree with the file's shape (today: `caps` first structure name vs `format`). Mismatch is a hard error at NULL→READY. |
 | Activation gate | `auto-activate` | Doesn't appear in the transport file; it gates whether the data path goes live eagerly at NULL→READY (and tells the daemon to flip `/active` to `master_enable: true` via `SyncResourceState`) or waits for an IS-05 PATCH. Orthogonal to where the flow_def came from. |
-| No interaction | `daemon-uri`, `node-seed`, `http-port`, `transport`, `mxl-domain-path` | These don't appear in the transport file at all. |
+| No interaction | `daemon-uri`, `node-seed`, `http-port`, `transport`, `mxl-domain-path`, `transport-properties`, `pay-properties`, `depay-properties` | These don't appear in the transport file at all. `transport-properties` / `pay-properties` / `depay-properties` tune the inner GStreamer elements at chain-build time instead. |
 
 `mxl-domain-id` is in the override group for the file tag, but is
 still **cross-checked** against `mxl-domain-path/domain_def.json`
@@ -77,24 +90,29 @@ The element separates "is the resource visible to NMOS controllers?"
 from "is the data path live?":
 
 - **Resource registration** (`AddSender` / `AddReceiver`) happens
-  at NULL→READY whenever a configuring flow_def is in play —
-  supplied via `transport-file*`, synthesised from `caps` (+
-  `mxl-flow-id`), or for the deferred-mode sender, synthesised
-  from peer caps at READY→PAUSED. With no flow_def in play the
+  at NULL→READY whenever a configuring transport file (MXL
+  `flow_def` JSON or SDP) is in play — supplied via
+  `transport-file*`, synthesised from `caps` plus the
+  transport-specific identity properties (`mxl-flow-id` on MXL;
+  the IS-05 endpoint properties — `destination-ip` etc. — on
+  RTP), or for the deferred-mode sender, synthesised from peer
+  caps at READY→PAUSED. With no transport file in play the
   session opens with no resource and the data path stays on the
   fake chain until an IS-05 activation supplies one.
 
-- **Inner data path** (real `mxlsink` / `mxlsrc`) only goes live
-  when `auto-activate=true` *or* when an IS-05 activation arrives.
-  With the default `auto-activate=false` the element registers the
-  resource but leaves the inner on the fake chain; the daemon's
+- **Inner data path** (real `mxlsink` / `mxlsrc` on MXL, or
+  `udpsink` + RTP payloader / `udpsrc` + RTP depayloader on
+  `udp` / `udp2`) only goes live when `auto-activate=true` *or*
+  when an IS-05 activation arrives. With the default
+  `auto-activate=false` the element registers the resource but
+  leaves the inner on the fake chain; the daemon's
   `/single/{senders,receivers}/{id}/active` shows
   `master_enable: false` until an external controller PATCHes the
   resource. Setting `auto-activate=true` is the no-controller
   shortcut: the element brings the inner up eagerly from its
-  resolved configuring flow_def and calls `SyncResourceState` on
-  the daemon to bring `/active` into sync — no IS-05 PATCH
-  required.
+  resolved configuring transport file and calls
+  `SyncResourceState` on the daemon to bring `/active` into sync
+  — no IS-05 PATCH required.
 
 ## Building
 
@@ -119,10 +137,28 @@ property surface above.
 ## Smoke test
 
 For an end-to-end demo — three NMOS Nodes (producer, consumer,
-processor) sharing one MXL Domain, with an interactive menu for
-IS-05 enable / disable / rewire — run
-[`scripts/gst-nmos-rs-demo.sh`](scripts/gst-nmos-rs-demo.sh). The
-script builds `nvnmosd` + the plugin, spawns the daemon and three
+processor) with an interactive menu for IS-05 enable / disable /
+rewire — run [`scripts/gst-nmos-rs-demo.sh`](scripts/gst-nmos-rs-demo.sh).
+Pick the transport family with `DEMO_TRANSPORT`:
+
+```sh
+# MXL shared-memory (default)
+./scripts/gst-nmos-rs-demo.sh
+
+# ST 2110 over RTP/UDP (gst-plugins-good)
+DEMO_TRANSPORT=udp ./scripts/gst-nmos-rs-demo.sh
+
+# ST 2110 over RTP/UDP (prefer gst-plugins-rs udpsrc2 / *pay2 / *depay2)
+DEMO_TRANSPORT=udp2 ./scripts/gst-nmos-rs-demo.sh
+```
+
+On WSL or headless hosts, skip the slow `autoaudiosink` probe:
+
+```sh
+AUDIO_SINK=fakesink VIDEO_SINK=fakesink DEMO_TRANSPORT=udp ./scripts/gst-nmos-rs-demo.sh
+```
+
+The script builds `nvnmosd` + the plugin, spawns the daemon and three
 gst-launch pipelines, then drops into a menu that PATCHes the
 IS-05 endpoints so you can exercise activation paths against a
 live pipeline.
@@ -185,11 +221,16 @@ downstream sees the concrete essence shape) or via the `format`
 field of the `transport-file`. When both are supplied they must
 agree.
 
-The same `caps` discipline applies to a future ST 2110 transport
-(`udpsrc ! depayloader ! …`): the application either declares
-`caps=…` on `nmossrc` / `nmossink` to drive flow-format selection and
-flow_def synthesis from properties, or provides a `transport-file`
-(which is then authoritative and the caps are taken from it).
+The same `caps` discipline applies to the RTP/UDP transports
+(`transport=udp` / `udp2`, internally `udpsrc ! depayloader ! …`
+on the receiver and `… ! payloader ! udpsink` on the sender): the
+application either declares `caps=…` on `nmossrc` / `nmossink` to
+drive SDP synthesis from properties (combined with the IS-05
+endpoint properties — `destination-ip` / `destination-port` /
+`interface-ip` / `multicast-ip` / `source-ip` / `source-port` —
+and any `transport-caps` overrides), or provides an SDP via
+`transport-file*` (which is then authoritative and the essence
+caps are derived from its `m=` / `rtpmap` / `fmtp` lines).
 
 `transport-file` (literal text) remains available for programmatic
 callers that compute the flow_def in memory; from gst-launch the path
@@ -359,13 +400,15 @@ across the steady-state window.
 - `NULL→READY` opens a session against `nvnmosd` via gRPC over UDS
   and subscribes to activations; `READY→NULL` closes it.
 - When a transport file is in play — either supplied via
-  `transport-file*` or synthesised from `caps` + `mxl-flow-id` — the
-  element also calls `AddSender` (on `nmossink`) or `AddReceiver`
-  (on `nmossrc`) so the resource is published in IS-04 and reachable
-  by IS-05 controllers. When neither source provides one the session
-  is opened but no resource is registered; the element awaits an
-  IS-05 activation (or, for `nmossink` only, READY→PAUSED peer-caps
-  resolution — see the deferred-mode note below).
+  `transport-file*` or synthesised from `caps` plus the
+  transport-specific identity properties (`mxl-flow-id` on MXL;
+  the IS-05 endpoint properties on RTP) — the element also calls
+  `AddSender` (on `nmossink`) or `AddReceiver` (on `nmossrc`) so
+  the resource is published in IS-04 and reachable by IS-05
+  controllers. When neither source provides one the session is
+  opened but no resource is registered; the element awaits an
+  IS-05 activation (or, for `nmossink` only, READY→PAUSED
+  peer-caps resolution — see the deferred-mode note below).
 - The `auto-activate` boolean property (default `false`) controls
   whether the data path goes live eagerly at NULL→READY or waits for
   an IS-05 PATCH. Default `false` gives canonical NMOS semantics:
@@ -373,23 +416,29 @@ across the steady-state window.
   data path stays on the fake chain until an external controller
   PATCHes `master_enable: true` against the
   `/single/{senders,receivers}/{id}/staged` endpoint. `true` is the
-  no-controller shortcut: once the configuring flow_def has been
-  resolved the element brings the inner `mxlsink` / `mxlsrc` up
-  and calls `SyncResourceState` on the daemon so
+  no-controller shortcut: once the configuring transport file has
+  been resolved the element brings the transport-specific real
+  chain up and calls `SyncResourceState` on the daemon so
   `/single/{senders,receivers}/{id}/active` reflects
   `master_enable: true` without the IS-05 stream being involved.
-  The gate is orthogonal to how the flow_def became available —
-  property override of `mxl-flow-id`, supplied `transport-file*`,
-  and caps→flow_def synthesis all feed the same toggle.
+  The gate is orthogonal to how the transport file became
+  available — property overrides (`mxl-flow-id` and friends on
+  MXL; IS-05 endpoint properties on RTP), supplied
+  `transport-file*`, and caps-driven transport-file synthesis all
+  feed the same toggle.
 - Activation events arriving on the subscription drive the inner
   data path. The element reads the event's transport file (for MXL
   receivers this is the daemon-spliced internal `flow_def` carrying
-  the PATCHed `mxl_domain_id` / `mxl_flow_id`), then swaps the
-  inner element between the real `mxlsink` / `mxlsrc` chain and
-  the fake chain.
-  The daemon's view is authoritative for identity — an IS-05 PATCH
-  legitimately replaces the configured-at-startup `mxl-flow-id` /
-  `mxl-domain-id` and the element silently picks up the new values.
+  the PATCHed `mxl_domain_id` / `mxl_flow_id`; for RTP receivers
+  it is the SDP with the PATCHed `c=` / `m=` / endpoint addresses
+  spliced in by the daemon), then swaps the inner element between
+  the real chain (`mxlsink` / `mxlsrc` on MXL; `udpsink` + RTP
+  payloader / `udpsrc` + RTP depayloader on `udp` / `udp2`) and
+  the fake chain. The daemon's view is authoritative for
+  identity — an IS-05 PATCH legitimately replaces the
+  configured-at-startup transport-file identity (`mxl-flow-id` /
+  `mxl-domain-id` on MXL; endpoint IPs / ports on RTP) and the
+  element silently picks up the new values.
   The essence-shape cross-check still applies, so an activation
   that tries to push an incompatible essence type at the element
   (e.g. a v210 video flow at an `nmossrc` configured for audio
@@ -402,20 +451,25 @@ across the steady-state window.
   chain behind the anchor, and removes the probe. Sticky events
   (STREAM_START, CAPS, SEGMENT) re-flow to the new chain on its
   first buffer push, so the external ghost-pad target never has to
-  be retargeted. For real → real re-activations the handler inserts
-  a fake-chain hop between the two real instances so libmxl's
-  per-process state (`FlowWriter` / `FlowReader`) is fully released
-  before the new one tries to attach. The activation is acked back
-  to the daemon as `success=true` when the inner element was
-  successfully brought up (or deactivation completed), and
-  `success=false` with a `failure_reason` when it could not — most
-  commonly because `mxl-domain-path` is unset on this host or the
+  be retargeted. For MXL real → real re-activations the handler
+  inserts a fake-chain hop between the two real instances so
+  libmxl's per-process state (`FlowWriter` / `FlowReader`) is
+  fully released before the new one tries to attach (the RTP
+  chains have no equivalent per-process singleton, so they swap
+  directly). The activation is acked back to the daemon as
+  `success=true` when the inner element was successfully brought
+  up (or deactivation completed), and `success=false` with a
+  `failure_reason` when it could not — most commonly because
+  `mxl-domain-path` is unset on this host (MXL only) or the
   essence-shape cross-check failed.
-- When the resolved configuration pins a Domain path *and* a Flow id
-  (plus a recognised essence shape on the receiver, supplied via
-  `caps` or read from the transport file's `format`), the inner data
-  path is the real `mxlsink` / `mxlsrc` chain configured from those
-  values. Otherwise the bin keeps a fake chain so the element
+- When the resolved configuration pins enough transport-specific
+  identity to build a real chain — for MXL a Domain path *and* a
+  Flow id (plus a recognised essence shape on the receiver,
+  supplied via `caps` or read from the transport file's `format`);
+  for RTP the network endpoints (`destination-ip` /
+  `destination-port` etc.) plus the parsed SDP essence /
+  transport caps — the inner data path is the transport-specific
+  real chain. Otherwise the bin keeps a fake chain so the element
   remains valid in the pipeline: `fakesink` on `nmossink` (sinks
   accept ANY caps), and an `appsrc` configured with the
   best-available essence caps on `nmossrc` (the `caps` property, or
@@ -424,55 +478,71 @@ across the steady-state window.
   its basesrc loop blocks in `create()`, but downstream caps
   queries are answered against the concrete essence shape so
   negotiation can complete and the pipeline can reach PLAYING while
-  the bin waits for an IS-05 activation to swap the inner to
-  `mxlsrc`. When no caps source is yet available (constructed-time,
-  before any properties have been set) the fake chain is built as
-  a bare `appsrc` without caps; it cannot satisfy caps negotiation
-  in that state, and the NULL→READY transition replaces it with a
-  caps-aware `appsrc` as soon as a caps source becomes available.
-- Both elements support a `caps`-driven flow_def synthesis path:
-  when the user supplies essence caps (`video/x-raw,format=v210,…`,
-  `audio/x-raw,format=F32LE,…`, or `meta/x-st-2038,framerate=…`)
-  plus `mxl-flow-id` and `sender-name` / `receiver-name`, the element
-  synthesises a MXL `flow_def` JSON document matching the SDK
-  reference shapes in
-  [`mxl/lib/tests/data/`](https://github.com/dmf-mxl/mxl/tree/main/lib/tests/data)
-  and feeds it to `AddSender` / `AddReceiver` as it would a
-  user-supplied transport-file. On `nmossrc` the synthesised flow_def
-  describes the Receiver's expected essence shape, which the daemon
-  publishes as BCP-004-01 narrow Receiver Caps on IS-04 (with the
-  `urn:x-nvnmos:tag:caps` tag spliced in by `receiver-caps-mode` to
-  indicate narrow vs wide); the live transport file delivered later
-  via IS-05 PATCH replaces only the subscription-relevant fields.
-  When both `transport-file*` and `caps` are set, `caps` is
-  cross-checked against the file's `format` rather than ignored —
-  see the property interaction matrix in "Property interaction with
-  `transport-file`" above.
+  the bin waits for an IS-05 activation to swap the inner to the
+  real chain. When no caps source is yet available
+  (constructed-time, before any properties have been set) the
+  fake chain is built as a bare `appsrc` without caps; it cannot
+  satisfy caps negotiation in that state, and the NULL→READY
+  transition replaces it with a caps-aware `appsrc` as soon as a
+  caps source becomes available.
+- Both elements support a `caps`-driven transport-file synthesis
+  path: when the user supplies essence caps
+  (`video/x-raw,format=…`, `audio/x-raw,format=…`, or
+  `meta/x-st-2038,framerate=…`) plus the transport-specific
+  identity properties (`mxl-flow-id` on MXL; the IS-05 endpoint
+  properties on RTP) and `sender-name` / `receiver-name`, the
+  element synthesises a transport file and feeds it to
+  `AddSender` / `AddReceiver` as it would a user-supplied one.
+  On `transport=mxl` the synthesised file is a MXL `flow_def`
+  JSON document matching the SDK reference shapes in
+  [`mxl/lib/tests/data/`](https://github.com/dmf-mxl/mxl/tree/main/lib/tests/data).
+  On `transport=udp` / `udp2` it is an SDP description — `v=` /
+  `o=` / `s=` / `i=` / `c=` / `m=` plus `rtpmap` / `fmtp` /
+  `ptime` lines derived from the essence caps, `transport-caps`
+  overrides, and the endpoint properties (including the
+  `a=x-nvnmos-name:` extension and, for senders, an
+  `a=source-filter:` line when `source-ip` is set; and for
+  receivers an `a=x-nvnmos-iface-ip:` line when `interface-ip`
+  is set). On `nmossrc` the synthesised file describes the
+  Receiver's expected essence shape, which the daemon publishes
+  as BCP-004-01 narrow Receiver Caps on IS-04 (with the
+  `urn:x-nvnmos:tag:caps` tag spliced in by `receiver-caps-mode`
+  to indicate narrow vs wide); the live transport file delivered
+  later via IS-05 PATCH replaces only the subscription-relevant
+  fields. When both `transport-file*` and `caps` are set, `caps`
+  is cross-checked against the file's essence shape rather than
+  ignored — see the property interaction matrix in "Property
+  interaction with `transport-file`" above.
 - `nmossink` also supports a *deferred mode*: when neither
   `transport-file*` nor `caps` is supplied at NULL→READY the session
   opens without a resource, and the actual `AddSender` is driven
   from `READY→PAUSED`. The ghost sink pad's upstream peer is queried
   for caps via `gst_pad_peer_query_caps()`, the result is fixated,
-  and the caps-driven flow_def builder runs against those caps; on
-  success the inner element swaps to `mxlsink` and the resource is
-  registered. `mxl-flow-id` / `mxl-domain-id` (or
-  `mxl-domain-path` with a `domain_def.json`) must still be set. If
-  the peer returned ANY/EMPTY caps or a shape the builder can't
-  accept (e.g. `video/x-raw,format=I420`), the state change fails
-  with a clear message telling the user to declare `caps=…` or insert
-  a `capsfilter` upstream. Receiver-side deferred mode is
+  and the caps-driven transport-file builder runs against those
+  caps; on success the inner element swaps to the transport-specific
+  real chain and the resource is registered. The transport-specific
+  identity properties must still be set (MXL: `mxl-flow-id` /
+  `mxl-domain-id`, or `mxl-domain-path` with a `domain_def.json`;
+  RTP: the IS-05 endpoint properties). If the peer returned
+  ANY/EMPTY caps or a shape the builder can't accept (e.g.
+  `video/x-raw,format=I420`), the state change fails with a clear
+  message telling the user to declare `caps=…` or insert a
+  `capsfilter` upstream. Receiver-side deferred mode is
   intentionally out of scope — `nmossrc` has no peer to query.
 - `nmossrc` advertises essence caps on its ghost source pad whenever
-  a flow_def is in play. The transport file (`transport-file*` at
-  NULL→READY, or the daemon-spliced internal one at activation) is
-  reverse-mapped to GStreamer caps (`video/x-raw,format=v210,…`,
-  `audio/x-raw,format=F32LE,…`, `meta/x-st-2038,framerate=…`) and
-  pinned by an internal `mxlsrc ! capsfilter` chain. Downstream caps
-  queries see the concrete shape the flow will carry — this is what
-  makes the canonical `nmossrc ! transform ! nmossink` pipeline work
-  end-to-end at READY→PAUSED, since the deferred `nmossink`'s
-  upstream peer query lands on those pinned caps and `AddSender`
-  runs against the right flow_def. When no transport file is
+  a transport file is in play. The transport file (`transport-file*`
+  at NULL→READY, or the daemon-spliced internal one at activation) is
+  reverse-mapped to GStreamer caps (`video/x-raw,format=…`,
+  `audio/x-raw,format=…`, `meta/x-st-2038,framerate=…`) and pinned
+  by an internal `mxlsrc ! capsfilter` chain on MXL, or by the
+  RTP depayloader's natural output (extended with a tail
+  `capsfilter` / `capssetter` as needed) on `udp` / `udp2`.
+  Downstream caps queries see the concrete shape the flow will
+  carry — this is what makes the canonical
+  `nmossrc ! transform ! nmossink` pipeline work end-to-end at
+  READY→PAUSED, since the deferred `nmossink`'s upstream peer query
+  lands on those pinned caps and `AddSender` runs against the right
+  transport file. On `transport=mxl`, when no transport file is
   available (development convenience with `mxl-domain-path` +
   `mxl-flow-id` + `caps` set but no flow_def supplied), the bare
   `mxlsrc` is used and its broad pad template propagates; the

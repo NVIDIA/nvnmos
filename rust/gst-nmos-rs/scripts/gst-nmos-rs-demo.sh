@@ -3,12 +3,36 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Interactive three-Node demo for the `gst-nmos-rs` plugin against a
-# live `nvnmosd` daemon. Spins up:
+# live `nvnmosd` daemon. The transport family is selected via the
+# `DEMO_TRANSPORT` env var:
+#
+#   DEMO_TRANSPORT=mxl   (default): MXL shared-memory transport
+#                                   (`mxlsrc` / `mxlsink`). Requires
+#                                   `/dev/shm` write access + a real
+#                                   MXL toolchain.
+#   DEMO_TRANSPORT=udp              ST 2110 over RTP/UDP via
+#                                   gst-plugins-good (`udpsrc` /
+#                                   `udpsink` + the `rtp*pay` /
+#                                   `rtp*depay` family).
+#   DEMO_TRANSPORT=udp2             ST 2110 over RTP/UDP, preferring
+#                                   gst-plugins-rs's `udpsrc2` and
+#                                   `*pay2` / `*depay2` siblings
+#                                   where available.
+#
+# The topology and interactive control loop are identical across
+# transports; only the per-Sender / per-Receiver property surface,
+# the essence caps, and the diagnostics differ. The MXL path uses
+# `mxl-domain-id` / `mxl-domain-path` / `mxl-flow-id` to identify
+# Flows; the UDP path uses the IS-05 endpoint properties
+# (`destination-ip` etc. on senders, `multicast-ip` etc. on
+# receivers) with per-flow multicast groups.
 #
 #   Node 1 (producer):  one pipeline with audiotestsrc (440 Hz tone) +
 #                       videotestsrc (smpte bars, horizontal-speed=2),
 #                       fed to two `nmossink` Senders on the same Node
-#                       (different sender-name, different mxl-flow-id).
+#                       (different sender-name, different per-flow
+#                       identity — MXL flow-id, or destination
+#                       multicast group + port).
 #
 #   Node 2 (consumer):  one pipeline with two `nmossrc` Receivers (one
 #                       per format) on the same Node, fed to `autoaudiosink`
@@ -23,13 +47,16 @@
 #                       publish processed flows that Node 2 can switch to
 #                       via IS-05 PATCH.
 #
-# Out of the box everything is pre-wired by `mxl-flow-id` so the user
-# sees and hears Node 1's flows on Node 2 immediately. The interactive
-# curl examples printed at the end let the user PATCH Receivers to
-# disable, re-enable, or rewire to Node 3's processed flows.
+# Out of the box everything is pre-wired by per-flow identity (MXL
+# flow-id or RTP multicast group + port) so the user sees and hears
+# Node 1's flows on Node 2 immediately. The interactive curl examples
+# printed at the end let the user PATCH Receivers to disable,
+# re-enable, or rewire to Node 3's processed flows.
 #
-# Requires a real MXL toolchain + `/dev/shm` (cannot run in a sandbox
-# without shared-memory write access).
+# MXL mode requires a real MXL toolchain + `/dev/shm` (cannot run in
+# a sandbox without shared-memory write access). UDP / UDP2 modes
+# require only the gst-plugins-good / gst-plugins-rs RTP elements and
+# a NIC that can carry multicast — see `DEMO_NIC_IP` below.
 #
 # Stop with Ctrl+C — the cleanup trap SIGTERMs the daemon + all
 # gst-launch pipelines, waits up to 2 s for orderly shutdown, then
@@ -42,6 +69,55 @@
 set -u
 
 # ---- Knobs ---------------------------------------------------------
+
+# Transport family for the inner data path. `mxl` (the default) keeps
+# this script's historical behaviour: MXL shared-memory transport on
+# `/dev/shm`. `udp` and `udp2` switch every Sender / Receiver in the
+# topology to ST 2110 over RTP/UDP — they share the property
+# surface, differing only in which RTP factory family the inner chain
+# picks (gst-plugins-good vs gst-plugins-rs). Validated below once
+# the helper functions are in place.
+DEMO_TRANSPORT=${DEMO_TRANSPORT:-mxl}
+
+# Local NIC IP used by the UDP path: drives the receiver's
+# `interface-ip` (the IGMP-join interface, resolved to an iface name
+# for `udpsrc.multicast-iface`) and the sender's `source-ip`
+# (`udpsink.bind-address` plus the SDP `a=source-filter:`
+# include-source). Ignored when DEMO_TRANSPORT=mxl. Defaults to the
+# host's first non-loopback IPv4 address (typically `eth0` on
+# WSL / Docker; the primary physical NIC otherwise). libnvnmos
+# walks the host's iface list and skips `lo` when resolving the
+# SDP `a=x-nvnmos-iface-ip` attribute back to an iface, so anything
+# assigned to the loopback iface is rejected — including non-127.x
+# global-scope IPs like WSL2's quirky `10.255.255.254/32` on `lo`.
+_default_nic_ip() {
+    local addr
+    if command -v ip >/dev/null 2>&1; then
+        # `ip -4 -o addr show` prints one line per address; column
+        # 2 is the iface name, column 4 is the CIDR. Skip the
+        # loopback iface explicitly (WSL2 can land a global-scope
+        # IP on `lo`, so `scope global` alone isn't sufficient) and
+        # take the first surviving address.
+        addr=$(ip -4 -o addr show 2>/dev/null \
+            | awk '$2 != "lo" {print $4; exit}' \
+            | cut -d/ -f1)
+    fi
+    if [[ -z "${addr:-}" ]]; then
+        # Fallback: `hostname -I` (space-separated list, already
+        # excludes 127.0.0.1 by `hostname(1)` convention). Safety
+        # net for systems with iproute2 deinstalled / replaced.
+        addr=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    echo "${addr:-127.0.0.1}"
+}
+DEMO_NIC_IP=${DEMO_NIC_IP:-$(_default_nic_ip)}
+
+# Inner `udpsrc` / `udpsrc2` / `udpsink` SO_RCVBUF / SO_SNDBUF (bytes) on
+# **video** flows only (audio stays at the element default). Applied via
+# nmossrc/nmossink `transport-properties` on UDP transports. Must be <=
+# `net.core.rmem_max` / `wmem_max`; see the sysctl note at demo startup.
+# Default 16 MiB. `DEMO_UDP_BUFFER_SIZE` is a deprecated alias.
+DEMO_UDP_VIDEO_BUFFER_SIZE=${DEMO_UDP_VIDEO_BUFFER_SIZE:-${DEMO_UDP_BUFFER_SIZE:-16777216}}
 
 # Resolve the script's own directory so `REPO` works in any checkout
 # without an env override. Layout assumed: <repo>/rust/gst-nmos-rs/scripts/
@@ -60,7 +136,9 @@ SOCK=/tmp/gst-nmos-rs-demo.sock
 LOG_DIR=$(mktemp -d -t gst-nmos-rs-demo-XXXXXX)
 DAEMON_LOG="$LOG_DIR/daemon.log"
 
-# Shared MXL Domain (tmpfs-backed). All three Nodes operate inside it.
+# Shared MXL Domain (tmpfs-backed). All three Nodes operate inside
+# it. Only used when DEMO_TRANSPORT=mxl; the bootstrap block below
+# only creates the directory + `domain_def.json` in that case.
 MXL_DOMAIN_ID=1ac254d9-c9be-475a-93a7-f80b9c1063a8
 MXL_DOMAIN_PATH=/dev/shm/gst-nmos-rs-demo
 
@@ -77,16 +155,180 @@ NODE1_SEED=demo-node1; NODE1_PORT=18011
 NODE2_SEED=demo-node2; NODE2_PORT=18021
 NODE3_SEED=demo-node3; NODE3_PORT=18031
 
-# Stable Flow IDs so the printed curl commands are deterministic.
+# Per-flow identity. Each Flow has a transport-specific identifier
+# used to wire Senders to their Receiver counterparts:
+#   MXL:  `mxl-flow-id` (UUID), shared between sender + matching receivers.
+#   UDP:  destination multicast group + port, joined by any receiver
+#         that wants to subscribe.
+# The MXL ids and UDP groups / ports stay stable here so the printed
+# curl recipes are deterministic.
 FLOW_VIDEO_NODE1=11111111-aaaa-1111-aaaa-111111111111
 FLOW_AUDIO_NODE1=11111111-bbbb-1111-bbbb-111111111111
 FLOW_VIDEO_NODE3=33333333-aaaa-3333-aaaa-333333333333
 FLOW_AUDIO_NODE3=33333333-bbbb-3333-bbbb-333333333333
 
-# Essence caps. Match the gst-nmos-rs smoke script style: v210 1080p
-# 59.94 progressive, F32LE 48 kHz stereo.
-VIDEO_CAPS='video/x-raw,format=v210,width=1920,height=1080,framerate=60000/1001,interlace-mode=progressive'
-AUDIO_CAPS='audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved'
+# UDP multicast groups + ports, one per flow. Picked from the
+# AD-HOC III administratively-scoped block (232.0.0.0/8 — SSM)
+# so they don't collide with any well-known group. Per-flow ports
+# (rather than a single 5004 across the board) keep wireshark /
+# tcpdump filters one-line and make per-flow log lines easy to
+# tell apart.
+FLOW_VIDEO1_GROUP=232.99.99.1;     FLOW_VIDEO1_PORT=5004
+FLOW_AUDIO1_GROUP=232.99.99.2;     FLOW_AUDIO1_PORT=5006
+FLOW_VIDEO_OUT_GROUP=232.99.99.3;  FLOW_VIDEO_OUT_PORT=5008
+FLOW_AUDIO_OUT_GROUP=232.99.99.4;  FLOW_AUDIO_OUT_PORT=5010
+
+# Essence caps. Chosen per transport because each transport has its
+# own GStreamer raw-format vocabulary in this plugin:
+#   MXL: v210 (10-bit 4:2:2 video) + F32LE (32-bit float audio) per
+#        the gst-mxl-rs `video_data_sync` integration test reference.
+#   UDP: UYVY (8-bit 4:2:2 video) + S24BE (L24 audio) per the
+#        rtpvrawdepay / rtpL24depay common case. Resolution is
+#        smaller for UDP so a multicast loopback run stays well
+#        below 1 Gbps (UYVY 1280x720@25 ≈ 368 Mbps; UYVY 192x108@25
+#        ≈ 8 Mbps).
+case "$DEMO_TRANSPORT" in
+    mxl)
+        VIDEO_CAPS='video/x-raw,format=v210,width=1920,height=1080,framerate=60000/1001,interlace-mode=progressive'
+        AUDIO_CAPS='audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved'
+        ;;
+    udp|udp2)
+        VIDEO_CAPS='video/x-raw,format=UYVY,width=1280,height=720,framerate=25/1,interlace-mode=progressive'
+        AUDIO_CAPS='audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved'
+        ;;
+    *)
+        echo "[error] DEMO_TRANSPORT=$DEMO_TRANSPORT not recognised; use one of mxl, udp, udp2"
+        exit 1
+        ;;
+esac
+
+# ---- Per-transport property helpers --------------------------------
+#
+# `transport_sender_props <flow>` / `transport_receiver_props <flow>`
+# print the transport-specific property fragment for one nmossink /
+# nmossrc invocation. The flow name (one of `video1`, `audio1`,
+# `video-out`, `audio-out`) is the script's stable handle for the
+# four Flows in the demo topology. On MXL both sides emit the same
+# `mxl-domain-id` / `mxl-domain-path` / `mxl-flow-id` triplet, which
+# is enough for the daemon to wire a Sender to its matching Receivers.
+# On UDP the sender side emits `destination-ip` / `destination-port`
+# / `source-ip`, the receiver side emits `multicast-ip` /
+# `destination-port` / `interface-ip` / `source-ip`.
+#
+# Output is one space-separated string. The caller inlines it via
+# unquoted command substitution so bash word-splits it into individual
+# `key=value` tokens for gst-launch.
+transport_sender_props() {
+    local flow=$1
+    local flow_id= group= port=
+    case "$DEMO_TRANSPORT" in
+        mxl)
+            case "$flow" in
+                video1)     flow_id=$FLOW_VIDEO_NODE1 ;;
+                audio1)     flow_id=$FLOW_AUDIO_NODE1 ;;
+                video-out)  flow_id=$FLOW_VIDEO_NODE3 ;;
+                audio-out)  flow_id=$FLOW_AUDIO_NODE3 ;;
+                *) echo "[error] transport_sender_props: unknown flow $flow" >&2; return 1 ;;
+            esac
+            printf 'mxl-domain-id=%s mxl-domain-path=%s mxl-flow-id=%s' \
+                "$MXL_DOMAIN_ID" "$MXL_DOMAIN_PATH" "$flow_id"
+            ;;
+        udp|udp2)
+            case "$flow" in
+                video1)     group=$FLOW_VIDEO1_GROUP;     port=$FLOW_VIDEO1_PORT ;;
+                audio1)     group=$FLOW_AUDIO1_GROUP;     port=$FLOW_AUDIO1_PORT ;;
+                video-out)  group=$FLOW_VIDEO_OUT_GROUP;  port=$FLOW_VIDEO_OUT_PORT ;;
+                audio-out)  group=$FLOW_AUDIO_OUT_GROUP;  port=$FLOW_AUDIO_OUT_PORT ;;
+                *) echo "[error] transport_sender_props: unknown flow $flow" >&2; return 1 ;;
+            esac
+            # Sender-side IS-05 endpoint properties: destination = the
+            # multicast group this flow lands on; source-ip = the local
+            # NIC the egress packets leave on (drives udpsink.bind-address
+            # and the SDP `a=source-filter:` include-source).
+            printf 'destination-ip=%s destination-port=%d source-ip=%s' \
+                "$group" "$port" "$DEMO_NIC_IP"
+            ;;
+    esac
+}
+
+transport_receiver_props() {
+    local flow=$1
+    local group= port=
+    case "$DEMO_TRANSPORT" in
+        mxl)
+            transport_sender_props "$flow"
+            ;;
+        udp|udp2)
+            case "$flow" in
+                video1)     group=$FLOW_VIDEO1_GROUP;     port=$FLOW_VIDEO1_PORT ;;
+                audio1)     group=$FLOW_AUDIO1_GROUP;     port=$FLOW_AUDIO1_PORT ;;
+                video-out)  group=$FLOW_VIDEO_OUT_GROUP;  port=$FLOW_VIDEO_OUT_PORT ;;
+                audio-out)  group=$FLOW_AUDIO_OUT_GROUP;  port=$FLOW_AUDIO_OUT_PORT ;;
+                *) echo "[error] transport_receiver_props: unknown flow $flow" >&2; return 1 ;;
+            esac
+            # Receiver-side IS-05 endpoint properties: multicast-ip =
+            # the group to JOIN; interface-ip = the local NIC the join
+            # is issued on (resolved to an iface name for
+            # udpsrc.multicast-iface); source-ip = SSM include-source
+            # (the sender's egress NIC, set equal to interface-ip in
+            # the demo since all four senders live on this host).
+            printf 'multicast-ip=%s destination-port=%d interface-ip=%s source-ip=%s' \
+                "$group" "$port" "$DEMO_NIC_IP" "$DEMO_NIC_IP"
+            ;;
+    esac
+}
+
+# `transport-properties` for video UDP sockets only. High-rate ST 2110-20
+# needs a large kernel receive buffer; ST 2110-30 audio does not. No-op
+# on MXL. Output is one gst-launch token (quoted value), or empty.
+udp_video_buffer_props() {
+    case "$DEMO_TRANSPORT" in
+        udp|udp2)
+            printf 'transport-properties="properties,buffer-size=%s"' \
+                "$DEMO_UDP_VIDEO_BUFFER_SIZE"
+            ;;
+    esac
+}
+
+# Transport-aware /active flow-identity summary for diagnostics.
+# `transport_identity_from_active <side> <body>` reads the resource's
+# `/active` JSON and prints a short flow-identity string suitable for
+# `printf` columns.
+#   side: `sender` or `receiver` (the IS-05 transport_params schemas
+#         differ slightly across sides on RTP transports).
+#   body: the raw JSON returned by /active.
+# Output examples:
+#   MXL:          `flow=11111111-aaaa-1111-aaaa-111111111111`
+#   UDP sender:   `dest=232.99.99.1:5004`
+#   UDP receiver: `join=232.99.99.1:5004`
+transport_identity_from_active() {
+    local side=$1 body=$2
+    case "$DEMO_TRANSPORT" in
+        mxl)
+            local flow
+            flow=$(jq -r '.transport_params[0].mxl_flow_id // "n/a"' <<< "$body" 2>/dev/null)
+            printf 'flow=%s' "$flow"
+            ;;
+        udp|udp2)
+            local addr port
+            case "$side" in
+                sender)
+                    addr=$(jq -r '.transport_params[0].destination_ip // "n/a"' <<< "$body" 2>/dev/null)
+                    port=$(jq -r '.transport_params[0].destination_port // "n/a"' <<< "$body" 2>/dev/null)
+                    printf 'dest=%s:%s' "$addr" "$port"
+                    ;;
+                receiver)
+                    addr=$(jq -r '.transport_params[0].multicast_ip // "n/a"' <<< "$body" 2>/dev/null)
+                    port=$(jq -r '.transport_params[0].destination_port // "n/a"' <<< "$body" 2>/dev/null)
+                    printf 'join=%s:%s' "$addr" "$port"
+                    ;;
+                *)
+                    printf 'unknown-side=%s' "$side"
+                    ;;
+            esac
+            ;;
+    esac
+}
 
 # Sinks for Node 2. The defaults (`autoaudiosink` / `autovideosink`)
 # Just Work on a desktop. On WSL or other headless setups
@@ -124,13 +366,18 @@ IS05_VERSION=v1.2
 # ---- Bootstrap -----------------------------------------------------
 
 echo "Logs: $LOG_DIR"
+echo "Transport: $DEMO_TRANSPORT"
 
-# Re-create the MXL Domain directory.
-rm -rf  "$MXL_DOMAIN_PATH"
-mkdir -p "$MXL_DOMAIN_PATH"
-cat > "$MXL_DOMAIN_PATH/domain_def.json" <<EOF
+# Re-create the MXL Domain directory. Only needed when
+# DEMO_TRANSPORT=mxl: the UDP / UDP2 transports go straight from
+# `nmossink` to `udpsink` and don't touch `/dev/shm` at all.
+if [[ "$DEMO_TRANSPORT" == mxl ]]; then
+    rm -rf  "$MXL_DOMAIN_PATH"
+    mkdir -p "$MXL_DOMAIN_PATH"
+    cat > "$MXL_DOMAIN_PATH/domain_def.json" <<EOF
 {"id":"$MXL_DOMAIN_ID","label":"gst-nmos-rs demo domain"}
 EOF
+fi
 
 echo "[build] cargo build -p nvnmosd -p gst-nmos-rs"
 NVNMOS_LIB_DIR="$LIB" \
@@ -215,6 +462,29 @@ echo "[daemon] ready (pid $DAEMON_PID)"
 export GST_PLUGIN_PATH="$PLUGIN_DIR:$MXL_PLUGIN_DIR${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
 export LD_LIBRARY_PATH="$LIB:$MXL_RT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+case "$DEMO_TRANSPORT" in
+    udp|udp2)
+        echo "[udp] video socket buffer-size=$DEMO_UDP_VIDEO_BUFFER_SIZE (video flows only; override with DEMO_UDP_VIDEO_BUFFER_SIZE=...)"
+        if [[ -r /proc/sys/net/core/rmem_max ]]; then
+            _rmem_max=$(cat /proc/sys/net/core/rmem_max)
+            if (( DEMO_UDP_VIDEO_BUFFER_SIZE > _rmem_max )); then
+                echo "[udp] warning: DEMO_UDP_VIDEO_BUFFER_SIZE ($DEMO_UDP_VIDEO_BUFFER_SIZE) exceeds net.core.rmem_max ($_rmem_max);"
+                echo "[udp]          raise with: sudo sysctl -w net.core.rmem_max=$DEMO_UDP_VIDEO_BUFFER_SIZE"
+                echo "[udp]          (and optionally net.core.rmem_default=$DEMO_UDP_VIDEO_BUFFER_SIZE)"
+            fi
+        fi
+        if [[ "$DEMO_TRANSPORT" == udp2 ]]; then
+            if command -v gst-inspect-1.0 >/dev/null 2>&1 \
+                && gst-inspect-1.0 udpsrc2 >/dev/null 2>&1; then
+                echo "[udp2] gst-plugins-rs udpsrc2 is installed (nmossrc will prefer it over udpsrc)"
+            else
+                echo "[udp2] udpsrc2 not found — nmossrc falls back to gst-plugins-good udpsrc"
+                echo "[udp2] install gst-plugins-rs (GStreamer 1.30+) or use DEMO_TRANSPORT=udp"
+            fi
+        fi
+        ;;
+esac
+
 # ---- Per-pipeline lifecycle helpers --------------------------------
 #
 # Each `launch_*` function builds one of the demo's gst-launch
@@ -291,11 +561,12 @@ teardown_pipeline() {
 # ---- Node 1: producer (one pipeline, 2 nmossinks) ----------------
 #
 # Node 1 is the always-on producer: auto-activate=true on both
-# Senders so the inner mxlsink is built and the flows start writing
-# as soon as the element reaches READY, no IS-05 PATCH required.
-# The element calls SyncResourceState after the inner mxlsink is
-# up, so the daemon's /single/senders/{id}/active reports
-# master_enable: true from the start.
+# Senders so the inner data path (mxlsink on MXL; udpsink + RTP
+# payloader on UDP) is built and the flows start writing as soon as
+# the element reaches READY, no IS-05 PATCH required. The element
+# calls SyncResourceState after the inner is up, so the daemon's
+# /single/senders/{id}/active reports master_enable: true from the
+# start.
 launch_node1() {
     if (( NODE1_PID > 0 )) && kill -0 "$NODE1_PID" 2>/dev/null; then
         echo "[node1] already running (pid $NODE1_PID)"
@@ -309,13 +580,12 @@ launch_node1() {
                 $VIDEO_CAPS ! \
                 nmossink \
                     daemon-uri="unix:$SOCK" \
-                    transport=mxl \
+                    transport="$DEMO_TRANSPORT" \
                     http-port="$NODE1_PORT" \
                     node-seed="$NODE1_SEED" \
                     sender-name=video1 \
-                    mxl-domain-id="$MXL_DOMAIN_ID" \
-                    mxl-domain-path="$MXL_DOMAIN_PATH" \
-                    mxl-flow-id="$FLOW_VIDEO_NODE1" \
+                    $(transport_sender_props video1) \
+                    $(udp_video_buffer_props) \
                     caps="$VIDEO_CAPS" \
                     label="Node 1 / video1 (SMPTE bars, scrolling)" \
                     auto-activate=true \
@@ -323,13 +593,11 @@ launch_node1() {
                 $AUDIO_CAPS ! \
                 nmossink \
                     daemon-uri="unix:$SOCK" \
-                    transport=mxl \
+                    transport="$DEMO_TRANSPORT" \
                     http-port="$NODE1_PORT" \
                     node-seed="$NODE1_SEED" \
                     sender-name=audio1 \
-                    mxl-domain-id="$MXL_DOMAIN_ID" \
-                    mxl-domain-path="$MXL_DOMAIN_PATH" \
-                    mxl-flow-id="$FLOW_AUDIO_NODE1" \
+                    $(transport_sender_props audio1) \
                     caps="$AUDIO_CAPS" \
                     label="Node 1 / audio1 (440 Hz sine)" \
                     auto-activate=true \
@@ -363,27 +631,24 @@ launch_node3_video() {
         gst-launch-1.0 -e \
             nmossrc \
                 daemon-uri="unix:$SOCK" \
-                transport=mxl \
+                transport="$DEMO_TRANSPORT" \
                 http-port="$NODE3_PORT" \
                 node-seed="$NODE3_SEED" \
                 receiver-name=video-in \
-                mxl-domain-id="$MXL_DOMAIN_ID" \
-                mxl-domain-path="$MXL_DOMAIN_PATH" \
-                mxl-flow-id="$FLOW_VIDEO_NODE1" \
+                $(transport_receiver_props video1) \
+                $(udp_video_buffer_props) \
                 caps="$VIDEO_CAPS" \
                 label="Node 3 / video-in" \
                 auto-activate=false ! \
             videoconvert ! videoflip method=horizontal-flip ! videoconvert ! \
-                $VIDEO_CAPS ! \
                 nmossink \
                     daemon-uri="unix:$SOCK" \
-                    transport=mxl \
+                    transport="$DEMO_TRANSPORT" \
                     http-port="$NODE3_PORT" \
                     node-seed="$NODE3_SEED" \
                     sender-name=video-out \
-                    mxl-domain-id="$MXL_DOMAIN_ID" \
-                    mxl-domain-path="$MXL_DOMAIN_PATH" \
-                    mxl-flow-id="$FLOW_VIDEO_NODE3" \
+                    $(transport_sender_props video-out) \
+                    $(udp_video_buffer_props) \
                     caps="$VIDEO_CAPS" \
                     label="Node 3 / video-out (horizontal flip of video1)" \
                     auto-activate=false \
@@ -402,27 +667,22 @@ launch_node3_audio() {
         gst-launch-1.0 -e \
             nmossrc \
                 daemon-uri="unix:$SOCK" \
-                transport=mxl \
+                transport="$DEMO_TRANSPORT" \
                 http-port="$NODE3_PORT" \
                 node-seed="$NODE3_SEED" \
                 receiver-name=audio-in \
-                mxl-domain-id="$MXL_DOMAIN_ID" \
-                mxl-domain-path="$MXL_DOMAIN_PATH" \
-                mxl-flow-id="$FLOW_AUDIO_NODE1" \
+                $(transport_receiver_props audio1) \
                 caps="$AUDIO_CAPS" \
                 label="Node 3 / audio-in" \
                 auto-activate=false ! \
             audioconvert ! volume volume=0.3 ! audioconvert ! \
-                $AUDIO_CAPS ! \
                 nmossink \
                     daemon-uri="unix:$SOCK" \
-                    transport=mxl \
+                    transport="$DEMO_TRANSPORT" \
                     http-port="$NODE3_PORT" \
                     node-seed="$NODE3_SEED" \
                     sender-name=audio-out \
-                    mxl-domain-id="$MXL_DOMAIN_ID" \
-                    mxl-domain-path="$MXL_DOMAIN_PATH" \
-                    mxl-flow-id="$FLOW_AUDIO_NODE3" \
+                    $(transport_sender_props audio-out) \
                     caps="$AUDIO_CAPS" \
                     label="Node 3 / audio-out (volume 0.3 of audio1)" \
                     auto-activate=false \
@@ -450,26 +710,23 @@ launch_node2() {
         gst-launch-1.0 -e \
             nmossrc \
                 daemon-uri="unix:$SOCK" \
-                transport=mxl \
+                transport="$DEMO_TRANSPORT" \
                 http-port="$NODE2_PORT" \
                 node-seed="$NODE2_SEED" \
                 receiver-name=video2 \
-                mxl-domain-id="$MXL_DOMAIN_ID" \
-                mxl-domain-path="$MXL_DOMAIN_PATH" \
-                mxl-flow-id="$FLOW_VIDEO_NODE1" \
+                $(transport_receiver_props video1) \
+                $(udp_video_buffer_props) \
                 caps="$VIDEO_CAPS" \
                 label="Node 2 / video2" \
                 auto-activate=true ! \
                 videoconvert ! "$VIDEO_SINK" sync=false \
             nmossrc \
                 daemon-uri="unix:$SOCK" \
-                transport=mxl \
+                transport="$DEMO_TRANSPORT" \
                 http-port="$NODE2_PORT" \
                 node-seed="$NODE2_SEED" \
                 receiver-name=audio2 \
-                mxl-domain-id="$MXL_DOMAIN_ID" \
-                mxl-domain-path="$MXL_DOMAIN_PATH" \
-                mxl-flow-id="$FLOW_AUDIO_NODE1" \
+                $(transport_receiver_props audio1) \
                 caps="$AUDIO_CAPS" \
                 label="Node 2 / audio2" \
                 auto-activate=true ! \
@@ -491,6 +748,10 @@ launch_node2() {
 # fakesink for headless capture. The file `bare-preview.log` will
 # contain mxlsrc/basesrc/fakesink chatter.
 launch_bare_preview() {
+    if [[ "$DEMO_TRANSPORT" != mxl ]]; then
+        echo "[preview] bare mxlsrc preview is MXL-only; skipping under DEMO_TRANSPORT=$DEMO_TRANSPORT"
+        return 1
+    fi
     if (( BARE_PREVIEW_PID > 0 )) && kill -0 "$BARE_PREVIEW_PID" 2>/dev/null; then
         echo "[preview] already running (pid $BARE_PREVIEW_PID)"
         return 1
@@ -511,8 +772,11 @@ launch_bare_preview() {
 # ---- Bring the demo up ---------------------------------------------
 
 launch_node1
-# Let Node 1 publish before consumers attach (mxlsrc on the consumer
-# side will block until the writer creates the MXL flow files).
+# Let Node 1 publish before consumers attach. On MXL the `mxlsrc`
+# basesrc loop blocks in `create()` until the writer creates the
+# domain's flow files; on UDP the udpsrc just sits on a quiet socket
+# until packets arrive, so the wait is only really necessary for MXL,
+# but a couple of seconds doesn't hurt either way.
 sleep 2
 
 launch_node3_video
@@ -632,7 +896,16 @@ collect_urls() {
     return 1
 }
 echo "[poll] waiting for all 8 IS-04 resources to register (timeout ${WAIT_TIMEOUT}s)..."
-collect_urls && echo "[poll] all resources visible"
+if ! collect_urls; then
+    echo "[poll] FAILED: not all resources registered within ${WAIT_TIMEOUT}s" >&2
+    exit 1
+fi
+echo "[poll] all resources visible"
+
+if [[ -n "${DEMO_SMOKE:-}" ]]; then
+    echo "[smoke] success; exiting (DEMO_SMOKE=1)"
+    exit 0
+fi
 
 URL_NODE1_SENDER_VIDEO=${URLS[node1_sender_video]:-}
 URL_NODE1_SENDER_AUDIO=${URLS[node1_sender_audio]:-}
@@ -643,23 +916,59 @@ URL_NODE3_RECEIVER_AUDIO=${URLS[node3_receiver_audio]:-}
 URL_NODE3_SENDER_VIDEO=${URLS[node3_sender_video]:-}
 URL_NODE3_SENDER_AUDIO=${URLS[node3_sender_audio]:-}
 
+# ---- Per-transport heredoc substitutions --------------------------
+#
+# Pre-compute transport-keyed labels + PATCH bodies for the friendly
+# summary heredoc and the example PATCHes that follow it. Keeping
+# this here (rather than in the heredoc itself) keeps the heredoc a
+# single substitution-only block and lets the conditional logic stay
+# in one place. Both transports define every variable in this block.
+case "$DEMO_TRANSPORT" in
+    mxl)
+        LABEL_FLOW_VIDEO1="flow $FLOW_VIDEO_NODE1"
+        LABEL_FLOW_AUDIO1="flow $FLOW_AUDIO_NODE1"
+        LABEL_FLOW_VIDEO_OUT="flow $FLOW_VIDEO_NODE3"
+        LABEL_FLOW_AUDIO_OUT="flow $FLOW_AUDIO_NODE3"
+        LABEL_INNER_CHAIN="mxlsink / mxlsrc"
+        LABEL_PREWIRED="via mxl-flow-id"
+        REROUTE_VIDEO_BODY="{\"transport_params\": [{\"mxl_flow_id\": \"$FLOW_VIDEO_NODE3\"}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
+        REROUTE_AUDIO_BODY="{\"transport_params\": [{\"mxl_flow_id\": \"$FLOW_AUDIO_NODE3\"}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
+        ;;
+    udp|udp2)
+        LABEL_FLOW_VIDEO1="dest $FLOW_VIDEO1_GROUP:$FLOW_VIDEO1_PORT"
+        LABEL_FLOW_AUDIO1="dest $FLOW_AUDIO1_GROUP:$FLOW_AUDIO1_PORT"
+        LABEL_FLOW_VIDEO_OUT="dest $FLOW_VIDEO_OUT_GROUP:$FLOW_VIDEO_OUT_PORT"
+        LABEL_FLOW_AUDIO_OUT="dest $FLOW_AUDIO_OUT_GROUP:$FLOW_AUDIO_OUT_PORT"
+        if [[ "$DEMO_TRANSPORT" == udp2 ]] \
+            && command -v gst-inspect-1.0 >/dev/null 2>&1 \
+            && gst-inspect-1.0 udpsrc2 >/dev/null 2>&1; then
+            LABEL_INNER_CHAIN="udpsink + RTP payloader / udpsrc2 + RTP depayloader (gst-plugins-rs)"
+        else
+            LABEL_INNER_CHAIN="udpsink + RTP payloader / udpsrc + RTP depayloader"
+        fi
+        LABEL_PREWIRED="via destination multicast group + port (interface $DEMO_NIC_IP); video udpsrc buffer-size=$DEMO_UDP_VIDEO_BUFFER_SIZE"
+        REROUTE_VIDEO_BODY="{\"transport_params\": [{\"source_ip\": \"$DEMO_NIC_IP\", \"multicast_ip\": \"$FLOW_VIDEO_OUT_GROUP\", \"interface_ip\": \"$DEMO_NIC_IP\", \"destination_port\": $FLOW_VIDEO_OUT_PORT, \"rtp_enabled\": true}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
+        REROUTE_AUDIO_BODY="{\"transport_params\": [{\"source_ip\": \"$DEMO_NIC_IP\", \"multicast_ip\": \"$FLOW_AUDIO_OUT_GROUP\", \"interface_ip\": \"$DEMO_NIC_IP\", \"destination_port\": $FLOW_AUDIO_OUT_PORT, \"rtp_enabled\": true}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
+        ;;
+esac
+
 # ---- Friendly summary ---------------------------------------------
 
 cat <<EOF
 
 ================================================================
-gst-nmos-rs three-Node interactive demo
+gst-nmos-rs three-Node interactive demo  (transport=$DEMO_TRANSPORT)
 ================================================================
 
 Topology:
 
   Node 1 (port $NODE1_PORT, seed $NODE1_SEED)  -- producer
-    audiotestsrc(440Hz)  -> nmossink Sender audio1 (flow $FLOW_AUDIO_NODE1)
-    videotestsrc(smpte)  -> nmossink Sender video1 (flow $FLOW_VIDEO_NODE1)
+    audiotestsrc(440Hz)  -> nmossink Sender audio1 ($LABEL_FLOW_AUDIO1)
+    videotestsrc(smpte)  -> nmossink Sender video1 ($LABEL_FLOW_VIDEO1)
 
   Node 3 (port $NODE3_PORT, seed $NODE3_SEED)  -- processor (two gst processes)
-    Receiver audio-in  --(volume 0.3)-->          Sender audio-out (flow $FLOW_AUDIO_NODE3)
-    Receiver video-in  --(videoflip h-flip)-->   Sender video-out (flow $FLOW_VIDEO_NODE3)
+    Receiver audio-in  --(volume 0.3)-->          Sender audio-out ($LABEL_FLOW_AUDIO_OUT)
+    Receiver video-in  --(videoflip h-flip)-->   Sender video-out ($LABEL_FLOW_VIDEO_OUT)
 
   Node 2 (port $NODE2_PORT, seed $NODE2_SEED)  -- consumer
     Receiver audio2  -> $AUDIO_SINK
@@ -668,17 +977,17 @@ Topology:
 Activation state out of the box:
 
   Node 1 / Node 2: \`auto-activate=true\` — the element brings its
-    inner mxlsink / mxlsrc up at NULL→READY and calls
+    inner $LABEL_INNER_CHAIN up at NULL→READY and calls
     SyncResourceState so the daemon's /single/{senders,receivers}/{id}/active
     reports master_enable: true with no PATCH required. The Node 2
-    Receivers are pre-wired to Node 1's flows via \`mxl-flow-id\`,
+    Receivers are pre-wired to Node 1's flows $LABEL_PREWIRED,
     so audio + video are flowing already.
 
   Node 3: \`auto-activate=false\` — the Receiver+Sender pairs are
     registered (visible on IS-04) but the data path stays on the
     caps-aware placeholder (an idle \`appsrc\` advertising the
     user-supplied caps so downstream negotiation completes) until
-    you PATCH /staged on the Connection API. Until then no MXL
+    you PATCH /staged on the Connection API. Until then no real
     writes / reads happen on Node 3 even though Node 1 is publishing
     the input flows. PATCH the Receiver(s) below and optionally the
     Sender(s) to flip Node 3 into a live processor.
@@ -735,8 +1044,9 @@ Example PATCHes (copy/paste):
   # ---- Activate Node 3 (Receiver+Sender on each side) ----
   # By default Node 3 is registered but inactive (auto-activate=false).
   # PATCH each /staged endpoint with master_enable=true to bring the
-  # video processor live (the inner mxlsrc / mxlsink instantiate and
-  # data flows from Node 1 via Node 3's videoflip to Node 3's Sender):
+  # video processor live (the inner $LABEL_INNER_CHAIN instantiate
+  # and data flows from Node 1 via Node 3's videoflip to Node 3's
+  # Sender):
   curl -sS -X PATCH -H 'Content-Type: application/json' \\
     -d '{"master_enable": true, "activation": {"mode": "activate_immediate"}}' \\
     "$URL_NODE3_RECEIVER_VIDEO/staged"
@@ -757,12 +1067,12 @@ Example PATCHes (copy/paste):
   # active (above), switch Node 2 to consume Node 3's flipped /
   # attenuated outputs (the daemon synthesises a transport file from
   # the staged transport_params and the activation handler swaps the
-  # inner mxlsrc to the new flow id):
+  # inner receiver to the new $DEMO_TRANSPORT identity):
   curl -sS -X PATCH -H 'Content-Type: application/json' \\
-    -d '{"transport_params": [{"mxl_flow_id": "'"$FLOW_VIDEO_NODE3"'"}], "master_enable": true, "activation": {"mode": "activate_immediate"}}' \\
+    -d '$REROUTE_VIDEO_BODY' \\
     "$URL_NODE2_RECEIVER_VIDEO/staged"
   curl -sS -X PATCH -H 'Content-Type: application/json' \\
-    -d '{"transport_params": [{"mxl_flow_id": "'"$FLOW_AUDIO_NODE3"'"}], "master_enable": true, "activation": {"mode": "activate_immediate"}}' \\
+    -d '$REROUTE_AUDIO_BODY' \\
     "$URL_NODE2_RECEIVER_AUDIO/staged"
 
   # ---- Deactivate Node 2's video Receiver (back to placeholder) ----
@@ -948,7 +1258,10 @@ patch_master_enable() {
     # present) but nmos-cpp's connection_api.cpp explicitly rejects any
     # PATCH that carries transport_file for an MXL receiver per BCP-007-03
     # (`Rejecting PATCH for MXL receiver with transport_file`, HTTP 400).
-    # See https://specs.amwa.tv/bcp-007-03/.
+    # See https://specs.amwa.tv/bcp-007-03/. RTP receivers DO accept
+    # `transport_file` PATCHes (it's the canonical IS-05 way to push an
+    # SDP at them), but a simple `master_enable` toggle has no reason to
+    # round-trip it, so the omission is fine for both transports.
     patch=$(jq -c --argjson enable "$enable" '
         {
             master_enable: $enable,
@@ -977,6 +1290,36 @@ patch_master_enable() {
     echo "[ok] master_enable=$resp_enable"
 }
 
+# Translate sender-side transport_params into receiver-side
+# transport_params. The IS-05 schemas differ across sides on RTP
+# transports: senders carry `destination_ip` / `source_ip` /
+# `destination_port`, receivers carry `multicast_ip` / `source_ip`
+# (SSM include-source) / `interface_ip` / `destination_port`. MXL
+# uses the same field (`mxl_flow_id`) on both sides, so the
+# translation is a pass-through.
+#
+# Echoes a JSON value that can be plugged into the receiver's
+# `transport_params:` slot via `--argjson`.
+subscription_transport_params() {
+    local sender_transport_params=$1
+    case "$DEMO_TRANSPORT" in
+        mxl)
+            printf '%s' "$sender_transport_params"
+            ;;
+        udp|udp2)
+            jq -c \
+                --arg iface_ip "$DEMO_NIC_IP" \
+                '[ .[] | {
+                    source_ip:         (.source_ip      // null),
+                    multicast_ip:      (.destination_ip // null),
+                    interface_ip:      $iface_ip,
+                    destination_port:  (.destination_port // null),
+                    rtp_enabled:       true
+                } ]' <<< "$sender_transport_params"
+            ;;
+    esac
+}
+
 # Subscribe a Receiver to a Sender by lifting the Sender's `/active`
 # transport_params onto the Receiver's `/staged` along with the
 # Sender's id, master_enable=true, and an immediate activation. The
@@ -989,9 +1332,9 @@ patch_master_enable() {
 connect_receiver_to_sender() {
     local receiver_url=$1 sender_url=$2
     local sender_id sender_active sender_status sender_body
-    local transport_params patch resp status body
+    local sender_params receiver_params patch resp status body
     local active_after active_status active_body
-    local resp_enable resp_sender resp_flow friendly
+    local resp_enable resp_sender resp_identity friendly
 
     sender_id=$(_id_from_url "$sender_url")
     if [[ -z "$sender_id" ]]; then
@@ -1013,15 +1356,19 @@ connect_receiver_to_sender() {
         echo "$sender_body" | jq . 2>/dev/null || echo "$sender_body"
         return 1
     fi
-    transport_params=$(jq -c '.transport_params' <<< "$sender_body" 2>/dev/null)
-    if [[ -z "$transport_params" || "$transport_params" == "null" ]]; then
+    sender_params=$(jq -c '.transport_params' <<< "$sender_body" 2>/dev/null)
+    if [[ -z "$sender_params" || "$sender_params" == "null" ]]; then
         echo "[error] sender has no usable transport_params (is it enabled?)"
         echo "$sender_body" | jq . 2>/dev/null || echo "$sender_body"
         return 1
     fi
+    receiver_params=$(subscription_transport_params "$sender_params") || {
+        echo "[error] could not translate sender transport_params for the receiver"
+        return 1
+    }
 
     patch=$(jq -nc \
-        --argjson params "$transport_params" \
+        --argjson params "$receiver_params" \
         --arg sender_id "$sender_id" \
         '{sender_id: $sender_id, transport_params: $params, master_enable: true, activation: {mode: "activate_immediate"}}') || return 1
 
@@ -1056,14 +1403,14 @@ connect_receiver_to_sender() {
     fi
     resp_enable=$(jq -r 'if has("master_enable") and .master_enable != null then (.master_enable | tostring) else "?" end' <<< "$active_body" 2>/dev/null)
     resp_sender=$(jq -r '.sender_id // "null"' <<< "$active_body" 2>/dev/null)
-    resp_flow=$(jq -r '.transport_params[0].mxl_flow_id // "n/a"' <<< "$active_body" 2>/dev/null)
+    resp_identity=$(transport_identity_from_active receiver "$active_body")
     friendly=${SENDER_ID_TO_NAME[$resp_sender]:-$resp_sender}
-    echo "[ok] master_enable=$resp_enable sender=$friendly flow=$resp_flow"
+    echo "[ok] master_enable=$resp_enable sender=$friendly $resp_identity"
 }
 
 # Compact dump of /active for every discovered resource.
 show_state() {
-    local i lbl url body en sender_id flow friendly
+    local i lbl url body en sender_id identity friendly
     echo
     echo "Current /active state:"
     echo "  Senders:"
@@ -1080,8 +1427,8 @@ show_state() {
             continue
         fi
         en=$(jq -r '.master_enable' <<< "$body" 2>/dev/null)
-        flow=$(jq -r '.transport_params[0].mxl_flow_id // "n/a"' <<< "$body" 2>/dev/null)
-        printf '    %-22s  master_enable=%-5s  flow=%s\n' "$lbl" "$en" "$flow"
+        identity=$(transport_identity_from_active sender "$body")
+        printf '    %-22s  master_enable=%-5s  %s\n' "$lbl" "$en" "$identity"
     done
     echo "  Receivers:"
     for i in "${!RECEIVER_LABELS[@]}"; do
@@ -1098,9 +1445,9 @@ show_state() {
         fi
         en=$(jq -r '.master_enable' <<< "$body" 2>/dev/null)
         sender_id=$(jq -r '.sender_id // "null"' <<< "$body" 2>/dev/null)
-        flow=$(jq -r '.transport_params[0].mxl_flow_id // "n/a"' <<< "$body" 2>/dev/null)
+        identity=$(transport_identity_from_active receiver "$body")
         friendly=${SENDER_ID_TO_NAME[$sender_id]:-$sender_id}
-        printf '    %-22s  master_enable=%-5s  sender=%-22s  flow=%s\n' "$lbl" "$en" "$friendly" "$flow"
+        printf '    %-22s  master_enable=%-5s  sender=%-22s  %s\n' "$lbl" "$en" "$friendly" "$identity"
     done
 }
 
@@ -1221,7 +1568,7 @@ diag_snapshot() {
     done
 
     # Compact stdout summary, sourced from the just-captured /active.
-    local body en flow sender_id friendly
+    local body en identity sender_id friendly
     echo "  Senders:"
     for i in "${!SENDER_LABELS[@]}"; do
         lbl=${SENDER_LABELS[$i]}; url=${SENDER_URLS[$i]}
@@ -1230,8 +1577,8 @@ diag_snapshot() {
         body=$(cat "$outdir/sender-$slug-active.json" 2>/dev/null || true)
         if [[ -z "$body" ]]; then printf '    %-22s  (HTTP error)\n' "$lbl"; continue; fi
         en=$(jq -r 'if has("master_enable") and .master_enable != null then (.master_enable | tostring) else "?" end' <<< "$body" 2>/dev/null)
-        flow=$(jq -r '.transport_params[0].mxl_flow_id // "n/a"' <<< "$body" 2>/dev/null)
-        printf '    %-22s  master_enable=%-5s  flow=%s\n' "$lbl" "$en" "$flow"
+        identity=$(transport_identity_from_active sender "$body")
+        printf '    %-22s  master_enable=%-5s  %s\n' "$lbl" "$en" "$identity"
     done
     echo "  Receivers:"
     for i in "${!RECEIVER_LABELS[@]}"; do
@@ -1242,9 +1589,9 @@ diag_snapshot() {
         if [[ -z "$body" ]]; then printf '    %-22s  (HTTP error)\n' "$lbl"; continue; fi
         en=$(jq -r 'if has("master_enable") and .master_enable != null then (.master_enable | tostring) else "?" end' <<< "$body" 2>/dev/null)
         sender_id=$(jq -r '.sender_id // "null"' <<< "$body" 2>/dev/null)
-        flow=$(jq -r '.transport_params[0].mxl_flow_id // "n/a"' <<< "$body" 2>/dev/null)
+        identity=$(transport_identity_from_active receiver "$body")
         friendly=${SENDER_ID_TO_NAME[$sender_id]:-$sender_id}
-        printf '    %-22s  master_enable=%-5s  sender=%-22s  flow=%s\n' "$lbl" "$en" "$friendly" "$flow"
+        printf '    %-22s  master_enable=%-5s  sender=%-22s  %s\n' "$lbl" "$en" "$friendly" "$identity"
     done
 
     # MXL flow filesystem layout (cf. lib/internal/include/mxl-internal/FlowManager.hpp):
@@ -1262,39 +1609,44 @@ diag_snapshot() {
     # `stat -c %Y` is misleading. We report the static inventory only
     # (grain count + newest filename for video flows) and leave the
     # full `shm-ls-R.txt` on disk for follow-up inspection.
-    echo "  Flow directories ($MXL_DOMAIN_PATH):"
-    ls -la "$MXL_DOMAIN_PATH" > "$outdir/shm-ls.txt" 2>/dev/null || true
-    if [[ -d "$MXL_DOMAIN_PATH" ]]; then
-        ls -laR "$MXL_DOMAIN_PATH" > "$outdir/shm-ls-R.txt" 2>/dev/null || true
-        local d base grains_dir grain_count newest_grain
-        shopt -s nullglob
-        for d in "$MXL_DOMAIN_PATH"/*.mxl-flow; do
-            base=${d##*/}
-            grains_dir="$d/grains"
-            grain_count=0
-            newest_grain="(none)"
-            if [[ -d "$grains_dir" ]]; then
-                local line
-                line=$(find "$grains_dir" -maxdepth 1 -type f -printf '%T@ %f\n' 2>/dev/null \
-                       | sort -rn | head -1)
-                if [[ -n "$line" ]]; then
-                    newest_grain=${line#* }
+    # Only meaningful on MXL — UDP transports have no shared filesystem
+    # state to inspect; the equivalent for those is the per-pipeline
+    # log tails captured below.
+    if [[ "$DEMO_TRANSPORT" == mxl ]]; then
+        echo "  Flow directories ($MXL_DOMAIN_PATH):"
+        ls -la "$MXL_DOMAIN_PATH" > "$outdir/shm-ls.txt" 2>/dev/null || true
+        if [[ -d "$MXL_DOMAIN_PATH" ]]; then
+            ls -laR "$MXL_DOMAIN_PATH" > "$outdir/shm-ls-R.txt" 2>/dev/null || true
+            local d base grains_dir grain_count newest_grain
+            shopt -s nullglob
+            for d in "$MXL_DOMAIN_PATH"/*.mxl-flow; do
+                base=${d##*/}
+                grains_dir="$d/grains"
+                grain_count=0
+                newest_grain="(none)"
+                if [[ -d "$grains_dir" ]]; then
+                    local line
+                    line=$(find "$grains_dir" -maxdepth 1 -type f -printf '%T@ %f\n' 2>/dev/null \
+                           | sort -rn | head -1)
+                    if [[ -n "$line" ]]; then
+                        newest_grain=${line#* }
+                    fi
+                    grain_count=$(find "$grains_dir" -maxdepth 1 -type f 2>/dev/null | wc -l)
+                    printf '    %s  grains=%d  newest=%s\n' \
+                        "$base" "$grain_count" "$newest_grain"
+                else
+                    # Audio flows don't have a grains/ subdir; just list the
+                    # files we do see so a missing/half-created flow is
+                    # obvious without claiming any liveness.
+                    local files
+                    files=$(find "$d" -maxdepth 1 -type f -printf '%f ' 2>/dev/null)
+                    printf '    %s  files=%s\n' "$base" "${files:-(none)}"
                 fi
-                grain_count=$(find "$grains_dir" -maxdepth 1 -type f 2>/dev/null | wc -l)
-                printf '    %s  grains=%d  newest=%s\n' \
-                    "$base" "$grain_count" "$newest_grain"
-            else
-                # Audio flows don't have a grains/ subdir; just list the
-                # files we do see so a missing/half-created flow is
-                # obvious without claiming any liveness.
-                local files
-                files=$(find "$d" -maxdepth 1 -type f -printf '%f ' 2>/dev/null)
-                printf '    %s  files=%s\n' "$base" "${files:-(none)}"
-            fi
-        done
-        shopt -u nullglob
-    else
-        echo "    (directory absent)"
+            done
+            shopt -u nullglob
+        else
+            echo "    (directory absent)"
+        fi
     fi
 
     # Log tails. Compact on stdout via a single one-line listing; full

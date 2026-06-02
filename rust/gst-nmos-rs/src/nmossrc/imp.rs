@@ -64,7 +64,28 @@ struct Settings {
     caps: Option<gst::Caps>,
     transport_caps: Option<gst::Caps>,
     receiver_caps_mode: CapsMode,
+    /// IS-05 receiver transport_params `source_ip` — SSM
+    /// include-source (the remote sender's IP). See
+    /// [`crate::session::CommonSettings::source_ip`]; empty
+    /// string = unset.
+    source_ip: String,
+    /// IS-05 receiver transport_params `interface_ip` — local
+    /// NIC IP used for the IGMP join. Resolved to an interface
+    /// name via [`crate::iface::iface_name_for_ip`] and fed into
+    /// `udpsrc.multicast-iface`. Empty string = unset.
+    interface_ip: String,
+    /// IS-05 receiver transport_params `multicast_ip` — multicast
+    /// group to join. Becomes `udpsrc.address` and the SDP `c=`
+    /// line address. Empty string = unset (unicast reception).
+    multicast_ip: String,
+    /// IS-05 receiver transport_params `destination_port` — local
+    /// listen port (becomes `udpsrc.port` and the SDP `m=` port
+    /// slot). 0 = unset (falls back to the transport file's `m=`
+    /// port or [`crate::sdp::defaults::RTP_PORT`]).
+    destination_port: u16,
     auto_activate: bool,
+    transport_properties: Option<gst::Structure>,
+    depay_properties: Option<gst::Structure>,
 }
 
 impl Default for Settings {
@@ -85,7 +106,13 @@ impl Default for Settings {
             caps: None,
             transport_caps: None,
             receiver_caps_mode: CapsMode::Auto,
+            source_ip: String::new(),
+            interface_ip: String::new(),
+            multicast_ip: String::new(),
+            destination_port: 0,
             auto_activate: false,
+            transport_properties: None,
+            depay_properties: None,
         }
     }
 }
@@ -241,6 +268,16 @@ impl ObjectImpl for NmosSrc {
                     .blurb(crate::session::TRANSPORT_CAPS_BLURB)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecBoxed::builder::<gst::Structure>("transport-properties")
+                    .nick("Transport source properties")
+                    .blurb(crate::session::TRANSPORT_PROPERTIES_BLURB)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecBoxed::builder::<gst::Structure>("depay-properties")
+                    .nick("Depayloader properties")
+                    .blurb(crate::session::DEPAY_PROPERTIES_BLURB)
+                    .mutable_ready()
+                    .build(),
                 glib::ParamSpecEnum::builder::<CapsMode>("receiver-caps-mode")
                     .nick("Receiver caps mode")
                     .blurb(
@@ -256,6 +293,66 @@ impl ObjectImpl for NmosSrc {
                          is \"present + non-empty\").",
                     )
                     .default_value(CapsMode::Auto)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("source-ip")
+                    .nick("Source IP")
+                    .blurb(
+                        "IS-05 receiver transport_params `source_ip`: \
+                         SSM include-source — the remote sender's IP. \
+                         Drives the configuring SDP \
+                         `a=source-filter:` include-source. On the \
+                         `udp2` (gst-plugins-rs `udpsrc2`) variant \
+                         this translates to `source-filter`; on the \
+                         `udp` (gst-plugins-good `udpsrc`) variant it \
+                         translates to `multicast-source`. Empty = \
+                         unset (any-source multicast / unicast). \
+                         Honoured only on the RTP transports; ignored \
+                         on `mxl`.",
+                    )
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("interface-ip")
+                    .nick("Interface IP")
+                    .blurb(
+                        "IS-05 receiver transport_params \
+                         `interface_ip`: local NIC IP used for the \
+                         IGMP join. Resolved to an interface name and \
+                         fed into `udpsrc.multicast-iface` on the RTP \
+                         transports. Also emitted in the configuring \
+                         SDP as `a=x-nvnmos-iface-ip:`. Empty = unset \
+                         (let the kernel pick). Honoured only on the \
+                         RTP transports; ignored on `mxl`.",
+                    )
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("multicast-ip")
+                    .nick("Multicast IP")
+                    .blurb(
+                        "IS-05 receiver transport_params \
+                         `multicast_ip`: multicast group to join. \
+                         Becomes `udpsrc.address` and the SDP `c=` \
+                         line address on the RTP transports. Empty = \
+                         unset (unicast reception). Honoured only on \
+                         the RTP transports; ignored on `mxl`.",
+                    )
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecUInt::builder("destination-port")
+                    .nick("Destination port")
+                    .blurb(
+                        "IS-05 receiver transport_params \
+                         `destination_port`: local listen port \
+                         (becomes `udpsrc.port` and the SDP `m=` port \
+                         slot). 0 (the default) = unset; falls back \
+                         to the transport file's `m=` port if \
+                         present, else to the canonical RTP default \
+                         5004 (`nmos-cpp` `auto_rtp_port`). Honoured \
+                         only on the RTP transports; ignored on `mxl`.",
+                    )
+                    .minimum(0)
+                    .maximum(65535)
+                    .default_value(0)
                     .mutable_ready()
                     .build(),
             ]
@@ -315,8 +412,27 @@ impl ObjectImpl for NmosSrc {
             "transport-caps" => {
                 settings.transport_caps = value.get().expect("type checked upstream");
             }
+            "transport-properties" => {
+                settings.transport_properties = value.get().expect("type checked upstream");
+            }
+            "depay-properties" => {
+                settings.depay_properties = value.get().expect("type checked upstream");
+            }
             "receiver-caps-mode" => {
                 settings.receiver_caps_mode = value.get().expect("type checked upstream");
+            }
+            "source-ip" => {
+                settings.source_ip = string_or_empty(value);
+            }
+            "interface-ip" => {
+                settings.interface_ip = string_or_empty(value);
+            }
+            "multicast-ip" => {
+                settings.multicast_ip = string_or_empty(value);
+            }
+            "destination-port" => {
+                let v: u32 = value.get().expect("type checked upstream");
+                settings.destination_port = u16::try_from(v).expect("range checked by ParamSpec");
             }
             _ => unimplemented!("unknown property {}", pspec.name()),
         }
@@ -340,7 +456,13 @@ impl ObjectImpl for NmosSrc {
             "transport-file-path" => settings.transport_file_path.to_value(),
             "caps" => settings.caps.to_value(),
             "transport-caps" => settings.transport_caps.to_value(),
+            "transport-properties" => settings.transport_properties.to_value(),
+            "depay-properties" => settings.depay_properties.to_value(),
             "receiver-caps-mode" => settings.receiver_caps_mode.to_value(),
+            "source-ip" => settings.source_ip.to_value(),
+            "interface-ip" => settings.interface_ip.to_value(),
+            "multicast-ip" => settings.multicast_ip.to_value(),
+            "destination-port" => u32::from(settings.destination_port).to_value(),
             _ => unimplemented!("unknown property {}", pspec.name()),
         }
     }
@@ -444,20 +566,62 @@ impl NmosSrc {
         outcome: &InnerConfig,
     ) -> Result<(), anyhow::Error> {
         match outcome {
-            InnerConfig::Real(TransportConfig::Mxl {
-                domain_path,
-                flow_id,
-                format,
-                transport_file,
-            }) => {
-                let advertise_caps = derive_advertise_caps(transport_file.as_deref())?;
-                let mxlsrc = inner::build_mxlsrc(
-                    domain_path,
-                    flow_id,
-                    *format,
-                    advertise_caps.as_ref(),
-                )?;
-                self.swap_inner(bin, &mxlsrc)?;
+            InnerConfig::Real(transport) => {
+                let new_inner = match transport {
+                    TransportConfig::Mxl {
+                        domain_path,
+                        flow_id,
+                        format,
+                        transport_file,
+                    } => {
+                        let advertise_caps = derive_advertise_caps(transport_file.as_deref())?;
+                        {
+                            let chain = inner::build_mxlsrc(
+                                domain_path,
+                                flow_id,
+                                *format,
+                                advertise_caps.as_ref(),
+                            )?;
+                            let settings = self.settings.lock().unwrap();
+                            inner::apply_mxl_src_inner_properties(
+                                &CAT,
+                                "nmossrc",
+                                &chain,
+                                settings.transport_properties.as_ref(),
+                                settings.depay_properties.as_ref(),
+                            );
+                            chain.bin
+                        }
+                    }
+                    TransportConfig::Udp { variant, media, .. } => {
+                        // Receiver-side advertise_caps for UDP is the
+                        // essence shape carried by `media.raw_caps`
+                        // (derived from the SDP transport-file at
+                        // resolution time). Pinned via the bare
+                        // factory call here; the factory itself wraps
+                        // the depayloader + a trailing capsfilter so
+                        // downstream caps queries see the concrete
+                        // shape the flow will carry, mirroring the
+                        // `mxlsrc ! capssetter` sub-bin pattern.
+                        {
+                            let chain = inner::build_udpsrc(
+                                media,
+                                *variant,
+                                Some(&media.raw_caps),
+                            )?;
+                            let settings = self.settings.lock().unwrap();
+                            inner::apply_udp_src_inner_properties(
+                                &CAT,
+                                "nmossrc",
+                                &chain,
+                                settings.transport_properties.as_ref(),
+                                settings.depay_properties.as_ref(),
+                            );
+                            chain.bin
+                        }
+                    }
+                };
+                self.swap_inner(bin, &new_inner)?;
                 // Reaching the `Real` branch at NULL→READY implies
                 // `auto-activate=true` (the `validate_and_open` gate
                 // downgrades to a fake chain otherwise). Tell the
@@ -470,7 +634,7 @@ impl NmosSrc {
                     &CAT,
                     "nmossrc",
                     &self.session,
-                    transport_file.as_deref(),
+                    transport.transport_file(),
                 ) {
                     gst::warning!(CAT, "nmossrc auto-activate sync failed: {e:#}");
                 }
@@ -654,11 +818,41 @@ impl NmosSrc {
                         };
                     }
                 };
+                let settings = self.settings.lock().unwrap();
                 match inner::build_mxlsrc(domain_path, flow_id, *format, advertise_caps.as_ref()) {
-                    Ok(e) => e,
+                    Ok(chain) => {
+                        inner::apply_mxl_src_inner_properties(
+                            &CAT,
+                            "nmossrc",
+                            &chain,
+                            settings.transport_properties.as_ref(),
+                            settings.depay_properties.as_ref(),
+                        );
+                        chain.bin
+                    }
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!("nmossrc: building inner mxlsrc: {e:#}"),
+                        };
+                    }
+                }
+            }
+            InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
+                let settings = self.settings.lock().unwrap();
+                match inner::build_udpsrc(media, *variant, Some(&media.raw_caps)) {
+                    Ok(chain) => {
+                        inner::apply_udp_src_inner_properties(
+                            &CAT,
+                            "nmossrc",
+                            &chain,
+                            settings.transport_properties.as_ref(),
+                            settings.depay_properties.as_ref(),
+                        );
+                        chain.bin
+                    }
+                    Err(e) => {
+                        return ActivationOutcome::Failed {
+                            reason: format!("nmossrc: building inner udpsrc: {e:#}"),
                         };
                     }
                 }
@@ -816,8 +1010,80 @@ impl From<Settings> for crate::session::CommonSettings {
             label: s.label,
             description: s.description,
             caps: s.caps,
+            transport_caps: s.transport_caps,
             caps_mode: s.receiver_caps_mode,
+            source_ip: s.source_ip,
+            interface_ip: s.interface_ip,
+            multicast_ip: s.multicast_ip,
+            destination_port: s.destination_port,
+            // Sender-only slots: empty/0 on the Receiver side.
+            // `nmossink::From<Settings>` populates these instead.
+            source_port: 0,
+            destination_ip: String::new(),
             auto_activate: s.auto_activate,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::CommonSettings;
+
+    /// Pins the IS-05 Receiver `transport_params` →
+    /// `CommonSettings` mapping. `nmossrc` populates the
+    /// receiver-side slots (`source_ip`, `interface_ip`,
+    /// `multicast_ip`, `destination_port`) directly and zeros
+    /// the sender-only slots (`source_port`, `destination_ip`);
+    /// the SDP splice helper reads from there.
+    #[test]
+    fn from_settings_populates_is05_receiver_transport_params() {
+        let s = Settings {
+            source_ip: "192.0.2.10".to_owned(),
+            interface_ip: "192.0.2.20".to_owned(),
+            multicast_ip: "239.1.1.1".to_owned(),
+            destination_port: 5004,
+            ..Settings::default()
+        };
+        let cs: CommonSettings = s.into();
+        assert_eq!(cs.source_ip, "192.0.2.10");
+        assert_eq!(cs.interface_ip, "192.0.2.20");
+        assert_eq!(cs.multicast_ip, "239.1.1.1");
+        assert_eq!(cs.destination_port, 5004);
+        assert_eq!(cs.source_port, 0, "sender-only on the Receiver side must be 0");
+        assert_eq!(cs.destination_ip, "", "sender-only on the Receiver side must be empty");
+        assert_eq!(cs.side, crate::session::Side::Receiver);
+    }
+
+    #[test]
+    fn from_settings_defaults_leave_route_b_unset() {
+        let cs: CommonSettings = Settings::default().into();
+        assert_eq!(cs.source_ip, "");
+        assert_eq!(cs.interface_ip, "");
+        assert_eq!(cs.multicast_ip, "");
+        assert_eq!(cs.destination_port, 0);
+        assert_eq!(cs.source_port, 0);
+        assert_eq!(cs.destination_ip, "");
+        assert_eq!(cs.transport_caps, None);
+    }
+
+    /// Pins that the `transport-caps` property propagates into
+    /// `CommonSettings` so the splice / synth path can read it for
+    /// pt / audio clock-rate / ptime overrides + essence
+    /// cross-check.
+    #[test]
+    fn from_settings_forwards_transport_caps() {
+        use std::str::FromStr;
+        let _ = gst::init();
+        let caps =
+            gst::Caps::from_str("application/x-rtp,media=audio,payload=99,clock-rate=48000")
+                .expect("valid caps");
+        let s = Settings {
+            transport_caps: Some(caps.clone()),
+            ..Settings::default()
+        };
+        let cs: CommonSettings = s.into();
+        assert_eq!(cs.transport_caps.as_ref(), Some(&caps));
+    }
+
 }
