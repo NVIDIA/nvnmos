@@ -1028,7 +1028,6 @@ impl From<Settings> for crate::session::CommonSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gstreamer::prelude::StaticType;
     use crate::session::CommonSettings;
 
     /// Pins the IS-05 Receiver `transport_params` →
