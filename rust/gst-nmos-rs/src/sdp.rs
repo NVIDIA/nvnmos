@@ -18,10 +18,13 @@
 //! attributes are folded onto those caps with
 //! `SDPMessage::attributes_to_caps`, mirroring the convention
 //! `nvds_nmos_bin/src/helpers/sdp_helpers.cpp::parse_sdp`
-//! established. The network params (`destination_ip`,
+//! established. IS-05 network params (`destination_ip`,
 //! `destination_port`, `interface_ip`, `source_ip`, `source_port`)
-//! come from the `m=` and `c=` lines and the `a=source-filter:`,
-//! `a=x-nvnmos-iface-ip:`, `a=x-nvnmos-src-port:` attributes.
+//! are parsed from the `m=` and `c=` lines and from
+//! `a=source-filter:`, `a=x-nvnmos-iface-ip:`, and
+//! `a=x-nvnmos-src-port:`. `a=x-nvnmos-iface:` (IS-04 interface
+//! identity) is emitted on the synthesis / override paths when a local
+//! NIC IP resolves, but is not read back into [`UdpMedia`].
 //!
 //! Today the module handles single-media SDPs only. ST 2022-7
 //! dual-media SDPs are detected and rejected with a clearly-
@@ -546,6 +549,7 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
 /// a=mediaclk:direct=0                                         ← synthesis only
 /// a=source-filter: incl IN IP4 <destination_ip> <source_ip>   ← if source_ip
 /// a=x-nvnmos-iface-ip:<interface_ip>                          ← if interface_ip
+/// a=x-nvnmos-iface:<name> <port-id>                           ← if interface_ip resolves locally
 /// a=x-nvnmos-src-port:<source_port>                           ← if source_port
 /// a=x-nvnmos-caps:<pt>                                        ← if session.advertise_caps
 /// ```
@@ -611,6 +615,7 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     // `nvds_nmos_bin::sdp_from_caps` for the slots it covers:
     //   a=source-filter (RFC 4607 SSM include)
     //   a=x-nvnmos-iface-ip (egress / join NIC IP)
+    //   a=x-nvnmos-iface (IS-04 identity when IP resolves locally)
     //   a=x-nvnmos-src-port (sender RTP source port)
     //   a=x-nvnmos-caps  (Receiver wide-caps advertisement)
     if let Some(src) = leg.source_ip.as_deref() {
@@ -619,6 +624,9 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     }
     if let Some(iface) = leg.interface_ip.as_deref() {
         m.add_attribute("x-nvnmos-iface-ip", Some(iface));
+        if let Some(value) = crate::iface::x_nvnmos_iface_value_for_ip(iface) {
+            m.add_attribute("x-nvnmos-iface", Some(&value));
+        }
     }
     if let Some(port) = leg.source_port {
         m.add_attribute("x-nvnmos-src-port", Some(&port.to_string()));
@@ -2668,6 +2676,29 @@ mod tests {
         assert!(
             text.contains("a=x-nvnmos-src-port:5005"),
             "x-nvnmos-src-port line missing: {text}",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn build_sdp_emits_x_nvnmos_iface_when_interface_ip_resolves_locally() {
+        init_gst();
+        let Some(ip) = crate::iface::test_first_non_loopback_ipv4() else {
+            return;
+        };
+        let ip_str = ip.to_string();
+        let mut media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        media.primary.interface_ip = Some(ip_str.clone());
+        let text = build_sdp(&media, test_session()).expect("build");
+        let expected = crate::iface::x_nvnmos_iface_value_for_ip(&ip_str)
+            .expect("host IP must yield x-nvnmos-iface");
+        assert!(
+            text.contains(&format!("a=x-nvnmos-iface-ip:{ip_str}")),
+            "iface-ip: {text}",
+        );
+        assert!(
+            text.contains(&format!("a=x-nvnmos-iface:{expected}")),
+            "x-nvnmos-iface missing: {text}",
         );
     }
 

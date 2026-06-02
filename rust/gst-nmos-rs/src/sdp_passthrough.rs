@@ -11,6 +11,7 @@
 
 use gstreamer_sdp::{SDPAttribute, SDPMediaRef, SDPConnection, SDPMessage};
 
+use crate::iface;
 use crate::sdp::{defaults, SdpError, SdpOverrides};
 use crate::types::CapsMode;
 
@@ -108,6 +109,7 @@ fn apply_media_overrides_on_leg(
 
     if let Some(ip) = overrides.interface_ip {
         upsert_media_attribute(m, "x-nvnmos-iface-ip", Some(ip), false);
+        sync_x_nvnmos_iface_for_local_ip(m, ip);
     }
     if let Some(port) = overrides.source_port {
         upsert_media_attribute(m, "x-nvnmos-src-port", Some(&port.to_string()), false);
@@ -345,4 +347,77 @@ fn remove_media_attributes_by_key(m: &mut SDPMediaRef, key: &str) {
             idx += 1;
         }
     }
+}
+
+/// Keep `a=x-nvnmos-iface:` aligned with an overridden local NIC IP.
+fn sync_x_nvnmos_iface_for_local_ip(m: &mut SDPMediaRef, ip: &str) {
+    if let Some(value) = iface::x_nvnmos_iface_value_for_ip(ip) {
+        upsert_media_attribute(m, "x-nvnmos-iface", Some(&value), false);
+    } else {
+        remove_media_attributes_by_key(m, "x-nvnmos-iface");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VIDEO_WITH_STALE_IFACE: &str = concat!(
+        "v=0\r\n",
+        "o=- 1 0 IN IP4 192.0.2.10\r\n",
+        "s=Example\r\n",
+        "t=0 0\r\n",
+        "m=video 5008 RTP/AVP 96\r\n",
+        "c=IN IP4 239.1.1.1/64\r\n",
+        "a=x-nvnmos-iface:example-net1 00-00-5e-00-53-00\r\n",
+        "a=x-nvnmos-iface-ip:192.0.2.11\r\n",
+        "a=rtpmap:96 raw/90000\r\n",
+    );
+
+    #[test]
+    #[cfg(unix)]
+    fn interface_ip_override_replaces_stale_x_nvnmos_iface_when_resolvable() {
+        let Some(ip) = iface::test_first_non_loopback_ipv4() else {
+            return;
+        };
+        let ip_str = ip.to_string();
+        let overrides = SdpOverrides {
+            interface_ip: Some(&ip_str),
+            ..Default::default()
+        };
+        let out = passthrough_with_overrides(VIDEO_WITH_STALE_IFACE, &overrides).expect("splice");
+        assert!(
+            out.contains(&format!("a=x-nvnmos-iface-ip:{ip}")),
+            "iface-ip must be overridden: {out}",
+        );
+        assert!(
+            !out.contains("example-net1"),
+            "stale iface name must be removed or replaced: {out}",
+        );
+        let expected_iface = iface::x_nvnmos_iface_value_for_ip(&ip_str)
+            .expect("test IP must resolve to x-nvnmos-iface on this host");
+        assert!(
+            out.contains(&format!("a=x-nvnmos-iface:{expected_iface}")),
+            "iface must match resolved identity: {out}",
+        );
+    }
+
+    #[test]
+    fn interface_ip_override_to_unbound_ip_clears_x_nvnmos_iface() {
+        let overrides = SdpOverrides {
+            interface_ip: Some("192.0.2.254"),
+            ..Default::default()
+        };
+        let out =
+            passthrough_with_overrides(VIDEO_WITH_STALE_IFACE, &overrides).expect("splice");
+        assert!(
+            out.contains("a=x-nvnmos-iface-ip:192.0.2.254"),
+            "iface-ip override: {out}",
+        );
+        assert!(
+            !out.contains("x-nvnmos-iface:"),
+            "unresolvable override must drop stale iface: {out}",
+        );
+    }
+
 }
