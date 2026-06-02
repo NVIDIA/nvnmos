@@ -164,7 +164,7 @@ docker cp nvnmos-test:/nvnmos-ubuntu-24.04.tar.gz .
 docker rm nvnmos-test
 ```
 
-The container also has an _entrypoint.sh_ which demonstrates how to install the run-time requirements and run the application.
+The runtime image includes _dbus_, _avahi-daemon_, and _avahi-utils_. _entrypoint.sh_ (and _entrypoint-setup.sh_) start D-Bus and Avahi without systemd or chroot, run the C _nvnmos-example_ and the Rust _nvnmosd_ / _nvnmosd-example_ pair, then exec your command.
 
 ```sh
 docker run -it nvnmos /bin/bash
@@ -180,7 +180,7 @@ The following build arguments are available.
 | PACKAGE_SUFFIX | Controls the package filename, which will be _nvnmos\<suffix\>.tar.gz_. Default is based on the base image, e.g. `-ubuntu-24.04`. |
 | NMOS_CPP_REF | Git commit of [sony/nmos-cpp](https://github.com/sony/nmos-cpp) to build via `add_subdirectory`. Default is the same hash pinned in `.github/workflows/ci.yml`. |
 
-The image clones that _nmos-cpp_ revision, runs `conan install` with `nmos_cpp_from_source=True` (no input lockfile), configures with `-DUSE_ADD_SUBDIRECTORY=ON`, and writes a fresh `conan.lock` into the package tarball from the resolved dependency graph.
+The image clones that _nmos-cpp_ revision, runs `conan install` with `nmos_cpp_from_source=True` (no input lockfile), configures with `-DUSE_ADD_SUBDIRECTORY=ON`, and writes a fresh `conan.lock` into the package tarball from the resolved dependency graph. Also builds the Rust workspace (`nvnmosd`, `gst-nmos-rs`, …) against the built `libnvnmos.so`.
 
 If this isn't sufficient for your purposes, read on for manual build instructions.
 

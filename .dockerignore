@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Keep in sync with .gitignore (paths relative to docker build context = repo root).
+# Same as .gitignore, plus rust/target/ for the Docker build context.
 
 # Python venv (README recommends `.venv` beside the repo)
 .venv/
@@ -12,3 +12,6 @@ CMakeUserPresets.json
 # Local Conan + CMake output (README layout)
 build/
 src/conan/
+
+# Rust workspace artifacts
+rust/target/
