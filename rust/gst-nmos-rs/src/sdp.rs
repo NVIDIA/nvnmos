@@ -55,7 +55,9 @@
 //! [`raw_caps_from_rtp_audio`] for the reasoning.
 
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::sync::LazyLock;
 
@@ -178,6 +180,14 @@ pub(crate) mod defaults {
     /// nmos-cpp emits.
     pub(crate) const ST2110_20_SSN: &str = "ST2110-20:2017";
 
+    // ST 2110-21 §8.1 `TP=` (video traffic profile) is intentionally omitted
+    // from caps-only **video** synthesis for now — see
+    // [`rtp_caps_from_raw_video`]. Without `TP=2110TPW` or `TP=2110TPN`
+    // the ST 2110-20 video fmtp is not strictly valid per ST 2110-21.
+    // We might want to pick the value based on the transport family
+    // (e.g. `2110TPW` for `udp` / `udp2`, `2110TPN` for `nvdsudp`) per the
+    // nvnmosd design notes.
+
     /// ST 2110-20 §6.4 fmtp `colorimetry=` default. The
     /// fmtp parameter is REQUIRED — nmos-cpp's
     /// `get_video_raw_parameters` (`Development/nmos/sdp_utils.cpp`)
@@ -282,10 +292,10 @@ pub(crate) struct SdpSession<'a> {
     /// not known yet.
     pub origin_address: &'a str,
     /// `o=` line `<sess-id>` slot (RFC 4566 §5.2). RFC 4566 wants
-    /// a non-zero numeric value; the daemon usually wants it
-    /// stable per-Sender so successive configuring SDPs handed
-    /// over for the same resource compare equal upstream of the
-    /// IS-04 publication.
+    /// a non-zero numeric value. On the caps-only synthesis path
+    /// this is derived from `(node_seed, side, name)` via
+    /// [`stable_origin_session_id`]; passthrough SDPs keep the
+    /// user's `o=` line unchanged.
     pub origin_session_id: &'a str,
     /// `s=` line session name (RFC 4566 §5.3). Typically the
     /// Sender's NMOS `label`; splices in via
@@ -533,6 +543,7 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
 /// c=IN IP4 <destination_ip>/64
 /// a=rtpmap:<pt> ...      ← from `set_media_from_caps`
 /// a=fmtp:<pt> ...        ← from `set_media_from_caps`
+/// a=mediaclk:direct=0                                         ← synthesis only
 /// a=source-filter: incl IN IP4 <destination_ip> <source_ip>   ← if source_ip
 /// a=x-nvnmos-iface-ip:<interface_ip>                          ← if interface_ip
 /// a=x-nvnmos-src-port:<source_port>                           ← if source_port
@@ -589,6 +600,11 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     // `nmos-cpp`'s `find_fmtp` / `get_format` parsers expect the
     // canonical case.
     canonicalise_st2110_wire_case(&mut m);
+
+    // ST 2110-10 §6.2 direct media clock — emitted on the synthesis
+    // path only (`build_sdp`). Passthrough SDPs keep the user's
+    // `a=mediaclk:` (or its absence) verbatim.
+    m.add_attribute("mediaclk", Some("direct=0"));
 
     // Media-level attribute order matches the canonical
     // configuring-SDP order emitted by
@@ -1049,6 +1065,10 @@ pub(crate) struct SdpBuildInput<'a> {
     /// configuring SDP is narrow until something says
     /// otherwise).
     pub advertise_caps: bool,
+    /// NMOS Node seed (`node-seed` on the element). With [`name`]
+    /// and [`side`](Self::side) drives a stable RFC 4566 `o=`
+    /// `<sess-id>` on the synthesis path.
+    pub node_seed: &'a str,
 }
 
 /// Synthesise a full configuring SDP from caps-only
@@ -1129,9 +1149,10 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
         Some(input.name)
     };
 
+    let origin_session_id = stable_origin_session_id(input.node_seed, input.side, input.name);
     let session = SdpSession {
         origin_address,
-        origin_session_id: "1",
+        origin_session_id: &origin_session_id,
         session_name,
         description,
         name,
@@ -1139,6 +1160,20 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
     };
 
     build_sdp(&media, session)
+}
+
+/// Deterministic RFC 4566 `o=` `<sess-id>` for caps-only synthesis.
+///
+/// Hashes `(node_seed, side, resource name)` so the same NMOS resource
+/// on a Node always gets the same configuring SDP session id, while
+/// distinct resources (and sender vs receiver with the same name)
+/// diverge. Never returns zero (RFC 4566 recommends a non-zero sess-id).
+pub(crate) fn stable_origin_session_id(node_seed: &str, side: Side, name: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    node_seed.hash(&mut hasher);
+    side.hash(&mut hasher);
+    name.hash(&mut hasher);
+    (hasher.finish() as u32).max(1).to_string()
 }
 
 /// Resolve the RTP payload type for a synthesis run: read
@@ -4108,6 +4143,7 @@ mod tests {
             destination_port: 5004,
             interface_ip: "192.0.2.11",
             advertise_caps: false,
+            node_seed: "demo-node1",
         }
     }
 
@@ -4308,6 +4344,31 @@ mod tests {
             !text.contains("a=x-nvnmos-caps"),
             "narrow advertise_caps=false omits caps attribute:\n{text}",
         );
+        assert!(
+            text.contains("a=mediaclk:direct=0"),
+            "synthesis path emits ST 2110-10 direct media clock:\n{text}",
+        );
+        let sess_id = stable_origin_session_id("demo-node1", Side::Sender, "test-name");
+        assert!(
+            text.contains(&format!("o=nvnmos {sess_id} 0 IN IP4")),
+            "o= sess-id is stable from node_seed+side+name:\n{text}",
+        );
+        assert_ne!(sess_id, "1", "sess-id must not be the old placeholder");
+    }
+
+    #[test]
+    fn stable_origin_session_id_is_deterministic_and_scoped() {
+        let a = stable_origin_session_id("demo-node1", Side::Sender, "video1");
+        let b = stable_origin_session_id("demo-node1", Side::Sender, "video1");
+        let other_name = stable_origin_session_id("demo-node1", Side::Sender, "audio1");
+        let other_side = stable_origin_session_id("demo-node1", Side::Receiver, "video1");
+        let other_seed = stable_origin_session_id("demo-node2", Side::Sender, "video1");
+        assert_eq!(a, b);
+        assert_ne!(a, other_name);
+        assert_ne!(a, other_side);
+        assert_ne!(a, other_seed);
+        assert_ne!(a, "0");
+        assert_ne!(a, "1");
     }
 
     #[test]
@@ -4327,6 +4388,7 @@ mod tests {
             text.contains("a=x-nvnmos-iface-ip:192.0.2.11"),
             "Receiver iface-ip distinct from source_ip:\n{text}",
         );
+        assert!(text.contains("a=mediaclk:direct=0"));
     }
 
     #[test]
@@ -4548,6 +4610,7 @@ mod tests {
             destination_port: 5004,
             interface_ip: "",
             advertise_caps: false,
+            node_seed: "demo-node1",
         };
         let text = from_caps(&input).expect("synth");
         assert!(

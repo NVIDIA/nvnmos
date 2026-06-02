@@ -32,7 +32,7 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 /// error/log messages so validation failures point the user at the
 /// right property name, and selects which gRPC AddSender/AddReceiver
 /// call the session opens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Side {
     Sender,
     Receiver,
@@ -864,6 +864,7 @@ fn synthesise_or_passthrough_udp(
                 destination_port: settings.destination_port,
                 interface_ip: &settings.interface_ip,
                 advertise_caps,
+                node_seed: &settings.node_seed,
             };
             let text = sdp::from_caps(&input)
                 .with_context(|| format!("{element}: synthesising SDP from caps"))?;
