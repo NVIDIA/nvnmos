@@ -439,9 +439,11 @@ pub(crate) enum TransportConfig {
     },
     /// OSS UDP/RTP transport. The inner chain is
     /// `rtp*pay ! udpsink` for senders and
-    /// `udpsrc ! capsfilter(rtp_caps) ! rtp*depay ! capsfilter(raw_caps)?`
-    /// for receivers. The exact element factory names dispatch on
-    /// [`UdpVariant`].
+    /// `udpsrc ! rtp*depay [! capssetter(raw_caps)]` for receivers.
+    /// Wide receivers (activation SDP carries `a=x-nvnmos-caps:`)
+    /// omit `capssetter`; narrow receivers pin configuring essence
+    /// caps parsed from the transport file. The exact element factory
+    /// names dispatch on [`UdpVariant`].
     ///
     /// Constructed at runtime by `resolve_inner_config_udp` (in
     /// `validate_and_open`) and `decide_inner_config_udp` (in
@@ -1130,14 +1132,16 @@ fn decide_inner_config_udp(
 }
 
 /// Cross-check strictness for [`decide_inner_config_udp`]: wide
-/// receivers relax essence shape on activation only.
+/// receivers (activation SDP carries `a=x-nvnmos-caps:`) relax
+/// essence shape on activation only.
 fn udp_essence_cross_check_mode(
     settings: &CommonSettings,
     activation: bool,
+    transport_file: Option<&str>,
 ) -> sdp::EssenceCrossCheckMode {
     if activation
         && settings.side == Side::Receiver
-        && settings.caps_mode == CapsMode::Wide
+        && transport_file.is_some_and(sdp::indicates_wide_receiver_caps)
     {
         sdp::EssenceCrossCheckMode::FormatFamilyOnly
     } else {
@@ -1637,7 +1641,7 @@ pub(crate) fn make_activation_plan(
             settings,
             UdpVariant::V1,
             Some(transport_file),
-            udp_essence_cross_check_mode(settings, true),
+            udp_essence_cross_check_mode(settings, true, Some(transport_file)),
         ) {
             Ok(inner) => inner,
             Err(e) => {
@@ -1656,7 +1660,7 @@ pub(crate) fn make_activation_plan(
             settings,
             UdpVariant::V2,
             Some(transport_file),
-            udp_essence_cross_check_mode(settings, true),
+            udp_essence_cross_check_mode(settings, true, Some(transport_file)),
         ) {
             Ok(inner) => inner,
             Err(e) => {
@@ -2759,10 +2763,56 @@ mod tests {
         }
 
         /// Wide receiver activation: stereo `caps` must not
-        /// block mono activation SDP (essence shape is not
-        /// cross-checked; format family still matches).
+        /// block mono activation SDP when the SDP carries
+        /// `a=x-nvnmos-caps:` (essence shape is not cross-checked;
+        /// format family still matches).
         #[test]
         fn activation_udp_wide_receiver_skips_essence_shape_cross_check() {
+            const AUDIO_MONO_ACTIVATION_SDP: &str = concat!(
+                "v=0\r\n",
+                "o=- 1 0 IN IP4 192.0.2.10\r\n",
+                "s=Example\r\n",
+                "t=0 0\r\n",
+                "m=audio 5004 RTP/AVP 97\r\n",
+                "c=IN IP4 239.2.2.2/64\r\n",
+                "a=rtpmap:97 L24/48000\r\n",
+                "a=x-nvnmos-caps:97\r\n",
+            );
+            let s = CommonSettings {
+                caps: Some(
+                    gst::Caps::builder("audio/x-raw")
+                        .field("channels", 2i32)
+                        .build(),
+                ),
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            let plan = make_activation_plan(
+                &cat(),
+                "nmossrc",
+                &s,
+                &req(Side::Receiver, Some(AUDIO_MONO_ACTIVATION_SDP)),
+            );
+            match plan.inner {
+                InnerConfig::Real(TransportConfig::Udp { media, .. }) => {
+                    assert_eq!(
+                        media
+                            .raw_caps
+                            .structure(0)
+                            .and_then(|s| s.get::<i32>("channels").ok()),
+                        Some(1),
+                        "activation SDP is authoritative for channel count",
+                    );
+                }
+                other => panic!("expected Real(Udp) inner on wide activation; got {other:?}"),
+            }
+            assert!(matches!(plan.ack, ActivationAck::Success));
+        }
+
+        /// `receiver-caps-mode=wide` alone does not relax activation
+        /// cross-check — the activation SDP must carry
+        /// `a=x-nvnmos-caps:` (libnvnmos adds it for wide receivers).
+        #[test]
+        fn activation_udp_property_wide_without_sdp_marker_still_cross_checks() {
             const AUDIO_MONO_ACTIVATION_SDP: &str = concat!(
                 "v=0\r\n",
                 "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -2787,20 +2837,14 @@ mod tests {
                 &s,
                 &req(Side::Receiver, Some(AUDIO_MONO_ACTIVATION_SDP)),
             );
-            match plan.inner {
-                InnerConfig::Real(TransportConfig::Udp { media, .. }) => {
-                    assert_eq!(
-                        media
-                            .raw_caps
-                            .structure(0)
-                            .and_then(|s| s.get::<i32>("channels").ok()),
-                        Some(1),
-                        "activation SDP is authoritative for channel count",
-                    );
-                }
-                other => panic!("expected Real(Udp) inner on wide activation; got {other:?}"),
+            assert!(matches!(plan.inner, InnerConfig::Fake { .. }));
+            match plan.ack {
+                ActivationAck::Failure { reason } => assert!(
+                    reason.contains("cross-checking SDP"),
+                    "expected essence cross-check failure; got: {reason}",
+                ),
+                other => panic!("expected Failure ack; got {other:?}"),
             }
-            assert!(matches!(plan.ack, ActivationAck::Success));
         }
 
         /// Activation SDP cross-check fires too: a video

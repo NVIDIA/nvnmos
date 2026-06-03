@@ -357,7 +357,7 @@ const CAPS_TAG: &str = "urn:x-nvnmos:tag:caps";
 /// Whether a transport file's `urn:x-nvnmos:tag:caps` tag indicates
 /// wide Receiver Caps per libnvnmos's BCP-007-03 rule: present with a
 /// non-empty JSON array (including `[""]`).
-pub(crate) fn transport_file_indicates_wide_caps(text: &str) -> Result<bool, FlowDefError> {
+pub(crate) fn indicates_wide_receiver_caps(text: &str) -> Result<bool, FlowDefError> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|source| FlowDefError::Parse { source })?;
     let Some(tags) = value.get("tags").and_then(|t| t.as_object()) else {
@@ -976,19 +976,19 @@ mod tests {
     }
 
     #[test]
-    fn transport_file_indicates_wide_caps_matches_libnvnmos_rule() {
+    fn indicates_wide_receiver_caps_matches_libnvnmos_rule() {
         let wide = format!(
             r#"{{"id":"{UUID_A}","format":"urn:x-nmos:format:video","tags":{{"urn:x-nvnmos:tag:caps":[""]}}}}"#
         );
-        assert!(transport_file_indicates_wide_caps(&wide).unwrap());
+        assert!(indicates_wide_receiver_caps(&wide).unwrap());
 
         let narrow = video_flow_def(UUID_A);
-        assert!(!transport_file_indicates_wide_caps(&narrow).unwrap());
+        assert!(!indicates_wide_receiver_caps(&narrow).unwrap());
 
         let empty_tag = format!(
             r#"{{"id":"{UUID_A}","format":"urn:x-nmos:format:video","tags":{{"urn:x-nvnmos:tag:caps":[]}}}}"#
         );
-        assert!(!transport_file_indicates_wide_caps(&empty_tag).unwrap());
+        assert!(!indicates_wide_receiver_caps(&empty_tag).unwrap());
     }
 
     #[test]

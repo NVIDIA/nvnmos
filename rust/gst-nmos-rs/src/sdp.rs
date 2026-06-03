@@ -388,6 +388,23 @@ pub(crate) struct SdpSession<'a> {
     pub advertise_caps: bool,
 }
 
+/// Whether an SDP transport file advertises wide Receiver Caps via
+/// media-level `a=x-nvnmos-caps:` (libnvnmos adds this on IS-05
+/// activation for wide receivers; configuring SDPs may carry it when
+/// `receiver-caps-mode=wide` splices it in at registration).
+///
+/// Both `a=x-nvnmos-caps` (flag form) and `a=x-nvnmos-caps:<pt>`
+/// (property form) signal wide to libnvnmos. Unparseable input is
+/// treated as narrow.
+pub(crate) fn indicates_wide_receiver_caps(text: &str) -> bool {
+    let Ok(msg) = SDPMessage::parse_buffer(text.as_bytes()) else {
+        return false;
+    };
+    msg.media(0)
+        .and_then(|m| m.attribute_val("x-nvnmos-caps").map(|_| ()))
+        .is_some()
+}
+
 /// Parse an SDP transport file into a [`UdpMedia`].
 ///
 /// Single-media SDPs only today; multi-media SDPs (ST 2022-7
@@ -920,7 +937,8 @@ pub(crate) use crate::sdp_passthrough::passthrough_with_overrides;
 /// so the error message is specific.
 ///
 /// [`EssenceCrossCheckMode::FormatFamilyOnly`] is used on UDP
-/// receiver activation when `receiver-caps-mode=wide`: the
+/// receiver activation when the activation SDP carries
+/// `a=x-nvnmos-caps:` (wide Receiver Caps per libnvnmos): the
 /// element's `caps` are an IS-04 configuring hint, not a
 /// constraint on the activation SDP's essence shape or RTP
 /// layer.
@@ -2015,6 +2033,23 @@ mod tests {
 
     fn init_gst() {
         let _ = gst::init();
+    }
+
+    #[test]
+    fn indicates_wide_receiver_caps_matches_attribute_presence() {
+        const NARROW: &str = concat!(
+            "v=0\r\no=- 1 0 IN IP4 127.0.0.1\r\ns=x\r\nt=0 0\r\n",
+            "m=video 5004 RTP/AVP 96\r\nc=IN IP4 239.0.0.1/64\r\n",
+            "a=rtpmap:96 raw/90000\r\n",
+        );
+        const WIDE: &str = concat!(
+            "v=0\r\no=- 1 0 IN IP4 127.0.0.1\r\ns=x\r\nt=0 0\r\n",
+            "m=video 5004 RTP/AVP 96\r\nc=IN IP4 239.0.0.1/64\r\n",
+            "a=rtpmap:96 raw/90000\r\na=x-nvnmos-caps:96\r\n",
+        );
+        assert!(!indicates_wide_receiver_caps(NARROW));
+        assert!(indicates_wide_receiver_caps(WIDE));
+        assert!(!indicates_wide_receiver_caps("not sdp"));
     }
 
     // `defaults` regression guards: every constant pins a
@@ -3462,19 +3497,6 @@ mod tests {
         "a=x-nvnmos-caps:96\r\n",
     );
 
-    /// Round-trip check: does the serialised SDP carry an
-    /// `a=x-nvnmos-caps` attribute at media level? Uses
-    /// `SDPMedia::attribute_val` so it works with both
-    /// `a=x-nvnmos-caps` (flag form) and `a=x-nvnmos-caps:`
-    /// (property form with empty value) — both parse to
-    /// `Some("")` and both signal wide to libnvnmos.
-    fn has_x_nvnmos_caps(sdp: &str) -> bool {
-        let msg = SDPMessage::parse_buffer(sdp.as_bytes()).expect("parse");
-        msg.media(0)
-            .and_then(|m| m.attribute_val("x-nvnmos-caps").map(|_| ()))
-            .is_some()
-    }
-
     // `caps_mode` is the SDP-side override slot mirroring
     // `flow_def::FlowDefOverrides::caps_mode`. Each test pins
     // one (input-state, CapsMode) cell of the 2×3 matrix:
@@ -3495,7 +3517,7 @@ mod tests {
         session.advertise_caps = true;
         let text = build_sdp(&media, session).expect("build");
         assert!(
-            has_x_nvnmos_caps(&text),
+            indicates_wide_receiver_caps(&text),
             "advertise_caps=true must emit media-level `a=x-nvnmos-caps`: {text}",
         );
         // Canonical wire form per `nvnmos_impl.cpp:1727-1731`:
@@ -3523,7 +3545,7 @@ mod tests {
         let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
         let text = build_sdp(&media, test_session()).expect("build");
         assert!(
-            !has_x_nvnmos_caps(&text),
+            !indicates_wide_receiver_caps(&text),
             "advertise_caps=false (test_session default) must omit `a=x-nvnmos-caps`: {text}",
         );
     }
@@ -3537,7 +3559,7 @@ mod tests {
         )
         .expect("splice");
         assert!(
-            !has_x_nvnmos_caps(&spliced),
+            !indicates_wide_receiver_caps(&spliced),
             "input had no a=x-nvnmos-caps; Auto must leave it absent: {spliced}",
         );
     }
@@ -3551,7 +3573,7 @@ mod tests {
         )
         .expect("splice");
         assert!(
-            has_x_nvnmos_caps(&spliced),
+            indicates_wide_receiver_caps(&spliced),
             "input had a=x-nvnmos-caps; Auto must preserve it: {spliced}",
         );
     }
@@ -3565,7 +3587,7 @@ mod tests {
         )
         .expect("splice");
         assert!(
-            !has_x_nvnmos_caps(&spliced),
+            !indicates_wide_receiver_caps(&spliced),
             "Narrow must strip a=x-nvnmos-caps from a wide input: {spliced}",
         );
     }
@@ -3579,7 +3601,7 @@ mod tests {
         )
         .expect("splice");
         assert!(
-            !has_x_nvnmos_caps(&spliced),
+            !indicates_wide_receiver_caps(&spliced),
             "Narrow on an already-narrow input must remain narrow: {spliced}",
         );
     }
@@ -3593,7 +3615,7 @@ mod tests {
         )
         .expect("splice");
         assert!(
-            has_x_nvnmos_caps(&spliced),
+            indicates_wide_receiver_caps(&spliced),
             "Wide must add a=x-nvnmos-caps to a narrow input: {spliced}",
         );
         // Canonical form: pt of the (single) media. Fixture pt
@@ -3612,7 +3634,7 @@ mod tests {
             &SdpOverrides { caps_mode: CapsMode::Wide, ..Default::default() },
         )
         .expect("splice");
-        assert!(has_x_nvnmos_caps(&spliced));
+        assert!(indicates_wide_receiver_caps(&spliced));
         // Re-emission collapses to the canonical `<pt>` form
         // regardless of the input value (libnvnmos's parser is
         // presence-only; we don't try to preserve constraint
