@@ -134,6 +134,9 @@ MXL_RT_LIB_DIR=${MXL_RT_LIB_DIR:-$MXL_REPO/build/Linux-Clang-Debug/lib}
 
 SOCK=/tmp/gst-nmos-rs-demo.sock
 LOG_DIR=$(mktemp -d -t gst-nmos-rs-demo-XXXXXX)
+# shellcheck source=pipeline-dots.sh
+source "$_SCRIPT_DIR/pipeline-dots.sh"
+PIPELINE_DOT_ROOT="$LOG_DIR/pipeline-dots"
 DAEMON_LOG="$LOG_DIR/daemon.log"
 
 # Shared MXL Domain (tmpfs-backed). All three Nodes operate inside
@@ -574,6 +577,7 @@ launch_node1() {
     fi
     echo "[node1] starting producer pipeline (audiotestsrc + videotestsrc -> 2 nmossinks)"
     _rotate_log "$LOG_DIR/node1-producer.log"
+    pipeline_dots_prepare_launch node1
     GST_DEBUG=${GST_DEBUG:-nmossink:3} \
         gst-launch-1.0 -e \
             videotestsrc pattern=smpte horizontal-speed=2 is-live=true ! \
@@ -627,6 +631,7 @@ launch_node3_video() {
     fi
     echo "[node3-video] starting video processor (nmossrc -> videoflip horizontal -> nmossink)"
     _rotate_log "$LOG_DIR/node3-video.log"
+    pipeline_dots_prepare_launch node3-video
     GST_DEBUG=${GST_DEBUG:-nmossrc:3,nmossink:3} \
         gst-launch-1.0 -e \
             nmossrc \
@@ -663,6 +668,7 @@ launch_node3_audio() {
     fi
     echo "[node3-audio] starting audio processor (nmossrc -> volume 0.3 -> nmossink)"
     _rotate_log "$LOG_DIR/node3-audio.log"
+    pipeline_dots_prepare_launch node3-audio
     GST_DEBUG=${GST_DEBUG:-nmossrc:3,nmossink:3} \
         gst-launch-1.0 -e \
             nmossrc \
@@ -706,6 +712,7 @@ launch_node2() {
     fi
     echo "[node2] starting consumer pipeline (2 nmossrcs -> $AUDIO_SINK / $VIDEO_SINK)"
     _rotate_log "$LOG_DIR/node2-consumer.log"
+    pipeline_dots_prepare_launch node2
     GST_DEBUG=${GST_DEBUG:-nmossrc:3} \
         gst-launch-1.0 -e \
             nmossrc \
@@ -758,6 +765,7 @@ launch_bare_preview() {
     fi
     echo "[preview] starting bare mxlsrc -> $VIDEO_SINK"
     _rotate_log "$LOG_DIR/bare-preview.log"
+    pipeline_dots_prepare_launch bare-preview
     GST_DEBUG=${GST_DEBUG:-mxlsrc:5,basesrc:4} \
         gst-launch-1.0 -e \
             mxlsrc \
@@ -1692,7 +1700,8 @@ menu_diag_snapshot() {
 # can't attach (i.e. flow-file recreation itself is broken). Keeping
 # the two as separate options also lets the user stop a pipeline,
 # inspect with action 5 / shell tools, and then bring it back without
-# a forced immediate relaunch.
+# a forced immediate relaunch. Action 8 exports GStreamer pipeline
+# diagrams (DOT + PNG) from dumps written at launch time.
 _pick_pipeline() {
     local -n __pp_out=$1; shift
     local __pp_prompt=$1; shift
@@ -1751,6 +1760,27 @@ menu_launch_pipeline() {
         echo "[hint] give the pipeline ~1-2s to re-register on IS-04 / open MXL flow"
 }
 
+# Export a pipeline diagram (Graphviz PNG) for the pipeline's *current* state.
+# Sends SIGHUP to gst-launch-1.0 for a fresh DOT snapshot, then renders the
+# newest dump.
+menu_export_pipeline_diagram() {
+    pipeline_dots_require_graphviz || return
+    local pick= slug= pid=0
+    _pick_pipeline pick "Pick a pipeline to diagram:" || return
+    case "$pick" in
+        node1)        slug=node1; pid=$NODE1_PID ;;
+        node2)        slug=node2; pid=$NODE2_PID ;;
+        node3_video)  slug=node3-video; pid=$NODE3_VIDEO_PID ;;
+        node3_audio)  slug=node3-audio; pid=$NODE3_AUDIO_PID ;;
+        bare_preview) slug=bare-preview; pid=$BARE_PREVIEW_PID ;;
+    esac
+    if (( pid == 0 )) || ! kill -0 "$pid" 2>/dev/null; then
+        echo "[error] that pipeline is not running — launch it first (menu 7)"
+        return
+    fi
+    pipeline_dots_export_current "$slug" "$pid" || return
+}
+
 interactive_loop() {
     if ! command -v jq >/dev/null 2>&1; then
         echo
@@ -1772,6 +1802,7 @@ interactive_loop() {
         echo "  5) Diagnostic snapshot             (/active + /staged + /dev/shm + log tails)"
         echo "  6) Tear down a pipeline            (SIGTERM the gst-launch process)"
         echo "  7) Launch a pipeline               (no-op if already running)"
+        echo "  8) Export pipeline diagram         (current state: DOT -> PNG via SIGHUP)"
         echo "  q) Quit"
         echo "================================================================"
         if ! read -r -p "> " ans; then
@@ -1786,6 +1817,7 @@ interactive_loop() {
             5) menu_diag_snapshot ;;
             6) menu_teardown_pipeline ;;
             7) menu_launch_pipeline ;;
+            8) menu_export_pipeline_diagram ;;
             q|Q) return ;;
             *) echo "Invalid choice." ;;
         esac
