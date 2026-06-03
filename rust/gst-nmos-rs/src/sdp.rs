@@ -918,16 +918,36 @@ pub(crate) use crate::sdp_passthrough::passthrough_with_overrides;
 /// (e.g. audio caps + video SDP) surface as
 /// [`SdpError::FormatMismatch`] before the shape intersect runs
 /// so the error message is specific.
+///
+/// [`EssenceCrossCheckMode::FormatFamilyOnly`] is used on UDP
+/// receiver activation when `receiver-caps-mode=wide`: the
+/// element's `caps` are an IS-04 configuring hint, not a
+/// constraint on the activation SDP's essence shape or RTP
+/// layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EssenceCrossCheckMode {
+    Full,
+    FormatFamilyOnly,
+}
+
 pub(crate) fn cross_check_essence(
     media: &UdpMedia,
     essence_caps: Option<&gst::Caps>,
     transport_caps: Option<&gst::Caps>,
+    mode: EssenceCrossCheckMode,
 ) -> Result<(), SdpError> {
     if let Some(caps) = essence_caps {
-        cross_check_essence_caps(media, caps)?;
+        match mode {
+            EssenceCrossCheckMode::Full => cross_check_essence_caps(media, caps)?,
+            EssenceCrossCheckMode::FormatFamilyOnly => {
+                cross_check_essence_format_family(media, caps)?;
+            }
+        }
     }
-    if let Some(caps) = transport_caps {
-        cross_check_transport_caps(media, caps)?;
+    if mode == EssenceCrossCheckMode::Full {
+        if let Some(caps) = transport_caps {
+            cross_check_transport_caps(media, caps)?;
+        }
     }
     Ok(())
 }
@@ -947,7 +967,7 @@ fn essence_caps_format(caps: &gst::Caps) -> Option<FlowFormat> {
     }
 }
 
-fn cross_check_essence_caps(media: &UdpMedia, caps: &gst::Caps) -> Result<(), SdpError> {
+fn cross_check_essence_format_family(media: &UdpMedia, caps: &gst::Caps) -> Result<(), SdpError> {
     if let Some(caps_format) = essence_caps_format(caps) {
         if caps_format != media.format {
             return Err(SdpError::FormatMismatch {
@@ -956,6 +976,11 @@ fn cross_check_essence_caps(media: &UdpMedia, caps: &gst::Caps) -> Result<(), Sd
             });
         }
     }
+    Ok(())
+}
+
+fn cross_check_essence_caps(media: &UdpMedia, caps: &gst::Caps) -> Result<(), SdpError> {
+    cross_check_essence_format_family(media, caps)?;
     let intersect = caps.intersect(&media.raw_caps);
     if intersect.is_empty() {
         return Err(SdpError::EssenceShapeMismatch {
@@ -3141,7 +3166,8 @@ mod tests {
     fn cross_check_essence_with_no_caps_is_noop() {
         init_gst();
         let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
-        cross_check_essence(&media, None, None).expect("no caps → pass");
+        cross_check_essence(&media, None, None, EssenceCrossCheckMode::Full)
+            .expect("no caps → pass");
     }
 
     /// Matching essence caps (`video/x-raw` + 1920x1080) +
@@ -3160,8 +3186,13 @@ mod tests {
             .field("encoding-name", "RAW")
             .field("clock-rate", 90_000i32)
             .build();
-        cross_check_essence(&media, Some(&essence), Some(&transport))
-            .expect("matching caps → pass");
+        cross_check_essence(
+            &media,
+            Some(&essence),
+            Some(&transport),
+            EssenceCrossCheckMode::Full,
+        )
+        .expect("matching caps → pass");
     }
 
     /// Format-family mismatch (`audio/x-raw` declared on a
@@ -3174,8 +3205,13 @@ mod tests {
         init_gst();
         let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
         let audio_caps = gst::Caps::builder("audio/x-raw").build();
-        let err = cross_check_essence(&media, Some(&audio_caps), None)
-            .expect_err("format-family mismatch must error");
+        let err = cross_check_essence(
+            &media,
+            Some(&audio_caps),
+            None,
+            EssenceCrossCheckMode::Full,
+        )
+        .expect_err("format-family mismatch must error");
         match err {
             SdpError::FormatMismatch { caps, sdp } => {
                 assert_eq!(caps, FlowFormat::Audio);
@@ -3196,8 +3232,13 @@ mod tests {
             .field("width", 1280i32)
             .field("height", 720i32)
             .build();
-        let err = cross_check_essence(&media, Some(&caps), None)
-            .expect_err("shape mismatch must error");
+        let err = cross_check_essence(
+            &media,
+            Some(&caps),
+            None,
+            EssenceCrossCheckMode::Full,
+        )
+        .expect_err("shape mismatch must error");
         assert!(matches!(err, SdpError::EssenceShapeMismatch { .. }),
             "got: {err:?}");
     }
@@ -3211,8 +3252,13 @@ mod tests {
         let transport = gst::Caps::builder("application/x-rtp")
             .field("encoding-name", "L24")
             .build();
-        let err = cross_check_essence(&media, None, Some(&transport))
-            .expect_err("encoding-name mismatch must error");
+        let err = cross_check_essence(
+            &media,
+            None,
+            Some(&transport),
+            EssenceCrossCheckMode::Full,
+        )
+        .expect_err("encoding-name mismatch must error");
         assert!(matches!(err, SdpError::TransportCapsMismatch { .. }),
             "got: {err:?}");
     }
@@ -3227,8 +3273,13 @@ mod tests {
         let transport = gst::Caps::builder("application/x-rtp")
             .field("clock-rate", 48_000i32)
             .build();
-        let err = cross_check_essence(&media, None, Some(&transport))
-            .expect_err("video clock-rate mismatch must error");
+        let err = cross_check_essence(
+            &media,
+            None,
+            Some(&transport),
+            EssenceCrossCheckMode::Full,
+        )
+        .expect_err("video clock-rate mismatch must error");
         assert!(matches!(err, SdpError::TransportCapsMismatch { .. }),
             "got: {err:?}");
     }
@@ -3253,8 +3304,13 @@ mod tests {
             .field("encoding-name", "RAW")
             .field("clock-rate", 90_000i32)
             .build();
-        cross_check_essence(&media, None, Some(&transport))
-            .expect("override-only disagreement must pass");
+        cross_check_essence(
+            &media,
+            None,
+            Some(&transport),
+            EssenceCrossCheckMode::Full,
+        )
+        .expect("override-only disagreement must pass");
     }
 
     /// Audio essence: the splice has already copied a user-
@@ -3280,8 +3336,66 @@ mod tests {
         let media = parse_sdp(&spliced).expect("re-parse");
         // 2. Cross-check matches because both now agree on
         //    clock-rate=96000.
-        cross_check_essence(&media, None, Some(&transport))
-            .expect("audio override + cross-check → pass");
+        cross_check_essence(
+            &media,
+            None,
+            Some(&transport),
+            EssenceCrossCheckMode::Full,
+        )
+        .expect("audio override + cross-check → pass");
+    }
+
+    /// Wide receiver activation: essence shape mismatch is
+    /// ignored when only the format family is checked.
+    #[test]
+    fn cross_check_essence_format_family_only_skips_shape_mismatch() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let caps = gst::Caps::builder("video/x-raw")
+            .field("width", 1280i32)
+            .field("height", 720i32)
+            .build();
+        cross_check_essence(
+            &media,
+            Some(&caps),
+            None,
+            EssenceCrossCheckMode::FormatFamilyOnly,
+        )
+        .expect("format family match → pass despite shape mismatch");
+    }
+
+    /// Format-family-only mode still rejects audio caps on a
+    /// video SDP.
+    #[test]
+    fn cross_check_essence_format_family_only_rejects_format_mismatch() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let audio_caps = gst::Caps::builder("audio/x-raw").build();
+        let err = cross_check_essence(
+            &media,
+            Some(&audio_caps),
+            None,
+            EssenceCrossCheckMode::FormatFamilyOnly,
+        )
+        .expect_err("format-family mismatch must error");
+        assert!(matches!(err, SdpError::FormatMismatch { .. }), "got: {err:?}");
+    }
+
+    /// Format-family-only mode ignores transport-caps disagreements.
+    #[test]
+    fn cross_check_essence_format_family_only_skips_transport_caps() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let transport = gst::Caps::builder("application/x-rtp")
+            .field("encoding-name", "L24")
+            .build();
+        cross_check_essence(
+            &media,
+            None,
+            Some(&transport),
+            EssenceCrossCheckMode::FormatFamilyOnly,
+        )
+        .expect("transport-caps must not be checked");
     }
 
     /// Pt outside RFC 3551 §6 dynamic range (96..=127) is
