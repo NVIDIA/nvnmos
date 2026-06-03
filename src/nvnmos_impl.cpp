@@ -91,7 +91,7 @@ namespace nvnmos
 
         // like nmos::make_session_description for 'internal' use
         // with support for the custom SDP attributes in nvnmos::attributes for senders as well as receivers
-        web::json::value make_session_description(const nmos::type& type, const utility::string_t& name, const utility::string_t& group_hint, const utility::string_t& session_info, const nmos::sdp_parameters& sdp_params, const web::json::value& transport_params);
+        web::json::value make_session_description(const nmos::type& type, const utility::string_t& name, const utility::string_t& group_hint, const utility::string_t& session_info, const nmos::sdp_parameters& sdp_params, const web::json::value& transport_params, bool caps);
 
         // like nmos::get_session_description_sdp_parameters
         // with support for multiple ts-refclk attributes in each media description
@@ -112,6 +112,9 @@ namespace nvnmos
 
         // get the optional capabilities from the custom attribute
         bool has_session_description_caps(const web::json::value& session_description);
+
+        // whether the IS-04 receiver has no BCP-004-01 constraint_sets (wide caps)
+        bool has_no_receiver_caps(const web::json::value& receiver);
 
         // get the format bit rate from the custom attribute if present or calculate an approximate value
         uint64_t get_format_bit_rate(const nmos::sdp_parameters& sdp_params);
@@ -1311,7 +1314,8 @@ namespace nvnmos
 
                     const auto group_hint = impl::get_group_hint(resource);
                     const auto& session_info = nmos::fields::description(resource.data);
-                    const auto merged_sdp = impl::make_session_description(id_type.second, name, group_hint, session_info, sdp_params, transport_params);
+                    const auto caps = nmos::types::receiver == id_type.second && impl::has_no_receiver_caps(resource.data);
+                    auto merged_sdp = impl::make_session_description(id_type.second, name, group_hint, session_info, sdp_params, transport_params, caps);
                     const auto sdp_data = sdp::make_session_description(merged_sdp);
 
                     connection_activated(id_type.second, utility::us2s(name), sdp_data);
@@ -1536,7 +1540,7 @@ namespace nvnmos
     {
         // like nmos::make_session_description for 'internal' use
         // with support for the custom SDP attributes in nvnmos::attributes for senders as well as receivers
-        web::json::value make_session_description(const nmos::type& type, const utility::string_t& name, const utility::string_t& group_hint, const utility::string_t& session_info, const nmos::sdp_parameters& sdp_params, const web::json::value& transport_params)
+        web::json::value make_session_description(const nmos::type& type, const utility::string_t& name, const utility::string_t& group_hint, const utility::string_t& session_info, const nmos::sdp_parameters& sdp_params, const web::json::value& transport_params, bool caps)
         {
             using web::json::value;
 
@@ -1562,7 +1566,14 @@ namespace nvnmos
                 auto& media_description = media_descriptions.at(leg);
                 auto& media_attributes = media_description.at(sdp::fields::attributes);
 
-                if (nmos::types::sender == type)
+                if (nmos::types::receiver == type)
+                {
+                    if (caps)
+                    {
+                        web::json::push_back(media_attributes, sdp::named_value(nvnmos::attributes::caps, utility::ostringstreamed(sdp_params.rtpmap.payload_type)));
+                    }
+                }
+                else // if (nmos::types::sender == type)
                 {
                     const auto& source_port = nmos::fields::source_port(transport_param);
                     if (source_port.is_integer())
@@ -1773,6 +1784,12 @@ namespace nvnmos
                 auto caps = sdp::find_name(ma, nvnmos::attributes::caps);
                 return ma.end() != caps;
             }
+        }
+
+        // whether the IS-04 receiver has no BCP-004-01 constraint_sets (wide caps)
+        bool has_no_receiver_caps(const web::json::value& receiver)
+        {
+            return !nmos::fields::constraint_sets(nmos::fields::caps(receiver)).is_array();
         }
 
         // approximate IP/UDP/RTP overhead
