@@ -282,15 +282,16 @@ impl ObjectImpl for NmosSrc {
                     .nick("Receiver caps mode")
                     .blurb(
                         "Selects whether the published NMOS Receiver advertises narrow \
-                         or wide Receiver Caps in IS-04, via the presence of the \
-                         `urn:x-nvnmos:tag:caps` tag on the flow_def. `auto` (default) \
-                         leaves the tag untouched in the spliced transport file: the \
-                         result is narrow when the transport file is present and the \
-                         tag is absent (or no transport file is in play), and wide \
-                         when the tag is already there. `narrow` strips the tag from \
-                         the transport file if present. `wide` ensures the tag is \
-                         present with a non-empty marker (libnvnmos's rule for wide \
-                         is \"present + non-empty\").",
+                         or wide Receiver Caps in IS-04. On MXL (`transport=mxl`) this \
+                         is encoded via the `urn:x-nvnmos:tag:caps` flow_def tag; on \
+                         RTP/UDP it is encoded via the media-level SDP \
+                         `a=x-nvnmos-caps` attribute. `auto` (default) leaves both \
+                         untouched in the spliced transport file: the result is narrow \
+                         when the file is present and the marker is absent (or no \
+                         transport file is in play), and wide when the marker is \
+                         already there. `narrow` strips the tag / attribute if \
+                         present. `wide` ensures each is present (libnvnmos's rule \
+                         for wide is \"present + non-empty\").",
                     )
                     .default_value(CapsMode::Auto)
                     .mutable_ready()
@@ -574,7 +575,8 @@ impl NmosSrc {
                         format,
                         transport_file,
                     } => {
-                        let advertise_caps = derive_advertise_caps(transport_file.as_deref())?;
+                        let advertise_caps =
+                            mxl_receiver_advertise_caps(transport_file.as_deref())?;
                         {
                             let chain = inner::build_mxlsrc(
                                 domain_path,
@@ -593,21 +595,18 @@ impl NmosSrc {
                             chain.bin
                         }
                     }
-                    TransportConfig::Udp { variant, media, .. } => {
-                        // Receiver-side advertise_caps for UDP is the
-                        // essence shape carried by `media.raw_caps`
-                        // (derived from the SDP transport-file at
-                        // resolution time). Pinned via the bare
-                        // factory call here; the factory itself wraps
-                        // the depayloader + a trailing capsfilter so
-                        // downstream caps queries see the concrete
-                        // shape the flow will carry, mirroring the
-                        // `mxlsrc ! capssetter` sub-bin pattern.
+                    TransportConfig::Udp {
+                        variant,
+                        media,
+                        transport_file,
+                    } => {
+                        let advertise_caps =
+                            udp_receiver_advertise_caps(transport_file.as_deref(), media);
                         {
                             let chain = inner::build_udpsrc(
                                 media,
                                 *variant,
-                                Some(&media.raw_caps),
+                                advertise_caps.as_ref(),
                             )?;
                             let settings = self.settings.lock().unwrap();
                             inner::apply_udp_src_inner_properties(
@@ -808,7 +807,7 @@ impl NmosSrc {
             InnerConfig::Real(TransportConfig::Mxl {
                 domain_path, flow_id, format, transport_file,
             }) => {
-                let advertise_caps = match derive_advertise_caps(transport_file.as_deref()) {
+                let advertise_caps = match mxl_receiver_advertise_caps(transport_file.as_deref()) {
                     Ok(c) => c,
                     Err(e) => {
                         return ActivationOutcome::Failed {
@@ -837,9 +836,15 @@ impl NmosSrc {
                     }
                 }
             }
-            InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
+            InnerConfig::Real(TransportConfig::Udp {
+                variant,
+                media,
+                transport_file,
+            }) => {
+                let advertise_caps =
+                    udp_receiver_advertise_caps(transport_file.as_deref(), media);
                 let settings = self.settings.lock().unwrap();
-                match inner::build_udpsrc(media, *variant, Some(&media.raw_caps)) {
+                match inner::build_udpsrc(media, *variant, advertise_caps.as_ref()) {
                     Ok(chain) => {
                         inner::apply_udp_src_inner_properties(
                             &CAT,
@@ -950,6 +955,68 @@ fn derive_advertise_caps(
     })?;
     gst::info!(CAT, "nmossrc: advertising caps `{caps}` from transport file");
     Ok(Some(caps))
+}
+
+/// True when the MXL receiver inner chain should omit `capssetter` and
+/// use bare `mxlsrc` so runtime caps come from the filesystem flow.
+/// Reads the wide caps tag from the effective configuring transport file
+/// (post-splice at NULL→READY, or the daemon activation file).
+fn mxl_receiver_skips_capssetter(transport_file: Option<&str>) -> bool {
+    transport_file
+        .filter(|s| !s.is_empty())
+        .and_then(|text| {
+            crate::flow_def::indicates_wide_receiver_caps(text)
+                .map_err(|e| {
+                    gst::warning!(
+                        CAT,
+                        "nmossrc: could not read wide caps tag from transport file \
+                         for inner-chain decision: {e:#}",
+                    );
+                })
+                .ok()
+        })
+        .unwrap_or(false)
+}
+
+/// MXL receiver inner-chain caps advertisement. When the effective
+/// transport file indicates wide Receiver Caps, omit `capssetter` so
+/// runtime caps come from the filesystem flow via `mxlsrc`; otherwise
+/// pin configuring essence caps from the same file.
+fn mxl_receiver_advertise_caps(
+    transport_file: Option<&str>,
+) -> Result<Option<gst::Caps>, anyhow::Error> {
+    if mxl_receiver_skips_capssetter(transport_file) {
+        gst::debug!(
+            CAT,
+            "nmossrc: wide MXL receiver — bare mxlsrc (no capssetter); \
+             runtime caps from MXL flow on disk",
+        );
+        return Ok(None);
+    }
+    derive_advertise_caps(transport_file)
+}
+
+/// UDP receiver inner-chain caps advertisement. When the effective
+/// transport file (activation SDP from libnvnmos, or the post-splice
+/// configuring SDP) carries `a=x-nvnmos-caps:`, omit `capssetter` so
+/// runtime caps come from the live RTP flow; otherwise pin essence
+/// caps parsed from the same SDP.
+fn udp_receiver_advertise_caps(
+    transport_file: Option<&str>,
+    media: &crate::session::UdpMedia,
+) -> Option<gst::Caps> {
+    if transport_file
+        .filter(|s| !s.is_empty())
+        .is_some_and(crate::sdp::indicates_wide_receiver_caps)
+    {
+        gst::debug!(
+            CAT,
+            "nmossrc: wide UDP receiver — depay only (no capssetter); \
+             runtime caps from activation SDP",
+        );
+        return None;
+    }
+    Some(media.raw_caps.clone())
 }
 
 /// Best-available caps for the bin's fake chain, resolved from
@@ -1084,6 +1151,104 @@ mod tests {
         };
         let cs: CommonSettings = s.into();
         assert_eq!(cs.transport_caps.as_ref(), Some(&caps));
+    }
+
+    #[test]
+    fn mxl_wide_receiver_skips_capssetter_advertise_caps() {
+        use crate::flow_def::{FlowDefOverrides, splice_overrides};
+        use crate::types::CapsMode;
+        let _ = gst::init();
+        let narrow_file = r#"{
+            "format":"urn:x-nmos:format:video",
+            "media_type":"video/v210",
+            "grain_rate":{"numerator":25,"denominator":1},
+            "frame_width":1920,
+            "frame_height":1080
+        }"#;
+        let wide_file = r#"{
+            "format":"urn:x-nmos:format:video",
+            "media_type":"video/v210",
+            "grain_rate":{"numerator":25,"denominator":1},
+            "frame_width":1920,
+            "frame_height":1080,
+            "tags":{"urn:x-nvnmos:tag:caps":[""]}
+        }"#;
+        let spliced_wide = splice_overrides(
+            narrow_file,
+            &FlowDefOverrides {
+                caps_mode: CapsMode::Wide,
+                ..FlowDefOverrides::default()
+            },
+        )
+        .expect("wide splice");
+        assert!(
+            mxl_receiver_advertise_caps(Some(&spliced_wide))
+                .unwrap()
+                .is_none(),
+            "post-splice wide transport file must skip capssetter",
+        );
+        assert!(
+            mxl_receiver_advertise_caps(Some(wide_file))
+                .unwrap()
+                .is_none(),
+            "activation/configuring file with wide caps tag must skip capssetter",
+        );
+        assert!(
+            mxl_receiver_advertise_caps(Some(narrow_file))
+                .unwrap()
+                .is_some(),
+            "narrow transport file still uses capssetter",
+        );
+        let spliced_narrow = splice_overrides(
+            wide_file,
+            &FlowDefOverrides {
+                caps_mode: CapsMode::Narrow,
+                ..FlowDefOverrides::default()
+            },
+        )
+        .expect("narrow splice");
+        assert!(
+            mxl_receiver_advertise_caps(Some(&spliced_narrow))
+                .unwrap()
+                .is_some(),
+            "post-splice narrow transport file must use capssetter",
+        );
+    }
+
+    #[test]
+    fn udp_wide_receiver_skips_capssetter_advertise_caps() {
+        let _ = gst::init();
+        const NARROW_SDP: &str = concat!(
+            "v=0\r\n",
+            "o=- 1 0 IN IP4 192.0.2.10\r\n",
+            "s=Example\r\n",
+            "t=0 0\r\n",
+            "m=video 5004 RTP/AVP 96\r\n",
+            "c=IN IP4 239.2.2.2/64\r\n",
+            "a=rtpmap:96 raw/90000\r\n",
+            "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=25/1; depth=10\r\n",
+        );
+        const WIDE_SDP: &str = concat!(
+            "v=0\r\n",
+            "o=- 1 0 IN IP4 192.0.2.10\r\n",
+            "s=Example\r\n",
+            "t=0 0\r\n",
+            "m=video 5004 RTP/AVP 96\r\n",
+            "c=IN IP4 239.2.2.2/64\r\n",
+            "a=rtpmap:96 raw/90000\r\n",
+            "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=25/1; depth=10\r\n",
+            "a=x-nvnmos-caps:96\r\n",
+        );
+        let narrow_media = crate::sdp::parse_sdp(NARROW_SDP).expect("parse narrow");
+        let wide_media = crate::sdp::parse_sdp(WIDE_SDP).expect("parse wide");
+        assert!(
+            udp_receiver_advertise_caps(Some(NARROW_SDP), &narrow_media).is_some(),
+            "narrow SDP must pin capssetter",
+        );
+        assert!(
+            udp_receiver_advertise_caps(Some(WIDE_SDP), &wide_media).is_none(),
+            "wide SDP (a=x-nvnmos-caps) must skip capssetter",
+        );
     }
 
 }
