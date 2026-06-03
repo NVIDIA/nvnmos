@@ -98,17 +98,20 @@
 //! `capsfilter`" hint. Receiver-side deferred mode is intentionally
 //! out of scope (no peer to query).
 //!
-//! `nmossrc` advertises essence caps on its ghost source pad
-//! whenever a flow_def is in play (`transport-file*` at NULL→READY,
-//! a flow_def synthesised from `caps + mxl-flow-id`, or the
-//! daemon-spliced internal transport file at activation). The
-//! flow_def is reverse-mapped via [`flow_def::caps_from`]
-//! and pinned by an internal `mxlsrc ! capssetter` chain so
-//! downstream caps queries see the concrete shape the flow will
-//! carry — the canonical `nmossrc ! transform ! nmossink` pipeline
-//! then resolves end-to-end at READY→PAUSED: the deferred
-//! `nmossink`'s peer_query_caps lands on the pinned caps and
-//! `AddSender` runs against the right flow_def.
+//! `nmossrc` advertises essence caps on its ghost source pad when a
+//! configuring transport file is in play, except for MXL receivers
+//! whose effective transport file indicates wide Receiver Caps (the
+//! `urn:x-nvnmos:tag:caps` tag after NULL→READY property splice, or on
+//! the daemon activation file): those use bare `mxlsrc` so runtime
+//! caps come from the filesystem flow_def, not the configuring one.
+//! Otherwise the configuring flow_def is reverse-mapped via
+//! [`flow_def::caps_from`] and pinned by an internal
+//! `mxlsrc ! capssetter` chain so downstream caps queries see the
+//! concrete shape the flow will carry — the canonical
+//! `nmossrc ! transform ! nmossink` pipeline then resolves end-to-end
+//! at READY→PAUSED: the deferred `nmossink`'s peer_query_caps lands
+//! on the pinned caps and `AddSender` runs against the right
+//! flow_def.
 //!
 //! Receiver-side caps→flow_def synthesis is symmetric with the
 //! Sender path: `nmossrc` with `caps` + `mxl-flow-id` (no transport
