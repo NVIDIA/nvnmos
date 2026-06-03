@@ -1078,6 +1078,7 @@ fn decide_inner_config_udp(
     settings: &CommonSettings,
     variant: UdpVariant,
     transport_file: Option<&str>,
+    cross_check_mode: sdp::EssenceCrossCheckMode,
 ) -> Result<InnerConfig, anyhow::Error> {
     let Some(text) = transport_file else {
         let reason = match settings.side {
@@ -1108,8 +1109,13 @@ fn decide_inner_config_udp(
     // as `SdpError::TransportCapsMismatch`. Mirrors
     // `decide_inner_config_mxl`'s `resolve_mxl_flow_meta`
     // cross-check pass.
-    sdp::cross_check_essence(&media, settings.caps.as_ref(), settings.transport_caps.as_ref())
-        .with_context(|| {
+    sdp::cross_check_essence(
+        &media,
+        settings.caps.as_ref(),
+        settings.transport_caps.as_ref(),
+        cross_check_mode,
+    )
+    .with_context(|| {
             format!(
                 "{element}: cross-checking SDP against `caps` / `transport-caps` \
                  for transport={:?}",
@@ -1121,6 +1127,22 @@ fn decide_inner_config_udp(
         media,
         transport_file: Some(text.to_owned()),
     }))
+}
+
+/// Cross-check strictness for [`decide_inner_config_udp`]: wide
+/// receivers relax essence shape on activation only.
+fn udp_essence_cross_check_mode(
+    settings: &CommonSettings,
+    activation: bool,
+) -> sdp::EssenceCrossCheckMode {
+    if activation
+        && settings.side == Side::Receiver
+        && settings.caps_mode == CapsMode::Wide
+    {
+        sdp::EssenceCrossCheckMode::FormatFamilyOnly
+    } else {
+        sdp::EssenceCrossCheckMode::Full
+    }
 }
 
 /// Transport-specific setup-time work for [`Transport::Mxl`]:
@@ -1274,8 +1296,13 @@ fn resolve_inner_config_udp(
         ),
         other => other,
     };
-    let inner =
-        decide_inner_config_udp(element, settings, variant, resolved_transport_file.as_deref())?;
+    let inner = decide_inner_config_udp(
+        element,
+        settings,
+        variant,
+        resolved_transport_file.as_deref(),
+        sdp::EssenceCrossCheckMode::Full,
+    )?;
     Ok((inner, resolved_transport_file))
 }
 
@@ -1610,6 +1637,7 @@ pub(crate) fn make_activation_plan(
             settings,
             UdpVariant::V1,
             Some(transport_file),
+            udp_essence_cross_check_mode(settings, true),
         ) {
             Ok(inner) => inner,
             Err(e) => {
@@ -1628,6 +1656,7 @@ pub(crate) fn make_activation_plan(
             settings,
             UdpVariant::V2,
             Some(transport_file),
+            udp_essence_cross_check_mode(settings, true),
         ) {
             Ok(inner) => inner,
             Err(e) => {
@@ -2002,8 +2031,14 @@ mod tests {
         fn decide_udp_v1_with_valid_sdp_is_real() {
             let s = udp_settings(Side::Receiver, Transport::Udp);
             let inner =
-                decide_inner_config_udp("nmossrc", &s, UdpVariant::V1, Some(VIDEO_UDP_SDP))
-                    .expect("valid SDP parses");
+                decide_inner_config_udp(
+                    "nmossrc",
+                    &s,
+                    UdpVariant::V1,
+                    Some(VIDEO_UDP_SDP),
+                    sdp::EssenceCrossCheckMode::Full,
+                )
+                .expect("valid SDP parses");
             match inner {
                 InnerConfig::Real(TransportConfig::Udp {
                     variant,
@@ -2028,8 +2063,14 @@ mod tests {
         fn decide_udp_v2_picks_udp2_variant() {
             let s = udp_settings(Side::Sender, Transport::Udp2);
             let inner =
-                decide_inner_config_udp("nmossink", &s, UdpVariant::V2, Some(VIDEO_UDP_SDP))
-                    .expect("valid SDP parses");
+                decide_inner_config_udp(
+                    "nmossink",
+                    &s,
+                    UdpVariant::V2,
+                    Some(VIDEO_UDP_SDP),
+                    sdp::EssenceCrossCheckMode::Full,
+                )
+                .expect("valid SDP parses");
             match inner {
                 InnerConfig::Real(TransportConfig::Udp { variant, .. }) => {
                     assert_eq!(variant, UdpVariant::V2);
@@ -2043,8 +2084,14 @@ mod tests {
             for side in [Side::Sender, Side::Receiver] {
                 let s = udp_settings(side, Transport::Udp);
                 let inner =
-                    decide_inner_config_udp("nmossrc", &s, UdpVariant::V1, None)
-                        .expect("None transport_file is not an error");
+                    decide_inner_config_udp(
+                        "nmossrc",
+                        &s,
+                        UdpVariant::V1,
+                        None,
+                        sdp::EssenceCrossCheckMode::Full,
+                    )
+                    .expect("None transport_file is not an error");
                 match inner {
                     InnerConfig::Fake { reason } => {
                         assert!(
@@ -2065,8 +2112,14 @@ mod tests {
         fn decide_udp_with_malformed_sdp_attributes_error() {
             let s = udp_settings(Side::Receiver, Transport::Udp);
             let err =
-                decide_inner_config_udp("nmossrc", &s, UdpVariant::V1, Some("garbage"))
-                    .expect_err("malformed SDP must error");
+                decide_inner_config_udp(
+                    "nmossrc",
+                    &s,
+                    UdpVariant::V1,
+                    Some("garbage"),
+                    sdp::EssenceCrossCheckMode::Full,
+                )
+                .expect_err("malformed SDP must error");
             let msg = format!("{err:#}");
             assert!(
                 msg.contains("nmossrc"),
@@ -2640,8 +2693,14 @@ mod tests {
                 ),
                 ..udp_settings(Side::Receiver, Transport::Udp)
             };
-            decide_inner_config_udp("nmossrc", &s, UdpVariant::V1, Some(VIDEO_UDP_SDP))
-                .expect("matching caps + transport_caps → ok");
+            decide_inner_config_udp(
+                "nmossrc",
+                &s,
+                UdpVariant::V1,
+                Some(VIDEO_UDP_SDP),
+                sdp::EssenceCrossCheckMode::Full,
+            )
+            .expect("matching caps + transport_caps → ok");
         }
 
         /// Format-family cross-check: `caps=audio/x-raw` on
@@ -2658,6 +2717,7 @@ mod tests {
                 &s,
                 UdpVariant::V1,
                 Some(VIDEO_UDP_SDP),
+                sdp::EssenceCrossCheckMode::Full,
             )
             .expect_err("audio caps + video SDP must error");
             let chain = format!("{err:#}");
@@ -2688,6 +2748,7 @@ mod tests {
                 &s,
                 UdpVariant::V1,
                 Some(VIDEO_UDP_SDP),
+                sdp::EssenceCrossCheckMode::Full,
             )
             .expect_err("video clock-rate mismatch must error");
             let chain = format!("{err:#}");
@@ -2695,6 +2756,51 @@ mod tests {
                 chain.contains("transport-caps mismatch"),
                 "error must attribute to cross-check; got: {chain}",
             );
+        }
+
+        /// Wide receiver activation: stereo `caps` must not
+        /// block mono activation SDP (essence shape is not
+        /// cross-checked; format family still matches).
+        #[test]
+        fn activation_udp_wide_receiver_skips_essence_shape_cross_check() {
+            const AUDIO_MONO_ACTIVATION_SDP: &str = concat!(
+                "v=0\r\n",
+                "o=- 1 0 IN IP4 192.0.2.10\r\n",
+                "s=Example\r\n",
+                "t=0 0\r\n",
+                "m=audio 5004 RTP/AVP 97\r\n",
+                "c=IN IP4 239.2.2.2/64\r\n",
+                "a=rtpmap:97 L24/48000\r\n",
+            );
+            let s = CommonSettings {
+                caps: Some(
+                    gst::Caps::builder("audio/x-raw")
+                        .field("channels", 2i32)
+                        .build(),
+                ),
+                caps_mode: CapsMode::Wide,
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            let plan = make_activation_plan(
+                &cat(),
+                "nmossrc",
+                &s,
+                &req(Side::Receiver, Some(AUDIO_MONO_ACTIVATION_SDP)),
+            );
+            match plan.inner {
+                InnerConfig::Real(TransportConfig::Udp { media, .. }) => {
+                    assert_eq!(
+                        media
+                            .raw_caps
+                            .structure(0)
+                            .and_then(|s| s.get::<i32>("channels").ok()),
+                        Some(1),
+                        "activation SDP is authoritative for channel count",
+                    );
+                }
+                other => panic!("expected Real(Udp) inner on wide activation; got {other:?}"),
+            }
+            assert!(matches!(plan.ack, ActivationAck::Success));
         }
 
         /// Activation SDP cross-check fires too: a video
