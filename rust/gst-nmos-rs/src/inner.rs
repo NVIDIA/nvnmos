@@ -85,6 +85,15 @@ const PROBE_WAIT: Duration = Duration::from_secs(2);
 /// failing) without dragging out a healthy activation.
 const STATE_WAIT: gst::ClockTime = gst::ClockTime::from_seconds(2);
 
+/// Options for [`rebuild_chain_with_opts`]. When `drain_downstream` is
+/// true, [`flush_external_of_ghost`] runs on an [`nmossrc`] src ghost
+/// before the anchor block probe (see callers). Used only for live
+/// PLAYING inner swaps, not initial NULL→READY activation.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RebuildChainOpts {
+    pub drain_downstream: bool,
+}
+
 /// Swap the chain behind the bin's permanent anchor.
 ///
 /// This is the **only** mutator of the bin's child set after
@@ -118,12 +127,13 @@ const STATE_WAIT: gst::ClockTime = gst::ClockTime::from_seconds(2);
 /// bins. For wrapped sub-bins (e.g. the `mxlsrc ! capssetter` bin
 /// built by `build_mxlsrc` with `advertise_caps`) this is the
 /// ghosted outer pad name on the sub-bin, which is `"src"`.
-pub(crate) fn rebuild_chain(
+pub(crate) fn rebuild_chain_with_opts(
     cat: &gst::DebugCategory,
     bin: &gst::Bin,
     ghost: &gst::GhostPad,
     new_chain: &gst::Element,
     pad_name: &str,
+    opts: RebuildChainOpts,
 ) -> Result<(), anyhow::Error> {
     let anchor_outer_pad = ghost
         .target()
@@ -153,6 +163,10 @@ pub(crate) fn rebuild_chain(
         anyhow!("anchor `{ANCHOR_NAME}` missing `{probe_pad_name}` pad")
     })?;
 
+    if opts.drain_downstream {
+        flush_external_of_ghost(cat, ghost);
+    }
+
     let probe_id = block_and_wait(cat, &probe_pad)
         .context("blocking anchor pad before chain rebuild")?;
 
@@ -170,7 +184,18 @@ pub(crate) fn rebuild_chain(
     result
 }
 
-/// Inner half of [`rebuild_chain`] — runs with the anchor pad held
+/// [`rebuild_chain_with_opts`] with default options (no downstream drain).
+pub(crate) fn rebuild_chain(
+    cat: &gst::DebugCategory,
+    bin: &gst::Bin,
+    ghost: &gst::GhostPad,
+    new_chain: &gst::Element,
+    pad_name: &str,
+) -> Result<(), anyhow::Error> {
+    rebuild_chain_with_opts(cat, bin, ghost, new_chain, pad_name, RebuildChainOpts::default())
+}
+
+/// Inner half of [`rebuild_chain_with_opts`] — runs with the anchor pad held
 /// blocked. Factored out so we can `?`-propagate errors and still
 /// remove the probe unconditionally in the caller.
 fn swap_chain_inner(
@@ -246,21 +271,66 @@ fn swap_chain_inner(
             "new chain `{}` missing `{new_chain_pad_name}` pad",
             new_chain.name(),
         ))?;
-    match ghost.direction() {
-        gst::PadDirection::Sink => link_pad.link(&new_chain_pad),
-        gst::PadDirection::Src => new_chain_pad.link(&link_pad),
-        _ => unreachable!(),
+
+    // The anchor retains sticky events (e.g. CAPS) from the previous
+    // inner chain after unlink. Default pad-link caps/template checks
+    // then fail with "Pads do not have common format" even when the
+    // new chain would negotiate correctly. Link with empty checks;
+    // the identity anchor forwards stickies to the new chain.
+    if let Err(e) = link_pads_for_chain_swap(ghost, &link_pad, &new_chain_pad) {
+        let _ = new_chain.set_state(gst::State::Null);
+        let _ = bin.remove(new_chain);
+        return Err(anyhow!(
+            "linking anchor to new chain `{}`: {e}",
+            new_chain.name(),
+        ));
     }
-    .map_err(|e| anyhow!(
-        "linking anchor to new chain `{}`: {e}",
-        new_chain.name(),
-    ))?;
 
     new_chain
         .sync_state_with_parent()
         .with_context(|| format!("syncing state of `{}` with parent", new_chain.name()))?;
 
     wait_for_chain_state(cat, bin, new_chain)
+}
+
+/// Link the anchor to a new inner chain without caps/template checks
+/// so a prior inner's sticky caps on the anchor do not block the swap.
+fn link_pads_for_chain_swap(
+    ghost: &gst::GhostPad,
+    link_pad: &gst::Pad,
+    new_chain_pad: &gst::Pad,
+) -> Result<(), gst::PadLinkError> {
+    use gst::PadLinkCheck;
+    match ghost.direction() {
+        gst::PadDirection::Sink => {
+            link_pad.link_full(new_chain_pad, PadLinkCheck::empty())?;
+        }
+        gst::PadDirection::Src => {
+            new_chain_pad.link_full(link_pad, PadLinkCheck::empty())?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+/// Optional pre-probe flush on the peer of an [`nmossrc`] src ghost when
+/// [`RebuildChainOpts::drain_downstream`] is set. May shorten how long
+/// the anchor stays blocked if something downstream still holds buffers.
+///
+/// Not used on [`nmossink`]: its ghost is a sink. Flushing upstream of a
+/// sender bin walks the whole processor (`nmossrc` included) and has
+/// been observed to wedge sender activation (HTTP PATCH timeout).
+fn flush_external_of_ghost(cat: &gst::DebugCategory, ghost: &gst::GhostPad) {
+    if ghost.direction() != gst::PadDirection::Src || ghost.peer().is_none() {
+        return;
+    }
+    gst::debug!(
+        cat,
+        "rebuild_chain: flushing downstream of ghost `{}` before anchor block",
+        ghost.name(),
+    );
+    let _ = ghost.send_event(gst::event::FlushStart::new());
+    let _ = ghost.send_event(gst::event::FlushStop::builder(true).build());
 }
 
 /// Install an `IDLE | BLOCK_DOWNSTREAM` probe on `pad` and wait for
@@ -410,8 +480,10 @@ fn parent_target_state(bin: &gst::Bin) -> gst::State {
 /// single-swap rebuild rather than inserting an intermediate fake
 /// hop.
 ///
-/// Used by `execute_activation_plan` to decide whether to go via a fake
-/// hop when swapping real → real: even though IS-05 requires every
+/// Used by `execute_activation_plan` to decide whether to go via a
+/// fake hop when swapping real → real (transport teardown; separate
+/// from anchor sticky-caps / pad-link policy in
+/// [`link_pads_for_chain_swap`]). Even though IS-05 requires every
 /// activation to rebuild the data path, doing real → new real in
 /// one step can race the transport's per-process state (libmxl, for
 /// instance: the old `FlowReader` may not be fully released before
@@ -2379,5 +2451,98 @@ mod tests {
             None,
             Some(&pay_props),
         );
+    }
+
+    /// Sticky caps on the anchor from the first inner chain must not block
+    /// linking a second chain with different advertised caps; default
+    /// pad-link checks fail, [`link_pads_for_chain_swap`] uses
+    /// [`gst::PadLinkCheck::empty`].
+    #[test]
+    fn link_pads_for_chain_swap_allows_mismatched_sticky_caps() {
+        init_gst();
+        if gst::ElementFactory::find("capssetter").is_none() {
+            return;
+        }
+        let narrow = gst::Caps::from_str(
+            "video/x-raw,format=v210,width=1920,height=1080,framerate=25/1",
+        )
+        .expect("narrow caps");
+        let other = gst::Caps::from_str(
+            "video/x-raw,format=UYVY,width=1920,height=1080,framerate=25/1",
+        )
+        .expect("other caps");
+
+        let anchor = gst::ElementFactory::make("identity")
+            .name("anchor")
+            .build()
+            .expect("identity");
+        let narrow_chain = gst::ElementFactory::make("capssetter")
+            .name("narrow")
+            .property("caps", &narrow)
+            .build()
+            .expect("narrow capssetter");
+        let wide_chain = gst::ElementFactory::make("capssetter")
+            .name("wide")
+            .property("caps", &other)
+            .build()
+            .expect("wide capssetter");
+
+        let bin = gst::Bin::new();
+        bin.add_many([&anchor, &narrow_chain, &wide_chain])
+            .expect("add elements");
+        anchor
+            .link(&narrow_chain)
+            .expect("link anchor to narrow chain");
+
+        bin.set_state(gst::State::Paused)
+            .expect("bin -> PAUSED");
+        let (_ret, state, _pending) = bin.state(gst::ClockTime::from_seconds(5));
+        assert_eq!(state, gst::State::Paused);
+
+        anchor.unlink(&narrow_chain);
+        // nmossrc topology: new_chain.src → anchor.sink (see `build_initial` / `rebuild_chain`).
+        let anchor_sink = anchor.static_pad("sink").expect("anchor sink");
+        let wide_src = wide_chain.static_pad("src").expect("wide src");
+
+        let ghost = gst::GhostPad::builder(gst::PadDirection::Src)
+            .name("src")
+            .build();
+        ghost
+            .set_target(Some(&anchor.static_pad("src").expect("anchor src")))
+            .expect("ghost target");
+        ghost.set_active(true).expect("ghost active");
+
+        assert!(
+            anchor_sink.link(&wide_src).is_err(),
+            "default pad-link check must reject mismatched sticky caps"
+        );
+        link_pads_for_chain_swap(&ghost, &anchor_sink, &wide_src).expect(
+            "empty pad-link check must allow swap despite sticky caps on anchor",
+        );
+
+        let _ = bin.set_state(gst::State::Null);
+    }
+
+    #[test]
+    fn flush_external_of_ghost_noop_without_downstream_peer() {
+        init_gst();
+        let cat = test_log_cat();
+        let nmos_bin = gst::Bin::with_name("test-nmossrc");
+        let initial = gst::ElementFactory::make("fakesrc")
+            .property("is-live", true)
+            .build()
+            .expect("fakesrc");
+        let ghost =
+            build_initial(&nmos_bin, initial, "src", gst::PadDirection::Src).expect("build_initial");
+        nmos_bin.add_pad(&ghost).expect("add ghost");
+        assert!(ghost.peer().is_none());
+
+        flush_external_of_ghost(cat, &ghost);
+        // No peer → no panic, no effect to assert beyond "returns".
+    }
+
+    #[test]
+    fn rebuild_chain_opts_drain_defaults_to_false() {
+        assert!(!RebuildChainOpts::default().drain_downstream);
     }
 }
