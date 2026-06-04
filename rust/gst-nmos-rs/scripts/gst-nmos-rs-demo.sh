@@ -157,6 +157,38 @@ _demo_line_buffered() {
     fi
 }
 
+# Return 0 when ss reports a LISTEN socket on path (another nvnmosd up).
+# No listener / missing path in ss → return 1.
+_uds_socket_listening() {
+    local path=$1
+    command -v ss >/dev/null 2>&1 || return 1
+    ss -xlpn 2>/dev/null | rg -F "LISTEN" | rg -qF "$path"
+}
+
+# Return 0 when ss reports pid is listening on the socket path.
+_uds_listener_owned_by_pid() {
+    local pid=$1 path=$2
+    command -v ss >/dev/null 2>&1 || return 0
+    ss -xlpn 2>/dev/null | rg -F "$path" | rg -q "pid=$pid[,)]"
+}
+
+# Fail if more than one nvnmosd was started with this --uds path.
+_assert_single_nvnmosd_on_sock() {
+    local -a pids=()
+    mapfile -t pids < <(pgrep -f "nvnmosd --uds $SOCK" 2>/dev/null || true)
+    if (( ${#pids[@]} != 1 )); then
+        echo "[error] expected exactly one nvnmosd on $SOCK, found ${#pids[@]}:"
+        pgrep -af "nvnmosd --uds $SOCK" 2>/dev/null || true
+        echo "        stop extras: pkill -9 -f 'nvnmosd --uds $SOCK'"
+        exit 1
+    fi
+    if (( pids[0] != DAEMON_PID )); then
+        echo "[error] nvnmosd on $SOCK is pid ${pids[0]}, not demo daemon pid $DAEMON_PID"
+        pgrep -af "nvnmosd --uds $SOCK" 2>/dev/null || true
+        exit 1
+    fi
+}
+
 # Shared MXL Domain (tmpfs-backed). All three Nodes operate inside
 # it. Only used when DEMO_TRANSPORT=mxl; the bootstrap block below
 # only creates the directory + `domain_def.json` in that case.
@@ -427,7 +459,16 @@ PLUGIN_DIR="$TARGET_DIR/debug"
 
 # ---- Daemon --------------------------------------------------------
 
-rm -f "$SOCK"
+# Do not `rm -f` the socket: that only unlinks the pathname while a
+# zombie nvnmosd can keep listening (and hold HTTP ports). nvnmosd probes
+# the path and exits if another listener is already up.
+if _uds_socket_listening "$SOCK"; then
+    echo "[error] UDS socket $SOCK is already in use (another nvnmosd listening?)."
+    echo "        Stop it, e.g.: pkill -9 -f 'nvnmosd --uds $SOCK'"
+    pgrep -af "nvnmosd --uds $SOCK" 2>/dev/null || true
+    exit 1
+fi
+
 echo "[daemon] starting nvnmosd on $SOCK"
 RUST_LOG=${RUST_LOG:-info} \
 LD_LIBRARY_PATH="$LIB:${LD_LIBRARY_PATH:-}" \
@@ -482,11 +523,33 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 for _ in $(seq 1 50); do
-    [[ -S "$SOCK" ]] && break
+    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+        echo "[daemon] nvnmosd exited during startup"
+        cat "$DAEMON_LOG"
+        exit 1
+    fi
+    # A socket file alone is not enough: a stale pathname or another
+    # nvnmosd can satisfy -S before our daemon has bound.
+    if _uds_socket_listening "$SOCK" && _uds_listener_owned_by_pid "$DAEMON_PID" "$SOCK"; then
+        break
+    fi
     sleep 0.1
 done
-[[ -S "$SOCK" ]] || { echo "[daemon] socket did not appear"; cat "$DAEMON_LOG"; exit 1; }
-echo "[daemon] ready (pid $DAEMON_PID)"
+if ! _uds_socket_listening "$SOCK"; then
+    echo "[daemon] $SOCK is not listening (stale file or nvnmosd failed to bind?)"
+    ls -la "$SOCK" 2>/dev/null || true
+    cat "$DAEMON_LOG"
+    exit 1
+fi
+if ! _uds_listener_owned_by_pid "$DAEMON_PID" "$SOCK"; then
+    echo "[daemon] $SOCK is not owned by nvnmosd pid $DAEMON_PID"
+    ss -xlpn 2>/dev/null | rg 'gst-nmos-rs-demo\.sock' || true
+    pgrep -af "nvnmosd --uds $SOCK" 2>/dev/null || true
+    cat "$DAEMON_LOG"
+    exit 1
+fi
+_assert_single_nvnmosd_on_sock
+echo "[daemon] ready (pid $DAEMON_PID, listening on $SOCK)"
 
 # ---- Common gst env for nmossrc / nmossink + inner mxl* ----------
 
