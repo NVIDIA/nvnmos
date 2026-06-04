@@ -27,40 +27,9 @@ use crate::types::{CapsMode, FlowFormat, Transport};
 /// timeout — same order of magnitude, no special meaning.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Whether the snapshot came from `nmossink` or `nmossrc`. Surfaces in
-/// error/log messages so validation failures point the user at the
-/// right property name, and selects which gRPC AddSender/AddReceiver
-/// call the session opens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Side {
-    Sender,
-    Receiver,
-}
+pub(crate) mod types;
 
-impl Side {
-    /// Property name the user sets to supply the NMOS name for this
-    /// side of element — `sender-name` on `nmossink`, `receiver-name`
-    /// on `nmossrc`. Used in validation error messages.
-    fn name_property(self) -> &'static str {
-        match self {
-            Self::Sender => "sender-name",
-            Self::Receiver => "receiver-name",
-        }
-    }
-
-    /// Decode the proto-level `Side` enum value carried on
-    /// `ActivationEvent.side`. Returns `None` for `SIDE_UNSPECIFIED`
-    /// or any value not in the proto enum — the daemon never sends
-    /// those, so the activation handler treats them as a bug and
-    /// acks failure.
-    pub(crate) fn try_from_proto(value: i32) -> Option<Self> {
-        match nvnmos_rpc::v1::Side::try_from(value).ok()? {
-            nvnmos_rpc::v1::Side::Sender => Some(Self::Sender),
-            nvnmos_rpc::v1::Side::Receiver => Some(Self::Receiver),
-            nvnmos_rpc::v1::Side::Unspecified => None,
-        }
-    }
-}
+use self::types::Side;
 
 /// Translate the GObject `Transport` enum to the wire enum.
 ///
@@ -455,11 +424,11 @@ pub(crate) enum TransportConfig {
     /// [`UdpVariant`]-selected RTP (de)payloader.
     Udp {
         variant: UdpVariant,
-        media: UdpMedia,
+        media: udp::types::UdpMedia,
         /// SDP transport file the daemon advertises on IS-04 (either
         /// the user-supplied one or the synthesised one). Retained
-        /// verbatim for logs / diagnostics; the data the inner chain
-        /// needs is denormalised into [`UdpMedia`].
+        /// verbatim for logs / diagnostics; the inner chain reads the
+        /// logical RTP stream in [`udp::types::UdpMedia`] (not raw SDP).
         transport_file: Option<String>,
     },
 }
@@ -481,9 +450,9 @@ impl TransportConfig {
 }
 
 mod mxl;
-mod udp;
+pub(crate) mod udp;
 
-pub(crate) use udp::{UdpLeg, UdpMedia, UdpVariant};
+pub(crate) use udp::UdpVariant;
 pub(crate) use mxl::decide_inner_config_mxl;
 pub(crate) use udp::{decide_inner_config_udp, udp_essence_cross_check_mode};
 
@@ -579,7 +548,7 @@ pub(crate) fn validate_and_open(
             format!("inner data path: mxl (domain_path={domain_path:?}, flow_id={flow_id}, format={format:?})")
         }
         InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
-            let leg_summary = |leg: &UdpLeg| {
+            let leg_summary = |leg: &udp::types::UdpLeg| {
                 format!(
                     "{}:{} iface={:?} source_ip={:?} source_port={:?}",
                     leg.destination_ip,

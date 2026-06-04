@@ -7,7 +7,8 @@
 //! is an SDP document (per AMWA IS-04 / IS-05 + the SMPTE ST 2110
 //! profiles). This module is the UDP-flavoured analogue of
 //! [`crate::flow_def`]: it parses a transport-file SDP into a
-//! [`UdpMedia`] that the chain factories can consume, and builds a
+//! [`UdpMedia`] (logical RTP stream — shared essence and leg(s), not a
+//! single `m=` block) that the chain factories can consume, and builds a
 //! *configuring* SDP from a [`UdpMedia`] that the element hands to
 //! `nvnmosd` at `AddSender` / `AddReceiver` time. The daemon owns
 //! the IS-04 / IS-05 publication; this module never writes
@@ -70,7 +71,8 @@ use gstreamer as gst;
 use gstreamer_sdp as gst_sdp;
 use thiserror::Error;
 
-use crate::session::{Side, UdpLeg, UdpMedia};
+use crate::session::types::Side;
+use crate::session::udp::types::{UdpLeg, UdpMedia};
 use crate::types::{CapsMode, FlowFormat};
 
 /// Canonical default values for SDP synthesis, sourced from
@@ -405,10 +407,11 @@ pub(crate) fn indicates_wide_receiver_caps(text: &str) -> bool {
         .is_some()
 }
 
-/// Parse an SDP transport file into a [`UdpMedia`].
+/// Parse an SDP transport file into a [`UdpMedia`] (logical RTP stream).
 ///
-/// Single-media SDPs only today; multi-media SDPs (ST 2022-7
-/// redundancy) return [`SdpError::MultipleMedia`].
+/// Single-`m=` transport files only today; files with more than one
+/// media line return [`SdpError::MultipleMedia`] until ST 2022-7 parsing
+/// can fold same-essence legs into one [`UdpMedia`].
 pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
     let msg = SDPMessage::parse_buffer(text.as_bytes())
         .map_err(|e| SdpError::Parse(e.to_string()))?;

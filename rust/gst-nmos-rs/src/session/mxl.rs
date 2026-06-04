@@ -7,9 +7,10 @@ use anyhow::{Context, bail};
 use gstreamer as gst;
 
 use super::{
-    ActivationAck, ActivationPlan, CommonSettings, InnerConfig, Side, TransportConfig,
+    ActivationAck, ActivationPlan, CommonSettings, InnerConfig, TransportConfig,
     caps_format,
 };
+use super::types::Side;
 use crate::domain::{self, DomainIdOrigin};
 use crate::flow_def::{self, FlowDefBuildInput, FlowDefOverrides, ValueOrigin};
 use crate::types::FlowFormat;
