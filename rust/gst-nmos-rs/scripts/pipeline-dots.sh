@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Shared helpers for GStreamer pipeline DOT capture + Graphviz PNG export.
-# Source from gst-nmos-rs-demo.sh or generate-udp-video-pipeline-dots.sh:
+# Source from gst-nmos-rs-demo.sh:
 #
 #   source "$(dirname "${BASH_SOURCE[0]}")/pipeline-dots.sh"
 #

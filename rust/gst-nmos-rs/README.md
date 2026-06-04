@@ -10,7 +10,7 @@ talking to the `nvnmosd` NMOS daemon over gRPC. Design lives in
 [`doc/designs/nvnmosd/README.md`](../../doc/designs/nvnmosd/README.md);
 the workspace overview is in [`../README.md`](../README.md).
 
-## Property surface
+## Property Surface
 
 Set via the standard `prop=value` syntax in `gst-launch-1.0`.
 
@@ -59,7 +59,7 @@ Both elements:
 | `destination-port` | uint (0–65535) | optional, RTP transports only | IS-05 receiver `transport_params.destination_port`. **Different semantics from the sender-side property of the same name**: local listen port. Becomes `udpsrc.port` and the SDP `m=` port slot. `0` (the default) = unset; falls back to the transport file's `m=` port, else to 5004. RTP-only. |
 | `depay-properties` | GstStructure | optional | Overrides applied to the inner RTP depayloader every time the UDP receiver chain is built. Same `GstStructure` syntax as `transport-properties`; ignored on non-UDP transports (a warning is logged if non-empty). Takes effect on the next chain build. |
 
-### Property interaction with `transport-file`
+### Property Interaction With `transport-file`
 
 When a `transport-file` (literal or path) and an overlapping property
 are both set, the resulting transport file handed to the daemon is
@@ -123,7 +123,7 @@ cargo build -p gst-nmos-rs
 
 Build output is `target/debug/libgstnmos.so` (or `target/release/...`).
 
-## Loading the plugin
+## Loading the Plugin
 
 ```sh
 export GST_PLUGIN_PATH=/path/to/nvnmos/rust/target/debug
@@ -134,7 +134,7 @@ gst-inspect-1.0 nmos
 `gst-inspect-1.0 nmossink` and `gst-inspect-1.0 nmossrc` list the
 property surface above.
 
-## Smoke test
+## Interactive Demo
 
 For an end-to-end demo — three NMOS Nodes (producer, consumer,
 processor) with an interactive menu for IS-05 enable / disable /
@@ -158,10 +158,38 @@ On WSL or headless hosts, skip the slow `autoaudiosink` probe:
 AUDIO_SINK=fakesink VIDEO_SINK=fakesink DEMO_TRANSPORT=udp ./scripts/gst-nmos-rs-demo.sh
 ```
 
-The script builds `nvnmosd` + the plugin, spawns the daemon and three
+The script builds `nvnmosd` + the plugin, spawns the daemon and several
 gst-launch pipelines, then drops into a menu that PATCHes the
 IS-05 endpoints so you can exercise activation paths against a
 live pipeline.
+
+### Three-Node Pipeline Diagrams
+
+Each Node runs its own `gst-launch-1.0` process (Node 3 uses two:
+one for video, one for audio). The diagrams below were exported from
+a running demo via the interactive menu.
+
+**Node 1 — producer** (audiotestsrc + videotestsrc → two `nmossink` senders):
+video sender is enabled, audio sender is disabled
+
+![Node 1 producer pipeline](images/producer.png)
+
+**Node 2 — consumer** (two `nmossrc` receivers → queues → sinks):
+video receiver is enabled, audio receiver is disabled
+
+![Node 2 consumer pipeline](images/consumer.png)
+
+**Node 3 — processor** (receive flows, process, re-transmit):
+
+Video (`nmossrc` → `videoflip` → `nmossink`): receiver and sender enabled
+
+![Node 3 video processor pipeline](images/processor-video.png)
+
+Audio (`nmossrc` → `volume` → `nmossink`): receiver and sender disabled
+
+![Node 3 audio processor pipeline](images/processor-audio.png)
+
+## More Basic Pipelines
 
 Without `mxl-domain-path` (and `mxl-flow-id`) the element opens a
 session but its data path stays on the fake chain:
@@ -325,7 +353,7 @@ caps, and calls `AddSender`. The daemon log shows both
 `AddReceiver` (from `nmossrc`) and `AddSender` (from the deferred
 `nmossink`) on the same node.
 
-## Multi-flow pipelines
+### Multi-Flow Pipelines
 
 Multiple Senders and Receivers can live on the same Node by sharing
 the `node-seed`; the daemon's session index is keyed on
