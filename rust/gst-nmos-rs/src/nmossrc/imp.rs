@@ -1003,7 +1003,7 @@ fn mxl_receiver_advertise_caps(
 /// caps parsed from the same SDP.
 fn udp_receiver_advertise_caps(
     transport_file: Option<&str>,
-    media: &crate::session::UdpMedia,
+    media: &crate::session::udp::types::UdpMedia,
 ) -> Option<gst::Caps> {
     if transport_file
         .filter(|s| !s.is_empty())
@@ -1067,7 +1067,7 @@ impl From<Settings> for crate::session::CommonSettings {
             node_seed: s.node_seed,
             http_port: s.http_port,
             transport: s.transport,
-            side: crate::session::Side::Receiver,
+            side: crate::session::types::Side::Receiver,
             name: s.receiver_name,
             mxl_domain_id: s.mxl_domain_id,
             mxl_domain_path: s.mxl_domain_path,
@@ -1119,7 +1119,7 @@ mod tests {
         assert_eq!(cs.destination_port, 5004);
         assert_eq!(cs.source_port, 0, "sender-only on the Receiver side must be 0");
         assert_eq!(cs.destination_ip, "", "sender-only on the Receiver side must be empty");
-        assert_eq!(cs.side, crate::session::Side::Receiver);
+        assert_eq!(cs.side, crate::session::types::Side::Receiver);
     }
 
     #[test]

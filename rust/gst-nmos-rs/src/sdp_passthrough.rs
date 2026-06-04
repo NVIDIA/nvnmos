@@ -74,7 +74,7 @@ pub(crate) fn apply_media_overrides_in_place(
 }
 
 /// Parse an SDP transport file, apply [`SdpOverrides`] in place, and
-/// serialise the result without round-tripping through [`crate::sdp::UdpMedia`].
+/// serialise the result without round-tripping through [`crate::session::udp::types::UdpMedia`].
 pub(crate) fn passthrough_with_overrides(
     text: &str,
     overrides: &SdpOverrides<'_>,

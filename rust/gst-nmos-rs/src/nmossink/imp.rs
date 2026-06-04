@@ -890,7 +890,7 @@ impl From<Settings> for crate::session::CommonSettings {
             node_seed: s.node_seed,
             http_port: s.http_port,
             transport: s.transport,
-            side: crate::session::Side::Sender,
+            side: crate::session::types::Side::Sender,
             name: s.sender_name,
             mxl_domain_id: s.mxl_domain_id,
             mxl_domain_path: s.mxl_domain_path,
@@ -942,7 +942,7 @@ mod tests {
         assert_eq!(cs.destination_port, 5004);
         assert_eq!(cs.interface_ip, "", "receiver-only on the Sender side must be empty");
         assert_eq!(cs.multicast_ip, "", "receiver-only on the Sender side must be empty");
-        assert_eq!(cs.side, crate::session::Side::Sender);
+        assert_eq!(cs.side, crate::session::types::Side::Sender);
     }
 
     #[test]

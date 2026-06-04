@@ -48,7 +48,7 @@ use gstreamer as gst;
 
 use crate::CAT;
 use crate::runtime::SHARED_RUNTIME;
-use crate::session::Side;
+use crate::session::types::Side;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 

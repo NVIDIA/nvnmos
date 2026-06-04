@@ -60,7 +60,8 @@ use gst::glib;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 
-use crate::session::{UdpMedia, UdpVariant};
+use crate::session::udp::types::UdpMedia;
+use crate::session::udp::UdpVariant;
 use crate::types::FlowFormat;
 
 /// Name of the permanent anchor element inside every `nmossink` /
@@ -1319,7 +1320,7 @@ pub(crate) fn apply_mxl_src_inner_properties(
 mod tests {
     use super::*;
     use std::sync::LazyLock;
-    use crate::session::UdpLeg;
+    use crate::session::udp::types::UdpLeg;
     use std::str::FromStr;
 
     fn init_gst() {
