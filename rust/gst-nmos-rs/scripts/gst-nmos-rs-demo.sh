@@ -79,6 +79,11 @@ set -u
 # the helper functions are in place.
 DEMO_TRANSPORT=${DEMO_TRANSPORT:-mxl}
 
+# Short queues on live paths (nmossrc → processing → nmossink / sinks).
+# Video: buffer count (2 frames @ 59.94 ≈ 33 ms); buffers=1 caused visible skips.
+DEMO_VIDEO_QUEUE_MAX_BUFFERS=${DEMO_VIDEO_QUEUE_MAX_BUFFERS:-2}
+# Audio: time limit — mxlsrc emits ~48 samples/buffer (1 ms @ 48 kHz).
+DEMO_AUDIO_QUEUE_MAX_TIME_MS=${DEMO_AUDIO_QUEUE_MAX_TIME_MS:-50}
 # Local NIC IP used by the UDP path: drives the receiver's
 # `interface-ip` (the IGMP-join interface, resolved to an iface name
 # for `udpsrc.multicast-iface`) and the sender's `source-ip`
@@ -128,7 +133,7 @@ MXL_REPO=${MXL_REPO:-$REPO/../mxl}
 
 # `libnvnmos.so` (consumed by nvnmosd) and the gst-mxl-rs plugin +
 # libmxl.so runtime (consumed by the inner mxlsink/mxlsrc swaps).
-LIB=${NVNMOS_LIB_DIR:-$REPO/build-mxl}
+LIB=${NVNMOS_LIB_DIR:-$REPO/build}
 MXL_PLUGIN_DIR=${MXL_PLUGIN_DIR:-$MXL_REPO/rust/target/debug}
 MXL_RT_LIB_DIR=${MXL_RT_LIB_DIR:-$MXL_REPO/build/Linux-Clang-Debug/lib}
 
@@ -138,6 +143,19 @@ LOG_DIR=$(mktemp -d -t gst-nmos-rs-demo-XXXXXX)
 source "$_SCRIPT_DIR/pipeline-dots.sh"
 PIPELINE_DOT_ROOT="$LOG_DIR/pipeline-dots"
 DAEMON_LOG="$LOG_DIR/daemon.log"
+
+# Line-buffer stdout/stderr when redirected to log files so GST_DEBUG and
+# daemon traces appear promptly in tail -f (default block buffering hides them).
+# Must `exec` the target so background launches record the real process in $!
+# (a non-exec function wrapper leaves gst-launch as an orphan when cleanup
+# kills only the subshell pid).
+_demo_line_buffered() {
+    if command -v stdbuf >/dev/null 2>&1; then
+        exec stdbuf -oL -eL "$@"
+    else
+        exec "$@"
+    fi
+}
 
 # Shared MXL Domain (tmpfs-backed). All three Nodes operate inside
 # it. Only used when DEMO_TRANSPORT=mxl; the bootstrap block below
@@ -304,6 +322,18 @@ udp_video_buffer_props() {
 #   MXL:          `flow=11111111-aaaa-1111-aaaa-111111111111`
 #   UDP sender:   `dest=232.99.99.1:5004`
 #   UDP receiver: `join=232.99.99.1:5004`
+# GstQueue after each nmossrc: video by frame count, audio by duration (mxlsrc ~1 ms/buffer).
+_demo_video_queue() {
+    local name=$1
+    echo queue name="$name" "max-size-buffers=$DEMO_VIDEO_QUEUE_MAX_BUFFERS" max-size-bytes=0 max-size-time=0
+}
+
+_demo_audio_queue() {
+    local name=$1
+    local max_time_ns=$(( DEMO_AUDIO_QUEUE_MAX_TIME_MS * 1000000 ))
+    echo queue name="$name" max-size-time="$max_time_ns" max-size-buffers=0 max-size-bytes=0
+}
+
 transport_identity_from_active() {
     local side=$1 body=$2
     case "$DEMO_TRANSPORT" in
@@ -370,6 +400,7 @@ IS05_VERSION=v1.2
 
 echo "Logs: $LOG_DIR"
 echo "Transport: $DEMO_TRANSPORT"
+echo "Queues after each nmossrc: video max-size-buffers=$DEMO_VIDEO_QUEUE_MAX_BUFFERS; audio max-size-time=${DEMO_AUDIO_QUEUE_MAX_TIME_MS}ms (Node 2 consumer + Node 3 processor)"
 
 # Re-create the MXL Domain directory. Only needed when
 # DEMO_TRANSPORT=mxl: the UDP / UDP2 transports go straight from
@@ -400,7 +431,7 @@ rm -f "$SOCK"
 echo "[daemon] starting nvnmosd on $SOCK"
 RUST_LOG=${RUST_LOG:-info} \
 LD_LIBRARY_PATH="$LIB:${LD_LIBRARY_PATH:-}" \
-    "$DAEMON_BIN" --uds "$SOCK" > "$DAEMON_LOG" 2>&1 &
+    _demo_line_buffered "$DAEMON_BIN" --uds "$SOCK" > "$DAEMON_LOG" 2>&1 &
 declare -i DAEMON_PID=$!
 
 # Per-pipeline PID globals. Each launcher (`launch_node1` etc) writes
@@ -423,23 +454,20 @@ cleanup() {
     _cleanup_done=1
     echo
     echo "[cleanup] stopping pipelines and daemon..."
-    # SIGTERM first — `gst-launch -e` responds with graceful EOS,
-    # `nvnmosd` tears its listeners down cleanly. If anyone is
-    # wedged (e.g. a pipeline stuck flushing EOS through an idle
-    # placeholder, or a daemon still serving an in-flight RPC) the
-    # SIGKILL after a short grace period guarantees Ctrl+C reliably
-    # exits the script instead of leaving the user with no choice
-    # but Ctrl+Z (which in turn leaks daemon zombies parented to
-    # the stopped script).
-    local -a pids=()
+    # gst-launch: SIGINT (`-e` EOS handler), same as menu teardown. nvnmosd:
+    # SIGTERM. SIGKILL after a short grace if anything is wedged.
     local p
-    for p in "$DAEMON_PID" "$NODE1_PID" "$NODE2_PID" \
-             "$NODE3_VIDEO_PID" "$NODE3_AUDIO_PID" "$BARE_PREVIEW_PID"; do
-        (( p > 0 )) && pids+=("$p")
+    for p in "$NODE1_PID" "$NODE2_PID" "$NODE3_VIDEO_PID" \
+             "$NODE3_AUDIO_PID" "$BARE_PREVIEW_PID"; do
+        (( p > 0 )) && kill -INT "$p" 2>/dev/null || true
     done
-    for p in "${pids[@]}"; do kill -TERM "$p" 2>/dev/null || true; done
+    (( DAEMON_PID > 0 )) && kill -TERM "$DAEMON_PID" 2>/dev/null || true
     sleep 2
-    for p in "${pids[@]}"; do kill -KILL "$p" 2>/dev/null || true; done
+    for p in "$NODE1_PID" "$NODE2_PID" "$NODE3_VIDEO_PID" \
+             "$NODE3_AUDIO_PID" "$BARE_PREVIEW_PID"; do
+        (( p > 0 )) && kill -KILL "$p" 2>/dev/null || true
+    done
+    (( DAEMON_PID > 0 )) && kill -KILL "$DAEMON_PID" 2>/dev/null || true
     wait 2>/dev/null
     rm -f "$SOCK"
     echo "[cleanup] logs retained at $LOG_DIR"
@@ -579,7 +607,7 @@ launch_node1() {
     _rotate_log "$LOG_DIR/node1-producer.log"
     pipeline_dots_prepare_launch node1
     GST_DEBUG=${GST_DEBUG:-nmossink:3} \
-        gst-launch-1.0 -e \
+        _demo_line_buffered gst-launch-1.0 -e \
             videotestsrc pattern=smpte horizontal-speed=2 is-live=true ! \
                 $VIDEO_CAPS ! \
                 nmossink \
@@ -629,11 +657,11 @@ launch_node3_video() {
         echo "[node3-video] already running (pid $NODE3_VIDEO_PID)"
         return 1
     fi
-    echo "[node3-video] starting video processor (nmossrc -> videoflip horizontal -> nmossink)"
+    echo "[node3-video] starting video processor (nmossrc -> queue(${DEMO_VIDEO_QUEUE_MAX_BUFFERS} buffers) -> videoflip -> nmossink)"
     _rotate_log "$LOG_DIR/node3-video.log"
     pipeline_dots_prepare_launch node3-video
     GST_DEBUG=${GST_DEBUG:-nmossrc:3,nmossink:3} \
-        gst-launch-1.0 -e \
+        _demo_line_buffered gst-launch-1.0 -e \
             nmossrc \
                 daemon-uri="unix:$SOCK" \
                 transport="$DEMO_TRANSPORT" \
@@ -645,6 +673,7 @@ launch_node3_video() {
                 caps="$VIDEO_CAPS" \
                 label="Node 3 / video-in" \
                 auto-activate=false ! \
+            $(_demo_video_queue n3-v-in) ! \
             videoconvert ! videoflip method=horizontal-flip ! videoconvert ! \
                 nmossink \
                     daemon-uri="unix:$SOCK" \
@@ -666,11 +695,11 @@ launch_node3_audio() {
         echo "[node3-audio] already running (pid $NODE3_AUDIO_PID)"
         return 1
     fi
-    echo "[node3-audio] starting audio processor (nmossrc -> volume 0.3 -> nmossink)"
+    echo "[node3-audio] starting audio processor (nmossrc -> queue(${DEMO_AUDIO_QUEUE_MAX_TIME_MS}ms) -> volume -> nmossink)"
     _rotate_log "$LOG_DIR/node3-audio.log"
     pipeline_dots_prepare_launch node3-audio
     GST_DEBUG=${GST_DEBUG:-nmossrc:3,nmossink:3} \
-        gst-launch-1.0 -e \
+        _demo_line_buffered gst-launch-1.0 -e \
             nmossrc \
                 daemon-uri="unix:$SOCK" \
                 transport="$DEMO_TRANSPORT" \
@@ -681,6 +710,7 @@ launch_node3_audio() {
                 caps="$AUDIO_CAPS" \
                 label="Node 3 / audio-in" \
                 auto-activate=false ! \
+            $(_demo_audio_queue n3-a-in) ! \
             audioconvert ! volume volume=0.3 ! audioconvert ! \
                 nmossink \
                     daemon-uri="unix:$SOCK" \
@@ -710,11 +740,11 @@ launch_node2() {
         echo "[node2] already running (pid $NODE2_PID)"
         return 1
     fi
-    echo "[node2] starting consumer pipeline (2 nmossrcs -> $AUDIO_SINK / $VIDEO_SINK)"
+    echo "[node2] starting consumer pipeline (nmossrc --> queue(${DEMO_VIDEO_QUEUE_MAX_BUFFERS} buffers) --> ${VIDEO_SINK}; nmossrc --> queue(${DEMO_AUDIO_QUEUE_MAX_TIME_MS}ms) --> ${AUDIO_SINK})"
     _rotate_log "$LOG_DIR/node2-consumer.log"
     pipeline_dots_prepare_launch node2
     GST_DEBUG=${GST_DEBUG:-nmossrc:3} \
-        gst-launch-1.0 -e \
+        _demo_line_buffered gst-launch-1.0 -e \
             nmossrc \
                 daemon-uri="unix:$SOCK" \
                 transport="$DEMO_TRANSPORT" \
@@ -726,6 +756,7 @@ launch_node2() {
                 caps="$VIDEO_CAPS" \
                 label="Node 2 / video2" \
                 auto-activate=true ! \
+            $(_demo_video_queue n2-v-in) ! \
                 videoconvert ! "$VIDEO_SINK" sync=false \
             nmossrc \
                 daemon-uri="unix:$SOCK" \
@@ -737,6 +768,7 @@ launch_node2() {
                 caps="$AUDIO_CAPS" \
                 label="Node 2 / audio2" \
                 auto-activate=true ! \
+            $(_demo_audio_queue n2-a-in) ! \
                 audioconvert ! "$AUDIO_SINK" sync=false \
         > "$LOG_DIR/node2-consumer.log" 2>&1 &
     NODE2_PID=$!
@@ -767,7 +799,7 @@ launch_bare_preview() {
     _rotate_log "$LOG_DIR/bare-preview.log"
     pipeline_dots_prepare_launch bare-preview
     GST_DEBUG=${GST_DEBUG:-mxlsrc:5,basesrc:4} \
-        gst-launch-1.0 -e \
+        _demo_line_buffered gst-launch-1.0 -e \
             mxlsrc \
                 domain="$MXL_DOMAIN_PATH" \
                 video-flow-id="$FLOW_VIDEO_NODE1" \
@@ -1413,7 +1445,7 @@ connect_receiver_to_sender() {
     resp_sender=$(jq -r '.sender_id // "null"' <<< "$active_body" 2>/dev/null)
     resp_identity=$(transport_identity_from_active receiver "$active_body")
     friendly=${SENDER_ID_TO_NAME[$resp_sender]:-$resp_sender}
-    echo "[ok] master_enable=$resp_enable sender=$friendly $resp_identity"
+    echo "[ok] master_enable=$resp_enable $resp_identity sender=$friendly"
 }
 
 # Compact dump of /active for every discovered resource.
@@ -1455,7 +1487,7 @@ show_state() {
         sender_id=$(jq -r '.sender_id // "null"' <<< "$body" 2>/dev/null)
         identity=$(transport_identity_from_active receiver "$body")
         friendly=${SENDER_ID_TO_NAME[$sender_id]:-$sender_id}
-        printf '    %-22s  master_enable=%-5s  sender=%-22s  %s\n' "$lbl" "$en" "$friendly" "$identity"
+        printf '    %-22s  master_enable=%-5s  %s  sender=%s\n' "$lbl" "$en" "$identity" "$friendly"
     done
 }
 
@@ -1599,7 +1631,7 @@ diag_snapshot() {
         sender_id=$(jq -r '.sender_id // "null"' <<< "$body" 2>/dev/null)
         identity=$(transport_identity_from_active receiver "$body")
         friendly=${SENDER_ID_TO_NAME[$sender_id]:-$sender_id}
-        printf '    %-22s  master_enable=%-5s  sender=%-22s  %s\n' "$lbl" "$en" "$friendly" "$identity"
+        printf '    %-22s  master_enable=%-5s  %s  sender=%s\n' "$lbl" "$en" "$identity" "$friendly"
     done
 
     # MXL flow filesystem layout (cf. lib/internal/include/mxl-internal/FlowManager.hpp):
