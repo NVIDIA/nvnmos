@@ -11,6 +11,10 @@ license.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+[lib]
+name = "nvnmosd"
+path = "src/lib.rs"
+
 [[bin]]
 name = "nvnmosd"
 path = "src/main.rs"

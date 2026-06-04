@@ -53,8 +53,9 @@ const SUBSCRIPTION_BUFFER: usize = 16;
 #[derive(Parser, Debug)]
 #[command(version, about = "NMOS daemon (nvnmosd)")]
 struct Args {
-    /// Path to the UDS socket to listen on. A pre-existing file at this
-    /// path is removed before binding.
+    /// Path to the UDS socket to listen on. Fails at startup if another
+    /// listener is already accepting connections on this path; removes
+    /// only a stale socket file left behind by a crashed process.
     #[arg(long, env = "NVNMOSD_UDS", default_value = "/tmp/nvnmosd.sock")]
     uds: PathBuf,
 }
@@ -463,14 +464,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    if args.uds.exists() {
-        std::fs::remove_file(&args.uds)
-            .with_context(|| format!("removing stale UDS socket at {}", args.uds.display()))?;
-    }
-    if let Some(parent) = args.uds.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating parent directory for {}", args.uds.display()))?;
-    }
+    nvnmosd::uds::prepare_listen_path(&args.uds)?;
 
     let listener = UnixListener::bind(&args.uds)
         .with_context(|| format!("binding UDS socket at {}", args.uds.display()))?;
