@@ -142,6 +142,11 @@ LOG_DIR=$(mktemp -d -t gst-nmos-rs-demo-XXXXXX)
 # shellcheck source=pipeline-dots.sh
 source "$_SCRIPT_DIR/pipeline-dots.sh"
 PIPELINE_DOT_ROOT="$LOG_DIR/pipeline-dots"
+# Menu 8 exports: shell-only view for listed bin GTypes (hide inner element subgraphs).
+#   PIPELINE_DOT_COLLAPSE_BIN_TYPES=0 ./gst-nmos-rs-demo.sh   # show all innards
+#   PIPELINE_DOT_COLLAPSE_BIN_TYPES=GstNmosSrc,GstNmosSink,...  # add NMOS bins
+[[ -v PIPELINE_DOT_COLLAPSE_BIN_TYPES ]] || \
+    PIPELINE_DOT_COLLAPSE_BIN_TYPES=GstAutoVideoSink,GstAutoAudioSink
 DAEMON_LOG="$LOG_DIR/daemon.log"
 
 # Line-buffer stdout/stderr when redirected to log files so GST_DEBUG and
