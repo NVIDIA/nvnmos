@@ -4,7 +4,8 @@
 //! Scale smoke client for [`nvnmosd`].
 //!
 //! Drives one scenario (node / session / resource counts), records per-RPC
-//! latencies and optional daemon RSS samples, and prints one JSON line.
+//! latencies, optional daemon RSS samples, and per-phase CPU utilization (Linux
+//! `/proc` background sampling), and prints one JSON line.
 //!
 //! See `doc/designs/nvnmosd/scale-smoke.md` for the full matrix and presets.
 //! Usually invoked by `scripts/run-nvnmosd-scale-smoke.sh`.
@@ -50,9 +51,13 @@ struct Args {
     #[arg(long)]
     label: Option<String>,
 
-    /// Daemon PID for VmRSS sampling via /proc.
+    /// Daemon PID for VmRSS and CPU sampling via /proc (Linux).
     #[arg(long, env = "NVNMOSD_PID")]
     daemon_pid: Option<u32>,
+
+    /// Background CPU sample interval during each bench phase (milliseconds).
+    #[arg(long, default_value_t = 100)]
+    cpu_sample_ms: u64,
 
     #[arg(long, default_value_t = 1)]
     nodes: usize,
@@ -181,10 +186,203 @@ fn sample_memory(pid: Option<u32>) -> Option<u64> {
     pid.and_then(|p| read_rss_kb(p).ok())
 }
 
+/// Linux `CLK_TCK` for `/proc/<pid>/stat` jiffies (typically 100).
+const LINUX_CLK_TCK: f64 = 100.0;
+
+/// Poll interval for per-phase daemon CPU sampling.
+fn cpu_sample_interval(ms: u64) -> Duration {
+    Duration::from_millis(ms.max(10))
+}
+
+/// Core-equivalent CPU percent between two `/proc/<pid>/stat` samples (may exceed 100).
+fn cpu_pct_between(
+    prev_utime: u64,
+    prev_stime: u64,
+    prev_wall: Instant,
+    utime: u64,
+    stime: u64,
+    wall: Instant,
+) -> f64 {
+    let delta_jiffies = utime.saturating_sub(prev_utime) + stime.saturating_sub(prev_stime);
+    let delta_wall_secs = wall.duration_since(prev_wall).as_secs_f64();
+    if delta_wall_secs <= 0.0 {
+        return 0.0;
+    }
+    100.0 * delta_jiffies as f64 / (delta_wall_secs * LINUX_CLK_TCK)
+}
+
+fn read_proc_cpu_jiffies(pid: u32) -> anyhow::Result<(u64, u64)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .with_context(|| format!("reading /proc/{pid}/stat"))?;
+    let rparen = stat
+        .rfind(')')
+        .context("parsing /proc/stat comm field")?;
+    let fields: Vec<&str> = stat[rparen + 2..].split_whitespace().collect();
+    anyhow::ensure!(
+        fields.len() > 12,
+        "short /proc/{pid}/stat (expected utime/stime)"
+    );
+    let utime: u64 = fields[11].parse().context("utime")?;
+    let stime: u64 = fields[12].parse().context("stime")?;
+    Ok((utime, stime))
+}
+
+#[derive(Debug, Serialize, Default, Clone)]
+struct CpuPhasePct {
+    avg: Option<f64>,
+    max: Option<f64>,
+    p95: Option<f64>,
+    samples: usize,
+}
+
+impl CpuPhasePct {
+    fn from_samples(mut samples: Vec<f64>) -> Self {
+        if samples.is_empty() {
+            return Self::default();
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let count = samples.len();
+        let sum: f64 = samples.iter().sum();
+        Self {
+            avg: Some(sum / count as f64),
+            max: Some(*samples.last().unwrap_or(&0.0)),
+            p95: Some(percentile_ms(&samples, 95)),
+            samples: count,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Default)]
+struct CpuPct {
+    open: CpuPhasePct,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subscribe: Option<CpuPhasePct>,
+    register: CpuPhasePct,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activate_sync: Option<CpuPhasePct>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activate_patch: Option<CpuPhasePct>,
+    teardown: CpuPhasePct,
+    overall: CpuPhasePct,
+}
+
+struct CpuPhaseSampler {
+    stop: std::sync::mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<Vec<f64>>>,
+}
+
+impl CpuPhaseSampler {
+    fn start(pid: u32, interval: Duration) -> Self {
+        let (stop, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || cpu_sampler_loop(pid, interval, rx));
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn stop(mut self) -> Vec<f64> {
+        let _ = self.stop.send(());
+        self.thread
+            .take()
+            .and_then(|t| t.join().ok())
+            .unwrap_or_default()
+    }
+}
+
+fn cpu_sampler_loop(
+    pid: u32,
+    interval: Duration,
+    stop: std::sync::mpsc::Receiver<()>,
+) -> Vec<f64> {
+    let mut samples = Vec::new();
+    let Ok((mut prev_utime, mut prev_stime)) = read_proc_cpu_jiffies(pid) else {
+        return samples;
+    };
+    let mut prev_wall = Instant::now();
+    loop {
+        match stop.recv_timeout(interval) {
+            Ok(()) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        let wall = Instant::now();
+        let Ok((utime, stime)) = read_proc_cpu_jiffies(pid) else {
+            break;
+        };
+        let pct = cpu_pct_between(prev_utime, prev_stime, prev_wall, utime, stime, wall);
+        if pct.is_finite() && pct >= 0.0 {
+            samples.push(pct);
+        }
+        prev_utime = utime;
+        prev_stime = stime;
+        prev_wall = wall;
+    }
+    samples
+}
+
+struct CpuMonitor {
+    pid: Option<u32>,
+    interval: Duration,
+    overall_samples: Vec<f64>,
+    active: Option<CpuPhaseSampler>,
+}
+
+impl CpuMonitor {
+    fn new(pid: Option<u32>, interval: Duration) -> Self {
+        Self {
+            pid,
+            interval,
+            overall_samples: Vec::new(),
+            active: None,
+        }
+    }
+
+    fn begin_phase(&mut self) {
+        if let Some(pid) = self.pid {
+            self.active = Some(CpuPhaseSampler::start(pid, self.interval));
+        }
+    }
+
+    fn end_phase(&mut self) -> CpuPhasePct {
+        let samples = self
+            .active
+            .take()
+            .map(CpuPhaseSampler::stop)
+            .unwrap_or_default();
+        self.overall_samples.extend(samples.iter().copied());
+        CpuPhasePct::from_samples(samples)
+    }
+
+    fn into_report(
+        self,
+        open: CpuPhasePct,
+        subscribe: Option<CpuPhasePct>,
+        register: CpuPhasePct,
+        activate_sync: Option<CpuPhasePct>,
+        activate_patch: Option<CpuPhasePct>,
+        teardown: CpuPhasePct,
+    ) -> Option<CpuPct> {
+        self.pid?;
+        let overall = CpuPhasePct::from_samples(self.overall_samples);
+        Some(CpuPct {
+            open,
+            subscribe,
+            register,
+            activate_sync,
+            activate_patch,
+            teardown,
+            overall,
+        })
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct BenchReport {
     scenario: ScenarioMeta,
     memory_kb: MemoryKb,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_pct: Option<CpuPct>,
     open_session_ms: LatencyMs,
     subscribe_activations_ms: LatencyMs,
     add_sender_ms: LatencyMs,
@@ -374,12 +572,14 @@ async fn main() -> anyhow::Result<()> {
         baseline: sample_memory(args.daemon_pid),
         ..Default::default()
     };
+    let mut cpu = CpuMonitor::new(args.daemon_pid, cpu_sample_interval(args.cpu_sample_ms));
 
     let node_seeds: Vec<String> = (0..args.nodes)
         .map(|i| format!("bench-node-{i}"))
         .collect();
 
     // -------- Open sessions (one UDS/gRPC client per session, in parallel) --------
+    cpu.begin_phase();
     let mut open_set = JoinSet::new();
     for s in 0..session_count {
         let uds = args.uds.clone();
@@ -426,11 +626,14 @@ async fn main() -> anyhow::Result<()> {
         open_samples.push(sample);
         sessions.push(ctx);
     }
+    let cpu_open = cpu.end_phase();
     memory.after_open = sample_memory(args.daemon_pid);
 
     // -------- Subscribe (PATCH path, parallel per session) --------
     let mut subscribe_samples = Vec::new();
+    let mut cpu_subscribe = None;
     if needs_patch {
+        cpu.begin_phase();
         let mut sub_set = JoinSet::new();
         for ctx in &mut sessions {
             let client = ctx.client.clone();
@@ -454,9 +657,11 @@ async fn main() -> anyhow::Result<()> {
             ctx.activation_hub = Some(hub);
             ctx.ack_task = Some(task);
         }
+        cpu_subscribe = Some(cpu.end_phase());
     }
 
     // -------- Add resources (parallel per session, sequential within session) --------
+    cpu.begin_phase();
     let mut add_sender_samples = Vec::with_capacity(args.senders);
     let mut add_receiver_samples = Vec::with_capacity(args.receivers);
     let mut senders: Vec<Option<ResourceSlot>> = vec![None; args.senders];
@@ -572,13 +777,16 @@ async fn main() -> anyhow::Result<()> {
         .into_iter()
         .map(|r| r.context("missing receiver slot"))
         .collect::<Result<_, _>>()?;
+    let cpu_register = cpu.end_phase();
     memory.after_register = sample_memory(args.daemon_pid);
 
     // -------- Sync activations (parallel per session) --------
     let mut sync_activate_samples = Vec::new();
     let mut sync_deactivate_samples = Vec::new();
+    let mut cpu_activate_sync = None;
 
     if needs_sync {
+        cpu.begin_phase();
         let sync_indices = sender_activation_indices(senders.len(), args.syncs);
         let mut sync_set = JoinSet::new();
         for ctx in &mut sessions {
@@ -628,14 +836,17 @@ async fn main() -> anyhow::Result<()> {
             sync_activate_samples.extend(activate);
             sync_deactivate_samples.extend(deactivate);
         }
+        cpu_activate_sync = Some(cpu.end_phase());
     }
 
     // -------- PATCH activations (GET then PATCH; HTTP parallelism via clients) --------
     let mut connection_get_samples = Vec::new();
     let mut patch_activate_samples = Vec::new();
     let mut patch_deactivate_samples = Vec::new();
+    let mut cpu_activate_patch = None;
 
     if needs_patch {
+        cpu.begin_phase();
         let patch_indices = sender_activation_indices(senders.len(), args.patches);
 
         let patch_work: Vec<(ResourceSlot, String)> = patch_indices
@@ -722,11 +933,13 @@ async fn main() -> anyhow::Result<()> {
             patch_activate_samples.extend(activates);
             patch_deactivate_samples.extend(deactivates);
         }
+        cpu_activate_patch = Some(cpu.end_phase());
     }
 
     memory.after_activate = sample_memory(args.daemon_pid);
 
     // -------- Close sessions (parallel, one client per session) --------
+    cpu.begin_phase();
     let mut close_samples = Vec::with_capacity(sessions.len());
     let mut close_set = JoinSet::new();
     for ctx in &mut sessions {
@@ -746,6 +959,7 @@ async fn main() -> anyhow::Result<()> {
     while let Some(res) = close_set.join_next().await {
         close_samples.push(res.context("CloseSession task panicked")??);
     }
+    let cpu_teardown = cpu.end_phase();
     memory.after_teardown = sample_memory(args.daemon_pid);
 
     for ctx in &mut sessions {
@@ -766,6 +980,14 @@ async fn main() -> anyhow::Result<()> {
             patches: args.patches,
         },
         memory_kb: memory,
+        cpu_pct: cpu.into_report(
+            cpu_open,
+            cpu_subscribe,
+            cpu_register,
+            cpu_activate_sync,
+            cpu_activate_patch,
+            cpu_teardown,
+        ),
         open_session_ms: LatencyMs::from_samples_us(open_samples),
         subscribe_activations_ms: LatencyMs::from_samples_us(subscribe_samples),
         add_sender_ms: LatencyMs::from_samples_us(add_sender_samples),
@@ -988,5 +1210,24 @@ mod tests {
         assert_eq!(indices[999], 999);
         assert_eq!(indices[1000], 0);
         assert_eq!(indices[1001], 1);
+    }
+
+    #[test]
+    fn cpu_pct_between_one_core_second() {
+        use std::time::{Duration, Instant};
+
+        let t0 = Instant::now();
+        // 100 jiffies at CLK_TCK=100 == 1.0 core-second over 1.0 wall second => 100%
+        let pct = super::cpu_pct_between(0, 0, t0, 100, 0, t0 + Duration::from_secs(1));
+        assert!((pct - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn cpu_phase_pct_stats() {
+        let stats = super::CpuPhasePct::from_samples(vec![10.0, 20.0, 30.0, 40.0]);
+        assert_eq!(stats.samples, 4);
+        assert!((stats.avg.unwrap() - 25.0).abs() < 0.01);
+        assert!((stats.max.unwrap() - 40.0).abs() < 0.01);
+        assert!((stats.p95.unwrap() - 40.0).abs() < 0.01);
     }
 }

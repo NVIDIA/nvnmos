@@ -5,8 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvnmosd Scale Smoke / Benchmark Harness
 
-Smoke and scaling measurements for a single `nvnmosd` process: memory usage and
-latency of gRPC lifecycle operations and IS-05 activation paths.
+Smoke and scaling measurements for a single `nvnmosd` process: memory usage, per-phase
+daemon CPU (Linux `/proc`), and latency of gRPC lifecycle operations and IS-05
+activation paths.
 
 ## Quick Start
 
@@ -43,11 +44,11 @@ PRESETS=xlarge ./rust/nvnmosd-bench/scripts/run-nvnmosd-scale-smoke.sh
 `base_http_port` defaults to `18080` (`NVNMOSD_BENCH_BASE_PORT`, passed through as
 `nvnmosd-bench --base-http-port`). `xlarge` uses 18080–18089.
 
-**Registration API:** bench `OpenSession` sets `network_services.registration_address`
-to `127.0.0.1` and `registration_port` to **9**. Any fixed `registration_address`
-disables DNS-SD browse/advertise in libnvnmos; **port 9** (the discard port — nothing
-listens there) makes registration HTTP fail immediately with connection refused, rather
-than mDNS browse timeouts (~seconds on WSL) or slow TCP timeouts to a dead host.
+**Registration API:** bench `OpenSession` sets `network_services.registration_port` to
+**65535** and leaves `registration_address` unset. In libnvnmos this is an internal
+sentinel: DNS-SD browse/advertise disabled, no `registry_address`, no Registration
+API HTTP — so `CloseSession` is not dominated by mDNS browse timeouts (~seconds on WSL)
+or dead-registry retries.
 
 ## Reading Results
 
@@ -57,6 +58,13 @@ One **JSON object per line** (JSONL). Example:
 {
   "scenario": { "label": "small", "nodes": 1, "senders": 10, "receivers": 10, "sessions": 1, "clients": 1, "syncs": 1, "patches": 10 },
   "memory_kb": { "baseline": 42000, "after_register": 98000, "after_activate": 100500, "after_teardown": 43000 },
+  "cpu_pct": {
+    "open": { "avg": 45.0, "max": 80.0, "p95": 75.0, "samples": 1 },
+    "register": { "avg": 120.0, "max": 180.0, "p95": 170.0, "samples": 8 },
+    "activate_patch": { "avg": 90.0, "max": 110.0, "p95": 105.0, "samples": 4 },
+    "teardown": { "avg": 60.0, "max": 90.0, "p95": 85.0, "samples": 2 },
+    "overall": { "avg": 100.0, "max": 180.0, "p95": 160.0, "samples": 15 }
+  },
   "wall_ms": 412.5,
   "add_sender_ms": { "count": 10, "total": 8.0, "p50": 0.15, "p95": 0.22, "p99": 0.28, "max": 0.35 },
   "close_session_ms": { "count": 1, "total": 3.1, "p50": 3.1, "p95": 3.1, "p99": 3.1, "max": 3.1 }
@@ -78,6 +86,7 @@ concurrent controller HTTP workflows for PATCH). So:
 | Metric | Sampled |
 |--------|----------------|
 | Memory (kB) | Resident Set Size (RSS) - baseline, after open, after register, after activate, after teardown |
+| **cpu_pct** (%, Linux) | Per-phase daemon CPU when `--daemon-pid` set: background `/proc` sample every **100 ms** (override `--cpu-sample-ms`). Phases: `open`, `register`, `teardown`, plus `subscribe` / `activate_sync` / `activate_patch` when those phases run. Each phase reports `avg`, `max`, `p95`, `samples`; `overall` merges all interval samples. Values are **core-equivalent** (100% = one full core; may exceed 100% on multi-threaded load). Omitted when no daemon PID. |
 | **OpenSession** / **CloseSession** (ms) | Per gRPC call |
 | **AddSender** / **AddReceiver** (ms) | Per gRPC call |
 | **SubscribeActivations** (ms) | Per session when `patches > 0` |
@@ -90,6 +99,7 @@ Latency values are **milliseconds** (float): `count`, `total`, `p50`, `p95`, `p9
 
 - **RSS vs resources** — daemon maps + libnvnmos model growth.
 - **RSS vs nodes** — more `NodeServer` / HTTP listeners at fixed per-node resource count.
+- **cpu_pct.register / activate_patch** — hottest phases on large presets; compare `avg` across runs, `max` for burst peaks.
 - **PATCH p95** vs **sync_activate_ms** — HTTP + in-band path vs out-of-band RPC only.
 
 ## Architecture
@@ -109,7 +119,8 @@ run-nvnmosd-scale-smoke.sh
 - **Controller side (HTTP):** GET/PATCH on Connection API when `patches > 0`.
 - Minimal ST 2110-20 SDP; no GStreamer.
 
-Memory: `/proc/<daemon-pid>/status` `VmRSS` when `--daemon-pid` is set.
+Memory and CPU (Linux): `/proc/<daemon-pid>/status` `VmRSS` and per-phase background
+sampling of `/proc/<daemon-pid>/stat` when `--daemon-pid` / `NVNMOSD_PID` is set.
 
 ## Phases (One Scenario Run)
 
@@ -187,7 +198,24 @@ controller-side HTTP workflows in the one bench process, not “number of `OpenS
 
 - Real media pipelines (`nmossrc` / `nmossink`, MXL, UDP).
 - Multi-process daemon fan-out (always one `nvnmosd`).
-- Production mDNS / registry discovery (bench uses dummy registry).
+- Production mDNS / registry discovery (bench uses registry-less sentinel; see above).
+
+## Troubleshooting
+
+**Port already in use** — the smoke script checks `base_http_port .. base_http_port + nodes − 1`
+before start. Free stale listeners (often a prior `nvnmosd`) or set `NVNMOSD_BENCH_BASE_PORT`.
+
+**Stale `nvnmosd` processes** — failed or interrupted runs can leave background daemons running
+(`pgrep -a nvnmosd`). They are usually idle (~24 MB RSS each) but clutter process lists.
+Clean up with `pkill -TERM -f 'target/debug/nvnmosd'` and `rm -f /tmp/nvnmosd*.sock`.
+
+**PATCH / interface IP** — when `patches > 0`, SDP needs a routable local IP. The bench
+autodetects via the routing table; on WSL or multi-homed hosts set
+`NVNMOSD_BENCH_INTERFACE_IP` or pass `--interface-ip` to `nvnmosd-bench`.
+
+**Short phases with few CPU samples** — `open` and `subscribe` can finish in under one
+sample interval (default 100 ms), yielding `samples: 0` or `1`. Lower `--cpu-sample-ms`
+(e.g. 25) for finer peaks on long phases; very short phases may still have no samples.
 
 ## Future Extensions
 
