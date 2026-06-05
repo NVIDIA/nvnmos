@@ -1,0 +1,991 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Scale smoke client for [`nvnmosd`].
+//!
+//! Drives one scenario (node / session / resource counts), records per-RPC
+//! latencies and optional daemon RSS samples, and prints one JSON line.
+//!
+//! See `doc/designs/nvnmosd/scale-smoke.md` for the full matrix and presets.
+//! Usually invoked by `scripts/run-nvnmosd-scale-smoke.sh`.
+
+use std::collections::HashMap;
+use std::net::UdpSocket;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::Context;
+use clap::Parser;
+use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
+use nvnmos_rpc::v1::{
+    AckActivationRequest, ActivationEvent, AddReceiverRequest, AddSenderRequest,
+    CloseSessionRequest, NetworkServicesConfig, NodeConfig, OpenSessionRequest, Side as ProtoSide,
+    SubscribeActivationsRequest, SyncResourceStateRequest, Transport as ProtoTransport,
+};
+use serde::Serialize;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UnixStream};
+use tokio::sync::{mpsc as tokio_mpsc, Mutex, Semaphore};
+use tokio::task::JoinSet;
+use tonic::transport::{Channel, Endpoint, Uri};
+use tower::service_fn;
+
+/// Typo guards for scale axes (not product limits).
+const MAX_NODES: usize = 10_000;
+const MAX_SENDERS: usize = 100_000;
+const MAX_RECEIVERS: usize = 100_000;
+const MAX_SESSIONS: usize = 10_000;
+const MAX_CLIENTS: usize = 1_000;
+const MAX_SYNCS: usize = 100_000;
+const MAX_PATCHES: usize = 100_000;
+
+#[derive(Parser, Debug)]
+#[command(version, about = "nvnmosd scale smoke / benchmark client")]
+struct Args {
+    #[arg(long, env = "NVNMOSD_UDS", default_value = "/tmp/nvnmosd.sock")]
+    uds: PathBuf,
+
+    /// Optional label echoed in JSON output (preset name).
+    #[arg(long)]
+    label: Option<String>,
+
+    /// Daemon PID for VmRSS sampling via /proc.
+    #[arg(long, env = "NVNMOSD_PID")]
+    daemon_pid: Option<u32>,
+
+    #[arg(long, default_value_t = 1)]
+    nodes: usize,
+
+    #[arg(long, default_value_t = 5)]
+    senders: usize,
+
+    #[arg(long, default_value_t = 5)]
+    receivers: usize,
+
+    /// Concurrent gRPC sessions; resources round-robin across sessions (`resource_index %
+    /// sessions`). When equal to `nodes`, one session per node; when equal to senders +
+    /// receivers, one session per resource.
+    #[arg(long, default_value_t = 1)]
+    sessions: usize,
+
+    #[arg(long, default_value_t = 18080)]
+    base_http_port: u16,
+
+    #[arg(long, env = "NVNMOSD_BENCH_INTERFACE_IP")]
+    interface_ip: Option<String>,
+
+    /// Out-of-band `SyncResourceState` workflows (`0` = none). Evenly spaced targets when
+    /// not more than registered senders; otherwise round-robin through them.
+    #[arg(long, default_value_t = 0)]
+    syncs: usize,
+
+    /// In-band GET/PATCH activation workflows (`0` = none). Evenly spaced targets when not
+    /// more than registered senders; otherwise round-robin through them.
+    #[arg(long, default_value_t = 0)]
+    patches: usize,
+
+    /// Max concurrent controller-side GET/PATCH HTTP workflows (`0` when `patches == 0`).
+    #[arg(long, default_value_t = 0)]
+    clients: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ScenarioMeta {
+    label: Option<String>,
+    nodes: usize,
+    senders: usize,
+    receivers: usize,
+    sessions: usize,
+    clients: usize,
+    syncs: usize,
+    patches: usize,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct MemoryKb {
+    baseline: Option<u64>,
+    after_open: Option<u64>,
+    after_register: Option<u64>,
+    after_activate: Option<u64>,
+    after_teardown: Option<u64>,
+}
+
+/// Latency stats in **milliseconds** (floating point) for JSON output.
+#[derive(Debug, Serialize)]
+struct LatencyMs {
+    count: usize,
+    total: f64,
+    p50: f64,
+    p95: f64,
+    p99: f64,
+    max: f64,
+}
+
+impl LatencyMs {
+    fn from_samples_us(samples_us: Vec<u64>) -> Self {
+        if samples_us.is_empty() {
+            return Self::zero();
+        }
+        let mut ms: Vec<f64> = samples_us.iter().map(|&us| us_to_ms(us)).collect();
+        ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let count = ms.len();
+        let total: f64 = ms.iter().sum();
+        Self {
+            count,
+            total,
+            p50: percentile_ms(&ms, 50),
+            p95: percentile_ms(&ms, 95),
+            p99: percentile_ms(&ms, 99),
+            max: *ms.last().unwrap_or(&0.0),
+        }
+    }
+
+    fn zero() -> Self {
+        Self {
+            count: 0,
+            total: 0.0,
+            p50: 0.0,
+            p95: 0.0,
+            p99: 0.0,
+            max: 0.0,
+        }
+    }
+}
+
+fn us_to_ms(us: u64) -> f64 {
+    us as f64 / 1000.0
+}
+
+fn percentile_ms(sorted_ms: &[f64], pct: u8) -> f64 {
+    if sorted_ms.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted_ms.len() as f64) * (f64::from(pct) / 100.0)).ceil() as usize;
+    sorted_ms[idx.saturating_sub(1).min(sorted_ms.len() - 1)]
+}
+
+fn read_rss_kb(pid: u32) -> anyhow::Result<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .with_context(|| format!("reading /proc/{pid}/status"))?;
+    for line in status.lines() {
+        if let Some(kb) = line.strip_prefix("VmRSS:") {
+            let kb: u64 = kb.trim().trim_end_matches(" kB").parse()?;
+            return Ok(kb);
+        }
+    }
+    anyhow::bail!("VmRSS not found in /proc/{pid}/status");
+}
+
+fn sample_memory(pid: Option<u32>) -> Option<u64> {
+    pid.and_then(|p| read_rss_kb(p).ok())
+}
+
+#[derive(Debug, Serialize)]
+struct BenchReport {
+    scenario: ScenarioMeta,
+    memory_kb: MemoryKb,
+    open_session_ms: LatencyMs,
+    subscribe_activations_ms: LatencyMs,
+    add_sender_ms: LatencyMs,
+    add_receiver_ms: LatencyMs,
+    sync_activate_ms: LatencyMs,
+    sync_deactivate_ms: LatencyMs,
+    connection_get_ms: LatencyMs,
+    patch_activate_ms: LatencyMs,
+    patch_deactivate_ms: LatencyMs,
+    close_session_ms: LatencyMs,
+    wall_ms: f64,
+}
+
+struct SessionSlot {
+    session_handle: String,
+    http_port: u16,
+}
+
+struct SessionContext {
+    index: usize,
+    slot: SessionSlot,
+    client: NvnmosDaemonClient<Channel>,
+    activation_hub: Option<Arc<ActivationHub>>,
+    ack_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Node-side demux: match `ActivationEvent`s by `(resource_handle, active)` so
+/// concurrent controller PATCH workflows targeting the same session do not steal
+/// each other's subscription events.
+struct ActivationHub {
+    state: Mutex<ActivationHubState>,
+}
+
+#[derive(Default)]
+struct ActivationHubState {
+    /// Events that arrived before `wait` registered.
+    pending: HashMap<ActivationWaitKey, u32>,
+    waiters: HashMap<ActivationWaitKey, Vec<tokio::sync::oneshot::Sender<()>>>,
+}
+
+#[derive(Clone, Hash, Eq, PartialEq)]
+struct ActivationWaitKey {
+    resource_handle: String,
+    active: bool,
+}
+
+impl ActivationHub {
+    fn new() -> (Arc<Self>, tokio_mpsc::Sender<ActivationEvent>) {
+        let (event_tx, mut event_rx) = tokio_mpsc::channel(256);
+        let hub = Arc::new(Self {
+            state: Mutex::new(ActivationHubState::default()),
+        });
+        let dispatch_hub = hub.clone();
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                dispatch_hub.deliver(event).await;
+            }
+        });
+        (hub, event_tx)
+    }
+
+    async fn deliver(&self, event: ActivationEvent) {
+        let side = ProtoSide::try_from(event.side).unwrap_or(ProtoSide::Unspecified);
+        if side != ProtoSide::Sender {
+            return;
+        }
+        let key = ActivationWaitKey {
+            resource_handle: event.resource_handle,
+            active: event.transport_file.is_some(),
+        };
+        let mut st = self.state.lock().await;
+        if let Some(waiters) = st.waiters.remove(&key) {
+            for tx in waiters {
+                let _ = tx.send(());
+            }
+        } else {
+            *st.pending.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    async fn wait(
+        &self,
+        resource_handle: &str,
+        active: bool,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        let key = ActivationWaitKey {
+            resource_handle: resource_handle.to_owned(),
+            active,
+        };
+        let rx = {
+            let mut st = self.state.lock().await;
+            if let Some(count) = st.pending.get_mut(&key) {
+                if *count > 0 {
+                    *count -= 1;
+                    if *count == 0 {
+                        st.pending.remove(&key);
+                    }
+                    return Ok(());
+                }
+            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            st.waiters.entry(key).or_default().push(tx);
+            rx
+        };
+        tokio::time::timeout(timeout, rx)
+            .await
+            .context("timed out waiting for ActivationEvent")?
+            .context("activation waiter dropped")?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct ResourceSlot {
+    session_index: usize,
+    resource_handle: String,
+    resource_id: String,
+    sdp: String,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
+
+    let args = Args::parse();
+    anyhow::ensure!(
+        (1..=MAX_NODES).contains(&args.nodes),
+        "nodes must be 1..={MAX_NODES}"
+    );
+    anyhow::ensure!(
+        args.senders <= MAX_SENDERS,
+        "senders must be <= {MAX_SENDERS}"
+    );
+    anyhow::ensure!(
+        args.receivers <= MAX_RECEIVERS,
+        "receivers must be <= {MAX_RECEIVERS}"
+    );
+    anyhow::ensure!(
+        args.syncs <= MAX_SYNCS,
+        "syncs must be <= {MAX_SYNCS}"
+    );
+    anyhow::ensure!(
+        args.patches <= MAX_PATCHES,
+        "patches must be <= {MAX_PATCHES}"
+    );
+    if args.syncs > 0 && args.senders == 0 {
+        anyhow::bail!("syncs > 0 requires at least one registered sender");
+    }
+    if args.patches > 0 && args.senders == 0 {
+        anyhow::bail!("patches > 0 requires at least one registered sender");
+    }
+    anyhow::ensure!(
+        args.clients <= MAX_CLIENTS,
+        "clients must be <= {MAX_CLIENTS}"
+    );
+    if args.patches > 0 {
+        anyhow::ensure!(args.clients >= 1, "patches > 0 requires clients >= 1");
+    }
+
+    anyhow::ensure!(
+        args.sessions <= MAX_SESSIONS,
+        "sessions must be <= {MAX_SESSIONS}"
+    );
+    if args.senders > 0 || args.receivers > 0 {
+        anyhow::ensure!(args.sessions >= 1, "sessions must be >= 1 when registering resources");
+    }
+    let session_count = args.sessions;
+    anyhow::ensure!(
+        u32::from(args.base_http_port) + args.nodes as u32 <= u16::MAX as u32,
+        "base_http_port + nodes overflows port range",
+    );
+
+    let needs_sync = args.syncs > 0;
+    let needs_patch = args.patches > 0;
+    let iface_ip = match args.interface_ip.clone() {
+        Some(ip) => ip,
+        None => autodetect_interface_ip().context("interface IP (set --interface-ip)")?,
+    };
+    let wall_start = Instant::now();
+    let mut memory = MemoryKb {
+        baseline: sample_memory(args.daemon_pid),
+        ..Default::default()
+    };
+
+    let node_seeds: Vec<String> = (0..args.nodes)
+        .map(|i| format!("bench-node-{i}"))
+        .collect();
+
+    // -------- Open sessions (one UDS/gRPC client per session, in parallel) --------
+    let mut open_set = JoinSet::new();
+    for s in 0..session_count {
+        let uds = args.uds.clone();
+        let node_index = session_node_index(s, args.nodes);
+        let http_port = args.base_http_port + node_index as u16;
+        let node_seed = node_seeds[node_index].clone();
+        open_set.spawn(async move {
+            let t0 = Instant::now();
+            let channel = connect_uds(&uds).await?;
+            let mut client = NvnmosDaemonClient::new(channel);
+            let resp = client
+                .open_session(OpenSessionRequest {
+                    node_config: Some(bench_node_config(&node_seed, http_port)),
+                })
+                .await
+                .with_context(|| format!("OpenSession node={node_index} session={s}"))?
+                .into_inner();
+            Ok::<_, anyhow::Error>((
+                s,
+                t0.elapsed().as_micros() as u64,
+                SessionContext {
+                    index: s,
+                    slot: SessionSlot {
+                        session_handle: resp.session_handle,
+                        http_port,
+                    },
+                    client,
+                    activation_hub: None,
+                    ack_task: None,
+                },
+            ))
+        });
+    }
+
+    let mut open_samples = Vec::with_capacity(session_count);
+    let mut open_results: Vec<(usize, u64, SessionContext)> = Vec::with_capacity(session_count);
+    while let Some(res) = open_set.join_next().await {
+        open_results.push(res.context("OpenSession task panicked")??);
+    }
+    open_results.sort_by_key(|(index, _, _)| *index);
+    let mut sessions = Vec::with_capacity(session_count);
+    for (index, sample, ctx) in open_results {
+        anyhow::ensure!(index == sessions.len(), "unexpected OpenSession index");
+        open_samples.push(sample);
+        sessions.push(ctx);
+    }
+    memory.after_open = sample_memory(args.daemon_pid);
+
+    // -------- Subscribe (PATCH path, parallel per session) --------
+    let mut subscribe_samples = Vec::new();
+    if needs_patch {
+        let mut sub_set = JoinSet::new();
+        for ctx in &mut sessions {
+            let client = ctx.client.clone();
+            let session_handle = ctx.slot.session_handle.clone();
+            let index = ctx.index;
+            sub_set.spawn(async move {
+                let t0 = Instant::now();
+                let (task, hub) = spawn_auto_ack_task(client, session_handle).await?;
+                Ok::<_, anyhow::Error>((
+                    index,
+                    t0.elapsed().as_micros() as u64,
+                    hub,
+                    task,
+                ))
+            });
+        }
+        while let Some(res) = sub_set.join_next().await {
+            let (index, sample, hub, task) = res.context("SubscribeActivations task panicked")??;
+            subscribe_samples.push(sample);
+            let ctx = &mut sessions[index];
+            ctx.activation_hub = Some(hub);
+            ctx.ack_task = Some(task);
+        }
+    }
+
+    // -------- Add resources (parallel per session, sequential within session) --------
+    let mut add_sender_samples = Vec::with_capacity(args.senders);
+    let mut add_receiver_samples = Vec::with_capacity(args.receivers);
+    let mut senders: Vec<Option<ResourceSlot>> = vec![None; args.senders];
+    let mut receivers: Vec<Option<ResourceSlot>> = vec![None; args.receivers];
+
+    let mut add_set = JoinSet::new();
+    for ctx in &mut sessions {
+        let session_index = ctx.index;
+        let session_handle = ctx.slot.session_handle.clone();
+        let mut client = ctx.client.clone();
+        let sender_indices: Vec<usize> = (0..args.senders)
+            .filter(|&i| {
+                session_for_resource(i, session_count) == session_index
+            })
+            .collect();
+        let receiver_indices: Vec<usize> = (0..args.receivers)
+            .filter(|&i| {
+                session_for_resource(args.senders + i, session_count) == session_index
+            })
+            .collect();
+        if sender_indices.is_empty() && receiver_indices.is_empty() {
+            continue;
+        }
+        let iface_ip = iface_ip.clone();
+        add_set.spawn(async move {
+            let mut local_sender_samples = Vec::new();
+            let mut local_receiver_samples = Vec::new();
+            let mut local_senders = Vec::new();
+            let mut local_receivers = Vec::new();
+
+            for i in sender_indices {
+                let name = format!("sender-{i}");
+                let sdp = build_video_sdp(&name, true, &iface_ip);
+                let t0 = Instant::now();
+                let resp = client
+                    .add_sender(AddSenderRequest {
+                        session_handle: session_handle.clone(),
+                        transport: ProtoTransport::Rtp as i32,
+                        transport_file: sdp.clone(),
+                        name: name.clone(),
+                    })
+                    .await
+                    .with_context(|| format!("AddSender {name}"))?
+                    .into_inner();
+                local_sender_samples.push((i, t0.elapsed().as_micros() as u64));
+                local_senders.push((
+                    i,
+                    ResourceSlot {
+                        session_index,
+                        resource_handle: resp.resource_handle,
+                        resource_id: resp.resource_id,
+                        sdp,
+                    },
+                ));
+            }
+
+            for i in receiver_indices {
+                let name = format!("receiver-{i}");
+                let sdp = build_video_sdp(&name, false, &iface_ip);
+                let t0 = Instant::now();
+                let resp = client
+                    .add_receiver(AddReceiverRequest {
+                        session_handle: session_handle.clone(),
+                        transport: ProtoTransport::Rtp as i32,
+                        transport_file: sdp.clone(),
+                        name: name.clone(),
+                    })
+                    .await
+                    .with_context(|| format!("AddReceiver {name}"))?
+                    .into_inner();
+                local_receiver_samples.push((i, t0.elapsed().as_micros() as u64));
+                local_receivers.push((
+                    i,
+                    ResourceSlot {
+                        session_index,
+                        resource_handle: resp.resource_handle,
+                        resource_id: resp.resource_id,
+                        sdp,
+                    },
+                ));
+            }
+
+            Ok::<_, anyhow::Error>((
+                local_sender_samples,
+                local_receiver_samples,
+                local_senders,
+                local_receivers,
+            ))
+        });
+    }
+
+    while let Some(res) = add_set.join_next().await {
+        let (s_samples, r_samples, s_slots, r_slots) =
+            res.context("AddResource task panicked")??;
+        for (_i, sample) in s_samples {
+            add_sender_samples.push(sample);
+        }
+        for (i, slot) in s_slots {
+            senders[i] = Some(slot);
+        }
+        for (_i, sample) in r_samples {
+            add_receiver_samples.push(sample);
+        }
+        for (i, slot) in r_slots {
+            receivers[i] = Some(slot);
+        }
+    }
+    let senders: Vec<ResourceSlot> = senders
+        .into_iter()
+        .map(|s| s.context("missing sender slot"))
+        .collect::<Result<_, _>>()?;
+    let _receivers: Vec<ResourceSlot> = receivers
+        .into_iter()
+        .map(|r| r.context("missing receiver slot"))
+        .collect::<Result<_, _>>()?;
+    memory.after_register = sample_memory(args.daemon_pid);
+
+    // -------- Sync activations (parallel per session) --------
+    let mut sync_activate_samples = Vec::new();
+    let mut sync_deactivate_samples = Vec::new();
+
+    if needs_sync {
+        let sync_indices = sender_activation_indices(senders.len(), args.syncs);
+        let mut sync_set = JoinSet::new();
+        for ctx in &mut sessions {
+            let session_index = ctx.index;
+            let session_handle = ctx.slot.session_handle.clone();
+            let mut client = ctx.client.clone();
+            let session_senders: Vec<ResourceSlot> = sync_indices
+                .iter()
+                .map(|&i| senders[i].clone())
+                .filter(|s| s.session_index == session_index)
+                .collect();
+            if session_senders.is_empty() {
+                continue;
+            }
+            sync_set.spawn(async move {
+                let mut activate = Vec::new();
+                let mut deactivate = Vec::new();
+                for s in &session_senders {
+                    let updated = s.sdp.replacen("o=- 0 0", "o=- 0 1", 1);
+                    let t0 = Instant::now();
+                    client
+                        .sync_resource_state(SyncResourceStateRequest {
+                            session_handle: session_handle.clone(),
+                            resource_handle: s.resource_handle.clone(),
+                            transport_file: Some(updated),
+                        })
+                        .await
+                        .context("SyncResourceState activate")?;
+                    activate.push(t0.elapsed().as_micros() as u64);
+
+                    let t0 = Instant::now();
+                    client
+                        .sync_resource_state(SyncResourceStateRequest {
+                            session_handle: session_handle.clone(),
+                            resource_handle: s.resource_handle.clone(),
+                            transport_file: None,
+                        })
+                        .await
+                        .context("SyncResourceState deactivate")?;
+                    deactivate.push(t0.elapsed().as_micros() as u64);
+                }
+                Ok::<_, anyhow::Error>((activate, deactivate))
+            });
+        }
+        while let Some(res) = sync_set.join_next().await {
+            let (activate, deactivate) = res.context("SyncResourceState task panicked")??;
+            sync_activate_samples.extend(activate);
+            sync_deactivate_samples.extend(deactivate);
+        }
+    }
+
+    // -------- PATCH activations (GET then PATCH; HTTP parallelism via clients) --------
+    let mut connection_get_samples = Vec::new();
+    let mut patch_activate_samples = Vec::new();
+    let mut patch_deactivate_samples = Vec::new();
+
+    if needs_patch {
+        let patch_indices = sender_activation_indices(senders.len(), args.patches);
+
+        let patch_work: Vec<(ResourceSlot, String)> = patch_indices
+            .iter()
+            .map(|&i| {
+                let s = &senders[i];
+                (
+                    s.clone(),
+                    format!(
+                        "/x-nmos/connection/v1.1/single/senders/{}/staged",
+                        s.resource_id
+                    ),
+                )
+            })
+            .collect();
+
+        let http_sem = Arc::new(Semaphore::new(args.clients));
+        let iface_ip = Arc::new(iface_ip);
+        let mut patch_set = JoinSet::new();
+
+        for (sender, staged_path) in patch_work {
+            let sem = http_sem.clone();
+            let iface_ip = iface_ip.clone();
+            let session_index = sender.session_index;
+            let http_port = sessions[session_index].slot.http_port;
+            let resource_handle = sender.resource_handle.clone();
+            let staged_path = staged_path.clone();
+            let activation_hub = sessions[session_index]
+                .activation_hub
+                .as_ref()
+                .context("activation hub for session")?
+                .clone();
+
+            patch_set.spawn(async move {
+                let _permit = sem
+                    .acquire()
+                    .await
+                    .context("HTTP client semaphore closed")?;
+
+                let mut get_samples = Vec::with_capacity(2);
+                let mut activate_samples = Vec::with_capacity(1);
+                let mut deactivate_samples = Vec::with_capacity(1);
+
+                let t0 = Instant::now();
+                let (status, _) =
+                    connection_get(&iface_ip, http_port, &staged_path).await?;
+                anyhow::ensure!(status == 200, "GET staged returned HTTP {status}");
+                get_samples.push(t0.elapsed().as_micros() as u64);
+
+                let t0 = Instant::now();
+                let body = r#"{"master_enable":true,"activation":{"mode":"activate_immediate"}}"#;
+                let (status, _) =
+                    connection_patch(&iface_ip, http_port, &staged_path, body).await?;
+                anyhow::ensure!(status == 200, "PATCH activate returned HTTP {status}");
+                activate_samples.push(t0.elapsed().as_micros() as u64);
+                activation_hub
+                    .wait(&resource_handle, true, Duration::from_secs(30))
+                    .await?;
+
+                let t0 = Instant::now();
+                let (status, _) =
+                    connection_get(&iface_ip, http_port, &staged_path).await?;
+                anyhow::ensure!(status == 200, "GET staged returned HTTP {status}");
+                get_samples.push(t0.elapsed().as_micros() as u64);
+
+                let t0 = Instant::now();
+                let body = r#"{"master_enable":false,"activation":{"mode":"activate_immediate"}}"#;
+                let (status, _) =
+                    connection_patch(&iface_ip, http_port, &staged_path, body).await?;
+                anyhow::ensure!(status == 200, "PATCH deactivate returned HTTP {status}");
+                deactivate_samples.push(t0.elapsed().as_micros() as u64);
+                activation_hub
+                    .wait(&resource_handle, false, Duration::from_secs(30))
+                    .await?;
+
+                Ok::<_, anyhow::Error>((get_samples, activate_samples, deactivate_samples))
+            });
+        }
+
+        while let Some(res) = patch_set.join_next().await {
+            let (gets, activates, deactivates) =
+                res.context("Connection API task panicked")??;
+            connection_get_samples.extend(gets);
+            patch_activate_samples.extend(activates);
+            patch_deactivate_samples.extend(deactivates);
+        }
+    }
+
+    memory.after_activate = sample_memory(args.daemon_pid);
+
+    // -------- Close sessions (parallel, one client per session) --------
+    let mut close_samples = Vec::with_capacity(sessions.len());
+    let mut close_set = JoinSet::new();
+    for ctx in &mut sessions {
+        let session_handle = ctx.slot.session_handle.clone();
+        let mut client = ctx.client.clone();
+        close_set.spawn(async move {
+            let t0 = Instant::now();
+            client
+                .close_session(CloseSessionRequest {
+                    session_handle,
+                })
+                .await
+                .context("CloseSession")?;
+            Ok::<_, anyhow::Error>(t0.elapsed().as_micros() as u64)
+        });
+    }
+    while let Some(res) = close_set.join_next().await {
+        close_samples.push(res.context("CloseSession task panicked")??);
+    }
+    memory.after_teardown = sample_memory(args.daemon_pid);
+
+    for ctx in &mut sessions {
+        if let Some(task) = ctx.ack_task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+        }
+    }
+
+    let report = BenchReport {
+        scenario: ScenarioMeta {
+            label: args.label,
+            nodes: args.nodes,
+            senders: args.senders,
+            receivers: args.receivers,
+            sessions: args.sessions,
+            clients: args.clients,
+            syncs: args.syncs,
+            patches: args.patches,
+        },
+        memory_kb: memory,
+        open_session_ms: LatencyMs::from_samples_us(open_samples),
+        subscribe_activations_ms: LatencyMs::from_samples_us(subscribe_samples),
+        add_sender_ms: LatencyMs::from_samples_us(add_sender_samples),
+        add_receiver_ms: LatencyMs::from_samples_us(add_receiver_samples),
+        sync_activate_ms: LatencyMs::from_samples_us(sync_activate_samples),
+        sync_deactivate_ms: LatencyMs::from_samples_us(sync_deactivate_samples),
+        connection_get_ms: LatencyMs::from_samples_us(connection_get_samples),
+        patch_activate_ms: LatencyMs::from_samples_us(patch_activate_samples),
+        patch_deactivate_ms: LatencyMs::from_samples_us(patch_deactivate_samples),
+        close_session_ms: LatencyMs::from_samples_us(close_samples),
+        wall_ms: us_to_ms(wall_start.elapsed().as_micros() as u64),
+    };
+
+    println!("{}", serde_json::to_string(&report)?);
+    Ok(())
+}
+
+fn session_node_index(session_index: usize, nodes: usize) -> usize {
+    session_index % nodes
+}
+
+fn session_for_resource(resource_index: usize, session_count: usize) -> usize {
+    resource_index % session_count
+}
+
+/// Per-workflow registered-sender index for sync or PATCH. `workflow_count == 0` → none.
+/// When `workflow_count <= registered_count`, targets are evenly spaced; when larger,
+/// round-robin through `[0, registered_count)`.
+fn sender_activation_indices(registered_count: usize, workflow_count: usize) -> Vec<usize> {
+    match (registered_count, workflow_count) {
+        (0, _) | (_, 0) => Vec::new(),
+        (n, c) if c <= n => (0..c).map(|i| i * n / c).collect(),
+        (n, c) => (0..c).map(|i| i % n).collect(),
+    }
+}
+
+fn bench_node_config(node_seed: &str, http_port: u16) -> NodeConfig {
+    NodeConfig {
+        seed: node_seed.to_string(),
+        http_port: u32::from(http_port),
+        network_services: Some(NetworkServicesConfig {
+            registration_address: "127.0.0.1".to_string(),
+            registration_port: 9,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn autodetect_interface_ip() -> anyhow::Result<String> {
+    let sock = UdpSocket::bind("0.0.0.0:0").context("UdpSocket::bind")?;
+    sock.connect("8.8.8.8:80").context("UdpSocket::connect")?;
+    Ok(sock.local_addr()?.ip().to_string())
+}
+
+async fn spawn_auto_ack_task(
+    mut client: NvnmosDaemonClient<Channel>,
+    session_handle: String,
+) -> anyhow::Result<(tokio::task::JoinHandle<()>, Arc<ActivationHub>)> {
+    let mut stream = client
+        .subscribe_activations(SubscribeActivationsRequest {
+            session_handle: session_handle.clone(),
+        })
+        .await?
+        .into_inner();
+
+    let (hub, event_tx) = ActivationHub::new();
+
+    let handle = tokio::spawn(async move {
+        while let Ok(Some(event)) = stream.message().await {
+            let _ = client
+                .ack_activation(AckActivationRequest {
+                    session_handle: session_handle.clone(),
+                    activation_handle: event.activation_handle.clone(),
+                    success: true,
+                    failure_reason: String::new(),
+                })
+                .await;
+            let _ = event_tx.send(event).await;
+        }
+    });
+    Ok((handle, hub))
+}
+
+async fn connection_get(host: &str, port: u16, path: &str) -> anyhow::Result<(u16, String)> {
+    connection_http("GET", host, port, path, None).await
+}
+
+async fn connection_patch(
+    host: &str,
+    port: u16,
+    path: &str,
+    body: &str,
+) -> anyhow::Result<(u16, String)> {
+    connection_http("PATCH", host, port, path, Some(body)).await
+}
+
+async fn connection_http(
+    method: &str,
+    host: &str,
+    port: u16,
+    path: &str,
+    body: Option<&str>,
+) -> anyhow::Result<(u16, String)> {
+    let addr = format!("{host}:{port}");
+    let request = match body {
+        Some(body) => format!(
+            "{method} {path} HTTP/1.1\r\n\
+             Host: {addr}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {len}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {body}",
+            len = body.len(),
+        ),
+        None => format!(
+            "{method} {path} HTTP/1.1\r\n\
+             Host: {addr}\r\n\
+             Connection: close\r\n\
+             \r\n",
+        ),
+    };
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut sock = TcpStream::connect(&addr).await?;
+        sock.write_all(request.as_bytes()).await?;
+        let mut buf = Vec::with_capacity(4096);
+        sock.read_to_end(&mut buf).await?;
+        let resp = String::from_utf8_lossy(&buf).into_owned();
+        let status_line = resp.lines().next().unwrap_or("");
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("bad HTTP status"))?;
+        Ok((status, resp))
+    })
+    .await
+    .with_context(|| format!("{method} timed out"))?
+}
+
+fn build_video_sdp(name: &str, sender: bool, iface_ip: &str) -> String {
+    const MULTICAST_IP: &str = "233.252.0.0";
+    const SOURCE_IP: &str = "192.0.2.0";
+    const DESTINATION_PORT: u16 = 5020;
+    const SOURCE_PORT: u16 = 5004;
+    const PAYLOAD_TYPE: u8 = 96;
+    const ENCODING: &str = "raw/90000";
+    const FMTP: &str = "sampling=YCbCr-4:2:2; width=1920; height=1080; \
+        exactframerate=50; depth=10; TCS=SDR; colorimetry=BT709; \
+        PM=2110GPM; SSN=ST2110-20:2017; TP=2110TPN; ";
+
+    let mut out = format!(
+        "v=0\r\n\
+         o=- 0 0 IN IP4 {iface_ip}\r\n\
+         s=nvnmosd-bench {name}\r\n\
+         t=0 0\r\n\
+         a=x-nvnmos-name:{name}\r\n\
+         m=video {DESTINATION_PORT} RTP/AVP {PAYLOAD_TYPE}\r\n\
+         c=IN IP4 {MULTICAST_IP}/64\r\n\
+         a=source-filter: incl IN IP4 {MULTICAST_IP} {}\r\n\
+         a=x-nvnmos-iface-ip:{iface_ip}\r\n\
+         a=rtpmap:{PAYLOAD_TYPE} {ENCODING}\r\n\
+         a=fmtp:{PAYLOAD_TYPE} {FMTP}\r\n\
+         a=mediaclk:direct=0\r\n",
+        if sender { iface_ip } else { SOURCE_IP },
+    );
+    if sender {
+        out.push_str(&format!("a=x-nvnmos-src-port:{SOURCE_PORT}\r\n"));
+        out.push_str("a=ts-refclk:localmac=CA-FE-01-CA-FE-02\r\n");
+    }
+    out
+}
+
+async fn connect_uds(uds: &Path) -> anyhow::Result<Channel> {
+    let uds = uds.to_path_buf();
+    let endpoint = Endpoint::try_from("http://[::1]:50051")?;
+    endpoint
+        .connect_with_connector(service_fn(move |_: Uri| {
+            let uds = uds.clone();
+            async move {
+                let stream = UnixStream::connect(uds).await?;
+                Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+            }
+        }))
+        .await
+        .context("UDS connect")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sender_activation_indices;
+
+    #[test]
+    fn activation_indices_zero_means_none() {
+        assert!(sender_activation_indices(10, 0).is_empty());
+        assert!(sender_activation_indices(0, 0).is_empty());
+        assert!(sender_activation_indices(0, 5).is_empty());
+    }
+
+    #[test]
+    fn activation_indices_full_coverage() {
+        assert_eq!(sender_activation_indices(10, 10), (0..10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn activation_indices_evenly_spaced_sample() {
+        assert_eq!(sender_activation_indices(1000, 32).len(), 32);
+        assert_eq!(sender_activation_indices(1000, 32)[0], 0);
+        assert_eq!(sender_activation_indices(1000, 32)[31], 31 * 1000 / 32);
+    }
+
+    #[test]
+    fn activation_indices_round_robin_when_exceeding_registered() {
+        let indices = sender_activation_indices(1000, 5000);
+        assert_eq!(indices.len(), 5000);
+        assert_eq!(indices[0], 0);
+        assert_eq!(indices[999], 999);
+        assert_eq!(indices[1000], 0);
+        assert_eq!(indices[1001], 1);
+    }
+}

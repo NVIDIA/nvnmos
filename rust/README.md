@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# nvnmos Rust workspace
+# nvnmos Rust Workspace
 
 Rust components for the new GStreamer NMOS plugin family described in
 [`doc/designs/nvnmosd/README.md`](../doc/designs/nvnmosd/README.md).
@@ -17,6 +17,7 @@ Rust components for the new GStreamer NMOS plugin family described in
 | `nvnmos-rpc`       | library     | gRPC protocol crate (`nvnmosd.proto` + `tonic`-generated stubs).     |
 | `nvnmosd`          | binary      | The NMOS daemon. Wraps `nvnmos-sys`, serves `nvnmos-rpc`.            |
 | `nvnmosd-example`  | binary      | Example/regression client modelled on the C `nvnmos-example`.        |
+| `nvnmosd-bench`    | binary      | Scale smoke / benchmark client for `nvnmosd`.                        |
 | `gst-nmos-rs`      | GStreamer plugin (cdylib) | `nmos` plugin (`nmossrc` / `nmossink`); session lifecycle, inner `mxlsink`/`mxlsrc`, IS-05 activation handling, deferred `nmossink` AddSender (peer-query at READY→PAUSED), `nmossrc` essence-caps advertisement, and property-override-vs-cross-check semantics are all wired. See [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md). |
 
 See `gst-nmos-rs`'s own
@@ -40,7 +41,21 @@ cargo build --workspace
 
 `protoc` is vendored via [`protobuf-src`](https://crates.io/crates/protobuf-src) — no system `protoc` is required.
 
-## Running the smoke test
+## Scale Benchmark (`nvnmosd-bench`)
+
+Measures daemon memory usage and RPC/HTTP latencies across preset scenarios. See
+[`doc/designs/nvnmosd/scale-smoke.md`](../doc/designs/nvnmosd/scale-smoke.md).
+
+```sh
+# Build libnvnmos first (../build/libnvnmos.so), then:
+export NVNMOS_LIB_DIR=/absolute/path/to/build
+./rust/nvnmosd-bench/scripts/run-nvnmosd-scale-smoke.sh              # default: small preset
+PRESETS="medium large" ./rust/nvnmosd-bench/scripts/run-nvnmosd-scale-smoke.sh
+```
+
+Results land in `rust/nvnmosd-bench/results/` (gitignored).
+
+## Running the Smoke Test
 
 ```sh
 # Terminal 1: daemon
