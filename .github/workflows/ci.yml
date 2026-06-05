@@ -22,18 +22,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # build against a https://github.com/sony/nmos-cpp commit
-      # until a Conan Center release of nmos-cpp is published.
-      - name: Clone nmos-cpp alongside nvnmos
-        env:
-          NMOS_CPP_REF: 079620d88756aa138ede92d3f52a0102370307fe
-        run: |
-          parent="$(dirname "${GITHUB_WORKSPACE}")"
-          git init "${parent}/nmos-cpp"
-          git -C "${parent}/nmos-cpp" remote add origin https://github.com/sony/nmos-cpp.git
-          git -C "${parent}/nmos-cpp" fetch --depth 1 origin "${NMOS_CPP_REF}"
-          git -C "${parent}/nmos-cpp" checkout FETCH_HEAD
-
       - name: Install Conan
         run: pip install conan~=2.2 && conan profile detect
       - name: Install dependencies
@@ -42,15 +30,13 @@ jobs:
             --settings:all build_type=${{ matrix.config }} \
             --build=missing \
             --output-folder=src/conan \
-            --lockfile="" \
-            -o "&:nmos_cpp_from_source=True"
+            --lockfile=src/conan.lock
       - name: Generate nvnmos (Linux)
         if: runner.os == 'Linux'
         run: |
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
             -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
-            -DUSE_ADD_SUBDIRECTORY=ON \
             src
       - name: Generate nvnmos (Windows)
         if: runner.os == 'Windows'
@@ -58,7 +44,6 @@ jobs:
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.config }} \
-            -DUSE_ADD_SUBDIRECTORY=ON \
             src
       - name: Build nvnmos (Linux)
         if: runner.os == 'Linux'

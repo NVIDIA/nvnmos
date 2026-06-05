@@ -17,8 +17,7 @@ ARG BASE_IMAGE=ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PACKAGE_SUFFIX
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
-# Match .github/workflows/ci.yml until a Conan Center nmos-cpp release is published.
-ARG NMOS_CPP_REF=079620d88756aa138ede92d3f52a0102370307fe
+ARG CONAN_LOCKFILE=src/conan.lock
 
 # use pattern replacement to clean up '/' and ':'
 ARG _BASE_IMAGE=${BASE_IMAGE//\//-}
@@ -30,25 +29,19 @@ ARG PACKAGE_NAME=nvnmos${PACKAGE_SUFFIX:--${_BASE_IMAGE//:/-}}
 FROM ${BASE_IMAGE} AS cpp-builder
 
 ARG DEBIAN_FRONTEND
-ARG NMOS_CPP_REF
 ARG PACKAGE_NAME
 ARG PIP_BREAK_SYSTEM_PACKAGES
+ARG CONAN_LOCKFILE
 
 ENV PIP_BREAK_SYSTEM_PACKAGES=${PIP_BREAK_SYSTEM_PACKAGES}
 
 RUN apt update && apt install -y --no-install-recommends \
     build-essential \
     ca-certificates \
-    git \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install cmake~=3.17
 RUN pip install conan~=2.2 && conan profile detect
-
-RUN git init /nmos-cpp \
-    && git -C /nmos-cpp remote add origin https://github.com/sony/nmos-cpp.git \
-    && git -C /nmos-cpp fetch --depth 1 origin "${NMOS_CPP_REF}" \
-    && git -C /nmos-cpp checkout FETCH_HEAD
 
 WORKDIR /nvnmos
 
@@ -58,15 +51,13 @@ RUN conan install src \
     --settings:all build_type=Release \
     --build=missing \
     --output-folder=src/conan \
-    --lockfile="" \
-    --lockfile-out=src/conan.lock \
-    -o "&:nmos_cpp_from_source=True"
+    --lockfile=${CONAN_LOCKFILE} \
+    --lockfile-out=src/conan.lock
 
 RUN cmake -B build \
     -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=ON \
-    -DUSE_ADD_SUBDIRECTORY=ON \
     src
 
 RUN cmake --build build --parallel 2
