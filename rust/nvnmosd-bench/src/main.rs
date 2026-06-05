@@ -807,8 +807,9 @@ fn bench_node_config(node_seed: &str, http_port: u16) -> NodeConfig {
         seed: node_seed.to_string(),
         http_port: u32::from(http_port),
         network_services: Some(NetworkServicesConfig {
-            registration_address: "127.0.0.1".to_string(),
-            registration_port: 9,
+            // registration_port 65535 without registration_address puts libnvnmos in
+            // registry-less mode (DNS-SD disabled, no Registration API requests)
+            registration_port: 65535,
             ..Default::default()
         }),
         ..Default::default()

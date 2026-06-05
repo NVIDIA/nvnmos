@@ -365,12 +365,17 @@ namespace nvnmos
             if (0 != services.registration_address)
             {
                 web::json::insert(settings, std::make_pair(nmos::fields::registry_address, utility::s2us(services.registration_address)));
+            }
+            // disable DNS-SD when a fixed registration_address is specified (or port 65535 without registration_address)
+            if (0 != services.registration_address || 65535 == services.registration_port)
+            {
                 // disable DNS-SD discovery
                 web::json::insert(settings, std::make_pair(nmos::fields::highest_pri, nmos::service_priorities::no_priority));
                 // disable DNS-SD advertisement
                 web::json::insert(settings, std::make_pair(nmos::fields::pri, nmos::service_priorities::no_priority));
             }
-            web::json::insert(settings, std::make_pair(nmos::fields::registration_port, 0 != services.registration_port ? services.registration_port : 80));
+            // default to port 80 when port 0 is specified (or port 65535 without registration_address)
+            web::json::insert(settings, std::make_pair(nmos::fields::registration_port, 0 != services.registration_port && (0 != services.registration_address || 65535 != services.registration_port) ? services.registration_port : 80));
             if (0 != services.registration_version)
             {
                 web::json::insert(settings, std::make_pair(nmos::fields::registry_version, utility::s2us(services.registration_version)));
