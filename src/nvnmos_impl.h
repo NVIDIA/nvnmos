@@ -75,6 +75,8 @@ namespace nvnmos
         const web::json::field_as_string transport_file{ U("transport_file") };
 
         const web::json::field_as_value clocks{ U("clocks") }; // object with clock names as keys
+
+        const web::json::field_as_value interface_bindings{ U("interface_bindings") }; // object with interface names as keys, reference counts as values
     }
 
     // custom SDP attributes
