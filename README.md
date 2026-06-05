@@ -178,9 +178,9 @@ The following build arguments are available.
 | --- | --- |
 | BASE_IMAGE | Controls the base container image and therefore the compatibility of the created package. Default is `ubuntu:24.04`. | 
 | PACKAGE_SUFFIX | Controls the package filename, which will be _nvnmos\<suffix\>.tar.gz_. Default is based on the base image, e.g. `-ubuntu-24.04`. |
-| NMOS_CPP_REF | Git commit of [sony/nmos-cpp](https://github.com/sony/nmos-cpp) to build via `add_subdirectory`. Default is the same hash pinned in `.github/workflows/ci.yml`. |
+| CONAN_LOCKFILE | Input lockfile path for `conan install`. Default is `src/conan.lock`. Pass an empty value, e.g. `--build-arg CONAN_LOCKFILE=`, to resolve the latest compatible graph instead. |
 
-The image clones that _nmos-cpp_ revision, runs `conan install` with `nmos_cpp_from_source=True` (no input lockfile), configures with `-DUSE_ADD_SUBDIRECTORY=ON`, and writes a fresh `conan.lock` into the package tarball from the resolved dependency graph. Also builds the Rust workspace (`nvnmosd`, `gst-nmos-rs`, …) against the built `libnvnmos.so`.
+The image installs the Conan Center `nmos-cpp` dependency graph via `conan install` (using `CONAN_LOCKFILE` when set), writes the resolved `conan.lock` into the package tarball, then builds the Rust workspace (`nvnmosd`, `gst-nmos-rs`, …) against the built `libnvnmos.so`.
 
 If this isn't sufficient for your purposes, read on for manual build instructions.
 

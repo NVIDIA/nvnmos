@@ -37,9 +37,9 @@ class NvNmosConan(ConanFile):
 
     def requirements(self):
         if not self.options.nmos_cpp_from_source:
-            self.requires("nmos-cpp/cci.20240223")
+            self.requires("nmos-cpp/cci.20260602")
         else:
-            # Based on Conan Center nmos-cpp/cci.20240223 direct requires.
+            # Based on Conan Center nmos-cpp/cci.20260602 direct requires.
             self.requires("boost/1.83.0", transitive_headers=True)
             self.requires("cpprestsdk/2.10.19", transitive_headers=True)
             self.requires("websocketpp/0.8.2")
