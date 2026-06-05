@@ -60,6 +60,8 @@ use gst::glib;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 
+use crate::nvdsudp::packetization::{self, Packetization, AUDIO_HEADER_SIZE, VIDEO_HEADER_SIZE};
+use crate::nvdsudp::sdp_file::SdpFileGuard;
 use crate::session::udp::types::UdpMedia;
 use crate::session::udp::UdpVariant;
 use crate::types::FlowFormat;
@@ -583,9 +585,9 @@ pub(crate) fn build_fake_src(
 /// `set_caps` + `render()` in the expected order.
 #[derive(Debug)]
 pub(crate) struct MxlSinkChain {
-    /// Wrapper element added to the outer bin (`mxlsink` — depth 1).
+    /// Inner `mxlsink` added directly to the outer bin (same object as [`Self::bin`]).
     pub bin: gst::Element,
-    /// Inner sink (`mxlsink`; same object as [`Self::bin`]).
+    /// Same element as [`Self::bin`].
     pub transport: gst::Element,
 }
 
@@ -616,6 +618,22 @@ pub(crate) struct UdpSrcChain {
     pub transport: gst::Element,
     /// RTP depayloader inside [`Self::bin`].
     pub depay: gst::Element,
+}
+
+#[derive(Debug)]
+pub(crate) struct NvDsUdpSinkChain {
+    /// Inner `nvdsudpsink` added directly to the outer bin (same object as [`Self::bin`]).
+    pub bin: gst::Element,
+    /// Same element as [`Self::bin`].
+    pub transport: gst::Element,
+}
+
+#[derive(Debug)]
+pub(crate) struct NvDsUdpSrcChain {
+    /// Inner `nvdsudpsrc` added directly to the outer bin (same object as [`Self::bin`]).
+    pub bin: gst::Element,
+    /// Same element as [`Self::bin`].
+    pub transport: gst::Element,
 }
 
 pub(crate) fn build_mxlsink(domain_path: &str, flow_id: &str) -> Result<MxlSinkChain, anyhow::Error> {
@@ -1235,6 +1253,172 @@ pub(crate) fn build_udpsrc(
     })
 }
 
+fn nvdsudp_log_cat() -> &'static gst::DebugCategory {
+    use std::sync::LazyLock;
+    static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
+        gst::DebugCategory::new(
+            "nvnmos-nvdsudp",
+            gst::DebugColorFlags::empty(),
+            Some("DeepStream nvdsudp inner chains"),
+        )
+    });
+    &CAT
+}
+
+fn require_nvdsudp_factory(name: &'static str) -> Result<(), anyhow::Error> {
+    if gst::ElementFactory::find(name).is_none() {
+        return Err(anyhow!(
+            "GStreamer factory `{name}` not found; install DeepStream's \
+             `gst-nvdsudp` plugin (Rivermax SDK + ConnectX-5 or newer NIC), \
+             set `GST_PLUGIN_PATH`, and ensure the host binary has \
+             `CAP_NET_RAW` (e.g. `sudo setcap CAP_NET_RAW=ep $(which gst-launch-1.0)`)"
+        ));
+    }
+    Ok(())
+}
+
+/// Build the inner DeepStream Rivermax sink for `nmossink` when
+/// `transport=nvdsudp`. Mode 3: uncompressed essence in, built-in RTP
+/// packetization. No external payloader.
+pub(crate) fn build_nvdsudpsink(
+    media: &UdpMedia,
+    sdp_text: &str,
+) -> Result<NvDsUdpSinkChain, anyhow::Error> {
+    require_nvdsudp_factory("nvdsudpsink")?;
+    let pkt = packetization::from_media(media.format, &media.raw_caps, &media.rtp_caps)?;
+
+    let sdp_file = SdpFileGuard::write("nvnmos-nvdsudpsink", sdp_text)?;
+    gst::debug!(
+        nvdsudp_log_cat(),
+        "build_nvdsudpsink: sdp-file={} (host={}, port={})",
+        sdp_file.path().display(),
+        media.primary.destination_ip,
+        media.primary.destination_port,
+    );
+
+    let sink = gst::ElementFactory::make("nvdsudpsink")
+        .name("nmossink-nvdsudp")
+        .property("host", &media.primary.destination_ip)
+        .property("port", i32::from(media.primary.destination_port))
+        .property("sdp-file", sdp_file.path().to_string_lossy().as_ref())
+        // Rivermax paces egress from buffer timestamps / PTP — not the
+        // pipeline clock. Override via transport-properties if needed.
+        .property("sync", false)
+        .build()
+        .with_context(|| {
+            format!(
+                "instantiating `nvdsudpsink` (host={}, port={})",
+                media.primary.destination_ip, media.primary.destination_port,
+            )
+        })?;
+
+    // Sender configuring SDP must carry `a=x-nvnmos-iface-ip` or
+    // `a=source-filter:` (libnvnmos derives `source_ip` from either).
+    // `UdpLeg.interface_ip` mirrors iface-ip / sender `source-ip`.
+    if let Some(iface) = &media.primary.interface_ip {
+        sink.set_property("local-iface-ip", iface);
+    } else {
+        gst::warning!(
+            nvdsudp_log_cat(),
+            "build_nvdsudpsink: no interface IP on UdpLeg — configuring SDP should \
+             include a=x-nvnmos-iface-ip or a=source-filter for senders",
+        );
+    }
+
+    if matches!(
+        crate::nvdsudp::ts_refclk::ptp_src_from_sdp(sdp_text),
+        crate::nvdsudp::ts_refclk::PtpSrcResolution::UseInterfaceIp,
+    ) {
+        if let Some(iface) = &media.primary.interface_ip {
+            sink.set_property("ptp-src", iface);
+        } else {
+            gst::warning!(
+                nvdsudp_log_cat(),
+                "build_nvdsudpsink: SDP declares PTP ts-refclk but no interface IP \
+                 is available for ptp-src",
+            );
+        }
+    }
+
+    match pkt {
+        Packetization::Video(v) => {
+            sink.set_property("payload-size", v.sink_payload_size);
+            sink.set_property("packets-per-line", v.packets_per_line);
+        }
+        Packetization::Audio(a) => {
+            sink.set_property("payload-size", a.sink_payload_size);
+        }
+    }
+
+    // `nvdsudpsink` reads `sdp-file` from disk in `start`, after callers
+    // drop this chain struct — keep the temp file on the GstObject.
+    SdpFileGuard::attach_to_element(&sink, sdp_file);
+
+    Ok(NvDsUdpSinkChain {
+        bin: sink.clone(),
+        transport: sink,
+    })
+}
+
+/// Build the inner DeepStream Rivermax source for `nmossrc` when
+/// `transport=nvdsudp`. Mode 3: built-in ST 2110-20/30 depacketization.
+/// No external depayloader.
+pub(crate) fn build_nvdsudpsrc(
+    media: &UdpMedia,
+    caps: &gst::Caps,
+) -> Result<NvDsUdpSrcChain, anyhow::Error> {
+    require_nvdsudp_factory("nvdsudpsrc")?;
+    let pkt = packetization::from_media(media.format, &media.raw_caps, &media.rtp_caps)?;
+
+    let src = gst::ElementFactory::make("nvdsudpsrc")
+        .name("nmossrc-nvdsudp")
+        .property("address", &media.primary.destination_ip)
+        .property("port", i32::from(media.primary.destination_port))
+        .property("caps", caps)
+        // DeepStream ST 2110 recv defaults; override via transport-properties.
+        // Hardware soak still needed to confirm for Rivermax deployments.
+        .property("use-rtp-timestamp", true)
+        .property("adjust-leap-seconds", true)
+        .build()
+        .with_context(|| {
+            format!(
+                "instantiating `nvdsudpsrc` (address={}, port={})",
+                media.primary.destination_ip, media.primary.destination_port,
+            )
+        })?;
+
+    // Receiver configuring SDP requires `a=x-nvnmos-iface-ip` (nvnmos.h).
+    if let Some(iface) = &media.primary.interface_ip {
+        src.set_property("local-iface-ip", iface);
+    } else {
+        gst::warning!(
+            nvdsudp_log_cat(),
+            "build_nvdsudpsrc: no interface IP on UdpLeg — configuring SDP should \
+             include a=x-nvnmos-iface-ip for receivers",
+        );
+    }
+    if let Some(source) = &media.primary.source_ip {
+        src.set_property("source-address", source);
+    }
+
+    match pkt {
+        Packetization::Video(v) => {
+            src.set_property("header-size", VIDEO_HEADER_SIZE);
+            src.set_property("payload-size", v.src_payload_size);
+        }
+        Packetization::Audio(a) => {
+            src.set_property("header-size", AUDIO_HEADER_SIZE);
+            src.set_property("payload-size", a.src_payload_size);
+            src.set_property("payload-multiple", a.payload_multiple);
+        }
+    }
+
+    Ok(NvDsUdpSrcChain {
+        bin: src.clone(),
+        transport: src,
+    })
+}
+
 fn require_mxl_factory(name: &'static str) -> Result<(), anyhow::Error> {
     if gst::ElementFactory::find(name).is_none() {
         return Err(anyhow!(
@@ -1304,21 +1488,26 @@ pub(crate) fn build_initial(
 
 
 /// Apply a `GstStructure` bag of GObject property overrides to a freshly
-/// built inner source, sink, payloader, or depayloader. Unknown fields and type mismatches log a warning and
-/// are skipped; an absent or empty structure is a no-op.
-pub(crate) fn apply_properties_to_leaf(
+/// built inner transport source or sink, payloader, or depayloader element.
+/// Unknown fields and type mismatches log a warning and are skipped; an
+/// absent or empty structure is a no-op.
+///
+/// `element` is the host element name (`nmossink` / `nmossrc`) for log
+/// messages; `inner_element` is the GStreamer element being configured
+/// (its GstObject name is `inner_element.name()` in warnings).
+pub(crate) fn apply_properties_to_element(
     cat: &gst::DebugCategory,
     element: &str,
-    leaf: &gst::Element,
+    inner_element: &gst::Element,
     props: Option<&gst::Structure>,
 ) {
     let Some(props) = props else { return };
     for (field_name, field_value) in props.iter() {
-        let Some(pspec) = leaf.class().find_property(field_name.as_ref()) else {
+        let Some(pspec) = inner_element.class().find_property(field_name.as_ref()) else {
             gst::warning!(
                 cat,
                 "{element}: ignoring unknown inner property `{field_name}` on `{}`",
-                leaf.name(),
+                inner_element.name(),
             );
             continue;
         };
@@ -1326,11 +1515,11 @@ pub(crate) fn apply_properties_to_leaf(
             gst::warning!(
                 cat,
                 "{element}: ignoring type-mismatched inner property `{field_name}` on `{}`",
-                leaf.name(),
+                inner_element.name(),
             );
             continue;
         }
-        leaf.set_property(field_name.as_ref(), field_value);
+        inner_element.set_property(field_name.as_ref(), field_value);
     }
 }
 
@@ -1341,8 +1530,8 @@ pub(crate) fn apply_udp_sink_inner_properties(
     transport_properties: Option<&gst::Structure>,
     pay_properties: Option<&gst::Structure>,
 ) {
-    apply_properties_to_leaf(cat, element, &chain.transport, transport_properties);
-    apply_properties_to_leaf(cat, element, &chain.pay, pay_properties);
+    apply_properties_to_element(cat, element, &chain.transport, transport_properties);
+    apply_properties_to_element(cat, element, &chain.pay, pay_properties);
 }
 
 pub(crate) fn apply_udp_src_inner_properties(
@@ -1352,8 +1541,8 @@ pub(crate) fn apply_udp_src_inner_properties(
     transport_properties: Option<&gst::Structure>,
     depay_properties: Option<&gst::Structure>,
 ) {
-    apply_properties_to_leaf(cat, element, &chain.transport, transport_properties);
-    apply_properties_to_leaf(cat, element, &chain.depay, depay_properties);
+    apply_properties_to_element(cat, element, &chain.transport, transport_properties);
+    apply_properties_to_element(cat, element, &chain.depay, depay_properties);
 }
 
 pub(crate) fn apply_mxl_sink_inner_properties(
@@ -1363,7 +1552,7 @@ pub(crate) fn apply_mxl_sink_inner_properties(
     transport_properties: Option<&gst::Structure>,
     pay_properties: Option<&gst::Structure>,
 ) {
-    apply_properties_to_leaf(cat, element, &chain.transport, transport_properties);
+    apply_properties_to_element(cat, element, &chain.transport, transport_properties);
     if pay_properties.is_some_and(|s| s.n_fields() > 0) {
         gst::warning!(
             cat,
@@ -1379,11 +1568,57 @@ pub(crate) fn apply_mxl_src_inner_properties(
     transport_properties: Option<&gst::Structure>,
     depay_properties: Option<&gst::Structure>,
 ) {
-    apply_properties_to_leaf(cat, element, &chain.transport, transport_properties);
+    apply_properties_to_element(cat, element, &chain.transport, transport_properties);
     if depay_properties.is_some_and(|s| s.n_fields() > 0) {
         gst::warning!(
             cat,
             "{element}: depay-properties set but this chain has no depayloader; ignoring",
+        );
+    }
+}
+
+pub(crate) fn apply_nvdsudp_sink_inner_properties(
+    cat: &gst::DebugCategory,
+    element: &str,
+    chain: &NvDsUdpSinkChain,
+    media: &UdpMedia,
+    transport_properties: Option<&gst::Structure>,
+    pay_properties: Option<&gst::Structure>,
+) {
+    apply_properties_to_element(cat, element, &chain.transport, transport_properties);
+    if pay_properties.is_some_and(|s| s.n_fields() > 0) {
+        gst::warning!(
+            cat,
+            "{element}: pay-properties set but nvdsudp has no payloader; ignoring",
+        );
+    }
+    if media.format == crate::types::FlowFormat::Video {
+        if let Err(e) = crate::nvdsudp::packetization::reconcile_sink_video_packetization(
+            &chain.transport,
+            &media.raw_caps,
+            cat,
+            element,
+        ) {
+            gst::warning!(
+                cat,
+                "{element}: reconciling nvdsudpsink video packetization: {e:#}",
+            );
+        }
+    }
+}
+
+pub(crate) fn apply_nvdsudp_src_inner_properties(
+    cat: &gst::DebugCategory,
+    element: &str,
+    chain: &NvDsUdpSrcChain,
+    transport_properties: Option<&gst::Structure>,
+    depay_properties: Option<&gst::Structure>,
+) {
+    apply_properties_to_element(cat, element, &chain.transport, transport_properties);
+    if depay_properties.is_some_and(|s| s.n_fields() > 0) {
+        gst::warning!(
+            cat,
+            "{element}: depay-properties set but nvdsudp has no depayloader; ignoring",
         );
     }
 }
@@ -2305,42 +2540,42 @@ mod tests {
     }
 
     #[test]
-    fn apply_properties_to_leaf_with_none_is_noop() {
+    fn apply_properties_to_element_with_none_is_noop() {
         init_gst();
         let udpsrc = gst::ElementFactory::make("udpsrc")
             .build()
             .expect("udpsrc must construct");
         let default = udpsrc.property::<i32>("buffer-size");
-        apply_properties_to_leaf(test_log_cat(), "nmossrc", &udpsrc, None);
+        apply_properties_to_element(test_log_cat(), "nmossrc", &udpsrc, None);
         assert_eq!(udpsrc.property::<i32>("buffer-size"), default);
     }
 
     #[test]
-    fn apply_properties_to_leaf_with_empty_structure_is_noop() {
+    fn apply_properties_to_element_with_empty_structure_is_noop() {
         init_gst();
         let udpsrc = gst::ElementFactory::make("udpsrc")
             .build()
             .expect("udpsrc must construct");
         let default = udpsrc.property::<i32>("buffer-size");
         let empty = gst::Structure::new_empty("properties");
-        apply_properties_to_leaf(test_log_cat(), "nmossrc", &udpsrc, Some(&empty));
+        apply_properties_to_element(test_log_cat(), "nmossrc", &udpsrc, Some(&empty));
         assert_eq!(udpsrc.property::<i32>("buffer-size"), default);
     }
 
     #[test]
-    fn apply_properties_to_leaf_sets_known_field() {
+    fn apply_properties_to_element_sets_known_field() {
         init_gst();
         let udpsrc = gst::ElementFactory::make("udpsrc")
             .build()
             .expect("udpsrc must construct");
         let mut props = gst::Structure::new_empty("properties");
         props.set("buffer-size", 26214400i32);
-        apply_properties_to_leaf(test_log_cat(), "nmossrc", &udpsrc, Some(&props));
+        apply_properties_to_element(test_log_cat(), "nmossrc", &udpsrc, Some(&props));
         assert_eq!(udpsrc.property::<i32>("buffer-size"), 26214400);
     }
 
     #[test]
-    fn apply_properties_to_leaf_skips_unknown_field_but_applies_known_fields() {
+    fn apply_properties_to_element_skips_unknown_field_but_applies_known_fields() {
         init_gst();
         let udpsrc = gst::ElementFactory::make("udpsrc")
             .build()
@@ -2348,12 +2583,12 @@ mod tests {
         let mut props = gst::Structure::new_empty("properties");
         props.set("definitely-not-a-property", true);
         props.set("buffer-size", 26214400i32);
-        apply_properties_to_leaf(test_log_cat(), "nmossrc", &udpsrc, Some(&props));
+        apply_properties_to_element(test_log_cat(), "nmossrc", &udpsrc, Some(&props));
         assert_eq!(udpsrc.property::<i32>("buffer-size"), 26214400);
     }
 
     #[test]
-    fn apply_properties_to_leaf_skips_type_mismatch() {
+    fn apply_properties_to_element_skips_type_mismatch() {
         init_gst();
         let udpsrc = gst::ElementFactory::make("udpsrc")
             .build()
@@ -2361,7 +2596,7 @@ mod tests {
         let default = udpsrc.property::<i32>("buffer-size");
         let mut props = gst::Structure::new_empty("properties");
         props.set("buffer-size", "foo");
-        apply_properties_to_leaf(test_log_cat(), "nmossrc", &udpsrc, Some(&props));
+        apply_properties_to_element(test_log_cat(), "nmossrc", &udpsrc, Some(&props));
         assert_eq!(udpsrc.property::<i32>("buffer-size"), default);
     }
 

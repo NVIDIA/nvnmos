@@ -11,7 +11,7 @@ use gstreamer as gst;
 use super::{CommonSettings, InnerConfig, TransportConfig};
 use super::types::Side;
 use crate::sdp::{self, SdpOverrides};
-use crate::types::CapsMode;
+use crate::types::{CapsMode, Transport};
 
 /// Which factory family to use for the UDP socket and RTP
 /// (de)payloader elements.
@@ -83,6 +83,7 @@ pub(super) fn synthesise_or_passthrough_udp(
                 interface_ip: &settings.interface_ip,
                 advertise_caps,
                 node_seed: &settings.node_seed,
+                narrow_traffic_profile: settings.transport == Transport::NvDsUdp,
             };
             let text = sdp::from_caps(&input)
                 .with_context(|| format!("{element}: synthesising SDP from caps"))?;
@@ -207,6 +208,76 @@ pub(crate) fn decide_inner_config_udp(
         media,
         transport_file: Some(text.to_owned()),
     }))
+}
+
+pub(crate) fn decide_inner_config_nvdsudp(
+    element: &str,
+    settings: &CommonSettings,
+    transport_file: Option<&str>,
+    cross_check_mode: sdp::EssenceCrossCheckMode,
+) -> Result<InnerConfig, anyhow::Error> {
+    let Some(text) = transport_file else {
+        let reason = match settings.side {
+            Side::Sender => {
+                "no SDP transport file; waiting for IS-05 PATCH to supply the destination address"
+                    .to_owned()
+            }
+            Side::Receiver => {
+                "no SDP transport file; waiting for IS-05 PATCH to supply the listen address"
+                    .to_owned()
+            }
+        };
+        return Ok(InnerConfig::Fake { reason });
+    };
+    let media = sdp::parse_sdp(text).with_context(|| {
+        format!(
+            "{element}: parsing SDP transport file for transport=nvdsudp"
+        )
+    })?;
+    sdp::cross_check_essence(
+        &media,
+        settings.caps.as_ref(),
+        settings.transport_caps.as_ref(),
+        cross_check_mode,
+    )
+    .with_context(|| {
+        format!(
+            "{element}: cross-checking SDP against `caps` / `transport-caps` \
+             for transport=nvdsudp"
+        )
+    })?;
+    Ok(InnerConfig::Real(TransportConfig::NvDsUdp {
+        media,
+        transport_file: Some(text.to_owned()),
+    }))
+}
+
+pub(super) fn resolve_inner_config_nvdsudp(
+    cat: &gst::DebugCategory,
+    element: &str,
+    settings: &CommonSettings,
+    resolved_transport_file: Option<String>,
+) -> Result<(InnerConfig, Option<String>), anyhow::Error> {
+    let had_user_transport_file = resolved_transport_file.is_some();
+    let resolved_transport_file =
+        synthesise_or_passthrough_udp(cat, element, settings, resolved_transport_file)?;
+
+    let resolved_transport_file = match resolved_transport_file {
+        Some(text) if had_user_transport_file => Some(
+            sdp::passthrough_with_overrides(&text, &property_overrides_udp(settings))
+                .with_context(|| {
+                    format!("{element}: applying property overrides to transport-file SDP")
+                })?,
+        ),
+        other => other,
+    };
+    let inner = decide_inner_config_nvdsudp(
+        element,
+        settings,
+        resolved_transport_file.as_deref(),
+        sdp::EssenceCrossCheckMode::Full,
+    )?;
+    Ok((inner, resolved_transport_file))
 }
 
 /// Cross-check strictness for [`decide_inner_config_udp`]: wide
@@ -1267,7 +1338,7 @@ mod tests {
         }
 
         #[test]
-        fn activation_nvdsudp_is_not_implemented_failure() {
+        fn activation_nvdsudp_parses_sdp_success() {
             let s = udp_settings(Side::Sender, Transport::NvDsUdp);
             let plan = make_activation_plan(
                 &cat(),
@@ -1275,14 +1346,14 @@ mod tests {
                 &s,
                 &req(Side::Sender, Some(VIDEO_UDP_SDP)),
             );
-            assert!(matches!(plan.inner, InnerConfig::Fake { .. }));
-            match plan.ack {
-                ActivationAck::Failure { reason } => assert!(
-                    reason.contains("nvdsudp") && reason.contains("not yet implemented"),
-                    "expected nvdsudp not-implemented attribution: {reason}",
-                ),
-                ActivationAck::Success => panic!("expected Failure ack for nvdsudp"),
+            match plan.inner {
+                InnerConfig::Real(TransportConfig::NvDsUdp { media, .. }) => {
+                    assert_eq!(media.primary.destination_ip, "239.1.1.1");
+                    assert_eq!(media.primary.destination_port, 5004);
+                }
+                other => panic!("expected Real(NvDsUdp), got {other:?}"),
             }
+            assert!(matches!(plan.ack, ActivationAck::Success));
         }
     }
 }

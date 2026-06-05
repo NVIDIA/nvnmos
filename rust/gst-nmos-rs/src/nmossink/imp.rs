@@ -624,6 +624,19 @@ impl NmosSink {
                 );
                 chain.bin
             }
+            TransportConfig::NvDsUdp { media, transport_file, .. } => {
+                let sdp = transport_file.as_deref().unwrap_or("");
+                let chain = inner::build_nvdsudpsink(media, sdp)?;
+                inner::apply_nvdsudp_sink_inner_properties(
+                    &CAT,
+                    "nmossink",
+                    &chain,
+                    media,
+                    settings.transport_properties.as_ref(),
+                    settings.pay_properties.as_ref(),
+                );
+                chain.bin
+            }
         };
         self.swap_inner(bin, &new_inner)?;
         // Reaching the `Real` branch at NULL→READY / READY→PAUSED
@@ -867,6 +880,32 @@ impl NmosSink {
                     Err(e) => {
                         return ActivationOutcome::Failed {
                             reason: format!("nmossink: building inner udpsink: {e:#}"),
+                        };
+                    }
+                }
+            }
+            InnerConfig::Real(TransportConfig::NvDsUdp {
+                media,
+                transport_file,
+                ..
+            }) => {
+                let settings = self.settings.lock().unwrap();
+                let sdp = transport_file.as_deref().unwrap_or("");
+                match inner::build_nvdsudpsink(media, sdp) {
+                    Ok(chain) => {
+                        inner::apply_nvdsudp_sink_inner_properties(
+                            &CAT,
+                            "nmossink",
+                            &chain,
+                            media,
+                            settings.transport_properties.as_ref(),
+                            settings.pay_properties.as_ref(),
+                        );
+                        chain.bin
+                    }
+                    Err(e) => {
+                        return ActivationOutcome::Failed {
+                            reason: format!("nmossink: building inner nvdsudpsink: {e:#}"),
                         };
                     }
                 }

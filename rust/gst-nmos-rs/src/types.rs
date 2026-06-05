@@ -24,9 +24,8 @@ use gstreamer::glib;
 /// (`udpsrc2` + the `*pay2` / `*depay2` family) and falls back
 /// per-element to the V1 form for anything without a V2 sibling
 /// yet — see [`crate::session::UdpVariant`] for the dispatch
-/// detail. [`Transport::NvDsUdp`] is reserved for the DeepStream
-/// `nvdsudp*` family (kernel-bypass plus PTP-aligned timing for
-/// strict ST 2110) and is rejected today.
+/// detail. [`Transport::NvDsUdp`] uses DeepStream's `nvdsudp*`
+/// family (kernel-bypass plus PTP-aligned timing for strict ST 2110).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, glib::Enum)]
 #[repr(i32)]
 #[enum_type(name = "GstNmosTransport")]
@@ -46,8 +45,8 @@ pub enum Transport {
     /// exists).
     #[enum_value(name = "OSS udp + RTP via gst-plugins-rs", nick = "udp2")]
     Udp2 = 2,
-    /// ST 2110 via DeepStream's `nvdsudp*`. Not implemented; rejected today.
-    #[enum_value(name = "NvDsUdp / Rivermax (not implemented)", nick = "nvdsudp")]
+    /// ST 2110 via DeepStream's `nvdsudpsrc` / `nvdsudpsink` (Rivermax).
+    #[enum_value(name = "NvDsUdp / Rivermax (DeepStream nvdsudp*)", nick = "nvdsudp")]
     NvDsUdp = 3,
 }
 

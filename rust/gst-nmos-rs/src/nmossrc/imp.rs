@@ -663,6 +663,27 @@ impl NmosSrc {
                             chain.bin
                         }
                     }
+                    TransportConfig::NvDsUdp {
+                        media,
+                        transport_file,
+                    } => {
+                        let caps = nvdsudp_receiver_caps(
+                            transport_file.as_deref(),
+                            media,
+                        );
+                        {
+                            let chain = inner::build_nvdsudpsrc(media, &caps)?;
+                            let settings = self.settings.lock().unwrap();
+                            inner::apply_nvdsudp_src_inner_properties(
+                                &CAT,
+                                "nmossrc",
+                                &chain,
+                                settings.transport_properties.as_ref(),
+                                settings.depay_properties.as_ref(),
+                            );
+                            chain.bin
+                        }
+                    }
                 };
                 self.swap_inner(bin, &new_inner, inner::RebuildChainOpts::default())?;
                 // Reaching the `Real` branch at NULL→READY implies
@@ -921,6 +942,30 @@ impl NmosSrc {
                     }
                 }
             }
+            InnerConfig::Real(TransportConfig::NvDsUdp {
+                media,
+                transport_file,
+            }) => {
+                let caps = nvdsudp_receiver_caps(transport_file.as_deref(), media);
+                let settings = self.settings.lock().unwrap();
+                match inner::build_nvdsudpsrc(media, &caps) {
+                    Ok(chain) => {
+                        inner::apply_nvdsudp_src_inner_properties(
+                            &CAT,
+                            "nmossrc",
+                            &chain,
+                            settings.transport_properties.as_ref(),
+                            settings.depay_properties.as_ref(),
+                        );
+                        chain.bin
+                    }
+                    Err(e) => {
+                        return ActivationOutcome::Failed {
+                            reason: format!("nmossrc: building inner nvdsudpsrc: {e:#}"),
+                        };
+                    }
+                }
+            }
             InnerConfig::Fake { .. } => {
                 // Deactivation, side mismatch, missing config, etc.
                 // The bin may be in PLAYING when this happens, so
@@ -1044,6 +1089,9 @@ fn intermediate_fake_src_caps(
             media,
             ..
         }) => Ok(udp_receiver_advertise_caps(transport_file.as_deref(), media)),
+        InnerConfig::Real(TransportConfig::NvDsUdp { media, .. }) => {
+            Ok(Some(nvdsudp_receiver_caps(None, media)))
+        }
         _ => fake_caps_from_settings(snapshot),
     }
 }
@@ -1092,6 +1140,16 @@ fn mxl_receiver_advertise_caps(
 /// configuring SDP) carries `a=x-nvnmos-caps:`, omit `capssetter` so
 /// runtime caps come from the live RTP flow; otherwise pin essence
 /// caps parsed from the same SDP.
+/// Essence caps for `nvdsudpsrc.caps` (Mode 3). Always uses
+/// [`UdpMedia::raw_caps`] — wide receivers still need explicit
+/// essence caps on the Rivermax source.
+fn nvdsudp_receiver_caps(
+    _transport_file: Option<&str>,
+    media: &crate::session::udp::types::UdpMedia,
+) -> gst::Caps {
+    media.raw_caps.clone()
+}
+
 fn udp_receiver_advertise_caps(
     transport_file: Option<&str>,
     media: &crate::session::udp::types::UdpMedia,

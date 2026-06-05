@@ -388,6 +388,10 @@ pub(crate) struct SdpSession<'a> {
     /// `receiver-caps-mode` already resolved against `Narrow`
     /// at no-transport-file time.
     pub advertise_caps: bool,
+    /// When true, emit `a=ts-refclk:ptp=IEEE1588-2008:traceable` on the
+    /// media block (Rivermax / `transport=nvdsudp` sender synthesis).
+    /// OSS `udp` / `udp2` and all receivers leave this false.
+    pub emit_ptp_ts_refclk: bool,
 }
 
 /// Whether an SDP transport file advertises wide Receiver Caps via
@@ -566,6 +570,7 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
 /// c=IN IP4 <destination_ip>/64
 /// a=rtpmap:<pt> ...      ← from `set_media_from_caps`
 /// a=fmtp:<pt> ...        ← from `set_media_from_caps`
+/// a=ts-refclk:ptp=IEEE1588-2008:traceable                     ← if session.emit_ptp_ts_refclk
 /// a=mediaclk:direct=0                                         ← synthesis only
 /// a=source-filter: incl IN IP4 <destination_ip> <source_ip>   ← if source_ip
 /// a=x-nvnmos-iface-ip:<interface_ip>                          ← if interface_ip
@@ -624,6 +629,13 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     // `nmos-cpp`'s `find_fmtp` / `get_format` parsers expect the
     // canonical case.
     canonicalise_st2110_wire_case(&mut m);
+
+    // ST 2110-10 §6.1 reference clock — synthesis default for
+    // `transport=nvdsudp` senders only. Passthrough SDPs keep the
+    // user's `a=ts-refclk:` (or its absence) verbatim.
+    if session.emit_ptp_ts_refclk {
+        m.add_attribute("ts-refclk", Some("ptp=IEEE1588-2008:traceable"));
+    }
 
     // ST 2110-10 §6.2 direct media clock — emitted on the synthesis
     // path only (`build_sdp`). Passthrough SDPs keep the user's
@@ -1123,6 +1135,9 @@ pub(crate) struct SdpBuildInput<'a> {
     /// and [`side`](Self::side) drives a stable RFC 4566 `o=`
     /// `<sess-id>` on the synthesis path.
     pub node_seed: &'a str,
+    /// When true, emit `TP=2110TPN` on video fmtp (Rivermax / `nvdsudp`
+    /// narrow traffic profile). OSS `udp` / `udp2` leave this unset.
+    pub narrow_traffic_profile: bool,
 }
 
 /// Synthesise a full configuring SDP from caps-only
@@ -1157,7 +1172,9 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
     let payload_type = resolve_payload_type(format, input.transport_caps)?;
 
     let rtp_caps = match format {
-        FlowFormat::Video => rtp_caps_from_raw_video(input.essence_caps, payload_type)?,
+        FlowFormat::Video => {
+            rtp_caps_from_raw_video(input.essence_caps, payload_type, input.narrow_traffic_profile)?
+        }
         FlowFormat::Audio => {
             let (ptime_ns, maxptime_ns) = resolve_audio_ptime(input.transport_caps);
             let resolved = resolved_audio_caps(input.essence_caps, input.transport_caps)?;
@@ -1204,6 +1221,8 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
     };
 
     let origin_session_id = stable_origin_session_id(input.node_seed, input.side, input.name);
+    let emit_ptp_ts_refclk =
+        input.narrow_traffic_profile && input.side == Side::Sender;
     let session = SdpSession {
         origin_address,
         origin_session_id: &origin_session_id,
@@ -1211,6 +1230,7 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
         description,
         name,
         advertise_caps: input.advertise_caps,
+        emit_ptp_ts_refclk,
     };
 
     build_sdp(&media, session)
@@ -1835,7 +1855,11 @@ fn format_ptime_ns_as_ms(ns: u64) -> String {
 /// outside the {`UYVY`, `UYVP`} subset [`raw_caps_from_rtp_video`]
 /// understands today; widening the matrix here without widening
 /// the inverse first would break the round-trip contract.
-fn rtp_caps_from_raw_video(raw_caps: &gst::Caps, payload_type: u8) -> Result<gst::Caps, SdpError> {
+fn rtp_caps_from_raw_video(
+    raw_caps: &gst::Caps,
+    payload_type: u8,
+    narrow_traffic_profile: bool,
+) -> Result<gst::Caps, SdpError> {
     let s = raw_caps
         .structure(0)
         .ok_or_else(|| SdpError::UnsupportedEssence("raw video caps empty".to_owned()))?;
@@ -1910,6 +1934,9 @@ fn rtp_caps_from_raw_video(raw_caps: &gst::Caps, payload_type: u8) -> Result<gst
     caps_text.push_str(&format!(",colorimetry=(string){colorimetry}"));
     if let Some(tcs_value) = tcs {
         caps_text.push_str(&format!(",tcs=(string){tcs_value}"));
+    }
+    if narrow_traffic_profile {
+        caps_text.push_str(",TP=(string)2110TPN");
     }
     gst::Caps::from_str(&caps_text)
         .map_err(|e| SdpError::UnsupportedEssence(format!("constructing rtp caps: {e}")))
@@ -2618,6 +2645,7 @@ mod tests {
             description: None,
             name: None,
             advertise_caps: false,
+            emit_ptp_ts_refclk: false,
         }
     }
 
@@ -2819,6 +2847,30 @@ mod tests {
         assert!(
             text.contains("a=x-nvnmos-name:Camera 1"),
             "a=x-nvnmos-name line missing when session.name is Some: {text}",
+        );
+    }
+
+    #[test]
+    fn build_sdp_emits_ptp_ts_refclk_when_flag_set() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let mut session = test_session();
+        session.emit_ptp_ts_refclk = true;
+        let text = build_sdp(&media, session).expect("build");
+        assert!(
+            text.contains("a=ts-refclk:ptp=IEEE1588-2008:traceable"),
+            "emit_ptp_ts_refclk must synthesise PTP traceable ts-refclk:\n{text}",
+        );
+    }
+
+    #[test]
+    fn build_sdp_omits_ts_refclk_by_default() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let text = build_sdp(&media, test_session()).expect("build");
+        assert!(
+            !text.contains("a=ts-refclk:"),
+            "default synthesis must not emit ts-refclk:\n{text}",
         );
     }
 
@@ -3920,7 +3972,7 @@ mod tests {
     fn rtp_caps_from_raw_video_uyvy_maps_to_ycbcr422_depth8() {
         init_gst();
         let raw = raw_video_caps("UYVY", 1920, 1080, gst::Fraction::new(50, 1), None);
-        let rtp = rtp_caps_from_raw_video(&raw, 96).expect("synth");
+        let rtp = rtp_caps_from_raw_video(&raw, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.name().as_str(), "application/x-rtp");
         assert_eq!(s.get::<&str>("media").unwrap(), "video");
@@ -3945,7 +3997,7 @@ mod tests {
     fn rtp_caps_from_raw_video_uyvp_maps_to_ycbcr422_depth10() {
         init_gst();
         let raw = raw_video_caps("UYVP", 1920, 1080, gst::Fraction::new(50, 1), None);
-        let rtp = rtp_caps_from_raw_video(&raw, 96).expect("synth");
+        let rtp = rtp_caps_from_raw_video(&raw, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("sampling").unwrap(), "YCbCr-4:2:2");
         assert_eq!(s.get::<&str>("depth").unwrap(), "10");
@@ -3961,7 +4013,7 @@ mod tests {
             gst::Fraction::new(30_000, 1_001),
             None,
         );
-        let rtp = rtp_caps_from_raw_video(&raw, 96).expect("synth");
+        let rtp = rtp_caps_from_raw_video(&raw, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("exactframerate").unwrap(), "30000/1001");
     }
@@ -3976,7 +4028,7 @@ mod tests {
             gst::Fraction::new(50, 1),
             Some("interlace-mode=progressive"),
         );
-        let rtp = rtp_caps_from_raw_video(&progressive, 96).expect("synth");
+        let rtp = rtp_caps_from_raw_video(&progressive, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert!(
             s.get::<&str>("interlace").is_err(),
@@ -3990,7 +4042,7 @@ mod tests {
             gst::Fraction::new(25, 1),
             Some("interlace-mode=interleaved"),
         );
-        let rtp = rtp_caps_from_raw_video(&interleaved, 96).expect("synth");
+        let rtp = rtp_caps_from_raw_video(&interleaved, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(
             s.get::<&str>("interlace").unwrap(),
@@ -4009,7 +4061,7 @@ mod tests {
             gst::Fraction::new(50, 1),
             Some("colorimetry=bt709"),
         );
-        let rtp = rtp_caps_from_raw_video(&raw, 96).expect("synth");
+        let rtp = rtp_caps_from_raw_video(&raw, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("colorimetry").unwrap(), "BT709");
         assert!(
@@ -4028,7 +4080,7 @@ mod tests {
             gst::Fraction::new(50, 1),
             Some("colorimetry=bt2100-pq"),
         );
-        let rtp = rtp_caps_from_raw_video(&pq, 96).expect("synth");
+        let rtp = rtp_caps_from_raw_video(&pq, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("colorimetry").unwrap(), "BT2100");
         assert_eq!(s.get::<&str>("tcs").unwrap(), "PQ");
@@ -4040,7 +4092,7 @@ mod tests {
             gst::Fraction::new(50, 1),
             Some("colorimetry=bt2100-hlg"),
         );
-        let rtp = rtp_caps_from_raw_video(&hlg, 96).expect("synth");
+        let rtp = rtp_caps_from_raw_video(&hlg, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("colorimetry").unwrap(), "BT2100");
         assert_eq!(s.get::<&str>("tcs").unwrap(), "HLG");
@@ -4056,7 +4108,7 @@ mod tests {
             gst::Fraction::new(50, 1),
             Some("colorimetry=1:3:5:1"),
         );
-        let rtp = rtp_caps_from_raw_video(&raw, 96).expect("synth");
+        let rtp = rtp_caps_from_raw_video(&raw, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         // `colorimetry=` is REQUIRED by nmos-cpp's
         // `get_video_raw_parameters`; an unrecognised value on
@@ -4077,7 +4129,7 @@ mod tests {
     fn rtp_caps_from_raw_video_rejects_unsupported_format() {
         init_gst();
         let raw = raw_video_caps("RGBA", 1920, 1080, gst::Fraction::new(50, 1), None);
-        let err = rtp_caps_from_raw_video(&raw, 96).expect_err("must reject");
+        let err = rtp_caps_from_raw_video(&raw, 96, false).expect_err("must reject");
         assert!(matches!(err, SdpError::UnsupportedEssence(ref m) if m.contains("RGBA")));
     }
 
@@ -4091,7 +4143,7 @@ mod tests {
             gst::Fraction::new(50, 1),
             Some("interlace-mode=progressive,colorimetry=bt2020-10"),
         );
-        let rtp = rtp_caps_from_raw_video(&original, 96).expect("synth");
+        let rtp = rtp_caps_from_raw_video(&original, 96, false).expect("synth");
         let round_tripped = raw_caps_from_rtp_video(&rtp).expect("parse back");
         let rt = round_tripped.structure(0).expect("rt raw");
         let orig = original.structure(0).expect("orig raw");
@@ -4314,6 +4366,7 @@ mod tests {
             interface_ip: "192.0.2.11",
             advertise_caps: false,
             node_seed: "demo-node1",
+            narrow_traffic_profile: false,
         }
     }
 
@@ -4453,6 +4506,33 @@ mod tests {
         input.source_port = 0;
         let leg = udp_leg_from_input(&input);
         assert_eq!(leg.source_port, None);
+    }
+
+    #[test]
+    fn from_caps_nvdsudp_sender_emits_ptp_ts_refclk() {
+        init_gst();
+        let essence = raw_video_caps("UYVP", 1920, 1080, gst::Fraction::new(50, 1), None);
+        let mut input = build_input(&essence, Side::Sender, None);
+        input.narrow_traffic_profile = true;
+        let text = from_caps(&input).expect("synth");
+        assert!(
+            text.contains("a=ts-refclk:ptp=IEEE1588-2008:traceable"),
+            "nvdsudp sender synthesis must emit PTP ts-refclk:\n{text}",
+        );
+        assert!(text.contains("TP=2110TPN"), "narrow traffic profile:\n{text}");
+    }
+
+    #[test]
+    fn from_caps_udp_sender_omits_ts_refclk() {
+        init_gst();
+        let essence = raw_video_caps("UYVP", 1920, 1080, gst::Fraction::new(50, 1), None);
+        let input = build_input(&essence, Side::Sender, None);
+        let text = from_caps(&input).expect("synth");
+        assert!(
+            !text.contains("a=ts-refclk:"),
+            "udp sender synthesis must omit ts-refclk:\n{text}",
+        );
+        assert!(!text.contains("TP=2110TPN"), "OSS udp must not narrow profile:\n{text}");
     }
 
     #[test]
@@ -4781,6 +4861,7 @@ mod tests {
             interface_ip: "",
             advertise_caps: false,
             node_seed: "demo-node1",
+            narrow_traffic_profile: false,
         };
         let text = from_caps(&input).expect("synth");
         assert!(

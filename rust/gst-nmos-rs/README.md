@@ -25,14 +25,14 @@ Both elements:
 | `domain`         | string  | optional  | DNS domain for NMOS network services (`network_services.domain`). Use `local` to force mDNS. Empty (the default) leaves libnvnmos on automatic discovery. **Not** the MXL Domain — see `mxl-domain-id` / `mxl-domain-path`. Honoured only by the `OpenSession` that creates the Node. |
 | `registration-url` | string | optional | Fixed IS-04 Registration API URL (`http://host[:port]/x-nmos/registration/v<X.Y>[/]`). Parsed into `network_services.registration_*`; invalid URLs are logged and ignored. Empty (the default) leaves libnvnmos on DNS-SD discovery based on `host-name`. Honoured only by the `OpenSession` that creates the Node. |
 | `system-url`     | string  | optional  | Fixed IS-09 System API URL (`http://host[:port]/x-nmos/system/v<X.Y>[/]`). Parsed into `network_services.system_*`; invalid URLs are logged and ignored. Honoured only when `registration-url` is also set (libnvnmos ignores a standalone System API). Honoured only by the `OpenSession` that creates the Node. |
-| `transport`      | enum    | required  | Inner data path family: `mxl` (MXL shared-memory, the `mxlsrc` / `mxlsink` chain), `udp` (ST 2110 over RTP/UDP via gst-plugins-good `udpsrc` / `udpsink` + the `rtp*pay` / `rtp*depay` line-up), `udp2` (same but preferring gst-plugins-rs's `udpsrc2` + `rtp*pay2` / `rtp*depay2` where available, falling back to gst-plugins-good per-element). `nvdsudp` is reserved for the DeepStream `nvdsudp*` family and is rejected today (gated on ConnectX / Rivermax hardware). |
-| `transport-file` | string  | route-dependent | Literal contents of the NvNmos transport file the daemon will register with the resource and re-publish into IS-05: MXL `flow_def` JSON for `transport=mxl`, SDP text for `transport=udp` / `udp2`. Pass text, not a path. Convenient for programmatic callers; gst-launch users want `transport-file-path` instead. Mutually exclusive with `transport-file-path`. May be substituted by `caps` (+ `mxl-flow-id` on MXL, or `transport-caps` and the IS-05 endpoint properties — `destination-ip` / `destination-port` / `interface-ip` / `multicast-ip` / `source-ip` / `source-port` — on RTP) on either element. |
+| `transport`      | enum    | required  | Inner data path family: `mxl` (MXL shared-memory, the `mxlsrc` / `mxlsink` chain), `udp` (ST 2110 over RTP/UDP via gst-plugins-good `udpsrc` / `udpsink` + the `rtp*pay` / `rtp*depay` line-up), `udp2` (same but preferring gst-plugins-rs's `udpsrc2` + `rtp*pay2` / `rtp*depay2` where available, falling back to gst-plugins-good per-element), `nvdsudp` (ST 2110 via DeepStream `nvdsudpsrc` / `nvdsudpsink` — Rivermax kernel-bypass, built-in RTP (de)payload, Mode 3; requires ConnectX-5+ and the Rivermax SDK). |
+| `transport-file` | string  | route-dependent | Literal contents of the NvNmos transport file the daemon will register with the resource and re-publish into IS-05: MXL `flow_def` JSON for `transport=mxl`, SDP text for `transport=udp` / `udp2` / `nvdsudp`. Pass text, not a path. Convenient for programmatic callers; gst-launch users want `transport-file-path` instead. Mutually exclusive with `transport-file-path`. May be substituted by `caps` (+ `mxl-flow-id` on MXL, or `transport-caps` and the IS-05 endpoint properties — `destination-ip` / `destination-port` / `interface-ip` / `multicast-ip` / `source-ip` / `source-port` — on RTP) on either element. |
 | `transport-file-path` | string | route-dependent | Filesystem path read at NULL→READY into `transport-file`. Convenience for `gst-launch-1.0`, whose pipeline parser doesn't cope with multi-line / quote-heavy property values. Mutually exclusive with `transport-file`. |
 | `label`          | string  | optional  | NMOS label for this Sender/Receiver (not the Node). Overrides the transport file's top-level `label` when both are supplied. |
 | `description`    | string  | optional  | NMOS description for this Sender/Receiver. Overrides the transport file's top-level `description` when both are supplied. |
 | `caps`           | GstCaps | required when `transport-file*` is unset | Essence caps. Supported shapes: `video/x-raw,format=…,width=…,height=…,framerate=…[,interlace-mode=…]` (MXL: `v210`; RTP/UDP: RFC 4175 8-bit `UYVY` and 10-bit `UYVP`); `audio/x-raw,format=…,rate=…,channels=…` (MXL: `F32LE`; RTP/UDP: ST 2110-30 `S24BE` (L24) and `S16BE` (L16)); `meta/x-st-2038,framerate=…` (the framerate must be present — set it upstream with a `capsfilter caps="meta/x-st-2038,framerate=30/1"` if needed). On both elements, drives `transport-file` synthesis when `transport-file*` is unset: on `transport=mxl` a MXL `flow_def` JSON document (requires `mxl-flow-id`); on `transport=udp` / `udp2` an SDP description (requires the relevant IS-05 endpoint properties — `destination-ip` etc.). On `nmossrc` the synthesised file describes the essence shape this Receiver accepts, which the daemon advertises as BCP-004-01 narrow Receiver Caps on IS-04 (with `urn:x-nvnmos:tag:caps` driven by `receiver-caps-mode` to indicate narrow vs wide). On `nmossrc` with `transport=mxl`, the media-type structure name (`video/x-raw` / `audio/x-raw` / `meta/x-st-2038`) also picks the `mxlsrc.{video,audio,data}-flow-id=` slot. Cross-checked against the transport file's `format` (MXL) / `m=` line (SDP) when both are supplied. |
 | `transport-caps` | GstCaps | optional  | RTP-only transport-layer overrides applied to the synthesised or supplied SDP, expressed as an `application/x-rtp` caps structure. Recognised fields: `payload` (dynamic RTP payload type, 96–127), `clock-rate` (audio only — video / ANC are pinned to 90000), `ptime` / `maxptime` (audio packetisation interval in ms, packed into SDP `a=ptime:` / `a=maxptime:`). Ignored on `transport=mxl`. |
-| `transport-properties` | GstStructure | optional | Overrides applied to the inner source or sink (`udpsrc` / `udpsink` / `mxlsrc` / `mxlsink`) every time the data-path chain is built. Pass a `GstStructure` whose fields are GObject property names on that inner element — for example `properties,buffer-size=26214400`. The structure name is not interpreted. Takes effect on the next chain build, not immediately on the one currently in the chain. Unknown fields log a warning and are skipped. |
+| `transport-properties` | GstStructure | optional | Overrides applied to the inner source or sink (`udpsrc` / `udpsink` / `nvdsudpsrc` / `nvdsudpsink` / `mxlsrc` / `mxlsink`) every time the data-path chain is built. Pass a `GstStructure` whose fields are GObject property names on that inner element — for example `properties,buffer-size=26214400` or `properties,gpu-id=0`. The structure name is not interpreted. Takes effect on the next chain build, not immediately on the one currently in the chain. Unknown fields log a warning and are skipped. |
 | `mxl-domain-path` | string | required for MXL | Local filesystem path identifying the MXL Domain on this host; fed into the inner `mxlsink` / `mxlsrc` `domain=` property. If a `domain_def.json` is present in the directory its `id` is used to populate or cross-check `mxl-domain-id` (mismatch is an error — this is host-level identity). |
 | `auto-activate`  | boolean | optional, default `false` | When `false` the element registers the resource so it appears on IS-04 and IS-05 but leaves the inner data path on the fake chain until an IS-05 PATCH activates it (`master_enable: true` on `/single/{senders,receivers}/{id}/active`). When `true` the element brings the inner `mxlsink` / `mxlsrc` up immediately once the configuring flow_def has been resolved at NULL→READY (or, for a deferred-mode sender, at READY→PAUSED) *and* calls `SyncResourceState` to push the daemon's IS-04/IS-05 view to active — i.e. it's a no-controller shortcut for development pipelines and for setups where flow identity comes entirely from properties / `transport-file*`. Orthogonal to how the flow_def itself becomes available: property override of `mxl-flow-id`, supplied `transport-file*`, and caps→flow_def synthesis all feed the same gate. |
 
@@ -47,7 +47,7 @@ Both elements:
 | `source-port` | uint (0–65535) | optional, RTP transports only | IS-05 sender `transport_params.source_port`. Local egress port. Drives `udpsink.bind-port` and the SDP `a=x-nvnmos-src-port:` attribute. `0` (the default) = unset; the OS picks an ephemeral port. RTP-only. |
 | `destination-ip` | string | optional, RTP transports only | IS-05 sender `transport_params.destination_ip`. Remote destination (unicast peer or multicast group). Becomes the configuring SDP `c=` line address and `udpsink.host`. Empty = unset (use the transport file's `c=` line if present; else daemon `auto`). RTP-only. |
 | `destination-port` | uint (0–65535) | optional, RTP transports only | IS-05 sender `transport_params.destination_port`. Remote destination port. Becomes the SDP `m=` port slot and `udpsink.port`. `0` (the default) = unset; falls back to the transport file's `m=` port, else to the canonical RTP default 5004 (`nmos-cpp::auto_rtp_port`). RTP-only. |
-| `pay-properties` | GstStructure | optional | Overrides applied to the inner RTP payloader every time the UDP sender chain is built. Same `GstStructure` syntax as `transport-properties`; ignored on non-UDP transports (a warning is logged if non-empty). Takes effect on the next chain build. |
+| `pay-properties` | GstStructure | optional | Overrides applied to the inner RTP payloader every time the OSS UDP sender chain is built. Same `GstStructure` syntax as `transport-properties`; ignored on `mxl` and `nvdsudp` (a warning is logged if non-empty). Takes effect on the next chain build. |
 
 `nmossrc`-only:
 
@@ -424,6 +424,29 @@ and every ST 2038 ANC packet appears on both sides — proving the
 two flows traverse the same MXL Domain on the same daemon Node and
 that the per-flow PTS gap between the two flows stays constant
 across the steady-state window.
+
+## `transport=nvdsudp` (DeepStream Rivermax)
+
+Uses a bare inner element — no external `rtp*pay` / `rtp*depay`:
+
+- `nmossink` → `nvdsudpsink` (Mode 3: essence frames in, built-in packetization)
+- `nmossrc` → `nvdsudpsrc` (Mode 3: built-in ST 2110-20/30 depacketization)
+
+The element auto-calculates `payload-size`, `packets-per-line` (video), and
+`payload-multiple` (audio) from essence caps. Override any of these via
+`transport-properties` when needed (custom thread affinity, etc.).
+
+SDP synthesis from `caps` emits `TP=2110TPN` (narrow traffic profile). Use
+`video/x-raw(memory:NVMM),…` in `caps` for GPU Direct; set `gpu-id` via
+`transport-properties`.
+
+**Prerequisites:** DeepStream `gst-nvdsudp` plugin on `GST_PLUGIN_PATH`,
+Rivermax SDK + license, ConnectX-5 or newer NIC, and `CAP_NET_RAW` on the
+host binary (`sudo setcap CAP_NET_RAW=ep $(which gst-launch-1.0)`).
+
+**Not yet supported:** ST 2022-7 (multi-leg), ST 2110-40 ANC, `video/x-jxsv`.
+
+Design notes: [`doc/designs/gst-nmos-rs-nvdsudp-plan.md`](../../doc/designs/gst-nmos-rs-nvdsudp-plan.md).
 
 ## Status
 
