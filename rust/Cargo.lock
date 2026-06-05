@@ -1139,6 +1139,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nvnmosd-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hyper-util",
+ "nvnmos-rpc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nvnmosd-example"
 version = "0.1.0"
 dependencies = [

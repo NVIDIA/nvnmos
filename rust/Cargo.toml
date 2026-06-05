@@ -9,6 +9,7 @@ members = [
     "nvnmos-rpc",
     "nvnmosd",
     "nvnmosd-example",
+    "nvnmosd-bench",
     "gst-nmos-rs",
 ]
 

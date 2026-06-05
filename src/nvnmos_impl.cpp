@@ -130,12 +130,13 @@ namespace nvnmos
         utility::string_t make_iface(const nmos::node_interface& interface);
         // parse x-nvnmos-iface from media legs that carry the attribute; legs is IS-05 transport leg count (0 to skip leg-count check)
         std::vector<nmos::node_interface> get_session_description_interfaces(const web::json::value& session_description, size_t legs = 0);
-        // collect node interface details from configured RTP transport files in settings
-        std::map<utility::string_t, nmos::node_interface> get_interfaces(const nmos::settings& settings);
-        // make a sender/receiver settings entry
-        web::json::value make_connection_settings(const nmos::transport& transport, const utility::string_t& transport_file);
-        // resolve the IS-04 interface binding name from a transport param address via host_interfaces()
+        // get node interfaces from host_interfaces for interface_bindings
+        std::map<utility::string_t, nmos::node_interface> get_interfaces_for_bindings(const std::vector<utility::string_t>& interface_names, const std::vector<web::hosts::experimental::host_interface>& host_interfaces);
+        // look up the interface name from a transport param address via host_interfaces
         utility::string_t get_interface_name(const nmos::type& type, const web::json::value& transport_param, const std::vector<web::hosts::experimental::host_interface>& host_interfaces);
+
+        // make a transport settings entry for a sender/receiver
+        web::json::value make_transport_settings(const nmos::transport& transport, const utility::string_t& transport_file);
 
         // generate a repeatable source-specific multicast address for each leg of a sender
         utility::string_t make_source_specific_multicast_address_v4(const nmos::id& id, int leg);
@@ -162,8 +163,14 @@ namespace nvnmos
         // modify node resource if necessary to update specified clock, which must already exist
         void update_node_clock(nmos::resources& node_resources, const nmos::id& node_id, const web::json::value& clock);
 
-        // modify node resource if necessary to include all of the specified interfaces that currently have interface_bindings in any senders or receivers
-        void update_node_interfaces(nmos::resources& node_resources, const nmos::id& node_id, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, const nmos::settings& settings);
+        struct interface_bindings_update
+        {
+            std::vector<utility::string_t> removed;
+            std::vector<utility::string_t> added;
+        };
+
+        // modify node resource interfaces incrementally, maintaining interface_bindings reference counts in settings
+        void update_node_interfaces(nmos::resources& node_resources, const nmos::id& node_id, const interface_bindings_update& bindings_update, const std::map<utility::string_t, nmos::node_interface>& interfaces, nmos::settings& settings);
 
         // resolve "auto" in connection transport params
         void resolve_auto(const nmos::resource& resource, const nmos::resource& connection_resource, web::json::value& transport_params, const utility::string_t& transport_file = {});
@@ -227,10 +234,11 @@ namespace nvnmos
             if (!nmos::insert_resource(node_resources, std::move(device)).second) throw node_implementation_exception();
         }
 
-        // insert empty clock, sender and receiver configs
+        // insert empty clock, sender, receiver and interface_binding configs
         settings[nvnmos::fields::clocks] = value::object();
         settings[nvnmos::fields::senders] = value::object();
         settings[nvnmos::fields::receivers] = value::object();
+        settings[nvnmos::fields::interface_bindings] = value::object();
     }
 
     void node_implementation_add_rtp_sender_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& sdp_, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
@@ -404,17 +412,15 @@ namespace nvnmos
             slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(sender_id, nmos::types::sender) << ": " << urls.first << " " << urls.second;
         }
 
-        // update device's deprecated senders array
-
-        nmos::modify_resource(node_resources, device_id, [&](nmos::resource& device)
-        {
-            device.data[nmos::fields::version] = value::string(nmos::make_version());
-            web::json::push_back(nmos::fields::senders(device.data), sender_id);
-        });
-
         // update node's interfaces
 
-        impl::update_node_interfaces(node_resources, node_id, host_interfaces, settings);
+        const auto interfaces_for_bindings = !interfaces.empty()
+            ? boost::copy_range<std::map<utility::string_t, nmos::node_interface>>(interfaces | boost::adaptors::transformed([](const nmos::node_interface& interface)
+            {
+                return std::make_pair(interface.name, interface);
+            }))
+            : impl::get_interfaces_for_bindings(interface_names, host_interfaces);
+        impl::update_node_interfaces(node_resources, node_id, { {}, interface_names }, interfaces_for_bindings, settings);
 
         // update node's clocks
 
@@ -426,7 +432,7 @@ namespace nvnmos
 
         // insert into settings
 
-        nvnmos::fields::senders(settings)[sender_id] = impl::make_connection_settings(nmos::transports::rtp, utility::s2us(sdp_));
+        nvnmos::fields::senders(settings)[sender_id] = impl::make_transport_settings(nmos::transports::rtp, utility::s2us(sdp_));
     }
 
     void node_implementation_add_rtp_receiver_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& sdp_, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
@@ -585,21 +591,19 @@ namespace nvnmos
             slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(receiver_id, nmos::types::receiver) << ": " << urls.first << " " << urls.second;
         }
 
-        // update device's deprecated receivers array
-
-        nmos::modify_resource(node_resources, device_id, [&](nmos::resource& device)
-        {
-            device.data[nmos::fields::version] = value::string(nmos::make_version());
-            web::json::push_back(nmos::fields::receivers(device.data), receiver_id);
-        });
-
         // update node's interfaces
 
-        impl::update_node_interfaces(node_resources, node_id, host_interfaces, settings);
+        const auto interfaces_for_bindings = !interfaces.empty()
+            ? boost::copy_range<std::map<utility::string_t, nmos::node_interface>>(interfaces | boost::adaptors::transformed([](const nmos::node_interface& interface)
+            {
+                return std::make_pair(interface.name, interface);
+            }))
+            : impl::get_interfaces_for_bindings(interface_names, host_interfaces);
+        impl::update_node_interfaces(node_resources, node_id, { {}, interface_names }, interfaces_for_bindings, settings);
 
         // insert into settings
 
-        nvnmos::fields::receivers(settings)[receiver_id] = impl::make_connection_settings(nmos::transports::rtp, utility::s2us(sdp_));
+        nvnmos::fields::receivers(settings)[receiver_id] = impl::make_transport_settings(nmos::transports::rtp, utility::s2us(sdp_));
     }
 
     void node_implementation_add_mxl_sender_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& flow_def_, nmos::settings& settings, slog::base_gate& gate)
@@ -720,17 +724,9 @@ namespace nvnmos
             slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(sender_id, nmos::types::sender) << ": " << urls.first << " " << urls.second;
         }
 
-        // update device's deprecated senders array
-
-        nmos::modify_resource(node_resources, device_id, [&](nmos::resource& device)
-        {
-            device.data[nmos::fields::version] = value::string(nmos::make_version());
-            web::json::push_back(nmos::fields::senders(device.data), sender_id);
-        });
-
         // insert into settings
 
-        nvnmos::fields::senders(settings)[sender_id] = impl::make_connection_settings(nmos::transports::mxl, utility::s2us(flow_def_));
+        nvnmos::fields::senders(settings)[sender_id] = impl::make_transport_settings(nmos::transports::mxl, utility::s2us(flow_def_));
     }
 
     void node_implementation_add_mxl_receiver_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& flow_def_, nmos::settings& settings, slog::base_gate& gate)
@@ -849,17 +845,9 @@ namespace nvnmos
             slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(receiver_id, nmos::types::receiver) << ": " << urls.first << " " << urls.second;
         }
 
-        // update device's deprecated receivers array
-
-        nmos::modify_resource(node_resources, device_id, [&](nmos::resource& device)
-        {
-            device.data[nmos::fields::version] = value::string(nmos::make_version());
-            web::json::push_back(nmos::fields::receivers(device.data), receiver_id);
-        });
-
         // insert into settings
 
-        nvnmos::fields::receivers(settings)[receiver_id] = impl::make_connection_settings(nmos::transports::mxl, utility::s2us(flow_def_));
+        nvnmos::fields::receivers(settings)[receiver_id] = impl::make_transport_settings(nmos::transports::mxl, utility::s2us(flow_def_));
     }
 
     void node_implementation_remove_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const nmos::type& type, const utility::string_t& name, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
@@ -876,6 +864,12 @@ namespace nvnmos
 
         if (node_resources.end() != resource)
         {
+            const auto bindings_removed = boost::copy_range<std::vector<utility::string_t>>(
+                nmos::fields::interface_bindings(resource->data) | boost::adaptors::transformed([](const web::json::value& binding)
+            {
+                return binding.as_string();
+            }));
+
             // erase connection resource
 
             nmos::erase_resource(connection_resources, id);
@@ -907,23 +901,9 @@ namespace nvnmos
             if (!flow_id.empty()) nmos::erase_resource(node_resources, flow_id);
             if (!source_id.empty()) nmos::erase_resource(node_resources, source_id);
 
-            // update device's deprecated senders/receivers array
-
-            nmos::modify_resource(node_resources, device_id, [&](nmos::resource& device)
-            {
-                auto& refs = nmos::types::sender == type ? nmos::fields::senders(device.data) : nmos::fields::receivers(device.data);
-                auto ref = std::find(refs.begin(), refs.end(), value::string(id));
-                if (refs.end() != ref)
-                {
-                    device.data[nmos::fields::version] = value::string(nmos::make_version());
-
-                    refs.erase(ref);
-                }
-            });
-
             // update node's interfaces
 
-            impl::update_node_interfaces(node_resources, node_id, host_interfaces, settings);
+            impl::update_node_interfaces(node_resources, node_id, { bindings_removed, {} }, {}, settings);
 
             // erase from settings
 
@@ -1944,42 +1924,21 @@ namespace nvnmos
             return interfaces;
         }
 
-        web::json::value make_connection_settings(const nmos::transport& transport, const utility::string_t& transport_file)
+        // get node interfaces from host_interfaces for interface_bindings
+        std::map<utility::string_t, nmos::node_interface> get_interfaces_for_bindings(const std::vector<utility::string_t>& interface_names, const std::vector<web::hosts::experimental::host_interface>& host_interfaces)
         {
-            using web::json::value_of;
+            if (interface_names.empty()) return {};
 
-            return value_of({
-                { nvnmos::fields::transport, transport.name },
-                { nvnmos::fields::transport_file, transport_file }
-            });
-        }
+            const auto interfaces = nmos::experimental::node_interfaces(host_interfaces);
 
-        std::map<utility::string_t, nmos::node_interface> get_interfaces(const nmos::settings& settings)
-        {
-            std::map<utility::string_t, nmos::node_interface> result;
-
-            const auto insert_interfaces = [&](const web::json::value& configs)
+            return boost::copy_range<std::map<utility::string_t, nmos::node_interface>>(interface_names | boost::adaptors::transformed([&](const utility::string_t& name)
             {
-                for (const auto& entry : configs.as_object() | boost::adaptors::map_values)
-                {
-                    if (nmos::transports::rtp != nmos::transport_base(nmos::transport{ nvnmos::fields::transport(entry) })) continue;
-
-                    for (const auto& interface : get_session_description_interfaces(sdp::parse_session_description(utility::us2s(nvnmos::fields::transport_file(entry)))))
-                    {
-                        const auto inserted = result.insert({ interface.name, interface });
-                        if (!inserted.second && inserted.first->second != interface)
-                        {
-                            throw std::invalid_argument("Conflicting x-nvnmos-iface details for interface name: " + utility::us2s(interface.name));
-                        }
-                    }
-                }
-            };
-
-            insert_interfaces(nvnmos::fields::senders(settings));
-            insert_interfaces(nvnmos::fields::receivers(settings));
-            return result;
+                const auto found = interfaces.find(name);
+                return std::make_pair(name, interfaces.end() != found ? found->second : nmos::node_interface{ {}, {}, name, {}, {} });
+            }));
         }
 
+        // look up the interface name from a transport param address via host_interfaces
         utility::string_t get_interface_name(const nmos::type& type, const web::json::value& transport_param, const std::vector<web::hosts::experimental::host_interface>& host_interfaces)
         {
             const auto& address = (nmos::types::sender == type ? nmos::fields::source_ip : nmos::fields::interface_ip)(transport_param).as_string();
@@ -1990,6 +1949,17 @@ namespace nvnmos
                     + " (provide a=x-nvnmos-iface with IS-04 interface metadata)");
             }
             return interface->name;
+        }
+
+        // make a transport settings entry for a sender/receiver
+        web::json::value make_transport_settings(const nmos::transport& transport, const utility::string_t& transport_file)
+        {
+            using web::json::value_of;
+
+            return value_of({
+                { nvnmos::fields::transport, transport.name },
+                { nvnmos::fields::transport_file, transport_file }
+            });
         }
 
         // generate repeatable ids for the node's resources
@@ -2171,59 +2141,67 @@ namespace nvnmos
             }
         }
 
-        // modify node resource if necessary to include all of the specified interfaces that currently have interface_bindings in any senders or receivers
-        void update_node_interfaces(nmos::resources& node_resources, const nmos::id& node_id, const std::vector<web::hosts::experimental::host_interface>& host_interfaces_, const nmos::settings& settings)
+        // modify node resource interfaces incrementally, maintaining interface_bindings reference counts in settings
+        void update_node_interfaces(nmos::resources& node_resources, const nmos::id& node_id, const interface_bindings_update& bindings_update, const std::map<utility::string_t, nmos::node_interface>& interfaces, nmos::settings& settings)
         {
             using web::json::value;
+
+            if (bindings_update.added.empty() && bindings_update.removed.empty()) return;
 
             auto node = nmos::find_resource(node_resources, { node_id, nmos::types::node });
             if (node_resources.end() == node) throw node_implementation_exception();
 
-            std::set<utility::string_t> interface_names;
+            auto& ref_counts = nvnmos::fields::interface_bindings(settings);
 
-            auto& by_type = node_resources.get<nmos::tags::type>();
+            std::set<utility::string_t> interface_names_to_add;
+            std::set<utility::string_t> interface_names_to_remove;
 
-            const auto senders = by_type.equal_range(nmos::details::has_data(nmos::types::sender));
-            for (auto sender = senders.first; senders.second != sender; ++sender)
+            for (const auto& name : bindings_update.removed)
             {
-                for (const auto& interface_binding : nmos::fields::interface_bindings(sender->data))
+                const auto count = web::json::field_as_integer_or{ name, 0 }(ref_counts);
+                if (count <= 1)
                 {
-                    interface_names.insert(interface_binding.as_string());
+                    interface_names_to_remove.insert(name);
+                    ref_counts.erase(name);
+                }
+                else
+                {
+                    ref_counts[name] = value::number(count - 1);
                 }
             }
 
-            const auto receivers = by_type.equal_range(nmos::details::has_data(nmos::types::receiver));
-            for (auto receiver = receivers.first; receivers.second != receiver; ++receiver)
+            for (const auto& name : bindings_update.added)
             {
-                for (const auto& interface_binding : nmos::fields::interface_bindings(receiver->data))
+                const auto count = web::json::field_as_integer_or{ name, 0 }(ref_counts);
+                if (0 == count) interface_names_to_add.insert(name);
+                ref_counts[name] = value::number(count + 1);
+            }
+
+            if (interface_names_to_add.empty() && interface_names_to_remove.empty()) return;
+
+            nmos::modify_resource(node_resources, node_id, [&](nmos::resource& node)
+            {
+                auto& node_interfaces = nmos::fields::interfaces(node.data);
+
+                for (const auto& name : interface_names_to_remove)
                 {
-                    interface_names.insert(interface_binding.as_string());
+                    const auto found = std::find_if(node_interfaces.begin(), node_interfaces.end(), [&](const value& interface)
+                    {
+                        return nmos::fields::name(interface) == name;
+                    });
+                    if (node_interfaces.end() != found) node_interfaces.erase(found);
                 }
-            }
 
-            const auto configured_interfaces = get_interfaces(settings);
-            const auto host_interfaces = nmos::experimental::node_interfaces(host_interfaces_);
-
-            const auto interfaces = nmos::make_node_interfaces(boost::copy_range<std::map<utility::string_t, nmos::node_interface>>(
-                boost::make_iterator_range(interface_names) | boost::adaptors::transformed([&](const utility::string_t& name)
+                for (const auto& name : interface_names_to_add)
                 {
-                    const auto configured = configured_interfaces.find(name);
-                    const auto host = host_interfaces.find(name);
-                    return std::make_pair(name, configured_interfaces.end() != configured ? configured->second
-                        : host_interfaces.end() != host ? host->second
-                        : nmos::node_interface{ {}, {}, name, {}, {} });
-                })
-            ));
+                    const auto found = interfaces.find(name);
+                    web::json::push_back(node_interfaces, interfaces.end() != found
+                        ? nmos::make_node_interface(found->second)
+                        : nmos::make_node_interface({ {}, {}, name, {}, {} }));
+                }
 
-            if (interfaces.as_array() != nmos::fields::interfaces(node->data))
-            {
-                nmos::modify_resource(node_resources, node_id, [&interfaces](nmos::resource& node)
-                {
-                    node.data[nmos::fields::version] = value::string(nmos::make_version());
-
-                    node.data[nmos::fields::interfaces] = interfaces;
-                });
-            }
+                node.data[nmos::fields::version] = value::string(nmos::make_version());
+            });
         }
 
         // parse an MXL flow definition (JSON) including nvnmos extensions
