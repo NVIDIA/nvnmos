@@ -143,11 +143,22 @@ ENV PACKAGE_NAME=${PACKAGE_NAME}
 RUN apt update && apt install -y --no-install-recommends \
     avahi-daemon \
     avahi-utils \
+    libavahi-compat-libdnssd1 \
+    libnss-mdns \
     dbus \
     && rm -rf /var/lib/apt/lists/*
 
-# Socket under /tmp so dbus-daemon does not need root. entrypoint-setup.sh binds here.
-# Derived images that start D-Bus differently must override this variable.
+# nss-mdns communicates with avahi-daemon via a Unix socket at this compiled-in path.
+# avahi-daemon insists on avahi:avahi ownership even with --no-drop-root (see
+# https://github.com/avahi/avahi/issues/432). mode 1777 allows any runAsUser UID
+# to write the socket when the container is started with `docker run --user`.
+RUN mkdir -p /run/avahi-daemon \
+    && chown avahi:avahi /run/avahi-daemon \
+    && chmod 1777 /run/avahi-daemon
+
+# By default, use a D-Bus socket file in /tmp so that root privileges are not needed.
+# entrypoint-setup.sh starts dbus-daemon at this address.
+# Derived images that start D-Bus differently MUST override this variable.
 ENV DBUS_SYSTEM_BUS_ADDRESS=unix:path=/tmp/dbus-system-bus-socket
 
 COPY --from=package \
