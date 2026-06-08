@@ -201,6 +201,19 @@ State is only modified through methods on `State`, all called under the daemon-w
 
 `dispatch_activation` is the only entry point reached from a libnvnmos worker thread; the others all run on the gRPC service's tokio executor. Holding the same mutex across both means the `AckActivation` handler can never observe a `pending_activations` entry that hasn't been published yet, even though the libnvnmos worker is blocked on the channel during the round-trip.
 
+#### glibc heap trim (Linux)
+
+After tearing down libnvnmos resources, glibc may retain freed pages in the process heap. `nvnmosd` optionally calls `malloc_trim(0)` to return unused heap to the kernel. Implementation lives in [`rust/nvnmosd/src/malloc_trim.rs`](../../../rust/nvnmosd/src/malloc_trim.rs); hooks run **after** the daemon mutex is released.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NVNMOSD_MALLOC_TRIM` | on (unset = enabled) | Set to `0`, `false`, `off`, or `no` to disable all trim hooks. |
+| `NVNMOSD_MALLOC_INFO` | off | Set to `1` / `true` / `on` to log full glibc `malloc_info` XML at `debug` before and after each trim. The normal `info` line logs only whether `malloc_trim` released pages (`released=true/false`). |
+
+When trim is enabled, the daemon calls `malloc_trim` after `RemoveResource`, `CloseSession`, or `RemoveNode` when the affected node has **no registered senders/receivers** — including when the node itself is torn down as part of that RPC (last session on a session-refcounted node, or `RemoveNode` on a persistent node). Trim is **not** invoked on every `RemoveResource`; only when the node's resource count drops to zero (or the node is removed).
+
+`malloc_trim` can briefly contend on glibc allocator locks (other threads may hitch) but does not hold the daemon mutex.
+
 ## Element design
 
 ### Pad config
