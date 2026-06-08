@@ -4,8 +4,9 @@
 //! Scale smoke client for [`nvnmosd`].
 //!
 //! Drives one scenario (node / session / resource counts), records per-RPC
-//! latencies, optional daemon RSS samples, and per-phase CPU utilization (Linux
-//! `/proc` background sampling), and prints one JSON line.
+//! latencies (including explicit `RemoveResource`, separate from `CloseSession`),
+//! optional daemon RSS samples, and per-phase CPU utilization (Linux `/proc`
+//! background sampling), and prints one JSON line.
 //!
 //! See `doc/designs/nvnmosd/scale-smoke.md` for the full matrix and presets.
 //! Usually invoked by `scripts/run-nvnmosd-scale-smoke.sh`.
@@ -21,8 +22,9 @@ use clap::Parser;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
     AckActivationRequest, ActivationEvent, AddReceiverRequest, AddSenderRequest,
-    CloseSessionRequest, NetworkServicesConfig, NodeConfig, OpenSessionRequest, Side as ProtoSide,
-    SubscribeActivationsRequest, SyncResourceStateRequest, Transport as ProtoTransport,
+    CloseSessionRequest, NetworkServicesConfig, NodeConfig, OpenSessionRequest,
+    RemoveResourceRequest, Side as ProtoSide, SubscribeActivationsRequest,
+    SyncResourceStateRequest, Transport as ProtoTransport,
 };
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -62,15 +64,27 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     nodes: usize,
 
-    #[arg(long, default_value_t = 5)]
-    senders: usize,
+    /// Senders to register via `AddSender` (`--senders` alias).
+    #[arg(long = "add-senders", alias = "senders", default_value_t = 5)]
+    add_senders: usize,
 
-    #[arg(long, default_value_t = 5)]
-    receivers: usize,
+    /// Receivers to register via `AddReceiver` (`--receivers` alias).
+    #[arg(long = "add-receivers", alias = "receivers", default_value_t = 5)]
+    add_receivers: usize,
+
+    /// Explicit `RemoveResource` for senders before `CloseSession` (`0` = skip; default).
+    /// Pass the add count to remove all senders on that side before session close.
+    #[arg(long = "remove-senders", default_value_t = 0)]
+    remove_senders: usize,
+
+    /// Explicit `RemoveResource` for receivers before `CloseSession` (`0` = skip; default).
+    /// Pass the add count to remove all receivers on that side before session close.
+    #[arg(long = "remove-receivers", default_value_t = 0)]
+    remove_receivers: usize,
 
     /// Concurrent gRPC sessions; resources round-robin across sessions (`resource_index %
-    /// sessions`). When equal to `nodes`, one session per node; when equal to senders +
-    /// receivers, one session per resource.
+    /// sessions`). When equal to `nodes`, one session per node; when equal to add-senders +
+    /// add-receivers, one session per resource.
     #[arg(long, default_value_t = 1)]
     sessions: usize,
 
@@ -99,8 +113,10 @@ struct Args {
 struct ScenarioMeta {
     label: Option<String>,
     nodes: usize,
-    senders: usize,
-    receivers: usize,
+    add_senders: usize,
+    add_receivers: usize,
+    remove_senders: usize,
+    remove_receivers: usize,
     sessions: usize,
     clients: usize,
     syncs: usize,
@@ -111,9 +127,10 @@ struct ScenarioMeta {
 struct MemoryKb {
     baseline: Option<u64>,
     after_open: Option<u64>,
-    after_register: Option<u64>,
+    after_add: Option<u64>,
     after_activate: Option<u64>,
-    after_teardown: Option<u64>,
+    after_remove: Option<u64>,
+    after_close: Option<u64>,
 }
 
 /// Latency stats in **milliseconds** (floating point) for JSON output.
@@ -252,17 +269,30 @@ impl CpuPhasePct {
     }
 }
 
+#[derive(Debug, Default)]
+struct CpuPhases {
+    open: CpuPhasePct,
+    subscribe: Option<CpuPhasePct>,
+    add: CpuPhasePct,
+    activate_sync: Option<CpuPhasePct>,
+    activate_patch: Option<CpuPhasePct>,
+    remove: Option<CpuPhasePct>,
+    close: CpuPhasePct,
+}
+
 #[derive(Debug, Serialize, Default)]
 struct CpuPct {
     open: CpuPhasePct,
     #[serde(skip_serializing_if = "Option::is_none")]
     subscribe: Option<CpuPhasePct>,
-    register: CpuPhasePct,
+    add: CpuPhasePct,
     #[serde(skip_serializing_if = "Option::is_none")]
     activate_sync: Option<CpuPhasePct>,
     #[serde(skip_serializing_if = "Option::is_none")]
     activate_patch: Option<CpuPhasePct>,
-    teardown: CpuPhasePct,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remove: Option<CpuPhasePct>,
+    close: CpuPhasePct,
     overall: CpuPhasePct,
 }
 
@@ -354,24 +384,17 @@ impl CpuMonitor {
         CpuPhasePct::from_samples(samples)
     }
 
-    fn into_report(
-        self,
-        open: CpuPhasePct,
-        subscribe: Option<CpuPhasePct>,
-        register: CpuPhasePct,
-        activate_sync: Option<CpuPhasePct>,
-        activate_patch: Option<CpuPhasePct>,
-        teardown: CpuPhasePct,
-    ) -> Option<CpuPct> {
+    fn into_report(self, phases: CpuPhases) -> Option<CpuPct> {
         self.pid?;
         let overall = CpuPhasePct::from_samples(self.overall_samples);
         Some(CpuPct {
-            open,
-            subscribe,
-            register,
-            activate_sync,
-            activate_patch,
-            teardown,
+            open: phases.open,
+            subscribe: phases.subscribe,
+            add: phases.add,
+            activate_sync: phases.activate_sync,
+            activate_patch: phases.activate_patch,
+            remove: phases.remove,
+            close: phases.close,
             overall,
         })
     }
@@ -392,6 +415,8 @@ struct BenchReport {
     connection_get_ms: LatencyMs,
     patch_activate_ms: LatencyMs,
     patch_deactivate_ms: LatencyMs,
+    remove_sender_ms: LatencyMs,
+    remove_receiver_ms: LatencyMs,
     close_session_ms: LatencyMs,
     wall_ms: f64,
 }
@@ -519,12 +544,32 @@ async fn main() -> anyhow::Result<()> {
         "nodes must be 1..={MAX_NODES}"
     );
     anyhow::ensure!(
-        args.senders <= MAX_SENDERS,
-        "senders must be <= {MAX_SENDERS}"
+        args.add_senders <= MAX_SENDERS,
+        "add-senders must be <= {MAX_SENDERS}"
     );
     anyhow::ensure!(
-        args.receivers <= MAX_RECEIVERS,
-        "receivers must be <= {MAX_RECEIVERS}"
+        args.add_receivers <= MAX_RECEIVERS,
+        "add-receivers must be <= {MAX_RECEIVERS}"
+    );
+    anyhow::ensure!(
+        args.remove_senders <= MAX_SENDERS,
+        "remove-senders must be <= {MAX_SENDERS}"
+    );
+    anyhow::ensure!(
+        args.remove_receivers <= MAX_RECEIVERS,
+        "remove-receivers must be <= {MAX_RECEIVERS}"
+    );
+    anyhow::ensure!(
+        args.remove_senders <= args.add_senders,
+        "remove-senders ({}) cannot exceed add-senders ({})",
+        args.remove_senders,
+        args.add_senders,
+    );
+    anyhow::ensure!(
+        args.remove_receivers <= args.add_receivers,
+        "remove-receivers ({}) cannot exceed add-receivers ({})",
+        args.remove_receivers,
+        args.add_receivers,
     );
     anyhow::ensure!(
         args.syncs <= MAX_SYNCS,
@@ -534,10 +579,10 @@ async fn main() -> anyhow::Result<()> {
         args.patches <= MAX_PATCHES,
         "patches must be <= {MAX_PATCHES}"
     );
-    if args.syncs > 0 && args.senders == 0 {
+    if args.syncs > 0 && args.add_senders == 0 {
         anyhow::bail!("syncs > 0 requires at least one registered sender");
     }
-    if args.patches > 0 && args.senders == 0 {
+    if args.patches > 0 && args.add_senders == 0 {
         anyhow::bail!("patches > 0 requires at least one registered sender");
     }
     anyhow::ensure!(
@@ -547,22 +592,18 @@ async fn main() -> anyhow::Result<()> {
     if args.patches > 0 {
         anyhow::ensure!(args.clients >= 1, "patches > 0 requires clients >= 1");
     }
-
     anyhow::ensure!(
         args.sessions <= MAX_SESSIONS,
         "sessions must be <= {MAX_SESSIONS}"
     );
-    if args.senders > 0 || args.receivers > 0 {
+    if args.add_senders > 0 || args.add_receivers > 0 {
         anyhow::ensure!(args.sessions >= 1, "sessions must be >= 1 when registering resources");
     }
-    let session_count = args.sessions;
     anyhow::ensure!(
         u32::from(args.base_http_port) + args.nodes as u32 <= u16::MAX as u32,
         "base_http_port + nodes overflows port range",
     );
 
-    let needs_sync = args.syncs > 0;
-    let needs_patch = args.patches > 0;
     let iface_ip = match args.interface_ip.clone() {
         Some(ip) => ip,
         None => autodetect_interface_ip().context("interface IP (set --interface-ip)")?,
@@ -581,7 +622,7 @@ async fn main() -> anyhow::Result<()> {
     // -------- Open sessions (one UDS/gRPC client per session, in parallel) --------
     cpu.begin_phase();
     let mut open_set = JoinSet::new();
-    for s in 0..session_count {
+    for s in 0..args.sessions {
         let uds = args.uds.clone();
         let node_index = session_node_index(s, args.nodes);
         let http_port = args.base_http_port + node_index as u16;
@@ -614,13 +655,13 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let mut open_samples = Vec::with_capacity(session_count);
-    let mut open_results: Vec<(usize, u64, SessionContext)> = Vec::with_capacity(session_count);
+    let mut open_samples = Vec::with_capacity(args.sessions);
+    let mut open_results: Vec<(usize, u64, SessionContext)> = Vec::with_capacity(args.sessions);
     while let Some(res) = open_set.join_next().await {
         open_results.push(res.context("OpenSession task panicked")??);
     }
     open_results.sort_by_key(|(index, _, _)| *index);
-    let mut sessions = Vec::with_capacity(session_count);
+    let mut sessions = Vec::with_capacity(args.sessions);
     for (index, sample, ctx) in open_results {
         anyhow::ensure!(index == sessions.len(), "unexpected OpenSession index");
         open_samples.push(sample);
@@ -632,7 +673,7 @@ async fn main() -> anyhow::Result<()> {
     // -------- Subscribe (PATCH path, parallel per session) --------
     let mut subscribe_samples = Vec::new();
     let mut cpu_subscribe = None;
-    if needs_patch {
+    if args.patches > 0 {
         cpu.begin_phase();
         let mut sub_set = JoinSet::new();
         for ctx in &mut sessions {
@@ -662,24 +703,24 @@ async fn main() -> anyhow::Result<()> {
 
     // -------- Add resources (parallel per session, sequential within session) --------
     cpu.begin_phase();
-    let mut add_sender_samples = Vec::with_capacity(args.senders);
-    let mut add_receiver_samples = Vec::with_capacity(args.receivers);
-    let mut senders: Vec<Option<ResourceSlot>> = vec![None; args.senders];
-    let mut receivers: Vec<Option<ResourceSlot>> = vec![None; args.receivers];
+    let mut add_sender_samples = Vec::with_capacity(args.add_senders);
+    let mut add_receiver_samples = Vec::with_capacity(args.add_receivers);
+    let mut senders: Vec<Option<ResourceSlot>> = vec![None; args.add_senders];
+    let mut receivers: Vec<Option<ResourceSlot>> = vec![None; args.add_receivers];
 
     let mut add_set = JoinSet::new();
     for ctx in &mut sessions {
         let session_index = ctx.index;
         let session_handle = ctx.slot.session_handle.clone();
         let mut client = ctx.client.clone();
-        let sender_indices: Vec<usize> = (0..args.senders)
+        let sender_indices: Vec<usize> = (0..args.add_senders)
             .filter(|&i| {
-                session_for_resource(i, session_count) == session_index
+                session_for_resource(i, args.sessions) == session_index
             })
             .collect();
-        let receiver_indices: Vec<usize> = (0..args.receivers)
+        let receiver_indices: Vec<usize> = (0..args.add_receivers)
             .filter(|&i| {
-                session_for_resource(args.senders + i, session_count) == session_index
+                session_for_resource(args.add_senders + i, args.sessions) == session_index
             })
             .collect();
         if sender_indices.is_empty() && receiver_indices.is_empty() {
@@ -773,19 +814,19 @@ async fn main() -> anyhow::Result<()> {
         .into_iter()
         .map(|s| s.context("missing sender slot"))
         .collect::<Result<_, _>>()?;
-    let _receivers: Vec<ResourceSlot> = receivers
+    let receivers: Vec<ResourceSlot> = receivers
         .into_iter()
         .map(|r| r.context("missing receiver slot"))
         .collect::<Result<_, _>>()?;
-    let cpu_register = cpu.end_phase();
-    memory.after_register = sample_memory(args.daemon_pid);
+    let cpu_add = cpu.end_phase();
+    memory.after_add = sample_memory(args.daemon_pid);
 
     // -------- Sync activations (parallel per session) --------
     let mut sync_activate_samples = Vec::new();
     let mut sync_deactivate_samples = Vec::new();
     let mut cpu_activate_sync = None;
 
-    if needs_sync {
+    if args.syncs > 0 {
         cpu.begin_phase();
         let sync_indices = sender_activation_indices(senders.len(), args.syncs);
         let mut sync_set = JoinSet::new();
@@ -845,7 +886,7 @@ async fn main() -> anyhow::Result<()> {
     let mut patch_deactivate_samples = Vec::new();
     let mut cpu_activate_patch = None;
 
-    if needs_patch {
+    if args.patches > 0 {
         cpu.begin_phase();
         let patch_indices = sender_activation_indices(senders.len(), args.patches);
 
@@ -938,6 +979,86 @@ async fn main() -> anyhow::Result<()> {
 
     memory.after_activate = sample_memory(args.daemon_pid);
 
+    // -------- Remove resources (parallel per session; distinct from CloseSession) --------
+    let mut remove_sender_samples = Vec::new();
+    let mut remove_receiver_samples = Vec::new();
+    let mut cpu_remove = None;
+
+    if args.remove_senders > 0 || args.remove_receivers > 0 {
+        cpu.begin_phase();
+        let (sender_removals, receiver_removals) =
+            resources_to_remove(
+                &senders,
+                &receivers,
+                args.remove_senders,
+                args.remove_receivers,
+            );
+        let mut remove_set = JoinSet::new();
+        for ctx in &mut sessions {
+            let session_index = ctx.index;
+            let session_handle = ctx.slot.session_handle.clone();
+            let mut client = ctx.client.clone();
+            let session_sender_removals: Vec<ResourceSlot> = sender_removals
+                .iter()
+                .filter(|r| r.session_index == session_index)
+                .cloned()
+                .collect();
+            let session_receiver_removals: Vec<ResourceSlot> = receiver_removals
+                .iter()
+                .filter(|r| r.session_index == session_index)
+                .cloned()
+                .collect();
+            if session_sender_removals.is_empty() && session_receiver_removals.is_empty() {
+                continue;
+            }
+            remove_set.spawn(async move {
+                let mut sender_samples = Vec::new();
+                let mut receiver_samples = Vec::new();
+                for resource in session_sender_removals {
+                    let t0 = Instant::now();
+                    client
+                        .remove_resource(RemoveResourceRequest {
+                            session_handle: session_handle.clone(),
+                            resource_handle: resource.resource_handle.clone(),
+                        })
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "RemoveResource sender resource_id={}",
+                                resource.resource_id
+                            )
+                        })?;
+                    sender_samples.push(t0.elapsed().as_micros() as u64);
+                }
+                for resource in session_receiver_removals {
+                    let t0 = Instant::now();
+                    client
+                        .remove_resource(RemoveResourceRequest {
+                            session_handle: session_handle.clone(),
+                            resource_handle: resource.resource_handle.clone(),
+                        })
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "RemoveResource receiver resource_id={}",
+                                resource.resource_id
+                            )
+                        })?;
+                    receiver_samples.push(t0.elapsed().as_micros() as u64);
+                }
+                Ok::<_, anyhow::Error>((sender_samples, receiver_samples))
+            });
+        }
+        while let Some(res) = remove_set.join_next().await {
+            let (sender_samples, receiver_samples) =
+                res.context("RemoveResource task panicked")??;
+            remove_sender_samples.extend(sender_samples);
+            remove_receiver_samples.extend(receiver_samples);
+        }
+        cpu_remove = Some(cpu.end_phase());
+    }
+    memory.after_remove = sample_memory(args.daemon_pid);
+
     // -------- Close sessions (parallel, one client per session) --------
     cpu.begin_phase();
     let mut close_samples = Vec::with_capacity(sessions.len());
@@ -959,8 +1080,8 @@ async fn main() -> anyhow::Result<()> {
     while let Some(res) = close_set.join_next().await {
         close_samples.push(res.context("CloseSession task panicked")??);
     }
-    let cpu_teardown = cpu.end_phase();
-    memory.after_teardown = sample_memory(args.daemon_pid);
+    let cpu_close = cpu.end_phase();
+    memory.after_close = sample_memory(args.daemon_pid);
 
     for ctx in &mut sessions {
         if let Some(task) = ctx.ack_task.take() {
@@ -972,22 +1093,25 @@ async fn main() -> anyhow::Result<()> {
         scenario: ScenarioMeta {
             label: args.label,
             nodes: args.nodes,
-            senders: args.senders,
-            receivers: args.receivers,
+            add_senders: args.add_senders,
+            add_receivers: args.add_receivers,
+            remove_senders: args.remove_senders,
+            remove_receivers: args.remove_receivers,
             sessions: args.sessions,
             clients: args.clients,
             syncs: args.syncs,
             patches: args.patches,
         },
         memory_kb: memory,
-        cpu_pct: cpu.into_report(
-            cpu_open,
-            cpu_subscribe,
-            cpu_register,
-            cpu_activate_sync,
-            cpu_activate_patch,
-            cpu_teardown,
-        ),
+        cpu_pct: cpu.into_report(CpuPhases {
+            open: cpu_open,
+            subscribe: cpu_subscribe,
+            add: cpu_add,
+            activate_sync: cpu_activate_sync,
+            activate_patch: cpu_activate_patch,
+            remove: cpu_remove,
+            close: cpu_close,
+        }),
         open_session_ms: LatencyMs::from_samples_us(open_samples),
         subscribe_activations_ms: LatencyMs::from_samples_us(subscribe_samples),
         add_sender_ms: LatencyMs::from_samples_us(add_sender_samples),
@@ -997,6 +1121,8 @@ async fn main() -> anyhow::Result<()> {
         connection_get_ms: LatencyMs::from_samples_us(connection_get_samples),
         patch_activate_ms: LatencyMs::from_samples_us(patch_activate_samples),
         patch_deactivate_ms: LatencyMs::from_samples_us(patch_deactivate_samples),
+        remove_sender_ms: LatencyMs::from_samples_us(remove_sender_samples),
+        remove_receiver_ms: LatencyMs::from_samples_us(remove_receiver_samples),
         close_session_ms: LatencyMs::from_samples_us(close_samples),
         wall_ms: us_to_ms(wall_start.elapsed().as_micros() as u64),
     };
@@ -1013,7 +1139,7 @@ fn session_for_resource(resource_index: usize, session_count: usize) -> usize {
     resource_index % session_count
 }
 
-/// Per-workflow registered-sender index for sync or PATCH. `workflow_count == 0` → none.
+/// Per-workflow index for sync, PATCH, or RemoveResource. `workflow_count == 0` → none.
 /// When `workflow_count <= registered_count`, targets are evenly spaced; when larger,
 /// round-robin through `[0, registered_count)`.
 fn sender_activation_indices(registered_count: usize, workflow_count: usize) -> Vec<usize> {
@@ -1022,6 +1148,24 @@ fn sender_activation_indices(registered_count: usize, workflow_count: usize) -> 
         (n, c) if c <= n => (0..c).map(|i| i * n / c).collect(),
         (n, c) => (0..c).map(|i| i % n).collect(),
     }
+}
+
+fn resources_to_remove(
+    senders: &[ResourceSlot],
+    receivers: &[ResourceSlot],
+    remove_senders: usize,
+    remove_receivers: usize,
+) -> (Vec<ResourceSlot>, Vec<ResourceSlot>) {
+    let sender_out: Vec<ResourceSlot> = sender_activation_indices(senders.len(), remove_senders)
+        .iter()
+        .map(|&i| senders[i].clone())
+        .collect();
+    let receiver_out: Vec<ResourceSlot> =
+        sender_activation_indices(receivers.len(), remove_receivers)
+            .iter()
+            .map(|&i| receivers[i].clone())
+            .collect();
+    (sender_out, receiver_out)
 }
 
 fn bench_node_config(node_seed: &str, http_port: u16) -> NodeConfig {
@@ -1210,6 +1354,36 @@ mod tests {
         assert_eq!(indices[999], 999);
         assert_eq!(indices[1000], 0);
         assert_eq!(indices[1001], 1);
+    }
+
+    #[test]
+    fn resources_to_remove_respects_per_side_counts() {
+        use super::{resources_to_remove, ResourceSlot};
+
+        let senders: Vec<ResourceSlot> = (0..4)
+            .map(|i| ResourceSlot {
+                session_index: i % 2,
+                resource_id: format!("sender-{i}"),
+                resource_handle: format!("res-s-{i}"),
+                sdp: String::new(),
+            })
+            .collect();
+        let receivers: Vec<ResourceSlot> = (0..2)
+            .map(|i| ResourceSlot {
+                session_index: 0,
+                resource_id: format!("receiver-{i}"),
+                resource_handle: format!("res-r-{i}"),
+                sdp: String::new(),
+            })
+            .collect();
+
+        let (removed_senders, removed_receivers) =
+            resources_to_remove(&senders, &receivers, 2, 1);
+        assert_eq!(removed_senders.len(), 2);
+        assert_eq!(removed_receivers.len(), 1);
+        assert_eq!(removed_senders[0].resource_id, "sender-0");
+        assert_eq!(removed_senders[1].resource_id, "sender-2");
+        assert_eq!(removed_receivers[0].resource_id, "receiver-0");
     }
 
     #[test]
