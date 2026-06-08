@@ -20,6 +20,7 @@
 #![allow(clippy::result_large_err)]
 
 mod log_bridge;
+mod malloc_trim;
 mod state;
 
 use std::path::PathBuf;
@@ -78,6 +79,22 @@ impl Daemon {
         // inconsistency that triggered the original panic.
         self.state.lock().expect("daemon state mutex poisoned")
     }
+
+    /// Trim when a node was removed or has no senders/receivers left.
+    fn maybe_malloc_trim(&self, node_seed: &str, via: &'static str, node_removed: bool) {
+        if !malloc_trim::trim_enabled() {
+            return;
+        }
+        let should_trim = if node_removed {
+            true
+        } else {
+            let state = self.lock_state();
+            state.resource_count_for_node(node_seed) == 0
+        };
+        if should_trim {
+            malloc_trim::run(via, node_seed);
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -121,6 +138,7 @@ impl NvnmosDaemon for Daemon {
             node_id = %outcome.node_id,
             "RemoveNode",
         );
+        self.maybe_malloc_trim(&req.node_seed, "remove_node", true);
         Ok(Response::new(Empty {}))
     }
 
@@ -181,6 +199,7 @@ impl NvnmosDaemon for Daemon {
             node_destroyed = outcome.node_destroyed,
             "CloseSession",
         );
+        self.maybe_malloc_trim(&outcome.node_seed, "close_session", outcome.node_destroyed);
         Ok(Response::new(Empty {}))
     }
 
@@ -261,6 +280,7 @@ impl NvnmosDaemon for Daemon {
             side = outcome.side.label(),
             "RemoveResource",
         );
+        self.maybe_malloc_trim(&outcome.node_seed, "remove_resource", false);
         Ok(Response::new(Empty {}))
     }
 

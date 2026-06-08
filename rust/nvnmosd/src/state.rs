@@ -590,6 +590,14 @@ impl State {
         })
     }
 
+    /// Count live senders/receivers registered on `node_seed`.
+    pub fn resource_count_for_node(&self, node_seed: &str) -> usize {
+        self.resources
+            .values()
+            .filter(|resource| resource.node_seed == node_seed)
+            .count()
+    }
+
     /// Create a persistent Node for `seed`.
     ///
     /// Errors:
