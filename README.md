@@ -309,19 +309,23 @@ os=Linux
 ```PowerShell
 pip install conan~=2.2 --upgrade
 conan profile detect
+notepad (conan profile path default)
 ```
 
-The detected profile is displayed, along with some `WARN` messages.
-For example, the following profile has been tested.
+You may wish to edit the detected profile.
+Conan Center prebuilt binaries target MSVC 193/194, not 195 (Visual Studio 2026).
+Pin MSVC 194 so `conan install` downloads packages instead of building from source, with `compiler.version=194` and `compiler.cppstd=17`.
+
+The following settings have been tested.
 
 ```ini
 [settings]
 arch=x86_64
 build_type=Release
 compiler=msvc
-compiler.cppstd=14
+compiler.cppstd=17
 compiler.runtime=dynamic
-compiler.version=193
+compiler.version=194
 os=Windows
 ```
 
