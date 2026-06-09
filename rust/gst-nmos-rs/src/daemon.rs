@@ -33,7 +33,7 @@ use std::time::Duration;
 use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
-    AckActivationRequest, AddReceiverRequest, AddSenderRequest, CloseSessionRequest, NodeConfig,
+    AckActivationRequest, AddReceiverRequest, AddSenderRequest, CloseSessionRequest,
     OpenSessionRequest, Side as ProtoSide, SubscribeActivationsRequest, SyncResourceStateRequest,
     Transport as ProtoTransport,
 };
@@ -47,8 +47,10 @@ use tower::service_fn;
 use gstreamer as gst;
 
 use crate::CAT;
+use crate::network_services::node_config_from_settings;
 use crate::runtime::SHARED_RUNTIME;
 use crate::session::types::Side;
+use crate::session::CommonSettings;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -149,10 +151,12 @@ impl Session {
     /// `transport_file` is `Some`) register `name` as a Sender or
     /// Receiver via `AddSender` / `AddReceiver`.
     ///
-    /// Only `unix:/path/to/sock` URIs are supported; the `node_seed`
-    /// is the only field set on `NodeConfig` (label, description,
-    /// asset_tags, network_services are left at their proto-default
-    /// and ignored by the daemon when attaching to an existing Node).
+    /// Only `unix:/path/to/sock` URIs are supported. `NodeConfig` is
+    /// assembled from the element's node-identity properties (`host-name`,
+    /// `domain`, `registration-url`, `system-url`, `http-port`) via
+    /// [`node_config_from_settings`]. Those fields are honoured only by
+    /// the `OpenSession` that actually creates the Node; attaching to
+    /// an existing Node (same `node-seed`) ignores them.
     ///
     /// `activation_handler` is invoked for every `ActivationEvent`
     /// the daemon delivers on this session. See
@@ -164,8 +168,7 @@ impl Session {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn open(
         daemon_uri: &str,
-        node_seed: &str,
-        http_port: u16,
+        settings: &CommonSettings,
         side: Side,
         name: &str,
         transport: ProtoTransport,
@@ -178,11 +181,7 @@ impl Session {
 
         let resp = client
             .open_session(OpenSessionRequest {
-                node_config: Some(NodeConfig {
-                    seed: node_seed.to_owned(),
-                    http_port: u32::from(http_port),
-                    ..NodeConfig::default()
-                }),
+                node_config: Some(node_config_from_settings(settings)),
             })
             .await?
             .into_inner();

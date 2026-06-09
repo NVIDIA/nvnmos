@@ -46,6 +46,10 @@ struct Settings {
     daemon_uri: String,
     node_seed: String,
     http_port: u16,
+    host_name: String,
+    domain: String,
+    registration_url: String,
+    system_url: String,
     transport: Transport,
     sender_name: String,
     mxl_domain_id: String,
@@ -84,6 +88,10 @@ impl Default for Settings {
             daemon_uri: DEFAULT_DAEMON_URI.to_owned(),
             node_seed: String::new(),
             http_port: 0,
+            host_name: String::new(),
+            domain: String::new(),
+            registration_url: String::new(),
+            system_url: String::new(),
             transport: Transport::default(),
             sender_name: String::new(),
             mxl_domain_id: String::new(),
@@ -145,6 +153,26 @@ impl ObjectImpl for NmosSink {
                     .minimum(0)
                     .maximum(65535)
                     .default_value(0)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("host-name")
+                    .nick("Host name")
+                    .blurb(crate::session::HOST_NAME_BLURB)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("domain")
+                    .nick("NMOS DNS domain")
+                    .blurb(crate::session::DOMAIN_BLURB)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("registration-url")
+                    .nick("Registration URL")
+                    .blurb(crate::session::REGISTRATION_URL_BLURB)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("system-url")
+                    .nick("System URL")
+                    .blurb(crate::session::SYSTEM_URL_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecEnum::builder_with_default("transport", Transport::Mxl)
@@ -350,6 +378,18 @@ impl ObjectImpl for NmosSink {
                 // ParamSpec range-checks against [0, 65535] upstream.
                 settings.http_port = u16::try_from(v).expect("range checked by ParamSpec");
             }
+            "host-name" => {
+                settings.host_name = string_or_empty(value);
+            }
+            "domain" => {
+                settings.domain = string_or_empty(value);
+            }
+            "registration-url" => {
+                settings.registration_url = string_or_empty(value);
+            }
+            "system-url" => {
+                settings.system_url = string_or_empty(value);
+            }
             "transport" => {
                 settings.transport = value.get().expect("type checked upstream");
             }
@@ -416,6 +456,10 @@ impl ObjectImpl for NmosSink {
             "daemon-uri" => settings.daemon_uri.to_value(),
             "node-seed" => settings.node_seed.to_value(),
             "http-port" => u32::from(settings.http_port).to_value(),
+            "host-name" => settings.host_name.to_value(),
+            "domain" => settings.domain.to_value(),
+            "registration-url" => settings.registration_url.to_value(),
+            "system-url" => settings.system_url.to_value(),
             "transport" => settings.transport.to_value(),
             "sender-name" => settings.sender_name.to_value(),
             "mxl-domain-id" => settings.mxl_domain_id.to_value(),
@@ -889,6 +933,10 @@ impl From<Settings> for crate::session::CommonSettings {
             daemon_uri: s.daemon_uri,
             node_seed: s.node_seed,
             http_port: s.http_port,
+            host_name: s.host_name,
+            domain: s.domain,
+            registration_url: s.registration_url,
+            system_url: s.system_url,
             transport: s.transport,
             side: crate::session::types::Side::Sender,
             name: s.sender_name,
@@ -961,6 +1009,22 @@ mod tests {
     /// `CommonSettings` so the splice / synth path can read it for
     /// pt / audio clock-rate / ptime overrides + essence
     /// cross-check.
+    #[test]
+    fn from_settings_forwards_network_services_properties() {
+        let s = Settings {
+            host_name: "studio-a".to_owned(),
+            domain: "local".to_owned(),
+            registration_url: "http://reg:3210/x-nmos/registration/v1.3".to_owned(),
+            system_url: "http://sys:10641/x-nmos/system/v1.0".to_owned(),
+            ..Settings::default()
+        };
+        let cs: CommonSettings = s.into();
+        assert_eq!(cs.host_name, "studio-a");
+        assert_eq!(cs.domain, "local");
+        assert_eq!(cs.registration_url, "http://reg:3210/x-nmos/registration/v1.3");
+        assert_eq!(cs.system_url, "http://sys:10641/x-nmos/system/v1.0");
+    }
+
     #[test]
     fn from_settings_forwards_transport_caps() {
         use std::str::FromStr;

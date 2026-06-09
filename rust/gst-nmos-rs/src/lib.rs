@@ -139,6 +139,7 @@ mod domain;
 mod flow_def;
 mod iface;
 mod inner;
+mod network_services;
 mod nmossink;
 mod nmossrc;
 mod runtime;
