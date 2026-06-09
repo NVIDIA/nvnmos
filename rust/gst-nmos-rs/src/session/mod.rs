@@ -36,10 +36,9 @@ use self::types::Side;
 /// `Mxl` carries data via the MXL Domain. `Udp` and `Udp2` reach
 /// this helper once `validate_and_open` resolves an SDP into a
 /// [`TransportConfig::Udp`] and the inner chain factories
-/// instantiate `udpsrc` / `udpsink`. `NvDsUdp` is rejected
-/// up-front because the DeepStream `nvdsudp*` elements aren't
-/// wired in yet. The mapping is provided eagerly so the helper
-/// stays exhaustive across all `Transport` variants.
+/// instantiate `udpsrc` / `udpsink`, or `nvdsudpsrc` / `nvdsudpsink`
+/// for [`Transport::NvDsUdp`]. The mapping is provided eagerly so
+/// the helper stays exhaustive across all `Transport` variants.
 pub(crate) fn transport_to_proto(t: Transport) -> ProtoTransport {
     match t {
         Transport::Mxl => ProtoTransport::Mxl,
@@ -115,9 +114,9 @@ pub(crate) const TRANSPORT_BLURB: &str =
      `udp2`: ST 2110 over RTP/UDP via gst-plugins-rs (`udpsrc2` + \
      the `*pay2` / `*depay2` family where available, falling back \
      to gst-plugins-good per-element). \
-     `nvdsudp`: reserved for DeepStream's `nvdsudp*` (kernel-bypass \
-     plus PTP-aligned timing for strict ST 2110); not yet \
-     implemented and rejected today.";
+     `nvdsudp`: ST 2110 via DeepStream's `nvdsudpsrc` / `nvdsudpsink` \
+     (Rivermax kernel-bypass, built-in RTP (de)payload, Mode 3). \
+     Requires ConnectX-5+ and the Rivermax SDK.";
 
 pub(crate) const MXL_DOMAIN_ID_BLURB: &str =
     "MXL Domain identifier (UUID) advertised in NMOS as \
@@ -140,7 +139,8 @@ pub(crate) const TRANSPORT_CAPS_BLURB: &str =
 
 pub(crate) const TRANSPORT_PROPERTIES_BLURB: &str =
     "Overrides applied to the inner source or sink (`udpsrc`, `udpsink`, \
-     `mxlsrc`, or `mxlsink`) every time the data-path chain is built. \
+     `nvdsudpsrc`, `nvdsudpsink`, `mxlsrc`, or `mxlsink`) every time the \
+     data-path chain is built. \
      Pass a `GstStructure` whose fields are GObject property names on that \
      inner source or sink — for example `properties,buffer-size=26214400`. \
      The structure name is not interpreted. Takes effect on the next chain \
@@ -502,6 +502,14 @@ pub(crate) enum TransportConfig {
         /// logical RTP stream in [`udp::types::UdpMedia`] (not raw SDP).
         transport_file: Option<String>,
     },
+    /// DeepStream Rivermax transport. Inner chain is a bare
+    /// `nvdsudpsink` / `nvdsudpsrc` in Mode 3 (built-in RTP
+    /// packetization / depacketization; no external `rtp*pay` /
+    /// `rtp*depay`).
+    NvDsUdp {
+        media: udp::types::UdpMedia,
+        transport_file: Option<String>,
+    },
 }
 
 impl TransportConfig {
@@ -513,9 +521,9 @@ impl TransportConfig {
     /// (deferred-mode awaiting peer caps).
     pub(crate) fn transport_file(&self) -> Option<&str> {
         match self {
-            Self::Mxl { transport_file, .. } | Self::Udp { transport_file, .. } => {
-                transport_file.as_deref()
-            }
+            Self::Mxl { transport_file, .. }
+            | Self::Udp { transport_file, .. }
+            | Self::NvDsUdp { transport_file, .. } => transport_file.as_deref(),
         }
     }
 }
@@ -525,10 +533,44 @@ pub(crate) mod udp;
 
 pub(crate) use udp::UdpVariant;
 pub(crate) use mxl::decide_inner_config_mxl;
-pub(crate) use udp::{decide_inner_config_udp, udp_essence_cross_check_mode};
+pub(crate) use udp::{
+    decide_inner_config_nvdsudp, decide_inner_config_udp, udp_essence_cross_check_mode,
+};
 
 use mxl::{resolve_activation_inner_mxl, resolve_inner_config_mxl};
-use udp::resolve_inner_config_udp;
+use udp::{resolve_inner_config_nvdsudp, resolve_inner_config_udp};
+
+fn udp_inner_summary(
+    family: &str,
+    variant: Option<UdpVariant>,
+    media: &udp::types::UdpMedia,
+) -> String {
+    fn leg_summary(leg: &udp::types::UdpLeg) -> String {
+        format!(
+            "{}:{} iface={:?} source_ip={:?} source_port={:?}",
+            leg.destination_ip,
+            leg.destination_port,
+            leg.interface_ip,
+            leg.source_ip,
+            leg.source_port,
+        )
+    }
+
+    let legs = match &media.secondary {
+        Some(secondary) => format!(
+            "primary=[{}], secondary=[{}]",
+            leg_summary(&media.primary),
+            leg_summary(secondary),
+        ),
+        None => format!("primary=[{}]", leg_summary(&media.primary)),
+    };
+    let body = format!("format={:?}, {legs}", media.format);
+
+    match variant {
+        Some(v) => format!("inner data path: {family} ({v:?}, {body})"),
+        None => format!("inner data path: {family} ({body})"),
+    }
+}
 
 /// Validate the settings snapshot and open a session via the shared
 /// tokio runtime. On success the session is stored under `session`
@@ -572,12 +614,9 @@ pub(crate) fn validate_and_open(
             UdpVariant::V2,
             resolved_transport_file,
         )?,
-        Transport::NvDsUdp => bail!(
-            "{element}: transport=nvdsudp is not yet implemented — strict \
-             ST 2110 receive/send via DeepStream's `nvdsudp` elements is \
-             gated on ConnectX / Rivermax hardware; only `mxl`, `udp` and \
-             `udp2` are implemented today"
-        ),
+        Transport::NvDsUdp => {
+            resolve_inner_config_nvdsudp(cat, element, settings, resolved_transport_file)?
+        }
     };
 
     inner = apply_auto_activate_gate(inner, settings.auto_activate);
@@ -618,26 +657,10 @@ pub(crate) fn validate_and_open(
             format!("inner data path: mxl (domain_path={domain_path:?}, flow_id={flow_id}, format={format:?})")
         }
         InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
-            let leg_summary = |leg: &udp::types::UdpLeg| {
-                format!(
-                    "{}:{} iface={:?} source_ip={:?} source_port={:?}",
-                    leg.destination_ip,
-                    leg.destination_port,
-                    leg.interface_ip,
-                    leg.source_ip,
-                    leg.source_port,
-                )
-            };
-            let mut s = format!(
-                "inner data path: udp ({variant:?}, format={:?}, primary=[{}]",
-                media.format,
-                leg_summary(&media.primary),
-            );
-            if let Some(secondary) = &media.secondary {
-                s.push_str(&format!(", secondary=[{}]", leg_summary(secondary)));
-            }
-            s.push(')');
-            s
+            udp_inner_summary("udp", Some(*variant), media)
+        }
+        InnerConfig::Real(TransportConfig::NvDsUdp { media, .. }) => {
+            udp_inner_summary("nvdsudp", None, media)
         }
         InnerConfig::Fake { reason } => {
             format!("inner data path: fake ({reason})")
@@ -945,7 +968,9 @@ pub(crate) enum ActivationAck {
 ///   - `Udp` / `Udp2`: parse the SDP via [`sdp::parse_sdp`] and
 ///     run [`decide_inner_config_udp`]. SDP parse errors → fake
 ///     chain + failure ack with attribution.
-///   - `NvDsUdp`: not implemented; fake chain + failure ack.
+///   - `NvDsUdp`: parse the SDP via [`decide_inner_config_nvdsudp`].
+///     SDP parse errors → fake chain + failure ack with attribution
+///     (same pattern as `Udp` / `Udp2`).
 ///
 /// * If the chosen `decide_inner_config_*` returns
 ///   [`InnerConfig::Real`], ack success; if it returns
@@ -1032,20 +1057,24 @@ pub(crate) fn make_activation_plan(
                 };
             }
         },
-        Transport::NvDsUdp => {
-            return ActivationPlan {
-                inner: InnerConfig::Fake {
-                    reason: "transport=nvdsudp not implemented".to_owned(),
-                },
-                ack: ActivationAck::Failure {
-                    reason: format!(
-                        "{element}: activation rejected — transport=nvdsudp is not yet \
-                         implemented; strict ST 2110 send/receive via DeepStream's \
-                         `nvdsudp` elements is gated on ConnectX / Rivermax hardware",
-                    ),
-                },
-            };
-        }
+        Transport::NvDsUdp => match decide_inner_config_nvdsudp(
+            element,
+            settings,
+            Some(transport_file),
+            udp_essence_cross_check_mode(settings, true, Some(transport_file)),
+        ) {
+            Ok(inner) => inner,
+            Err(e) => {
+                return ActivationPlan {
+                    inner: InnerConfig::Fake {
+                        reason: "SDP transport file rejected".to_owned(),
+                    },
+                    ack: ActivationAck::Failure {
+                        reason: format!("{element}: parsing activation SDP: {e:#}"),
+                    },
+                };
+            }
+        },
     };
 
     let ack = match &inner {
@@ -1226,8 +1255,9 @@ mod tests {
                     assert_eq!(flow_id, FLOW_ID_A);
                     assert_eq!(format, FlowFormat::Video);
                 }
-                InnerConfig::Real(TransportConfig::Udp { .. }) => {
-                    panic!("auto-activate=true must not change Mxl into Udp")
+                InnerConfig::Real(TransportConfig::Udp { .. })
+                | InnerConfig::Real(TransportConfig::NvDsUdp { .. }) => {
+                    panic!("auto-activate=true must not change Mxl into RTP transport")
                 }
                 InnerConfig::Fake { reason } => {
                     panic!("auto-activate=true must not downgrade Real: {reason}")
@@ -1298,8 +1328,9 @@ mod tests {
                 InnerConfig::Real(TransportConfig::Mxl { flow_id, .. }) => {
                     assert_eq!(flow_id, FLOW_ID_A)
                 }
-                InnerConfig::Real(TransportConfig::Udp { .. }) => {
-                    panic!("expected Real(Mxl), got Real(Udp)")
+                InnerConfig::Real(TransportConfig::Udp { .. })
+                | InnerConfig::Real(TransportConfig::NvDsUdp { .. }) => {
+                    panic!("expected Real(Mxl), got Real(RTP transport)")
                 }
                 InnerConfig::Fake { reason } => {
                     panic!("IS-05 activation must reach Real regardless of auto-activate: {reason}")

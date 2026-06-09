@@ -140,6 +140,7 @@ mod flow_def;
 mod iface;
 mod inner;
 mod network_services;
+mod nvdsudp;
 mod nmossink;
 mod nmossrc;
 mod runtime;

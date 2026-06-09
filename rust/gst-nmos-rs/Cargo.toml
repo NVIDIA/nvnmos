@@ -29,6 +29,7 @@ tower = { workspace = true }
 hyper-util = { workspace = true }
 
 anyhow = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

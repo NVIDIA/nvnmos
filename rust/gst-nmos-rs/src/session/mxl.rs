@@ -377,8 +377,9 @@ mod tests {
             InnerConfig::Real(TransportConfig::Mxl { format, .. }) => {
                 assert_eq!(format, FlowFormat::Data)
             }
-            InnerConfig::Real(TransportConfig::Udp { .. }) => {
-                panic!("expected Real(Mxl(data)), got Real(Udp)")
+            InnerConfig::Real(TransportConfig::Udp { .. })
+            | InnerConfig::Real(TransportConfig::NvDsUdp { .. }) => {
+                panic!("expected Real(Mxl(data)), got Real(RTP transport)")
             }
             InnerConfig::Fake { reason } => {
                 panic!("expected Real(Mxl(data)), got Fake({reason})")
@@ -438,8 +439,9 @@ mod tests {
                     "make_activation_plan must thread req.transport_file into InnerConfig",
                 );
             }
-            InnerConfig::Real(TransportConfig::Udp { .. }) => {
-                panic!("expected Real(Mxl), got Real(Udp)")
+            InnerConfig::Real(TransportConfig::Udp { .. })
+            | InnerConfig::Real(TransportConfig::NvDsUdp { .. }) => {
+                panic!("expected Real(Mxl), got Real(RTP transport)")
             }
             InnerConfig::Fake { reason } => panic!("expected Real(Mxl), got Fake({reason})"),
         }
