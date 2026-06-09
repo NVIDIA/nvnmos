@@ -102,7 +102,12 @@ jobs:
             gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good
 
-      # For now, use whatever Rust toolchain ships with the ubuntu-24.04 runner
+      - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
+        with:
+          rust-src-dir: rust
+          components: clippy
+          rustflags: ""
+
       - name: Print Rust toolchain
         run: |
           rustc --version
@@ -129,7 +134,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Build image
-        run: docker build -t nvnmos:ci .
+        run: docker build -f docker/nvnmos/Dockerfile -t nvnmos:ci .
 
       - name: Run entrypoint smoke tests (non-root)
         run: docker run --rm --user 1000:1000 --cap-drop=ALL nvnmos:ci true

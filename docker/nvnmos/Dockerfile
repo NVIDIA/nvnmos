@@ -1,23 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Library package image: builds libnvnmos + Rust workspace, produces a tarball,
+# and smoke-tests nvnmos-example / nvnmosd / nvnmosd-example on start.
 #
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Build from the repository root:
+#   docker build -f docker/nvnmos/Dockerfile -t nvnmos .
 
 ARG BASE_IMAGE=ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PACKAGE_SUFFIX
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
 ARG CONAN_LOCKFILE=src/conan.lock
+ARG RUST_TOOLCHAIN=1.92
 
 # use pattern replacement to clean up '/' and ':'
 ARG _BASE_IMAGE=${BASE_IMAGE//\//-}
@@ -70,6 +65,7 @@ RUN cmake --install build --prefix=${PACKAGE_NAME}
 FROM ${BASE_IMAGE} AS rust-builder
 
 ARG DEBIAN_FRONTEND
+ARG RUST_TOOLCHAIN
 
 RUN apt update && apt install -y --no-install-recommends \
     build-essential \
@@ -84,7 +80,7 @@ RUN apt update && apt install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain 1.85 --profile minimal
+    | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /nvnmos
@@ -120,7 +116,7 @@ COPY --from=rust-builder /nvnmos/rust/target/release/nvnmosd \
 COPY --from=rust-builder /nvnmos/rust/target/release/nvnmosd-example \
     /nvnmos/${PACKAGE_NAME}/bin/
 
-COPY entrypoint.sh entrypoint-setup.sh LICENSE README.md Doxyfile ./
+COPY docker/nvnmos/entrypoint.sh docker/nvnmos/entrypoint-setup.sh LICENSE README.md Doxyfile ./
 COPY doc/doxygen doc/doxygen
 
 RUN chmod +x entrypoint.sh entrypoint-setup.sh \

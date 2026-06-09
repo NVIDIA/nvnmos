@@ -23,7 +23,7 @@
 # without the host system dbus. Provides a publish_mdns_hostname function.
 #
 # Usage:
-#   source /entrypoint-setup.sh
+#   source entrypoint-setup.sh
 #
 # Expects DBUS_SYSTEM_BUS_ADDRESS (e.g. set via Dockerfile ENV). Derived
 # images that start D-Bus differently must override that variable.
@@ -70,10 +70,11 @@ pids+=($!)
 
 cleanup() {
     echo "Stopping background processes..."
+    local pid
     for pid in "${pids[@]}"; do
-        kill "$pid" 2>/dev/null
+        kill "$pid" 2>/dev/null || true
     done
-    wait
+    wait || true
 }
 trap cleanup EXIT INT TERM
 
