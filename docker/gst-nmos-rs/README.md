@@ -29,13 +29,21 @@ The nvnmos tree is taken from the build context (`COPY src/`, `COPY rust/` via t
 |----------|---------|-------------|
 | `BASE_IMAGE` | `ubuntu:24.04` | Base image for all stages; controls runtime compatibility. |
 | `CONAN_LOCKFILE` | `src/conan.lock` | Input lockfile for `conan install`. Pass an empty value to resolve the latest compatible graph instead. |
+| `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for all Rust stages in this image. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); gst-plugins-rs MSRV is **1.92**. Workspace MSRV is **1.85** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
 | `MXL_REPO` | `https://github.com/dmf-mxl/mxl.git` | MXL source repository (`libmxl`, `gst-mxl-rs`). |
 | `MXL_REF` | `81738a15adb55119a6855343bc1053a4389bf6df` | Pinned MXL commit (`81738a1`, tip of `release/v1.1` at time of writing). Use a full 40-character SHA or a branch/tag name. |
 | `GST_PLUGINS_RS_REPO` | `https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git` | gst-plugins-rs source for `transport=udp2`. |
 | `GST_PLUGINS_RS_REF` | `207b1f4eeef4c192696181ce2ddb69da8ff73c8a` | Pinned gst-plugins-rs commit (`udpsrc2` landed after tag `0.15.2`). Builds `gst-plugin-udp` + `gst-plugin-rtp`. Use a full 40-character SHA or a branch/tag name. |
-| `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for all Rust stages in this image. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); gst-plugins-rs MSRV is **1.92**. Workspace MSRV is **1.85** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
 | `NVNMOS_UID` | `10001` | Fixed runtime user UID (`nvnmos`). |
 | `NVNMOS_GID` | `10001` | Fixed runtime group GID (`nvnmos`). |
+| `EXTRA_APT_PACKAGES` | *(empty)* | Optional space-separated apt package names added in the final image stage (e.g. `gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly`). Installed to the default GStreamer plugin path. |
+
+Example with extra plugins:
+
+```bash
+docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst \
+  --build-arg EXTRA_APT_PACKAGES="gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly" .
+```
 
 ## Run
 

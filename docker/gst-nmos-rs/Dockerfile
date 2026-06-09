@@ -9,25 +9,35 @@
 # Build from the repository root:
 #   docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst .
 #
+# Optional extra distro packages (space-separated apt names), e.g. gst-plugins-bad/-ugly plugins:
+#   docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst \
+#     --build-arg EXTRA_APT_PACKAGES="gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly" .
+#
 # Run:
 #
 #   docker run --rm -v /path/to/mxl-domain:/mxl/domain:rw nvnmos-gst \
 #     gst-launch-1.0 -e videotestsrc ! ... ! nmossink transport=mxl \
 #       daemon-uri=unix:/tmp/nvnmosd.sock mxl-domain-path=/mxl/domain node-seed=...
 
+# Base image
 ARG BASE_IMAGE=ubuntu:24.04
+
+# Build/install arguments
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
 ARG CONAN_LOCKFILE=src/conan.lock
+ARG RUST_TOOLCHAIN=1.92
 
+# External sources
 ARG MXL_REPO=https://github.com/dmf-mxl/mxl.git
 ARG MXL_REF=81738a15adb55119a6855343bc1053a4389bf6df
 ARG GST_PLUGINS_RS_REPO=https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git
 ARG GST_PLUGINS_RS_REF=207b1f4eeef4c192696181ce2ddb69da8ff73c8a
 
-ARG RUST_TOOLCHAIN=1.92
+# Final image arguments
 ARG NVNMOS_UID=10001
 ARG NVNMOS_GID=10001
+ARG EXTRA_APT_PACKAGES=
 
 # -----------------------------------------------------------------------------
 # MXL — vcpkg + gst-mxl-rs. libmxl is built once by mxl-sys via cargo (no
@@ -247,6 +257,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG EXTRA_APT_PACKAGES
 ARG NVNMOS_UID
 ARG NVNMOS_GID
 
@@ -268,6 +279,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-tools \
+    ${EXTRA_APT_PACKAGES} \
     && rm -rf /var/lib/apt/lists/*
 
 # nss-mdns communicates with avahi-daemon via a Unix socket at this compiled-in path.
