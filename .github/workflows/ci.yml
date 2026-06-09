@@ -24,6 +24,19 @@ jobs:
 
       - name: Install Conan
         run: pip install conan~=2.2 && conan profile detect
+      - name: Prepare Conan profile (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # windows-2025 is migrating to Visual Studio 2026 (MSVC 195)
+          # Conan Center prebuilt binaries target MSVC 193/194.
+          # Pin MSVC 194 so conan install downloads packages instead of
+          # building from source. See actions/runner-images#14017.
+          $profile = conan profile path default
+          (Get-Content $profile) `
+            -replace '^compiler\.cppstd=.*$', 'compiler.cppstd=17' `
+            -replace '^compiler\.version=.*$', 'compiler.version=194' |
+            Set-Content $profile
       - name: Install dependencies
         run: |
           conan install src \

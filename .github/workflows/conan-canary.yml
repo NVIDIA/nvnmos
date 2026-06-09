@@ -32,6 +32,15 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install Conan
         run: pip install conan~=2.2 && conan profile detect
+      - name: Prepare Conan profile (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $profile = conan profile path default
+          (Get-Content $profile) `
+            -replace '^compiler\.cppstd=.*$', 'compiler.cppstd=17' `
+            -replace '^compiler\.version=.*$', 'compiler.version=194' |
+            Set-Content $profile
       - name: Install dependencies without lockfile
         id: conan_install
         run: |
@@ -101,6 +110,15 @@ jobs:
           git clone --depth 1 https://github.com/sony/nmos-cpp.git "${parent}/nmos-cpp"
       - name: Install Conan
         run: pip install conan~=2.2 && conan profile detect
+      - name: Prepare Conan profile (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $profile = conan profile path default
+          (Get-Content $profile) `
+            -replace '^compiler\.cppstd=.*$', 'compiler.cppstd=17' `
+            -replace '^compiler\.version=.*$', 'compiler.version=194' |
+            Set-Content $profile
       - name: Install dependencies without lockfile
         id: conan_install
         run: |
