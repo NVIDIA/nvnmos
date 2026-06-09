@@ -24,7 +24,15 @@ See `gst-nmos-rs`'s own
 [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md) for the per-element
 property matrix, load instructions, and status.
 
+## Container Image
+
+For a combined image with `nvnmosd` + `gst-nmos-rs` + plugins for `transport=mxl` and
+`transport=udp`/`udp2`, suitable for `gst-launch-1.0` in Kubernetes or Docker, see
+[`docker/gst-nmos-rs/README.md`](../docker/gst-nmos-rs/README.md).
+
 ## Building
+
+The workspace **MSRV** is **Rust 1.85** (`rust-version` in [`Cargo.toml`](Cargo.toml)). Development, CI, and container builds pin **1.92** in [`rust-toolchain.toml`](rust-toolchain.toml) — the minimum needed for gst-plugins-rs `0.15.2` in [`docker/gst-nmos-rs`](../docker/gst-nmos-rs/).
 
 `nvnmos-sys` links against a pre-built `libnvnmos.so`. The Rust crate does **not** build the C library itself (today); use the existing CMake/Conan workflow under `../src/` to produce `libnvnmos.so` first, then point the Rust build at it:
 

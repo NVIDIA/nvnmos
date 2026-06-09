@@ -1,18 +1,6 @@
 <!--
- SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- SPDX-License-Identifier: Apache-2.0
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
+SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
 -->
 
 # NVIDIA Networked Media Open Specifications Library
@@ -148,41 +136,30 @@ On IS-05 activation, `"auto"` values for RTP Senders are now resolved based on t
 - `destination_port` is resolved to the SDP `m=` port if non-zero; otherwise, the IS-05 default (5004) is used as before.
 - `source_port` is resolved to the `a=x-nvnmos-src-port:` port if present; otherwise, the IS-05 default (5004) is used as before.
 
-## Docker-Based Build
+## Container Images
 
-A _Dockerfile_ is provided which builds, packages and tests the library and application from source.
+Container definitions live under [`docker/`](docker/). Build context is always the repository root.
 
-```sh
-docker build -t nvnmos .
-```
+### Library Package Image (`docker/nvnmos`)
 
-The package can then be copied directly to the host system.
+Builds and packages the C++ library and Rust workspace from source (see [`docker/nvnmos/README.md`](docker/nvnmos/README.md) for build arguments and runtime behaviour). With the defaults (`ubuntu:24.04`, `src/conan.lock`) the image produces **`nvnmos-ubuntu-24.04.tar.gz`**:
 
 ```sh
+docker build -f docker/nvnmos/Dockerfile -t nvnmos .
 docker create --name nvnmos-test nvnmos
 docker cp nvnmos-test:/nvnmos-ubuntu-24.04.tar.gz .
 docker rm nvnmos-test
 ```
 
-The runtime image includes _dbus_, _avahi-daemon_, and _avahi-utils_. _entrypoint.sh_ (and _entrypoint-setup.sh_) start D-Bus and Avahi without systemd or chroot, run the C _nvnmos-example_ and the Rust _nvnmosd_ / _nvnmosd-example_ pair, then exec your command.
+### gst-nmos-rs Operator Image (`docker/gst-nmos-rs`)
+
+Combined runtime for `nvnmosd` + `gst-nmos-rs`, intended for `gst-launch-1.0` pipelines (`transport=mxl` via gst-mxl-rs, `udp` via gst-plugins-good, `udp2` via gst-plugins-rs). See [`docker/gst-nmos-rs/README.md`](docker/gst-nmos-rs/README.md) for build arguments, run, and Kubernetes notes.
 
 ```sh
-docker run -it nvnmos /bin/bash
+docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst .
 ```
 
-### Dockerfile Build Arguments
-
-The following build arguments are available.
-
-| Argument | Explanation |
-| --- | --- |
-| BASE_IMAGE | Controls the base container image and therefore the compatibility of the created package. Default is `ubuntu:24.04`. | 
-| PACKAGE_SUFFIX | Controls the package filename, which will be _nvnmos\<suffix\>.tar.gz_. Default is based on the base image, e.g. `-ubuntu-24.04`. |
-| CONAN_LOCKFILE | Input lockfile path for `conan install`. Default is `src/conan.lock`. Pass an empty value, e.g. `--build-arg CONAN_LOCKFILE=`, to resolve the latest compatible graph instead. |
-
-The image installs the Conan Center `nmos-cpp` dependency graph via `conan install` (using `CONAN_LOCKFILE` when set), writes the resolved `conan.lock` into the package tarball, then builds the Rust workspace (`nvnmosd`, `gst-nmos-rs`, …) against the built `libnvnmos.so`.
-
-If this isn't sufficient for your purposes, read on for manual build instructions.
+If container builds are not sufficient for your purposes, read on for manual build instructions.
 
 ## Pre-Build Requirements
 
