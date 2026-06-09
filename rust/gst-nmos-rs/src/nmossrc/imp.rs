@@ -52,6 +52,10 @@ struct Settings {
     daemon_uri: String,
     node_seed: String,
     http_port: u16,
+    host_name: String,
+    domain: String,
+    registration_url: String,
+    system_url: String,
     transport: Transport,
     receiver_name: String,
     mxl_domain_id: String,
@@ -94,6 +98,10 @@ impl Default for Settings {
             daemon_uri: DEFAULT_DAEMON_URI.to_owned(),
             node_seed: String::new(),
             http_port: 0,
+            host_name: String::new(),
+            domain: String::new(),
+            registration_url: String::new(),
+            system_url: String::new(),
             transport: Transport::default(),
             receiver_name: String::new(),
             mxl_domain_id: String::new(),
@@ -156,6 +164,26 @@ impl ObjectImpl for NmosSrc {
                     .minimum(0)
                     .maximum(65535)
                     .default_value(0)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("host-name")
+                    .nick("Host name")
+                    .blurb(crate::session::HOST_NAME_BLURB)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("domain")
+                    .nick("NMOS DNS domain")
+                    .blurb(crate::session::DOMAIN_BLURB)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("registration-url")
+                    .nick("Registration URL")
+                    .blurb(crate::session::REGISTRATION_URL_BLURB)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("system-url")
+                    .nick("System URL")
+                    .blurb(crate::session::SYSTEM_URL_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecEnum::builder_with_default("transport", Transport::Mxl)
@@ -377,6 +405,18 @@ impl ObjectImpl for NmosSrc {
                 let v: u32 = value.get().expect("type checked upstream");
                 settings.http_port = u16::try_from(v).expect("range checked by ParamSpec");
             }
+            "host-name" => {
+                settings.host_name = string_or_empty(value);
+            }
+            "domain" => {
+                settings.domain = string_or_empty(value);
+            }
+            "registration-url" => {
+                settings.registration_url = string_or_empty(value);
+            }
+            "system-url" => {
+                settings.system_url = string_or_empty(value);
+            }
             "transport" => {
                 settings.transport = value.get().expect("type checked upstream");
             }
@@ -445,6 +485,10 @@ impl ObjectImpl for NmosSrc {
             "daemon-uri" => settings.daemon_uri.to_value(),
             "node-seed" => settings.node_seed.to_value(),
             "http-port" => u32::from(settings.http_port).to_value(),
+            "host-name" => settings.host_name.to_value(),
+            "domain" => settings.domain.to_value(),
+            "registration-url" => settings.registration_url.to_value(),
+            "system-url" => settings.system_url.to_value(),
             "transport" => settings.transport.to_value(),
             "receiver-name" => settings.receiver_name.to_value(),
             "mxl-domain-id" => settings.mxl_domain_id.to_value(),
@@ -1113,6 +1157,10 @@ impl From<Settings> for crate::session::CommonSettings {
             daemon_uri: s.daemon_uri,
             node_seed: s.node_seed,
             http_port: s.http_port,
+            host_name: s.host_name,
+            domain: s.domain,
+            registration_url: s.registration_url,
+            system_url: s.system_url,
             transport: s.transport,
             side: crate::session::types::Side::Receiver,
             name: s.receiver_name,

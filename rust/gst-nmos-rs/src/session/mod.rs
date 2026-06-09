@@ -21,7 +21,7 @@ use crate::daemon::{ActivationHandler, ActivationRequest, Session};
 use crate::domain;
 use crate::flow_def::{self, FlowDefBuildInput};
 use crate::runtime::SHARED_RUNTIME;
-use crate::types::{CapsMode, FlowFormat, Transport};
+use crate::types::{CapsMode, DEFAULT_DAEMON_URI, FlowFormat, Transport};
 
 /// Open-session timeout. Aligned with the daemon's activation ack
 /// timeout — same order of magnitude, no special meaning.
@@ -76,6 +76,35 @@ pub(crate) const HTTP_PORT_BLURB: &str =
      (e.g. another nmossink / nmossrc opened first with the same \
      node-seed) this property is ignored, just like the rest of \
      node_config.";
+
+pub(crate) const HOST_NAME_BLURB: &str =
+    "NMOS Node host name (`node_config.host_name`). Empty (the \
+     default) leaves libnvnmos to autodetect. Honoured only by the \
+     OpenSession that actually creates the Node; ignored when \
+     attaching to a pre-existing Node with the same `node-seed`.";
+
+pub(crate) const DOMAIN_BLURB: &str =
+    "DNS domain for NMOS network services (`network_services.domain`). \
+     Use `local` to force mDNS. Empty (the default) leaves libnvnmos \
+     on automatic discovery. Not to be confused with `mxl-domain-id` \
+     / `mxl-domain-path`, which identify an MXL shared-memory Domain. \
+     Honoured only by the OpenSession that creates the Node.";
+
+pub(crate) const REGISTRATION_URL_BLURB: &str =
+    "Fixed IS-04 Registration API URL. Format: \
+     `http://host[:port]/x-nmos/registration/v<X.Y>[/]`. Parsed into \
+     `network_services.registration_*`; invalid URLs are logged and \
+     ignored. Empty (the default) leaves libnvnmos on DNS-SD discovery \
+     based on `host-name`. Honoured only by the OpenSession that \
+     creates the Node.";
+
+pub(crate) const SYSTEM_URL_BLURB: &str =
+    "Fixed IS-09 System API URL. Format: \
+     `http://host[:port]/x-nmos/system/v<X.Y>[/]`. Parsed into \
+     `network_services.system_*`; invalid URLs are logged and ignored. \
+     Honoured only when `registration-url` is also set (libnvnmos \
+     ignores a standalone System API). Honoured only by the OpenSession \
+     that creates the Node.";
 
 pub(crate) const TRANSPORT_BLURB: &str =
     "Inner data path family. \
@@ -148,6 +177,14 @@ pub(crate) struct CommonSettings {
     pub(crate) node_seed: String,
     /// See [`HTTP_PORT_BLURB`].
     pub(crate) http_port: u16,
+    /// See [`HOST_NAME_BLURB`].
+    pub(crate) host_name: String,
+    /// See [`DOMAIN_BLURB`].
+    pub(crate) domain: String,
+    /// See [`REGISTRATION_URL_BLURB`].
+    pub(crate) registration_url: String,
+    /// See [`SYSTEM_URL_BLURB`].
+    pub(crate) system_url: String,
     pub(crate) transport: Transport,
     /// Whether this snapshot came from `nmossink` (Sender) or `nmossrc`
     /// (Receiver). Pinned by the element that built the snapshot.
@@ -320,6 +357,40 @@ pub(crate) struct CommonSettings {
     /// `auto-activate=true` brings the inner up and informs the
     /// daemon; `auto-activate=false` leaves it for the controller.
     pub(crate) auto_activate: bool,
+}
+
+impl Default for CommonSettings {
+    fn default() -> Self {
+        Self {
+            daemon_uri: DEFAULT_DAEMON_URI.to_owned(),
+            node_seed: String::new(),
+            http_port: 0,
+            host_name: String::new(),
+            domain: String::new(),
+            registration_url: String::new(),
+            system_url: String::new(),
+            transport: Transport::default(),
+            side: Side::Sender,
+            name: String::new(),
+            mxl_domain_id: String::new(),
+            mxl_domain_path: String::new(),
+            mxl_flow_id: String::new(),
+            transport_file: String::new(),
+            transport_file_path: String::new(),
+            label: String::new(),
+            description: String::new(),
+            caps: None,
+            transport_caps: None,
+            caps_mode: CapsMode::default(),
+            source_ip: String::new(),
+            source_port: 0,
+            destination_ip: String::new(),
+            destination_port: 0,
+            interface_ip: String::new(),
+            multicast_ip: String::new(),
+            auto_activate: false,
+        }
+    }
 }
 
 /// Outcome of resolving `transport_file` / `transport_file_path`.
@@ -521,8 +592,7 @@ pub(crate) fn validate_and_open(
                 OPEN_TIMEOUT,
                 Session::open(
                     &settings.daemon_uri,
-                    &settings.node_seed,
-                    settings.http_port,
+                    settings,
                     side,
                     &name,
                     transport,
@@ -1019,6 +1089,10 @@ mod support {
             daemon_uri: "unix:/dev/null".to_owned(),
             node_seed: NODE_SEED.to_owned(),
             http_port: 0,
+            host_name: String::new(),
+            domain: String::new(),
+            registration_url: String::new(),
+            system_url: String::new(),
             transport: Transport::Mxl,
             side,
             name: "test-name".to_owned(),
