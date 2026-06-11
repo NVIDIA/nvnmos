@@ -60,7 +60,9 @@ use gst::glib;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 
-use crate::nvdsudp::packetization::{self, Packetization, AUDIO_HEADER_SIZE, VIDEO_HEADER_SIZE};
+use crate::nvdsudp::packetization::{
+    self, Packetization, ANC_HEADER_SIZE, AUDIO_HEADER_SIZE, VIDEO_HEADER_SIZE,
+};
 use crate::nvdsudp::sdp_file::SdpFileGuard;
 use crate::session::udp::types::UdpMedia;
 use crate::session::udp::UdpVariant;
@@ -1348,6 +1350,7 @@ pub(crate) fn build_nvdsudpsink(
         Packetization::Audio(a) => {
             sink.set_property("payload-size", a.sink_payload_size);
         }
+        Packetization::Anc => {}
     }
 
     // `nvdsudpsink` reads `sdp-file` from disk in `start`, after callers
@@ -1361,7 +1364,7 @@ pub(crate) fn build_nvdsudpsink(
 }
 
 /// Build the inner DeepStream Rivermax source for `nmossrc` when
-/// `transport=nvdsudp`. Mode 3: built-in ST 2110-20/30 depacketization.
+/// `transport=nvdsudp`. Mode 3: built-in ST 2110-20/30/40 depacketization.
 /// No external depayloader.
 pub(crate) fn build_nvdsudpsrc(
     media: &UdpMedia,
@@ -1410,6 +1413,9 @@ pub(crate) fn build_nvdsudpsrc(
             src.set_property("header-size", AUDIO_HEADER_SIZE);
             src.set_property("payload-size", a.src_payload_size);
             src.set_property("payload-multiple", a.payload_multiple);
+        }
+        Packetization::Anc => {
+            src.set_property("header-size", ANC_HEADER_SIZE);
         }
     }
 
@@ -2281,6 +2287,43 @@ mod tests {
                 "{variant:?} must resolve to rtpsmpte291depay for ANC",
             );
         }
+    }
+
+    fn nvdsudp_available() -> bool {
+        init_gst();
+        gst::ElementFactory::find("nvdsudpsrc").is_some()
+            && gst::ElementFactory::find("nvdsudpsink").is_some()
+    }
+
+    const ANC_NVDSUDP_SDP: &str = concat!(
+        "v=0\r\n",
+        "o=- 0 0 IN IP4 192.0.2.10\r\n",
+        "s=ANC\r\n",
+        "t=0 0\r\n",
+        "m=video 5006 RTP/AVP 100\r\n",
+        "c=IN IP4 239.1.1.10/64\r\n",
+        "a=rtpmap:100 smpte291/90000\r\n",
+        "a=fmtp:100 exactframerate=60\r\n",
+    );
+
+    #[test]
+    fn build_nvdsudpsink_anc_constructs() {
+        if !nvdsudp_available() {
+            return;
+        }
+        build_nvdsudpsink(&anc_smpte291_media(), ANC_NVDSUDP_SDP)
+            .expect("ANC nvdsudpsink chain");
+    }
+
+    #[test]
+    fn build_nvdsudpsrc_anc_sets_header_size() {
+        if !nvdsudp_available() {
+            return;
+        }
+        let caps = anc_smpte291_media().raw_caps.clone();
+        let chain = build_nvdsudpsrc(&anc_smpte291_media(), &caps)
+            .expect("ANC nvdsudpsrc chain");
+        assert_eq!(chain.transport.property::<u32>("header-size"), 20);
     }
 
     #[test]

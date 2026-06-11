@@ -430,7 +430,7 @@ across the steady-state window.
 Uses a bare inner element — no external `rtp*pay` / `rtp*depay`:
 
 - `nmossink` → `nvdsudpsink` (Mode 3: essence frames in, built-in packetization)
-- `nmossrc` → `nvdsudpsrc` (Mode 3: built-in ST 2110-20/30 depacketization)
+- `nmossrc` → `nvdsudpsrc` (Mode 3: built-in ST 2110-20/30/40 depacketization)
 
 The element auto-calculates `payload-size`, `packets-per-line` (video), and
 `payload-multiple` (audio) from essence caps. Override any of these via
@@ -444,7 +444,7 @@ SDP synthesis from `caps` emits `TP=2110TPN` (narrow traffic profile). Use
 Rivermax SDK + license, ConnectX-5 or newer NIC, and `CAP_NET_RAW` on the
 host binary (`sudo setcap CAP_NET_RAW=ep $(which gst-launch-1.0)`).
 
-**Not yet supported:** ST 2022-7 (multi-leg), ST 2110-40 ANC, `video/x-jxsv`.
+**Not yet supported:** ST 2022-7 (multi-leg), `video/x-jxsv`.
 
 Design notes: [`doc/designs/gst-nmos-rs-nvdsudp-plan.md`](../../doc/designs/gst-nmos-rs-nvdsudp-plan.md).
 
