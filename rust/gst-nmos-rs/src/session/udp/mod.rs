@@ -1355,5 +1355,60 @@ mod tests {
             }
             assert!(matches!(plan.ack, ActivationAck::Success));
         }
+
+        const ANC_SMPTE291_SDP: &str = concat!(
+            "v=0\r\n",
+            "o=- 0 0 IN IP4 192.0.2.10\r\n",
+            "s=ANC\r\n",
+            "t=0 0\r\n",
+            "m=video 5006 RTP/AVP 100\r\n",
+            "c=IN IP4 239.1.1.10/64\r\n",
+            "a=rtpmap:100 smpte291/90000\r\n",
+            "a=fmtp:100 exactframerate=60\r\n",
+        );
+
+        #[test]
+        fn decide_udp_anc_smpte291_is_real() {
+            for transport in [Transport::Udp, Transport::Udp2, Transport::NvDsUdp] {
+                let s = udp_settings(Side::Receiver, transport);
+                let inner = match transport {
+                    Transport::NvDsUdp => decide_inner_config_nvdsudp(
+                        "nmossrc",
+                        &s,
+                        Some(ANC_SMPTE291_SDP),
+                        sdp::EssenceCrossCheckMode::Full,
+                    )
+                    .expect("ANC SDP parses"),
+                    Transport::Udp => decide_inner_config_udp(
+                        "nmossrc",
+                        &s,
+                        UdpVariant::V1,
+                        Some(ANC_SMPTE291_SDP),
+                        sdp::EssenceCrossCheckMode::Full,
+                    )
+                    .expect("ANC SDP parses"),
+                    Transport::Udp2 => decide_inner_config_udp(
+                        "nmossrc",
+                        &s,
+                        UdpVariant::V2,
+                        Some(ANC_SMPTE291_SDP),
+                        sdp::EssenceCrossCheckMode::Full,
+                    )
+                    .expect("ANC SDP parses"),
+                    _ => unreachable!(),
+                };
+                match inner {
+                    InnerConfig::Real(TransportConfig::NvDsUdp { media, .. })
+                    | InnerConfig::Real(TransportConfig::Udp { media, .. }) => {
+                        assert_eq!(media.format, FlowFormat::Data);
+                        assert_eq!(
+                            media.raw_caps.structure(0).unwrap().name(),
+                            "meta/x-st-2038",
+                        );
+                    }
+                    other => panic!("expected Real for {transport:?} ANC, got {other:?}"),
+                }
+            }
+        }
     }
 }

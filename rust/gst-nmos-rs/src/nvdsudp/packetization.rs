@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! ST 2110-20 / ST 2110-30 packetization defaults for DeepStream
-//! `nvdsudpsrc` / `nvdsudpsink` Mode 3 (built-in RTP (de)payload).
+//! ST 2110-20 / ST 2110-30 / ST 2110-40 packetization defaults for
+//! DeepStream `nvdsudpsrc` / `nvdsudpsink` Mode 3 (built-in RTP
+//! (de)payload).
 //!
 //! Semantics match DeepStream 9.0 docs and `nvds_nmos_bin`'s
 //! `configure_nvdsudpsink_for_media_api()`:
@@ -22,6 +23,13 @@ pub(crate) const VIDEO_HEADER_SIZE: u32 = 20;
 
 /// ST 2110-30 audio RTP header size (bytes).
 pub(crate) const AUDIO_HEADER_SIZE: u32 = 12;
+
+/// ST 2110-40 RFC 8331 header (12-byte RTP + 8-byte payload header).
+///
+/// Set on `nvdsudpsrc` only — enables header/data split for ANC depayload.
+/// Per-packet sizes are taken from the wire; `payload-size` stays at the
+/// plugin default.
+pub(crate) const ANC_HEADER_SIZE: u32 = 20;
 
 /// Default maximum raw RTP payload per video packet (bytes).
 ///
@@ -70,6 +78,9 @@ pub(crate) struct AudioPacketization {
 pub(crate) enum Packetization {
     Video(VideoPacketization),
     Audio(AudioPacketization),
+    /// ST 2110-40 ANC — plugin defaults for `payload-size`; src needs
+    /// [`ANC_HEADER_SIZE`] only.
+    Anc,
 }
 
 /// RFC 4175 / ST 2110-20 packing group for a GStreamer `format` string.
@@ -117,13 +128,31 @@ pub(crate) fn from_media(
             let pkt = audio_from_raw_caps(raw_caps, ptime_ns)?;
             Ok(Packetization::Audio(pkt))
         }
-        FlowFormat::Data | FlowFormat::Unspecified => {
-            bail!(
-                "nvdsudp Mode 3 does not support essence format {format:?} \
-                 (ST 2110-40 ANC is deferred)"
-            );
+        FlowFormat::Data => anc_from_raw_caps(raw_caps),
+        FlowFormat::Unspecified => {
+            bail!("nvdsudp Mode 3 does not support unspecified essence format");
         }
     }
+}
+
+/// ST 2110-40 ANC (`meta/x-st-2038,alignment=frame`). DeepStream selects
+/// Mode 3 from sink/src caps; ANC RTP packet sizes are variable on the wire.
+pub(crate) fn anc_from_raw_caps(raw_caps: &gst::Caps) -> Result<Packetization, anyhow::Error> {
+    let s = raw_caps
+        .structure(0)
+        .ok_or_else(|| anyhow::anyhow!("ANC raw caps empty"))?;
+    if s.name() != "meta/x-st-2038" {
+        bail!(
+            "nvdsudp ANC expects meta/x-st-2038 caps, got `{}`",
+            s.name()
+        );
+    }
+    match s.get::<&str>("alignment") {
+        Ok("frame") => {}
+        Ok(other) => bail!("nvdsudp ANC requires alignment=frame, got `{other}`"),
+        Err(_) => bail!("nvdsudp ANC requires alignment=frame on meta/x-st-2038 caps"),
+    }
+    Ok(Packetization::Anc)
 }
 
 /// Line stride in bytes for one ST 2110-20 scan line.
@@ -468,6 +497,23 @@ mod tests {
         let pkt = audio_from_raw_caps(&caps, ptime_ns).unwrap();
         assert_eq!(pkt.src_payload_size, 36);
         assert_eq!(pkt.sink_payload_size, 48);
+    }
+
+    #[test]
+    fn anc_from_meta_st2038_frame_alignment() {
+        init_gst();
+        let caps = gst::Caps::from_str("meta/x-st-2038,alignment=frame,framerate=60/1")
+            .unwrap();
+        let pkt = from_media(FlowFormat::Data, &caps, &gst::Caps::new_empty())
+            .expect("ANC packetization");
+        assert!(matches!(pkt, Packetization::Anc));
+    }
+
+    #[test]
+    fn anc_rejects_non_frame_alignment() {
+        init_gst();
+        let caps = gst::Caps::from_str("meta/x-st-2038,alignment=packets").unwrap();
+        assert!(from_media(FlowFormat::Data, &caps, &gst::Caps::new_empty()).is_err());
     }
 
     #[test]

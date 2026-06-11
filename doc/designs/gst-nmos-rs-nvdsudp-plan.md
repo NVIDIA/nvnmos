@@ -70,9 +70,10 @@ nmossrc: nvdsudpsrc → anchor → ghost(src)
 | Property | `nvdsudpsink` (sender) | `nvdsudpsrc` (receiver) |
 |---|---|---|
 | Network | `host`, `port`, `local-iface-ip` | `address`, `port`, `local-iface-ip` |
-| Mode select | `sdp-file` (path) + uncompressed sink caps | `caps` = essence (`video/x-raw` / `audio/x-raw` [+ `(memory:NVMM)`]) |
+| Mode select | `sdp-file` (path) + uncompressed sink caps | `caps` = essence (`video/x-raw` / `audio/x-raw` / `meta/x-st-2038,alignment=frame` [+ `(memory:NVMM)` on video]) |
 | Video packetization | `payload-size`, `packets-per-line` | `header-size` (=20), `payload-size` (RTP payload only, **excludes** 20-byte ST 2110 header) |
 | Audio packetization | `payload-size` (= src payload + 12) | `header-size` (=12), `payload-size`, `payload-multiple` |
+| ANC packetization | plugin default `payload-size` (variable per RTP packet) | `header-size` (=20) only; plugin default `payload-size`; no `packets-per-line` / `payload-multiple` |
 | SSM | (in SDP `a=source-filter:`) | `source-address` when `UdpLeg.source_ip` set |
 | Sync / clock | `sync=false` (Rivermax paces egress; not pipeline clock) | `use-rtp-timestamp` + `adjust-leap-seconds` — see *Timestamp defaults* |
 | GPU Direct | `gpu-id` via `transport-properties`; input caps carry `memory:NVMM` | same |
@@ -164,7 +165,14 @@ Supported formats: `S24BE` (L24), `S16BE` (L16) — matching current OSS UDP sco
 
 ### ANC / ST 2110-40
 
-Parent scope lists `meta/x-st-2038` via nvdsudp ANC patch. DeepStream 9.0 mainline docs do not document Mode-3 ANC end-to-end; patched sources expose `st2110-40` on both elements. **Defer to Phase 2.1** unless we confirm DS 9.0 ships the patch. When added: fixed `payload-size` per ANC packet, no `packets-per-line`; enable via caps + `st2110-40=true` in `transport-properties`.
+**Landed** in `gst-nmos-rs`: `meta/x-st-2038,alignment=frame` selects Mode 3 on
+`nvdsudpsrc` / `nvdsudpsink` (DeepStream `gst-nvdsudp` in `deepstreamsdk`). SDP
+uses `m=video` + `encoding-name=SMPTE291` per RFC 8331. Auto packetization:
+`header-size=20` on `nvdsudpsrc` only (HDS for RFC 8331); ANC RTP packet sizes
+are variable — `payload-size` is left at plugin defaults. No `packets-per-line`.
+GPU Direct is disabled for ANC in the plugin. Override via
+`transport-properties` when needed. OSS `udp` / `udp2` use `rtpsmpte291pay` /
+`rtpsmpte291depay` from `gst-plugins-rs`.
 
 ### Interaction with `transport-properties`
 
@@ -202,7 +210,7 @@ Cross-check `caps` vs `transport-file` unchanged.
 | `audio/x-raw` S24BE / S16BE, 48/96 kHz, 1–16 ch | yes | yes | `ptime` from `transport-caps` or default 1 ms |
 | `video/x-raw(memory:NVMM)` | yes | yes | ConnectX-6+; `gpu-id` via `transport-properties` |
 | `video/x-jxsv` | no | no | Placeholder until nvdsudp JXSV lands |
-| `meta/x-st-2038` | defer | defer | ANC patch / Phase 2.1 |
+| `meta/x-st-2038,alignment=frame` | yes | yes | ST 2110-40 / RFC 8331 SMPTE291 |
 
 ## Session / activation wiring
 
@@ -263,7 +271,6 @@ Almost all **software** work can land without ConnectX / Rivermax / DeepStream o
 - ST 2022-7 (`st2022-7-streams`, secondary `UdpLeg`, `group:DUP` SDP)
 - Modes 1/2 (external RTP pay/depay in front of `nvdsudp*`)
 - `video/x-jxsv` (ST 2110-22)
-- ST 2110-40 ANC unless explicitly pulled into Phase 2.1
 - Sender `pass-rtp-timestamp` / regeneration modes
 - Modifying `nvdsudpsrc` / `nvdsudpsink` sources (wrap only — parent non-negotiable)
 - `nvdsudpsrc` `source_port` bind until element supports it
@@ -350,5 +357,5 @@ Three layers, in precedence order:
 - **Hardware dependency** — CI cannot prove wire correctness; calculator drift vs DeepStream internals is the main software risk. Mitigate by porting nvds_nmos_bin tables verbatim and checking against DS 9.0 doc appendix.
 - **`sdp-file` path races** — mitigated by atomic `tempfile` creation; multi-activation soak on one host still useful to validate end-to-end.
 - **Essence caps vs NVMM** — downstream of `nmossrc` must tolerate NVMM or user inserts `nvvideoconvert`; document, don't auto-insert convert (keeps chain minimal).
-- **ANC / patch divergence** — ds-patches may differ from stock DS 9.0; treat ANC as optional follow-up tied to deployment image.
+- **ANC hardware soak** — Mode 3 ANC is unit-tested against `deepstreamsdk` property semantics; Rivermax wire validation pending.
 - **Clock provider** — receiver-only pipelines fine; multi-source may need Phase 2+ clock policy (monitor in soak).
