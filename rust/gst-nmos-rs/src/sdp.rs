@@ -27,10 +27,13 @@
 //! identity) is emitted on the synthesis / override paths when a local
 //! NIC IP resolves, but is not read back into [`UdpMedia`].
 //!
-//! Today the module handles single-media SDPs only. ST 2022-7
-//! dual-media SDPs are detected and rejected with a clearly-
-//! attributed error; redundancy parsing lands when the property
-//! surface for the secondary leg is designed.
+//! Single-`m=` SDPs and ST 2022-7 dual-`m=` SDPs (same essence,
+//! separate destination addresses) parse into one [`UdpMedia`].
+//! Inactive legs (`a=inactive`) are ignored for
+//! [`UdpMedia::secondary`] / inner chain wiring; see
+//! [`doc/designs/gst-nmos-rs-st2022-7-dual-leg-plan.md`](../../doc/designs/gst-nmos-rs-st2022-7-dual-leg-plan.md).
+//! Mixed-essence multi-`m=` (e.g. video + audio) and three or more
+//! `m=` blocks are rejected with typed errors.
 //!
 //! Essence coverage so far:
 //!   * Video: RFC 4175 `encoding-name=raw`,
@@ -217,8 +220,18 @@ pub(crate) enum SdpError {
     Parse(String),
     #[error("SDP has no media lines")]
     NoMedia,
-    #[error("SDP has {0} media lines; multi-leg SDPs (ST 2022-7) are not yet supported")]
-    MultipleMedia(usize),
+    #[error(
+        "dual-leg SDP requires transport=nvdsudp; transport=udp/udp2 supports single-leg RTP only"
+    )]
+    DualLegNotSupported,
+    #[error(
+        "cannot normalise SDP to a single active leg: expected exactly one active `m=` block"
+    )]
+    NotExactlyOneActiveLeg,
+    #[error(
+        "SDP `m=` blocks carry mismatched essence (PT / rtpmap / fmtp differ across legs)"
+    )]
+    DualLegEssenceMismatch,
     #[error("SDP has {0} media lines; at most two same-essence legs are supported")]
     TooManyMediaBlocks(usize),
     #[error(
@@ -282,13 +295,6 @@ pub(crate) enum SdpError {
 /// media-side plumbing does not own. Caller-supplied because
 /// these naturally come from the NMOS resource (label, sender id,
 /// interface IP) which lives outside the SDP module.
-///
-/// Today only the two `o=` slots we vary (`<unicast-address>` and
-/// `<sess-id>`; `<username>` / `<sess-version>` / `<nettype>` /
-/// `<addrtype>` are hardcoded) and the `s=` line are modelled.
-/// `i=` (session information) and session-level `a=` attributes
-/// (e.g. `a=group:DUP` for ST 2022-7) will land here when the
-/// integration path needs them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SdpSession<'a> {
     /// `o=` line `<unicast-address>` slot (RFC 4566 §5.2). For
@@ -411,24 +417,64 @@ pub(crate) fn indicates_wide_receiver_caps(text: &str) -> bool {
         .is_some()
 }
 
-/// Parse an SDP transport file into a [`UdpMedia`] (logical RTP stream).
-///
-/// Single-`m=` transport files only today; files with more than one
-/// media line return [`SdpError::MultipleMedia`] until ST 2022-7 parsing
-/// can fold same-essence legs into one [`UdpMedia`].
-pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
+/// Parsed essence fields shared across all legs of an ST 2022-7 pair.
+struct ParsedMediaEssence {
+    format: FlowFormat,
+    rtp_caps: gst::Caps,
+    raw_caps: gst::Caps,
+}
+
+/// True when the media block carries `a=inactive` (IS-05 `rtp_enabled: false`).
+pub(crate) fn is_media_inactive(media: &SDPMediaRef) -> bool {
+    media.attribute_val("inactive").is_some()
+}
+
+/// Number of `m=` blocks in an SDP transport file.
+pub(crate) fn sdp_media_block_count(text: &str) -> Result<usize, SdpError> {
     let msg = SDPMessage::parse_buffer(text.as_bytes())
         .map_err(|e| SdpError::Parse(e.to_string()))?;
+    Ok(msg.medias_len() as usize)
+}
 
-    let num_medias = msg.medias_len() as usize;
-    if num_medias == 0 {
+/// Count `m=` blocks that are not `a=inactive` (IS-05 `rtp_enabled: true`).
+pub(crate) fn count_active_sdp_legs(text: &str) -> Result<u8, SdpError> {
+    let msg = SDPMessage::parse_buffer(text.as_bytes())
+        .map_err(|e| SdpError::Parse(e.to_string()))?;
+    let num = msg.medias_len();
+    if num == 0 {
         return Err(SdpError::NoMedia);
     }
-    if num_medias > 1 {
-        return Err(SdpError::MultipleMedia(num_medias));
+    let mut active = 0u8;
+    for idx in 0..num {
+        let Some(m) = msg.media(idx) else {
+            continue;
+        };
+        if !is_media_inactive(m) {
+            active = active.saturating_add(1);
+        }
     }
-    let media = msg.media(0).ok_or(SdpError::NoMedia)?;
+    Ok(active)
+}
 
+/// Validate a two-`m=` SDP for same media type and equivalent essence (passthrough gate).
+pub(crate) fn validate_dual_leg_sdp(msg: &SDPMessage) -> Result<(), SdpError> {
+    let m0 = msg.media(0).ok_or(SdpError::NoMedia)?;
+    let m1 = msg.media(1).ok_or(SdpError::NoMedia)?;
+    let kind0 = m0.media().unwrap_or("");
+    let kind1 = m1.media().unwrap_or("");
+    if !kind0.eq_ignore_ascii_case(kind1) {
+        return Err(SdpError::MultiMediaMixedEssence);
+    }
+    let essence0 = parse_media_essence(msg, m0)?;
+    let essence1 = parse_media_essence(msg, m1)?;
+    if !dual_leg_essence_equivalent(&essence0, &essence1) {
+        return Err(SdpError::DualLegEssenceMismatch);
+    }
+    Ok(())
+}
+
+/// Derive RTP + raw essence caps from one SDP `m=` block.
+fn parse_media_essence(msg: &SDPMessage, media: &SDPMediaRef) -> Result<ParsedMediaEssence, SdpError> {
     let pt_str = media.format(0).ok_or(SdpError::MissingPt)?;
     let pt: i32 = pt_str.parse().map_err(|_| SdpError::MissingPt)?;
 
@@ -441,18 +487,8 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
             .map_err(|e| SdpError::CapsFromMedia(format!("attributes_to_caps failed: {e}")))?;
         if let Some(s) = caps_mut.structure_mut(0) {
             s.set_name("application/x-rtp");
-            // `caps_from_media` only handles `rtpmap`/`fmtp`/
-            // `framesize`; `a=ptime:` (and `a=maxptime:`) are
-            // separate media-level attributes that GStreamer
-            // expects on caps as `a-ptime` / `a-maxptime` so that
-            // `set_media_from_caps` round-trips them as
-            // standalone `a=…:` lines rather than folding them
-            // into `a=fmtp:`. We hoist the values explicitly
-            // here (rather than calling
-            // `media.attributes_to_caps`) so that source-filter
-            // and `x-nvnmos-*` — which we surface separately on
-            // [`UdpLeg`] — don't end up double-emitted by
-            // [`build_sdp`].
+            // ptime/maxptime: caps_from_media omits them; read from `m=` only (not full
+            // media.attributes_to_caps — avoids duplicating source-filter / x-nvnmos-* on caps).
             if let Some(ptime) = media.attribute_val("ptime") {
                 s.set("a-ptime", ptime);
             }
@@ -468,17 +504,9 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
     let media_kind = structure
         .get::<&str>("media")
         .map_err(|_| SdpError::MissingMediaField)?;
-    // `caps_from_media` upper-cases the rtpmap encoding-name via
-    // `g_ascii_strup` (gstsdpmessage.c) so the match arms below
-    // can use the canonical upper-case form. An absent field falls
-    // through to "" which doesn't match any arm — the inner
-    // `raw_caps_from_rtp_*` then surfaces the precise reason.
+    // Dispatch on (media, encoding-name): RFC 8331 ANC rides `m=video` + SMPTE291.
     let encoding_name = structure.get::<&str>("encoding-name").unwrap_or("");
     let format = match (media_kind, encoding_name) {
-        // RFC 8331 / ST 2110-40 carries SMPTE 291 ANC under
-        // `m=video`; only `encoding-name=SMPTE291` distinguishes it
-        // from RFC 4175 raw video, so the dispatch has to be
-        // (media, encoding-name)-keyed rather than media-keyed.
         ("video", enc) if enc.eq_ignore_ascii_case("SMPTE291") => FlowFormat::Data,
         ("video", _) => FlowFormat::Video,
         ("audio", _) => FlowFormat::Audio,
@@ -498,6 +526,15 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
         ),
     };
 
+    Ok(ParsedMediaEssence {
+        format,
+        rtp_caps,
+        raw_caps,
+    })
+}
+
+/// Network parameters for one SDP `m=` block.
+fn udp_leg_from_media(msg: &SDPMessage, media: &SDPMediaRef) -> Result<UdpLeg, SdpError> {
     let connection = media
         .connection(0)
         .or_else(|| msg.connection())
@@ -508,26 +545,172 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
         .to_owned();
     let destination_port = media.port() as u16;
 
-    let interface_ip = media.attribute_val("x-nvnmos-iface-ip").map(str::to_owned);
-    let source_port = media
-        .attribute_val("x-nvnmos-src-port")
-        .and_then(|s| s.parse::<u16>().ok());
-    let source_ip = media
-        .attribute_val("source-filter")
-        .and_then(extract_source_ip_from_filter);
+    Ok(UdpLeg {
+        destination_ip,
+        destination_port,
+        interface_ip: media.attribute_val("x-nvnmos-iface-ip").map(str::to_owned),
+        source_port: media
+            .attribute_val("x-nvnmos-src-port")
+            .and_then(|s| s.parse::<u16>().ok()),
+        source_ip: media
+            .attribute_val("source-filter")
+            .and_then(extract_source_ip_from_filter),
+    })
+}
 
-    Ok(UdpMedia {
-        format,
-        primary: UdpLeg {
-            destination_ip,
-            destination_port,
-            interface_ip,
-            source_ip,
-            source_port,
-        },
-        secondary: None,
-        rtp_caps,
-        raw_caps,
+/// Cross-check that two legs carry the same wire essence (PT / rtpmap / shape).
+fn dual_leg_essence_equivalent(a: &ParsedMediaEssence, b: &ParsedMediaEssence) -> bool {
+    if a.format != b.format {
+        return false;
+    }
+    let (Some(sa), Some(sb)) = (a.rtp_caps.structure(0), b.rtp_caps.structure(0)) else {
+        return false;
+    };
+    let rtp_match = sa.get::<i32>("payload").ok() == sb.get::<i32>("payload").ok()
+        && sa.get::<i32>("clock-rate").ok() == sb.get::<i32>("clock-rate").ok()
+        && sa
+            .get::<&str>("encoding-name")
+            .ok()
+            .zip(sb.get::<&str>("encoding-name").ok())
+            .is_some_and(|(x, y)| x.eq_ignore_ascii_case(y));
+    if !rtp_match {
+        return false;
+    }
+    !a.raw_caps.intersect(&b.raw_caps).is_empty()
+}
+
+/// Map **active** legs (in SDP order) onto [`UdpMedia::primary`] /
+/// [`UdpMedia::secondary`]. Inactive legs are skipped. When no leg is
+/// active, the first `m=` block is still stored on `primary` so essence
+/// caps remain available; chain gating treats zero active legs as fake.
+fn active_legs_to_udp_media(
+    essence: ParsedMediaEssence,
+    legs: [(UdpLeg, bool); 2],
+) -> UdpMedia {
+    let leg0_fallback = legs[0].0.clone();
+    let active: Vec<UdpLeg> = legs
+        .into_iter()
+        .filter_map(|(leg, active)| active.then_some(leg))
+        .collect();
+    let (primary, secondary) = match active.as_slice() {
+        [] => (leg0_fallback, None),
+        [one] => (one.clone(), None),
+        [first, second] => (first.clone(), Some(second.clone())),
+        _ => unreachable!("at most two `m=` blocks"),
+    };
+    UdpMedia {
+        format: essence.format,
+        primary,
+        secondary,
+        rtp_caps: essence.rtp_caps,
+        raw_caps: essence.raw_caps,
+    }
+}
+
+/// Parse an SDP transport file into a [`UdpMedia`] (logical RTP stream).
+///
+/// Accepts one or two same-essence `m=` blocks (ST 2022-7). Inactive
+/// legs are omitted from [`UdpMedia::secondary`]. Three or more `m=`
+/// lines, or mixed essence (e.g. video + audio), return typed errors.
+pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
+    let msg = SDPMessage::parse_buffer(text.as_bytes())
+        .map_err(|e| SdpError::Parse(e.to_string()))?;
+
+    let num_medias = msg.medias_len() as usize;
+    if num_medias == 0 {
+        return Err(SdpError::NoMedia);
+    }
+    if num_medias > 2 {
+        return Err(SdpError::TooManyMediaBlocks(num_medias));
+    }
+
+    if num_medias == 1 {
+        let media = msg.media(0).ok_or(SdpError::NoMedia)?;
+        let essence = parse_media_essence(&msg, media)?;
+        let leg = udp_leg_from_media(&msg, media)?;
+        return Ok(UdpMedia {
+            format: essence.format,
+            primary: leg,
+            secondary: None,
+            rtp_caps: essence.rtp_caps,
+            raw_caps: essence.raw_caps,
+        });
+    }
+
+    let m0 = msg.media(0).ok_or(SdpError::NoMedia)?;
+    let m1 = msg.media(1).ok_or(SdpError::NoMedia)?;
+    let kind0 = m0.media().unwrap_or("");
+    let kind1 = m1.media().unwrap_or("");
+    if !kind0.eq_ignore_ascii_case(kind1) {
+        return Err(SdpError::MultiMediaMixedEssence);
+    }
+
+    let essence0 = parse_media_essence(&msg, m0)?;
+    let essence1 = parse_media_essence(&msg, m1)?;
+    if !dual_leg_essence_equivalent(&essence0, &essence1) {
+        return Err(SdpError::DualLegEssenceMismatch);
+    }
+
+    let leg0 = udp_leg_from_media(&msg, m0)?;
+    let leg1 = udp_leg_from_media(&msg, m1)?;
+    Ok(active_legs_to_udp_media(
+        essence0,
+        [
+            (leg0, !is_media_inactive(m0)),
+            (leg1, !is_media_inactive(m1)),
+        ],
+    ))
+}
+
+/// Build a single-`m=` SDP from a dual-leg activation file when exactly one leg
+/// is active. Used for `nvdsudpsink` `sdp-file` — not for configuring SDP sent
+/// to `nvnmosd`.
+pub(crate) fn normalise_to_single_active_leg(text: &str) -> Result<String, SdpError> {
+    let count = sdp_media_block_count(text)?;
+    if count == 1 {
+        return Ok(text.to_owned());
+    }
+    if count != 2 {
+        return Err(SdpError::TooManyMediaBlocks(count));
+    }
+    if count_active_sdp_legs(text)? != 1 {
+        return Err(SdpError::NotExactlyOneActiveLeg);
+    }
+    let media = parse_sdp(text)?;
+    let msg = SDPMessage::parse_buffer(text.as_bytes())
+        .map_err(|e| SdpError::Parse(e.to_string()))?;
+    let origin = msg.origin();
+    let origin_address = origin
+        .and_then(|o| o.addr())
+        .unwrap_or(defaults::ORIGIN_ADDRESS);
+    let origin_session_id = origin
+        .and_then(|o| o.sess_id())
+        .unwrap_or("0");
+    let session_name = msg.session_name().unwrap_or("nvnmos session");
+    let active_idx = (0..2).find(|&idx| {
+        msg.media(idx)
+            .is_some_and(|m| !is_media_inactive(m))
+    });
+    let emit_ptp_ts_refclk = active_idx
+        .and_then(|idx| msg.media(idx))
+        .and_then(|m| m.attribute_val("ts-refclk"))
+        .is_some();
+    let session = SdpSession {
+        origin_address,
+        origin_session_id,
+        session_name,
+        description: msg.information(),
+        name: session_attribute_value(&msg, "x-nvnmos-name"),
+        advertise_caps: false,
+        emit_ptp_ts_refclk,
+    };
+    build_sdp(&media, session)
+}
+
+fn session_attribute_value<'a>(msg: &'a SDPMessage, key: &str) -> Option<&'a str> {
+    (0..msg.attributes_len()).find_map(|idx| {
+        let attr = msg.attribute(idx)?;
+        (attr.key() == key).then(|| attr.value()).flatten()
     })
 }
 
@@ -551,9 +734,10 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
 /// User-supplied transport files are mutated in place via
 /// [`passthrough_with_overrides`] rather than rebuilt here.
 ///
-/// Today the module emits single-media SDPs only. The
-/// `media.secondary` leg is ignored if present; ST 2022-7
-/// redundancy emits its second `m=` block when that work lands.
+/// [`build_sdp`] always emits a single `m=` — `media.secondary` is never
+/// written here. Caps-only synthesis is always single-leg. Dual-leg
+/// configuring SDPs must be supplied via user `transport-file*` passthrough
+/// on `transport=nvdsudp`.
 ///
 /// SDP output shape:
 ///
@@ -911,7 +1095,9 @@ pub(crate) struct SdpOverrides<'a> {
     pub caps_mode: CapsMode,
 }
 
-pub(crate) use crate::sdp_passthrough::passthrough_with_overrides;
+pub(crate) use crate::sdp_passthrough::{
+    passthrough_with_overrides, DualLegPassthroughPolicy,
+};
 
 /// Cross-check the parsed [`UdpMedia`] (post-splice) against
 /// the user-supplied `caps` (essence shape) and
@@ -2059,7 +2245,7 @@ fn rtp_caps_from_raw_data(raw_caps: &gst::Caps, payload_type: u8) -> Result<gst:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdp_passthrough::reject_unsupported_multi_media;
+    use crate::sdp_passthrough::{reject_unsupported_multi_media, DualLegPassthroughPolicy};
 
     fn init_gst() {
         let _ = gst::init();
@@ -2426,22 +2612,169 @@ mod tests {
         assert!(matches!(err, SdpError::NoMedia | SdpError::Parse(_)));
     }
 
-    #[test]
-    fn multi_media_sdp_is_rejected_with_attributed_error() {
-        init_gst();
+    /// Second leg of a dual-`m=` ST 2022-7 video SDP (same essence,
+    /// different destination / interface).
+    const VIDEO_ST2022_7_LEG2_SUFFIX: &str = concat!(
+        "m=video 5006 RTP/AVP 96\r\n",
+        "c=IN IP4 239.1.1.2/64\r\n",
+        "a=rtpmap:96 raw/90000\r\n",
+        "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080;",
+        " exactframerate=50; depth=10\r\n",
+        "a=x-nvnmos-iface-ip:192.0.2.12\r\n",
+    );
+
+    fn dual_leg_video_sdp() -> String {
         let mut sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.to_owned();
-        sdp.push_str("m=video 5006 RTP/AVP 96\r\n");
-        sdp.push_str("c=IN IP4 239.1.1.2/64\r\n");
-        sdp.push_str("a=rtpmap:96 raw/90000\r\n");
+        sdp.push_str(VIDEO_ST2022_7_LEG2_SUFFIX);
+        sdp
+    }
+
+    #[test]
+    fn dual_active_st2022_7_populates_primary_and_secondary() {
+        init_gst();
+        let media = parse_sdp(&dual_leg_video_sdp()).expect("parse");
+        assert_eq!(media.primary.destination_ip, "239.1.1.1");
+        assert_eq!(media.primary.destination_port, 5004);
+        assert_eq!(media.primary.interface_ip.as_deref(), Some("192.0.2.11"));
+        let secondary = media.secondary.as_ref().expect("secondary leg");
+        assert_eq!(secondary.destination_ip, "239.1.1.2");
+        assert_eq!(secondary.destination_port, 5006);
+        assert_eq!(secondary.interface_ip.as_deref(), Some("192.0.2.12"));
+    }
+
+    #[test]
+    fn dual_leg_secondary_inactive_yields_single_leg_media() {
+        init_gst();
+        let mut sdp = dual_leg_video_sdp();
+        sdp.push_str("a=inactive\r\n");
+        let media = parse_sdp(&sdp).expect("parse");
+        assert_eq!(media.primary.destination_ip, "239.1.1.1");
+        assert!(media.secondary.is_none());
+    }
+
+    #[test]
+    fn dual_leg_primary_inactive_maps_secondary_only_to_primary() {
+        init_gst();
+        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace(
+            "m=video 5004 RTP/AVP 96\r\n",
+            "m=video 5004 RTP/AVP 96\r\na=inactive\r\n",
+        );
+        let mut sdp = sdp;
+        sdp.push_str(VIDEO_ST2022_7_LEG2_SUFFIX);
+        let media = parse_sdp(&sdp).expect("parse");
+        assert_eq!(media.primary.destination_ip, "239.1.1.2");
+        assert_eq!(media.primary.destination_port, 5006);
+        assert_eq!(media.primary.interface_ip.as_deref(), Some("192.0.2.12"));
+        assert!(media.secondary.is_none());
+    }
+
+    #[test]
+    fn dual_leg_both_inactive_parses_with_primary_from_first_m_block() {
+        init_gst();
+        let sdp = dual_leg_video_sdp()
+            .replace(
+                "m=video 5004 RTP/AVP 96\r\n",
+                "m=video 5004 RTP/AVP 96\r\na=inactive\r\n",
+            )
+            + "a=inactive\r\n";
+        let media = parse_sdp(&sdp).expect("parse");
+        assert_eq!(media.primary.destination_ip, "239.1.1.1");
+        assert!(media.secondary.is_none());
+    }
+
+    #[test]
+    fn dual_leg_mismatched_essence_is_rejected() {
+        init_gst();
+        let mut sdp = dual_leg_video_sdp();
+        sdp = sdp.replace("depth=10\r\n", "depth=8\r\n");
+        let err = parse_sdp(&sdp).expect_err("must error");
+        assert!(matches!(err, SdpError::DualLegEssenceMismatch));
+    }
+
+    #[test]
+    fn passthrough_nvdsudp_policy_preserves_dual_leg_and_inactive() {
+        init_gst();
+        let mut sdp = dual_leg_video_sdp();
+        sdp.push_str("a=inactive\r\n");
+        let out = passthrough_with_overrides(
+            &sdp,
+            &SdpOverrides::default(),
+            DualLegPassthroughPolicy::AllowDualLeg,
+        )
+        .expect("passthrough");
+        assert_eq!(sdp_media_block_count(&out).expect("count"), 2);
+        assert!(out.matches("m=video").count() == 2);
+        assert!(out.contains("a=inactive"));
+    }
+
+    #[test]
+    fn passthrough_scalar_override_clears_inactive_on_primary_leg_only() {
+        init_gst();
+        let sdp = dual_leg_video_sdp().replace(
+            "m=video 5004 RTP/AVP 96\r\n",
+            "m=video 5004 RTP/AVP 96\r\na=inactive\r\n",
+        );
+        let overrides = SdpOverrides {
+            destination_ip: Some("239.9.9.9"),
+            ..Default::default()
+        };
+        let out = passthrough_with_overrides(
+            &sdp,
+            &overrides,
+            DualLegPassthroughPolicy::AllowDualLeg,
+        )
+        .expect("splice");
+        assert!(
+            !out.contains("a=inactive"),
+            "leg 0 inactive must be cleared when destination-ip is set: {out}",
+        );
+        assert!(out.contains("239.9.9.9"));
+    }
+
+    #[test]
+    fn normalise_to_single_active_leg_secondary_only() {
+        init_gst();
+        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace(
+            "m=video 5004 RTP/AVP 96\r\n",
+            "m=video 5004 RTP/AVP 96\r\na=inactive\r\n",
+        );
+        let mut full = sdp;
+        full.push_str(VIDEO_ST2022_7_LEG2_SUFFIX);
+        let out = normalise_to_single_active_leg(&full).expect("normalise");
+        assert_eq!(sdp_media_block_count(&out).expect("count"), 1);
+        let media = parse_sdp(&out).expect("re-parse");
+        assert_eq!(media.primary.destination_ip, "239.1.1.2");
+        assert_eq!(media.primary.destination_port, 5006);
+        assert!(media.secondary.is_none());
+    }
+
+    #[test]
+    fn count_active_sdp_legs_matches_inactive_flags() {
+        init_gst();
+        assert_eq!(
+            count_active_sdp_legs(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("count"),
+            1
+        );
+        let both_inactive = dual_leg_video_sdp()
+            .replace(
+                "m=video 5004 RTP/AVP 96\r\n",
+                "m=video 5004 RTP/AVP 96\r\na=inactive\r\n",
+            )
+            + "a=inactive\r\n";
+        assert_eq!(count_active_sdp_legs(&both_inactive).expect("count"), 0);
+    }
+
+    #[test]
+    fn three_media_blocks_is_too_many() {
+        init_gst();
+        let mut sdp = dual_leg_video_sdp();
         sdp.push_str(
-            "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080;\
-             exactframerate=50; depth=10\r\n",
+            "m=video 5008 RTP/AVP 96\r\n\
+             c=IN IP4 239.1.1.3/64\r\n\
+             a=rtpmap:96 raw/90000\r\n",
         );
         let err = parse_sdp(&sdp).expect_err("must error");
-        assert!(
-            matches!(err, SdpError::MultipleMedia(2)),
-            "expected MultipleMedia(2), got {err:?}"
-        );
+        assert!(matches!(err, SdpError::TooManyMediaBlocks(3)));
     }
 
     /// 48 kHz L24 stereo SMPTE ST 2110-30 SDP, modelled after the
@@ -2894,7 +3227,8 @@ mod tests {
         init_gst();
         let msg = SDPMessage::parse_buffer(VIDEO_YCBCR_422_10BIT_1080P50_SDP.as_bytes())
             .expect("parse");
-        reject_unsupported_multi_media(&msg).expect("single media ok");
+        reject_unsupported_multi_media(&msg, DualLegPassthroughPolicy::RejectDualLeg)
+            .expect("single media ok");
     }
 
     #[test]
@@ -2908,7 +3242,8 @@ mod tests {
              a=rtpmap:97 L24/48000/2\r\n",
         );
         let msg = SDPMessage::parse_buffer(sdp.as_bytes()).expect("parse");
-        let err = reject_unsupported_multi_media(&msg).expect_err("mixed essence");
+        let err = reject_unsupported_multi_media(&msg, DualLegPassthroughPolicy::AllowDualLeg)
+            .expect_err("mixed essence");
         assert!(matches!(err, SdpError::MultiMediaMixedEssence));
     }
 
@@ -2926,7 +3261,8 @@ mod tests {
              a=rtpmap:96 raw/90000\r\n",
         );
         let msg = SDPMessage::parse_buffer(sdp.as_bytes()).expect("parse");
-        let err = reject_unsupported_multi_media(&msg).expect_err("too many");
+        let err = reject_unsupported_multi_media(&msg, DualLegPassthroughPolicy::RejectDualLeg)
+            .expect_err("too many");
         assert!(matches!(err, SdpError::TooManyMediaBlocks(3)));
     }
 
@@ -2941,8 +3277,12 @@ mod tests {
              a=rtpmap:96 raw/90000\r\n",
         );
         let msg = SDPMessage::parse_buffer(sdp.as_bytes()).expect("parse");
-        let err = reject_unsupported_multi_media(&msg).expect_err("dual leg");
-        assert!(matches!(err, SdpError::MultipleMedia(2)));
+        let err = reject_unsupported_multi_media(&msg, DualLegPassthroughPolicy::RejectDualLeg)
+            .expect_err("dual leg");
+        assert!(matches!(err, SdpError::DualLegNotSupported));
+        let good = SDPMessage::parse_buffer(dual_leg_video_sdp().as_bytes()).expect("parse");
+        reject_unsupported_multi_media(&good, DualLegPassthroughPolicy::AllowDualLeg)
+            .expect("matching dual-leg SDP");
     }
 
     #[test]
@@ -2951,6 +3291,7 @@ mod tests {
         let out = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides::default(),
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("passthrough");
         assert_eq!(out, VIDEO_YCBCR_422_10BIT_1080P50_SDP);
@@ -2966,7 +3307,7 @@ mod tests {
             "PM=2110GPM; SomeFutureKey=Value;",
         );
         let out =
-            passthrough_with_overrides(&sdp, &SdpOverrides::default()).expect("passthrough");
+            passthrough_with_overrides(&sdp, &SdpOverrides::default(), DualLegPassthroughPolicy::RejectDualLeg).expect("passthrough");
         assert!(
             out.contains("SomeFutureKey=Value"),
             "vendor/future fmtp keys must survive passthrough:\n{out}",
@@ -2978,7 +3319,7 @@ mod tests {
         init_gst();
         let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace("s=Example\r\n", "s=Example\r\ni=Studio A\r\n");
         let out =
-            passthrough_with_overrides(&sdp, &SdpOverrides::default()).expect("passthrough");
+            passthrough_with_overrides(&sdp, &SdpOverrides::default(), DualLegPassthroughPolicy::RejectDualLeg).expect("passthrough");
         assert!(out.contains("i=Studio A"));
     }
 
@@ -2988,6 +3329,7 @@ mod tests {
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides { label: Some("new label"), ..Default::default() },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse");
@@ -3004,6 +3346,7 @@ mod tests {
                 description: Some("Studio A camera"),
                 ..Default::default()
             },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse");
@@ -3024,6 +3367,7 @@ mod tests {
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides { name: Some("Camera 1"), ..Default::default() },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse");
@@ -3058,6 +3402,7 @@ mod tests {
                 source_port: Some(5556),
                 ..Default::default()
             },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         // Re-parse via the canonical `parse_sdp` path rather than
@@ -3076,7 +3421,7 @@ mod tests {
         init_gst();
         let original = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
         let spliced =
-            passthrough_with_overrides(VIDEO_YCBCR_422_10BIT_1080P50_SDP, &SdpOverrides::default())
+            passthrough_with_overrides(VIDEO_YCBCR_422_10BIT_1080P50_SDP, &SdpOverrides::default(), DualLegPassthroughPolicy::RejectDualLeg)
                 .expect("splice");
         let after = parse_sdp(&spliced).expect("re-parse");
         // Leg fields must round-trip unchanged.
@@ -3102,7 +3447,7 @@ mod tests {
         // address and session-id (the daemon may rely on these
         // being stable across the configuring-SDP lifecycle).
         let spliced =
-            passthrough_with_overrides(VIDEO_YCBCR_422_10BIT_1080P50_SDP, &SdpOverrides::default())
+            passthrough_with_overrides(VIDEO_YCBCR_422_10BIT_1080P50_SDP, &SdpOverrides::default(), DualLegPassthroughPolicy::RejectDualLeg)
                 .expect("splice");
         let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse");
         let origin = msg.origin().expect("origin");
@@ -3113,7 +3458,7 @@ mod tests {
     #[test]
     fn passthrough_invalid_input_propagates_parse_error() {
         init_gst();
-        let err = passthrough_with_overrides("not an SDP at all", &SdpOverrides::default())
+        let err = passthrough_with_overrides("not an SDP at all", &SdpOverrides::default(), DualLegPassthroughPolicy::RejectDualLeg)
             .expect_err("must error");
         assert!(matches!(err, SdpError::Parse(_) | SdpError::NoMedia));
     }
@@ -3133,6 +3478,7 @@ mod tests {
                 payload_type: Some(99),
                 ..Default::default()
             },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         assert!(spliced.contains("m=audio 5004 RTP/AVP 99"),
@@ -3158,6 +3504,7 @@ mod tests {
                 audio_clock_rate: Some(96000),
                 ..Default::default()
             },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         assert!(spliced.contains("a=rtpmap:97 L24/96000/2"),
@@ -3180,6 +3527,7 @@ mod tests {
                 a_maxptime: Some("2"),
                 ..Default::default()
             },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         assert!(spliced.contains("a=ptime:1\r\n"),
@@ -3207,6 +3555,7 @@ mod tests {
                 a_maxptime: Some("0.125"),
                 ..Default::default()
             },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         // `caps_from_media` upper-cases the rtpmap
@@ -3232,6 +3581,7 @@ mod tests {
                 payload_type: Some(100),
                 ..Default::default()
             },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         assert!(spliced.contains("m=video 5004 RTP/AVP 100"),
@@ -3421,6 +3771,7 @@ mod tests {
                 audio_clock_rate: Some(96_000),
                 ..Default::default()
             },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         let media = parse_sdp(&spliced).expect("re-parse");
@@ -3503,7 +3854,8 @@ mod tests {
                     payload_type: Some(pt),
                     ..Default::default()
                 },
-            )
+                DualLegPassthroughPolicy::RejectDualLeg,
+        )
             .expect_err(&format!("pt={pt} must be rejected"));
             match err {
                 SdpError::InvalidPayloadType(p) => {
@@ -3520,7 +3872,8 @@ mod tests {
                     payload_type: Some(pt),
                     ..Default::default()
                 },
-            )
+                DualLegPassthroughPolicy::RejectDualLeg,
+        )
             .unwrap_or_else(|e| panic!("pt={pt} must be valid: {e}"));
         }
     }
@@ -3611,6 +3964,7 @@ mod tests {
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides { caps_mode: CapsMode::Auto, ..Default::default() },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         assert!(
@@ -3625,6 +3979,7 @@ mod tests {
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_WIDE_SDP,
             &SdpOverrides { caps_mode: CapsMode::Auto, ..Default::default() },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         assert!(
@@ -3639,6 +3994,7 @@ mod tests {
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_WIDE_SDP,
             &SdpOverrides { caps_mode: CapsMode::Narrow, ..Default::default() },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         assert!(
@@ -3653,6 +4009,7 @@ mod tests {
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides { caps_mode: CapsMode::Narrow, ..Default::default() },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         assert!(
@@ -3667,6 +4024,7 @@ mod tests {
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
             &SdpOverrides { caps_mode: CapsMode::Wide, ..Default::default() },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         assert!(
@@ -3687,6 +4045,7 @@ mod tests {
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_WIDE_SDP,
             &SdpOverrides { caps_mode: CapsMode::Wide, ..Default::default() },
+            DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
         assert!(indicates_wide_receiver_caps(&spliced));
@@ -4951,7 +5310,7 @@ mod tests {
             VPID_Code=133;\
             TM=Async\r\n";
         let spliced =
-            passthrough_with_overrides(raw_sdp, &SdpOverrides::default()).expect("splice no-op");
+            passthrough_with_overrides(raw_sdp, &SdpOverrides::default(), DualLegPassthroughPolicy::RejectDualLeg).expect("splice no-op");
         // rtpmap encoding-name must round-trip lower-case.
         assert!(
             spliced.contains("a=rtpmap:96 raw/90000"),

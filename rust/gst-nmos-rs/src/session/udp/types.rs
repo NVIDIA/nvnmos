@@ -18,8 +18,8 @@ use crate::types::FlowFormat;
 /// Populated from an SDP transport file ([`crate::sdp::parse_sdp`]),
 /// from caps ([`crate::sdp::from_caps`]), or both after property splice.
 /// That is separate from how many SDP `m=` lines describe the stream:
-/// today parsing accepts a single `m=` line; redundancy will map multiple
-/// lines onto one [`UdpMedia`].
+/// ST 2022-7 separate destination addresses mode uses two `m=` lines with
+/// common media attributes; parsing folds these onto one [`UdpMedia`].
 ///
 /// Essence-level state (`format`, `rtp_caps`, `raw_caps`) is shared
 /// across legs because both legs of an ST 2022-7 pair carry the
@@ -34,25 +34,29 @@ use crate::types::FlowFormat;
 /// `interface-ip`, `multicast-ip`), mapped onto these per-leg
 /// fields at property-set / SDP-splice time — see
 /// [`crate::session::CommonSettings::source_ip`] et seq. for the per-side wire
-/// semantics. The mapping is 1:1 to IS-05 wire JSON, so a
-/// controller PATCHing `/single/senders/{id}/staged` reads
-/// straight into the same GObject property names. How the
-/// redundant secondary leg gets exposed on the property surface
-/// is a separate design decision — `nvdsudpsrc` for example
-/// overloads `local-iface-ip` into a comma-separated list and
-/// adds a combined `st2022-7-streams` property rather than
-/// `-2`-suffixed scalar twins — and is deferred until the
-/// redundancy work lands.
+/// semantics. GObject properties map 1:1 to IS-05 **leg-0** transport
+/// scalars (`destination-ip`, `interface-ip`, …); there is no `-2`
+/// suffixed leg-2 property surface. ST 2022-7 uses a dual-`m=`
+/// **transport file** on `transport=nvdsudp` (configuring passthrough
+/// preserves both legs for NMOS registration) and inner-element
+/// redundancy properties on receive (comma-separated `st2022-7-streams`,
+/// `local-iface-ip`, and `source-address` on `nvdsudpsrc`). Dual-leg
+/// `transport-file*` on `udp` / `udp2` is rejected at element creation.
 #[derive(Debug, Clone)]
 pub(crate) struct UdpMedia {
     /// Essence family — selects the payloader / depayloader factory
     /// alongside [`crate::session::udp::UdpVariant`].
     pub(crate) format: FlowFormat,
-    /// First (and, for non-redundant RTP, only) leg.
+    /// First **active** leg in SDP `m=` order (not necessarily `m=` line 0).
+    /// Single-leg RTP has one active leg here; ST 2022-7 with only the
+    /// second `m=` active also stores that leg alone on `primary`.
+    /// When every leg is `a=inactive`, parsing still places the first `m=`
+    /// block here so essence caps remain available; chain gating treats
+    /// zero active legs as fake ([`crate::sdp::parse_sdp`]).
     pub(crate) primary: UdpLeg,
-    /// Redundant secondary leg for ST 2022-7. `None` for
-    /// non-redundant RTP — which is everything today, until the
-    /// 2022-7 work lands.
+    /// Second **active** leg in SDP order, when two legs are active.
+    /// `None` whenever fewer than two legs are active (`a=inactive`
+    /// legs are omitted, not stored here).
     pub(crate) secondary: Option<UdpLeg>,
     /// `application/x-rtp,...` caps the depayloader consumes (and
     /// the payloader produces). Carries PT, clock-rate,

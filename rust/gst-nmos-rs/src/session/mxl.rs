@@ -7,7 +7,7 @@ use anyhow::{Context, bail};
 use gstreamer as gst;
 
 use super::{
-    ActivationAck, ActivationPlan, CommonSettings, InnerConfig, TransportConfig,
+    ActivationAck, ActivationPlan, CommonSettings, FakeKind, InnerConfig, TransportConfig,
     caps_format,
 };
 use super::types::Side;
@@ -92,20 +92,22 @@ pub(crate) fn decide_inner_config_mxl(
 ) -> InnerConfig {
     if settings.mxl_domain_path.is_empty() {
         return InnerConfig::Fake {
-            reason: "`mxl-domain-path` unset".to_owned(),
+            kind: FakeKind::Misconfigured,
+            detail: "`mxl-domain-path` unset".into(),
         };
     }
     if flow.id.is_empty() {
         return InnerConfig::Fake {
-            reason: "`mxl-flow-id` unset (neither property nor transport file supplied it)".to_owned(),
+            kind: FakeKind::Misconfigured,
+            detail: "`mxl-flow-id` unset (neither property nor transport file supplied it)".into(),
         };
     }
     if settings.side == Side::Receiver && flow.format == FlowFormat::Unspecified {
         return InnerConfig::Fake {
-            reason:
-                "`caps` media-type unrecognised or unset on nmossrc \
-                 (neither caps nor transport file pinned a flow format)"
-                    .to_owned(),
+            kind: FakeKind::Misconfigured,
+            detail: "`caps` media-type unrecognised or unset on nmossrc \
+                      (neither caps nor transport file pinned a flow format)"
+                .into(),
         };
     }
     InnerConfig::Real(TransportConfig::Mxl {
@@ -192,8 +194,8 @@ pub(super) fn resolve_inner_config_mxl(
         && matches!(inner, InnerConfig::Real(_))
     {
         inner = InnerConfig::Fake {
-            reason: "deferred — peer caps will drive registration at READY\u{2192}PAUSED"
-                .to_owned(),
+            kind: FakeKind::NotConfigured,
+            detail: String::new(),
         };
     }
 
@@ -211,7 +213,8 @@ pub(super) fn resolve_activation_inner_mxl(
             Err(e) => {
                 return Err(Box::new(ActivationPlan {
                     inner: InnerConfig::Fake {
-                        reason: "mxl-domain-id resolution failed".to_owned(),
+                        kind: FakeKind::Misconfigured,
+                        detail: "mxl-domain-id resolution failed".into(),
                     },
                     ack: ActivationAck::Failure {
                         reason: format!(
@@ -224,7 +227,8 @@ pub(super) fn resolve_activation_inner_mxl(
     if domain_resolution.id.is_empty() {
         return Err(Box::new(ActivationPlan {
             inner: InnerConfig::Fake {
-                reason: "mxl-domain-id unresolved".to_owned(),
+                kind: FakeKind::Misconfigured,
+                detail: "mxl-domain-id unresolved".into(),
             },
             ack: ActivationAck::Failure {
                 reason: format!(
@@ -260,7 +264,8 @@ pub(super) fn resolve_activation_inner_mxl(
         Err(e) => {
             return Err(Box::new(ActivationPlan {
                 inner: InnerConfig::Fake {
-                    reason: "flow_def resolution failed".to_owned(),
+                    kind: FakeKind::Misconfigured,
+                    detail: "flow_def resolution failed".into(),
                 },
                 ack: ActivationAck::Failure {
                     reason: format!(
@@ -381,8 +386,8 @@ mod tests {
             | InnerConfig::Real(TransportConfig::NvDsUdp { .. }) => {
                 panic!("expected Real(Mxl(data)), got Real(RTP transport)")
             }
-            InnerConfig::Fake { reason } => {
-                panic!("expected Real(Mxl(data)), got Fake({reason})")
+            InnerConfig::Fake { kind, .. } => {
+                panic!("expected Real(Mxl(data)), got Fake({kind})")
             }
         }
         assert!(matches!(plan.ack, ActivationAck::Success));
@@ -406,10 +411,13 @@ mod tests {
             ),
         );
         match plan.inner {
-            InnerConfig::Fake { reason } => assert!(
-                reason.contains("caps") && reason.contains("flow format"),
-                "expected caps-driven reason: {reason}"
-            ),
+            InnerConfig::Fake { kind, detail } => {
+                assert_eq!(kind, FakeKind::Misconfigured);
+                assert!(
+                    detail.contains("caps") && detail.contains("flow format"),
+                    "expected caps-driven detail: {detail}",
+                );
+            }
             InnerConfig::Real(_) => panic!("expected Fake, got Real"),
         }
     }
@@ -443,7 +451,7 @@ mod tests {
             | InnerConfig::Real(TransportConfig::NvDsUdp { .. }) => {
                 panic!("expected Real(Mxl), got Real(RTP transport)")
             }
-            InnerConfig::Fake { reason } => panic!("expected Real(Mxl), got Fake({reason})"),
+            InnerConfig::Fake { kind, .. } => panic!("expected Real(Mxl), got Fake({kind})"),
         }
         assert!(matches!(plan.ack, ActivationAck::Success));
     }
@@ -490,10 +498,13 @@ mod tests {
             &req(Side::Sender, Some(&video_flow_def(FLOW_ID_A))),
         );
         match plan.inner {
-            InnerConfig::Fake { reason } => assert!(
-                reason.contains("mxl-domain-path"),
-                "expected mxl-domain-path reason, got: {reason}"
-            ),
+            InnerConfig::Fake { kind, detail } => {
+                assert_eq!(kind, FakeKind::Misconfigured);
+                assert!(
+                    detail.contains("mxl-domain-path"),
+                    "expected mxl-domain-path detail: {detail}",
+                );
+            }
             InnerConfig::Real(_) => panic!("expected Fake when mxl-domain-path unset"),
         }
         match plan.ack {

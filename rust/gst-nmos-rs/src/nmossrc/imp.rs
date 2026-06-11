@@ -1531,7 +1531,8 @@ mod tests {
         };
         let plan = ActivationPlan {
             inner: InnerConfig::Fake {
-                reason: "deactivation".to_owned(),
+                kind: crate::session::FakeKind::NotActive,
+                detail: "deactivation".into(),
             },
             ack: ActivationAck::Success,
         };

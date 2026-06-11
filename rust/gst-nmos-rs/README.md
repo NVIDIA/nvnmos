@@ -444,7 +444,15 @@ SDP synthesis from `caps` emits `TP=2110TPN` (narrow traffic profile). Use
 Rivermax SDK + license, ConnectX-5 or newer NIC, and `CAP_NET_RAW` on the
 host binary (`sudo setcap CAP_NET_RAW=ep $(which gst-launch-1.0)`).
 
-**Not yet supported:** ST 2022-7 (multi-leg), `video/x-jxsv`.
+**ST 2022-7 (dual-leg):** supported on `transport=nvdsudp` when configuring
+or activation SDP has two same-essence `m=` lines (separate destination
+addresses). Inactive legs (`a=inactive` / `rtp_enabled: false`) are gated
+at activation; `nvdsudpsrc` uses comma-separated `st2022-7-streams`,
+`local-iface-ip`, and `source-address`. Dual-leg transport files on
+`udp` / `udp2` are rejected. Caps-only synthesis still emits one `m=`.
+See [`doc/designs/gst-nmos-rs-st2022-7-dual-leg-plan.md`](../../doc/designs/gst-nmos-rs-st2022-7-dual-leg-plan.md).
+
+**Not yet supported:** `video/x-jxsv`.
 
 Design notes: [`doc/designs/gst-nmos-rs-nvdsudp-plan.md`](../../doc/designs/gst-nmos-rs-nvdsudp-plan.md).
 

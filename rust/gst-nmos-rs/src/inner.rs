@@ -64,7 +64,7 @@ use crate::nvdsudp::packetization::{
     self, Packetization, ANC_HEADER_SIZE, AUDIO_HEADER_SIZE, VIDEO_HEADER_SIZE,
 };
 use crate::nvdsudp::sdp_file::SdpFileGuard;
-use crate::session::udp::types::UdpMedia;
+use crate::session::udp::types::{UdpLeg, UdpMedia};
 use crate::session::udp::UdpVariant;
 use crate::types::FlowFormat;
 
@@ -1279,6 +1279,48 @@ fn require_nvdsudp_factory(name: &'static str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+fn host_port(leg: &UdpLeg) -> String {
+    format!("{}:{}", leg.destination_ip, leg.destination_port)
+}
+
+fn comma_separated_iface_ips(legs: &[&UdpLeg]) -> Option<String> {
+    let ips: Vec<&str> = legs
+        .iter()
+        .filter_map(|leg| leg.interface_ip.as_deref())
+        .collect();
+    if ips.len() != legs.len() {
+        return None;
+    }
+    Some(ips.join(","))
+}
+
+/// Rivermax wildcard for “any source” on an input flow (`rmx_input_set_flow_remote_addr`).
+const NVDSUDP_SOURCE_ANY: &str = "0.0.0.0";
+
+/// `nvdsudpsrc` `source-address`: one comma entry per stream; `0.0.0.0` when leg has no SSM.
+fn comma_separated_source_ips(legs: &[&UdpLeg]) -> Option<String> {
+    if legs.is_empty() {
+        return None;
+    }
+    let ips: Vec<&str> = legs
+        .iter()
+        .map(|leg| leg.source_ip.as_deref().unwrap_or(NVDSUDP_SOURCE_ANY))
+        .collect();
+    if ips.iter().all(|ip| *ip == NVDSUDP_SOURCE_ANY) {
+        return None;
+    }
+    Some(ips.join(","))
+}
+
+fn nvdsudpsrc_builder(caps: &gst::Caps) -> gst::element_factory::ElementBuilder<'_> {
+    gst::ElementFactory::make("nvdsudpsrc")
+        .name("nmossrc-nvdsudp")
+        .property("caps", caps)
+        // DeepStream ST 2110 recv defaults; override via transport-properties.
+        .property("use-rtp-timestamp", true)
+        .property("adjust-leap-seconds", true)
+}
+
 /// Build the inner DeepStream Rivermax sink for `nmossink` when
 /// `transport=nvdsudp`. Mode 3: uncompressed essence in, built-in RTP
 /// packetization. No external payloader.
@@ -1289,7 +1331,18 @@ pub(crate) fn build_nvdsudpsink(
     require_nvdsudp_factory("nvdsudpsink")?;
     let pkt = packetization::from_media(media.format, &media.raw_caps, &media.rtp_caps)?;
 
-    let sdp_file = SdpFileGuard::write("nvnmos-nvdsudpsink", sdp_text)?;
+    let sdp_for_sink = if media.secondary.is_none()
+        && crate::sdp::sdp_media_block_count(sdp_text).is_ok_and(|n| n > 1)
+    {
+        crate::sdp::normalise_to_single_active_leg(sdp_text)
+            .with_context(|| {
+                "nvdsudpsink: normalising dual-leg SDP with only one leg active to single-leg SDP"
+            })?
+    } else {
+        sdp_text.to_owned()
+    };
+
+    let sdp_file = SdpFileGuard::write("nvnmos-nvdsudpsink", &sdp_for_sink)?;
     gst::debug!(
         nvdsudp_log_cat(),
         "build_nvdsudpsink: sdp-file={} (host={}, port={})",
@@ -1314,11 +1367,12 @@ pub(crate) fn build_nvdsudpsink(
             )
         })?;
 
-    // Sender configuring SDP must carry `a=x-nvnmos-iface-ip` or
-    // `a=source-filter:` (libnvnmos derives `source_ip` from either).
-    // `UdpLeg.interface_ip` mirrors iface-ip / sender `source-ip`.
-    if let Some(iface) = &media.primary.interface_ip {
-        sink.set_property("local-iface-ip", iface);
+    let iface_ips = match &media.secondary {
+        Some(secondary) => comma_separated_iface_ips(&[&media.primary, secondary]),
+        None => media.primary.interface_ip.as_deref().map(str::to_owned),
+    };
+    if let Some(iface) = iface_ips {
+        sink.set_property("local-iface-ip", &iface);
     } else {
         gst::warning!(
             nvdsudp_log_cat(),
@@ -1373,26 +1427,31 @@ pub(crate) fn build_nvdsudpsrc(
     require_nvdsudp_factory("nvdsudpsrc")?;
     let pkt = packetization::from_media(media.format, &media.raw_caps, &media.rtp_caps)?;
 
-    let src = gst::ElementFactory::make("nvdsudpsrc")
-        .name("nmossrc-nvdsudp")
-        .property("address", &media.primary.destination_ip)
-        .property("port", i32::from(media.primary.destination_port))
-        .property("caps", caps)
-        // DeepStream ST 2110 recv defaults; override via transport-properties.
-        // Hardware soak still needed to confirm for Rivermax deployments.
-        .property("use-rtp-timestamp", true)
-        .property("adjust-leap-seconds", true)
-        .build()
-        .with_context(|| {
-            format!(
-                "instantiating `nvdsudpsrc` (address={}, port={})",
-                media.primary.destination_ip, media.primary.destination_port,
-            )
-        })?;
+    let src = if let Some(secondary) = &media.secondary {
+        let streams = format!("{},{}", host_port(&media.primary), host_port(secondary));
+        nvdsudpsrc_builder(caps)
+            .property("st2022-7-streams", &streams)
+            .build()
+            .with_context(|| format!("instantiating `nvdsudpsrc` (st2022-7-streams={streams})"))?
+    } else {
+        nvdsudpsrc_builder(caps)
+            .property("address", &media.primary.destination_ip)
+            .property("port", i32::from(media.primary.destination_port))
+            .build()
+            .with_context(|| {
+                format!(
+                    "instantiating `nvdsudpsrc` (address={}, port={})",
+                    media.primary.destination_ip, media.primary.destination_port,
+                )
+            })?
+    };
 
-    // Receiver configuring SDP requires `a=x-nvnmos-iface-ip` (nvnmos.h).
-    if let Some(iface) = &media.primary.interface_ip {
-        src.set_property("local-iface-ip", iface);
+    let iface_ips = match &media.secondary {
+        Some(secondary) => comma_separated_iface_ips(&[&media.primary, secondary]),
+        None => media.primary.interface_ip.as_deref().map(str::to_owned),
+    };
+    if let Some(iface) = iface_ips {
+        src.set_property("local-iface-ip", &iface);
     } else {
         gst::warning!(
             nvdsudp_log_cat(),
@@ -1400,8 +1459,12 @@ pub(crate) fn build_nvdsudpsrc(
              include a=x-nvnmos-iface-ip for receivers",
         );
     }
-    if let Some(source) = &media.primary.source_ip {
-        src.set_property("source-address", source);
+    let source_legs = match &media.secondary {
+        Some(secondary) => vec![&media.primary, secondary],
+        None => vec![&media.primary],
+    };
+    if let Some(source) = comma_separated_source_ips(&source_legs) {
+        src.set_property("source-address", &source);
     }
 
     match pkt {
@@ -2822,5 +2885,57 @@ mod tests {
     #[test]
     fn rebuild_chain_opts_drain_defaults_to_false() {
         assert!(!RebuildChainOpts::default().drain_downstream);
+    }
+
+    fn leg_with_source(ip: &str) -> UdpLeg {
+        UdpLeg {
+            source_ip: Some(ip.to_owned()),
+            ..minimal_udp_media().primary
+        }
+    }
+
+    #[test]
+    fn comma_separated_source_ips_single_leg() {
+        let leg = leg_with_source("192.0.2.20");
+        assert_eq!(
+            comma_separated_source_ips(&[&leg]),
+            Some("192.0.2.20".to_owned())
+        );
+    }
+
+    #[test]
+    fn comma_separated_source_ips_dual_leg_both() {
+        let a = leg_with_source("192.0.2.20");
+        let b = leg_with_source("192.0.2.21");
+        assert_eq!(
+            comma_separated_source_ips(&[&a, &b]),
+            Some("192.0.2.20,192.0.2.21".to_owned())
+        );
+    }
+
+    #[test]
+    fn comma_separated_source_ips_dual_leg_one_ssm() {
+        let a = leg_with_source("192.0.2.20");
+        let b = minimal_udp_media().primary;
+        assert_eq!(
+            comma_separated_source_ips(&[&a, &b]),
+            Some("192.0.2.20,0.0.0.0".to_owned())
+        );
+    }
+
+    #[test]
+    fn comma_separated_source_ips_dual_leg_ssm_on_second_only() {
+        let a = minimal_udp_media().primary;
+        let b = leg_with_source("192.0.2.21");
+        assert_eq!(
+            comma_separated_source_ips(&[&a, &b]),
+            Some("0.0.0.0,192.0.2.21".to_owned())
+        );
+    }
+
+    #[test]
+    fn comma_separated_source_ips_none_when_all_asm() {
+        let leg = minimal_udp_media().primary;
+        assert_eq!(comma_separated_source_ips(&[&leg]), None);
     }
 }

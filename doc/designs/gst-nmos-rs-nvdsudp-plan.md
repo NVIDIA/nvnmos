@@ -22,7 +22,7 @@ No external `rtp*pay` / `rtp*depay` elements. The outer elements continue to exp
 
 **Initial scope constraints (explicit):**
 
-- **Single-leg only** — one `m=` line, one NIC, no ST 2022-7. Multi-leg `UdpMedia` and `st2022-7-streams` / comma-separated `local-iface-ip` are deferred.
+- **Single-leg by default** — caps-only synthesis emits one `m=` line. **ST 2022-7** dual-leg (`UdpMedia::secondary`, comma-separated `st2022-7-streams`, `local-iface-ip`, and `source-address`) is implemented for `transport=nvdsudp`; see [`gst-nmos-rs-st2022-7-dual-leg-plan.md`](gst-nmos-rs-st2022-7-dual-leg-plan.md).
 - **Built-in (de)payloaders only** — Modes 1 and 2 of `nvdsudp*` (RTP packets on the pad, external depay/pay) are out of scope; we do not add a parallel `nvdsudp+rtpvrawpay` chain.
 - **No new `nmossrc` / `nmossink` properties** for Rivermax tuning — advanced users set `transport-properties` (and ignore `pay-properties` / `depay-properties`, which have no leaf on this path). Packetization defaults are auto-calculated from essence caps / SDP; users override via `transport-properties` when the defaults are wrong (jumbo MTU, custom `gpu-id`, PTP source, thread affinity, etc.).
 - **System memory and `memory:NVMM` (GPU Direct)** — selected by essence caps and/or `transport-properties`, not bespoke NMOS properties (see *Memory: system vs NVMM*).
@@ -262,13 +262,13 @@ Almost all **software** work can land without ConnectX / Rivermax / DeepStream o
 | End-to-end wire send/recv | **no** — needs Rivermax license, ConnectX NIC, `CAP_NET_RAW`, plugin on `GST_PLUGIN_PATH` |
 | GPU Direct validation | **no** — needs ConnectX-6+ and NVMM pipeline |
 | Soak: clock provider / multi-receiver | **no** |
-| ST 2022-7 | **no** — explicitly deferred |
+| ST 2022-7 | **yes** (software path; dual-leg `transport-file*` + `nvdsudpsrc` / `nvdsudpsink`; hardware soak pending) |
 
 **Recommended CI strategy:** default `cargo test` uses pure unit tests; add `#[ignore]` integration tests `nvdsudp_chain_roundtrip` and `nvdsudp_activation_smoke` documented in README (same pattern as `multi_flow_video_data.rs`). Optional GitLab job on a Rivermax-equipped runner when available.
 
 ## Out of scope (this document)
 
-- ST 2022-7 (`st2022-7-streams`, secondary `UdpLeg`, `group:DUP` SDP)
+- ST 2022-7 caps-only **synthesis** of dual-`m=` SDPs (transport-file passthrough + inner chain are landed)
 - Modes 1/2 (external RTP pay/depay in front of `nvdsudp*`)
 - `video/x-jxsv` (ST 2110-22)
 - Sender `pass-rtp-timestamp` / regeneration modes
