@@ -8,9 +8,9 @@ pub(crate) mod types;
 use anyhow::Context;
 use gstreamer as gst;
 
-use super::{CommonSettings, InnerConfig, TransportConfig};
+use super::{CommonSettings, FakeKind, InnerConfig, TransportConfig};
 use super::types::Side;
-use crate::sdp::{self, SdpOverrides};
+use crate::sdp::{self, DualLegPassthroughPolicy, SdpOverrides};
 use crate::types::{CapsMode, Transport};
 
 /// Which factory family to use for the UDP socket and RTP
@@ -154,84 +154,20 @@ pub(crate) fn property_overrides_udp(settings: &CommonSettings) -> SdpOverrides<
         caps_mode: settings.caps_mode,
     }
 }
-pub(crate) fn decide_inner_config_udp(
+fn finish_udp_inner_config(
     element: &str,
     settings: &CommonSettings,
-    variant: UdpVariant,
-    transport_file: Option<&str>,
+    transport: Transport,
+    text: &str,
     cross_check_mode: sdp::EssenceCrossCheckMode,
+    build_real: impl FnOnce(types::UdpMedia) -> InnerConfig,
 ) -> Result<InnerConfig, anyhow::Error> {
-    let Some(text) = transport_file else {
-        let reason = match settings.side {
-            Side::Sender => {
-                "no SDP transport file; waiting for IS-05 PATCH to supply the destination address"
-                    .to_owned()
-            }
-            Side::Receiver => {
-                "no SDP transport file; waiting for IS-05 PATCH to supply the listen address"
-                    .to_owned()
-            }
-        };
-        return Ok(InnerConfig::Fake { reason });
-    };
+    if transport != Transport::NvDsUdp && sdp::sdp_media_block_count(text)? > 1 {
+        return Err(anyhow::Error::new(sdp::SdpError::DualLegNotSupported));
+    }
     let media = sdp::parse_sdp(text).with_context(|| {
         format!(
-            "{element}: parsing SDP transport file for transport={:?}",
-            settings.transport
-        )
-    })?;
-    // Cross-check the parsed SDP against the user-supplied
-    // `caps` (essence shape) and `transport-caps` (RTP-layer
-    // hints). The check fires after property overrides have
-    // applied the override-class fields, so an audio
-    // clock-rate that the user asked us to write into the
-    // SDP is implicit-OK while a video clock-rate disagreement
-    // (where clock-rate is cross-check, not override) surfaces
-    // as `SdpError::TransportCapsMismatch`. Mirrors
-    // `decide_inner_config_mxl`'s `resolve_mxl_flow_meta`
-    // cross-check pass.
-    sdp::cross_check_essence(
-        &media,
-        settings.caps.as_ref(),
-        settings.transport_caps.as_ref(),
-        cross_check_mode,
-    )
-    .with_context(|| {
-            format!(
-                "{element}: cross-checking SDP against `caps` / `transport-caps` \
-                 for transport={:?}",
-                settings.transport
-            )
-        })?;
-    Ok(InnerConfig::Real(TransportConfig::Udp {
-        variant,
-        media,
-        transport_file: Some(text.to_owned()),
-    }))
-}
-
-pub(crate) fn decide_inner_config_nvdsudp(
-    element: &str,
-    settings: &CommonSettings,
-    transport_file: Option<&str>,
-    cross_check_mode: sdp::EssenceCrossCheckMode,
-) -> Result<InnerConfig, anyhow::Error> {
-    let Some(text) = transport_file else {
-        let reason = match settings.side {
-            Side::Sender => {
-                "no SDP transport file; waiting for IS-05 PATCH to supply the destination address"
-                    .to_owned()
-            }
-            Side::Receiver => {
-                "no SDP transport file; waiting for IS-05 PATCH to supply the listen address"
-                    .to_owned()
-            }
-        };
-        return Ok(InnerConfig::Fake { reason });
-    };
-    let media = sdp::parse_sdp(text).with_context(|| {
-        format!(
-            "{element}: parsing SDP transport file for transport=nvdsudp"
+            "{element}: parsing SDP transport file for transport={transport:?}"
         )
     })?;
     sdp::cross_check_essence(
@@ -243,13 +179,72 @@ pub(crate) fn decide_inner_config_nvdsudp(
     .with_context(|| {
         format!(
             "{element}: cross-checking SDP against `caps` / `transport-caps` \
-             for transport=nvdsudp"
+             for transport={transport:?}"
         )
     })?;
-    Ok(InnerConfig::Real(TransportConfig::NvDsUdp {
-        media,
-        transport_file: Some(text.to_owned()),
-    }))
+    if sdp::count_active_sdp_legs(text)? == 0 {
+        return Ok(InnerConfig::Fake {
+            kind: FakeKind::NotActive,
+            detail: "all legs inactive (rtp_enabled: false)".into(),
+        });
+    }
+    Ok(build_real(media))
+}
+
+pub(crate) fn decide_inner_config_udp(
+    element: &str,
+    settings: &CommonSettings,
+    variant: UdpVariant,
+    transport_file: Option<&str>,
+    cross_check_mode: sdp::EssenceCrossCheckMode,
+) -> Result<InnerConfig, anyhow::Error> {
+    let Some(text) = transport_file else {
+        return Ok(InnerConfig::Fake {
+            kind: FakeKind::Misconfigured,
+            detail: "caps or transport-file required for NMOS registration".into(),
+        });
+    };
+    finish_udp_inner_config(
+        element,
+        settings,
+        settings.transport,
+        text,
+        cross_check_mode,
+        |media| {
+            InnerConfig::Real(TransportConfig::Udp {
+                variant,
+                media,
+                transport_file: Some(text.to_owned()),
+            })
+        },
+    )
+}
+
+pub(crate) fn decide_inner_config_nvdsudp(
+    element: &str,
+    settings: &CommonSettings,
+    transport_file: Option<&str>,
+    cross_check_mode: sdp::EssenceCrossCheckMode,
+) -> Result<InnerConfig, anyhow::Error> {
+    let Some(text) = transport_file else {
+        return Ok(InnerConfig::Fake {
+            kind: FakeKind::Misconfigured,
+            detail: "caps or transport-file required for NMOS registration".into(),
+        });
+    };
+    finish_udp_inner_config(
+        element,
+        settings,
+        Transport::NvDsUdp,
+        text,
+        cross_check_mode,
+        |media| {
+            InnerConfig::Real(TransportConfig::NvDsUdp {
+                media,
+                transport_file: Some(text.to_owned()),
+            })
+        },
+    )
 }
 
 pub(super) fn resolve_inner_config_nvdsudp(
@@ -264,10 +259,14 @@ pub(super) fn resolve_inner_config_nvdsudp(
 
     let resolved_transport_file = match resolved_transport_file {
         Some(text) if had_user_transport_file => Some(
-            sdp::passthrough_with_overrides(&text, &property_overrides_udp(settings))
-                .with_context(|| {
-                    format!("{element}: applying property overrides to transport-file SDP")
-                })?,
+            sdp::passthrough_with_overrides(
+                &text,
+                &property_overrides_udp(settings),
+                DualLegPassthroughPolicy::AllowDualLeg,
+            )
+            .with_context(|| {
+                format!("{element}: applying property overrides to transport-file SDP")
+            })?,
         ),
         other => other,
     };
@@ -323,10 +322,14 @@ pub(super) fn resolve_inner_config_udp(
     // property in via [`sdp::from_caps`]; skip the second pass.
     let resolved_transport_file = match resolved_transport_file {
         Some(text) if had_user_transport_file => Some(
-            sdp::passthrough_with_overrides(&text, &property_overrides_udp(settings))
-                .with_context(|| {
-                    format!("{element}: applying property overrides to transport-file SDP")
-                })?,
+            sdp::passthrough_with_overrides(
+                &text,
+                &property_overrides_udp(settings),
+                DualLegPassthroughPolicy::RejectDualLeg,
+            )
+            .with_context(|| {
+                format!("{element}: applying property overrides to transport-file SDP")
+            })?,
         ),
         other => other,
     };
@@ -496,8 +499,92 @@ mod tests {
             }
         }
 
+        fn dual_leg_video_udp_sdp() -> String {
+            let mut sdp = VIDEO_UDP_SDP.to_owned();
+            sdp.push_str(
+                "m=video 5006 RTP/AVP 96\r\n\
+                 c=IN IP4 239.1.1.2/64\r\n\
+                 a=rtpmap:96 raw/90000\r\n\
+                 a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080;\
+                 exactframerate=50; depth=10\r\n",
+            );
+            sdp
+        }
+
         #[test]
-        fn decide_udp_without_transport_file_is_fake_deferred() {
+        fn decide_udp_rejects_dual_leg_transport_file() {
+            let sdp = dual_leg_video_udp_sdp();
+            for transport in [Transport::Udp, Transport::Udp2] {
+                let s = udp_settings(Side::Receiver, transport);
+                let err = decide_inner_config_udp(
+                    "nmossrc",
+                    &s,
+                    if transport == Transport::Udp2 {
+                        UdpVariant::V2
+                    } else {
+                        UdpVariant::V1
+                    },
+                    Some(&sdp),
+                    sdp::EssenceCrossCheckMode::Full,
+                )
+                .expect_err("dual-leg SDP must be rejected for OSS UDP");
+                assert!(
+                    format!("{err:#}").contains("dual-leg SDP requires transport=nvdsudp"),
+                    "unexpected error: {err:#}",
+                );
+            }
+        }
+
+        #[test]
+        fn decide_udp_single_leg_inactive_is_fake() {
+            let sdp = VIDEO_UDP_SDP.replace(
+                "m=video 5004 RTP/AVP 96\r\n",
+                "m=video 5004 RTP/AVP 96\r\na=inactive\r\n",
+            );
+            let s = udp_settings(Side::Receiver, Transport::Udp);
+            let inner = decide_inner_config_udp(
+                "nmossrc",
+                &s,
+                UdpVariant::V1,
+                Some(&sdp),
+                sdp::EssenceCrossCheckMode::Full,
+            )
+            .expect("inactive single-leg SDP parses");
+            match inner {
+                InnerConfig::Fake { kind, .. } => {
+                    assert_eq!(kind, FakeKind::NotActive);
+                }
+                other => panic!("expected Fake for inactive leg, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn activation_udp_inactive_leg_acks_success_with_fake_chain() {
+            let sdp = VIDEO_UDP_SDP.replace(
+                "m=video 5004 RTP/AVP 96\r\n",
+                "m=video 5004 RTP/AVP 96\r\na=inactive\r\n",
+            );
+            let s = udp_settings(Side::Receiver, Transport::Udp);
+            let plan = make_activation_plan(
+                &cat(),
+                "nmossrc",
+                &s,
+                &req(Side::Receiver, Some(&sdp)),
+            );
+            match plan.inner {
+                InnerConfig::Fake { kind, .. } => {
+                    assert_eq!(kind, FakeKind::NotActive);
+                }
+                other => panic!("expected Fake for inactive leg, got {other:?}"),
+            }
+            assert!(
+                matches!(plan.ack, ActivationAck::Success),
+                "master_enable with rtp_enabled=false is a valid dormant activation",
+            );
+        }
+
+        #[test]
+        fn decide_udp_without_transport_file_is_misconfigured() {
             for side in [Side::Sender, Side::Receiver] {
                 let s = udp_settings(side, Transport::Udp);
                 let inner =
@@ -510,14 +597,11 @@ mod tests {
                     )
                     .expect("None transport_file is not an error");
                 match inner {
-                    InnerConfig::Fake { reason } => {
+                    InnerConfig::Fake { kind, detail } => {
+                        assert_eq!(kind, FakeKind::Misconfigured);
                         assert!(
-                            reason.contains("no SDP transport file"),
-                            "expected no-SDP reason for {side:?}: {reason}",
-                        );
-                        assert!(
-                            reason.contains("IS-05 PATCH"),
-                            "expected IS-05 PATCH hint for {side:?}: {reason}",
+                            detail.contains("caps or transport-file"),
+                            "expected misconfiguration detail, got {detail:?}",
                         );
                     }
                     other => panic!("expected Fake for {side:?}, got {other:?}"),
@@ -769,11 +853,10 @@ mod tests {
         }
 
         /// No `transport_file` and no `caps` → neither synthesis
-        /// nor splice fires; the deferred-fake path is preserved
-        /// for the "wait for IS-05 PATCH to provide everything"
-        /// case.
+        /// nor splice fires; inner stays misconfigured (no NMOS
+        /// resource can be registered).
         #[test]
-        fn resolve_inner_config_udp_no_transport_file_and_no_caps_remains_fake() {
+        fn resolve_inner_config_udp_no_transport_file_and_no_caps_is_misconfigured() {
             let s = CommonSettings {
                 // IS-05 endpoint property set but no caps and no
                 // transport file — nothing to synthesise from.
@@ -789,7 +872,12 @@ mod tests {
             )
             .expect("no error");
             assert!(text.is_none(), "no input → no synth, no spliced output");
-            assert!(matches!(inner, InnerConfig::Fake { .. }));
+            match inner {
+                InnerConfig::Fake { kind, .. } => {
+                    assert_eq!(kind, FakeKind::Misconfigured);
+                }
+                other => panic!("expected misconfigured fake, got {other:?}"),
+            }
         }
 
         /// `caps` supplied but no transport_file →

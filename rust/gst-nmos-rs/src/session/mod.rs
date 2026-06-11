@@ -429,6 +429,39 @@ fn resolve_transport_file(
     }
 }
 
+/// Why the element stays on the fake data path instead of a real
+/// transport chain — coarse category only. Subcases (e.g. which
+/// dormant IS-05 state) live in [`InnerConfig::Fake::detail`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FakeKind {
+    /// Not enough state to register or build a real chain yet (e.g.
+    /// MXL sender awaiting peer caps for deferred `AddSender`).
+    NotConfigured,
+    /// Invalid or inconsistent configuration — cannot honour activation.
+    Misconfigured,
+    /// Registered and valid, but no live RTP/media path (initial
+    /// `auto-activate=false`, deactivated, or all SDP legs inactive).
+    NotActive,
+}
+
+impl std::fmt::Display for FakeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotConfigured => write!(f, "not configured"),
+            Self::Misconfigured => write!(f, "misconfigured"),
+            Self::NotActive => write!(f, "not active"),
+        }
+    }
+}
+
+impl FakeKind {
+    /// Whether an IS-05 activation that produced this fake state should
+    /// ack **success** (valid inactive state) rather than failure.
+    pub(crate) fn activation_succeeds(self) -> bool {
+        matches!(self, Self::NotActive)
+    }
+}
+
 /// What the element should build on its data path after a successful
 /// `validate_and_open`.
 ///
@@ -446,10 +479,12 @@ fn resolve_transport_file(
 pub(crate) enum InnerConfig {
     Real(TransportConfig),
     Fake {
-        /// One-line summary of which piece of state was missing.
-        /// Logged at INFO so it's clear why the fake chain is in
-        /// use.
-        reason: String,
+        /// Coarse category — drives activation ack policy via
+        /// [`FakeKind::activation_succeeds`].
+        kind: FakeKind,
+        /// Optional human-readable subcase; included in logs and activation
+        /// failure reasons when non-empty.
+        detail: String,
     },
 }
 
@@ -662,8 +697,12 @@ pub(crate) fn validate_and_open(
         InnerConfig::Real(TransportConfig::NvDsUdp { media, .. }) => {
             udp_inner_summary("nvdsudp", None, media)
         }
-        InnerConfig::Fake { reason } => {
-            format!("inner data path: fake ({reason})")
+        InnerConfig::Fake { kind, detail } => {
+            if detail.is_empty() {
+                format!("inner data path: fake ({kind})")
+            } else {
+                format!("inner data path: fake ({kind}: {detail})")
+            }
         }
     };
     gst::info!(
@@ -704,7 +743,8 @@ pub(super) fn caps_format(settings: &CommonSettings) -> FlowFormat {
 fn apply_auto_activate_gate(inner: InnerConfig, auto_activate: bool) -> InnerConfig {
     if !auto_activate && matches!(inner, InnerConfig::Real(_)) {
         return InnerConfig::Fake {
-            reason: "auto-activate=false; waiting for IS-05 PATCH to activate".to_owned(),
+            kind: FakeKind::NotActive,
+            detail: "auto-activate=false; waiting for IS-05 PATCH to activate".into(),
         };
     }
     inner
@@ -973,12 +1013,11 @@ pub(crate) enum ActivationAck {
 ///     (same pattern as `Udp` / `Udp2`).
 ///
 /// * If the chosen `decide_inner_config_*` returns
-///   [`InnerConfig::Real`], ack success; if it returns
-///   [`InnerConfig::Fake`] we have a live transport file but
-///   can't bring up the real chain (typically `mxl-domain-path` is
-///   unset on this host, or — for UDP — IS-05 PATCH delivered an
-///   empty SDP) — swap to the fake chain but ack **failure** so
-///   the controller surfaces the misconfiguration.
+///   [`InnerConfig::Real`], ack success. If it returns
+///   [`InnerConfig::Fake`] with [`FakeKind::NotActive`] (all legs
+///   inactive), ack **success** — same spirit as deactivation: valid
+///   IS-05 state, fake data path. [`FakeKind::Misconfigured`] acks
+///   **failure** so the controller surfaces bad configuration.
 pub(crate) fn make_activation_plan(
     cat: &gst::DebugCategory,
     element: &str,
@@ -988,7 +1027,8 @@ pub(crate) fn make_activation_plan(
     if req.side != settings.side {
         return ActivationPlan {
             inner: InnerConfig::Fake {
-                reason: "activation side mismatch".to_owned(),
+                kind: FakeKind::Misconfigured,
+                detail: "activation side mismatch".into(),
             },
             ack: ActivationAck::Failure {
                 reason: format!(
@@ -1008,7 +1048,8 @@ pub(crate) fn make_activation_plan(
         );
         return ActivationPlan {
             inner: InnerConfig::Fake {
-                reason: "deactivation".to_owned(),
+                kind: FakeKind::NotActive,
+                detail: "deactivation".into(),
             },
             ack: ActivationAck::Success,
         };
@@ -1030,7 +1071,8 @@ pub(crate) fn make_activation_plan(
             Err(e) => {
                 return ActivationPlan {
                     inner: InnerConfig::Fake {
-                        reason: "SDP transport file rejected".to_owned(),
+                        kind: FakeKind::Misconfigured,
+                        detail: "SDP transport file rejected".into(),
                     },
                     ack: ActivationAck::Failure {
                         reason: format!("{element}: parsing activation SDP: {e:#}"),
@@ -1049,7 +1091,8 @@ pub(crate) fn make_activation_plan(
             Err(e) => {
                 return ActivationPlan {
                     inner: InnerConfig::Fake {
-                        reason: "SDP transport file rejected".to_owned(),
+                        kind: FakeKind::Misconfigured,
+                        detail: "SDP transport file rejected".into(),
                     },
                     ack: ActivationAck::Failure {
                         reason: format!("{element}: parsing activation SDP: {e:#}"),
@@ -1067,7 +1110,8 @@ pub(crate) fn make_activation_plan(
             Err(e) => {
                 return ActivationPlan {
                     inner: InnerConfig::Fake {
-                        reason: "SDP transport file rejected".to_owned(),
+                        kind: FakeKind::Misconfigured,
+                        detail: "SDP transport file rejected".into(),
                     },
                     ack: ActivationAck::Failure {
                         reason: format!("{element}: parsing activation SDP: {e:#}"),
@@ -1079,16 +1123,26 @@ pub(crate) fn make_activation_plan(
 
     let ack = match &inner {
         InnerConfig::Real(_) => ActivationAck::Success,
-        // Per design: if the activation supplies a live transport file
-        // but the element can't bring up the real chain (typically
-        // `mxl-domain-path` is unset), ack failure so the controller
-        // sees the resource as misconfigured rather than silently
-        // deactivated.
-        InnerConfig::Fake { reason } => ActivationAck::Failure {
-            reason: format!(
-                "{element}: activation cannot bring up inner data path: {reason}"
-            ),
-        },
+        InnerConfig::Fake { kind, .. } if kind.activation_succeeds() => {
+            gst::info!(
+                cat,
+                "{element}: activation is master_enable with all legs inactive; \
+                 fake chain, ack success",
+            );
+            ActivationAck::Success
+        }
+        InnerConfig::Fake { kind, detail } => {
+            let msg = if detail.is_empty() {
+                kind.to_string()
+            } else {
+                detail.clone()
+            };
+            ActivationAck::Failure {
+                reason: format!(
+                    "{element}: activation cannot bring up inner data path: {msg}"
+                ),
+            }
+        }
     };
 
     ActivationPlan { inner, ack }
@@ -1243,7 +1297,8 @@ mod tests {
 
         fn fake_inner() -> InnerConfig {
             InnerConfig::Fake {
-                reason: "test fixture fake chain".to_owned(),
+                kind: FakeKind::Misconfigured,
+                detail: "test fixture fake chain".into(),
             }
         }
 
@@ -1259,8 +1314,8 @@ mod tests {
                 | InnerConfig::Real(TransportConfig::NvDsUdp { .. }) => {
                     panic!("auto-activate=true must not change Mxl into RTP transport")
                 }
-                InnerConfig::Fake { reason } => {
-                    panic!("auto-activate=true must not downgrade Real: {reason}")
+                InnerConfig::Fake { kind, .. } => {
+                    panic!("auto-activate=true must not downgrade Real: {kind}")
                 }
             }
         }
@@ -1272,15 +1327,8 @@ mod tests {
                 InnerConfig::Real(_) => {
                     panic!("auto-activate=false must downgrade Real to Fake")
                 }
-                InnerConfig::Fake { reason } => {
-                    assert!(
-                        reason.contains("auto-activate=false"),
-                        "expected gate-attributed reason, got: {reason}"
-                    );
-                    assert!(
-                        reason.contains("IS-05"),
-                        "expected reason to point at IS-05 path, got: {reason}"
-                    );
+                InnerConfig::Fake { kind, .. } => {
+                    assert_eq!(kind, FakeKind::NotActive);
                 }
             }
         }
@@ -1332,8 +1380,8 @@ mod tests {
                 | InnerConfig::Real(TransportConfig::NvDsUdp { .. }) => {
                     panic!("expected Real(Mxl), got Real(RTP transport)")
                 }
-                InnerConfig::Fake { reason } => {
-                    panic!("IS-05 activation must reach Real regardless of auto-activate: {reason}")
+                InnerConfig::Fake { kind, .. } => {
+                    panic!("IS-05 activation must reach Real regardless of auto-activate: {kind}")
                 }
             }
             assert!(matches!(plan.ack, ActivationAck::Success));
@@ -1385,8 +1433,8 @@ mod tests {
             );
             let lazy = super::super::apply_auto_activate_gate(inner, false);
             match lazy {
-                InnerConfig::Fake { reason } => {
-                    assert!(reason.contains("auto-activate=false"))
+                InnerConfig::Fake { kind, .. } => {
+                    assert_eq!(kind, FakeKind::NotActive);
                 }
                 InnerConfig::Real(_) => {
                     panic!("auto-activate=false: caps-synthesised flow_id must defer to IS-05")

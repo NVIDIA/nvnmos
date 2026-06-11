@@ -12,17 +12,23 @@
 use gstreamer_sdp::{SDPAttribute, SDPMediaRef, SDPConnection, SDPMessage};
 
 use crate::iface;
-use crate::sdp::{defaults, SdpError, SdpOverrides};
+use crate::sdp::{self, defaults, SdpError, SdpOverrides};
 use crate::types::CapsMode;
 
+/// Whether the configuring passthrough path may carry a dual-`m=` ST 2022-7 SDP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DualLegPassthroughPolicy {
+    /// `transport=udp` / `udp2`: dual-leg files are rejected at element creation.
+    RejectDualLeg,
+    /// `transport=nvdsudp`: preserve two same-essence `m=` blocks.
+    AllowDualLeg,
+}
+
 /// Reject SDP shapes this stack does not support on the passthrough path.
-///
-/// Single-`m=` SDPs pass. Two `m=` blocks are reserved for future ST 2022-7
-/// support and are rejected with [`SdpError::MultipleMedia`] until dual-leg
-/// handling lands. Video+audio (or any mixed `m=` media type) in one SDP is
-/// rejected with [`SdpError::MultiMediaMixedEssence`]. Three or more `m=`
-/// blocks yield [`SdpError::TooManyMediaBlocks`].
-pub(crate) fn reject_unsupported_multi_media(msg: &SDPMessage) -> Result<(), SdpError> {
+pub(crate) fn reject_unsupported_multi_media(
+    msg: &SDPMessage,
+    policy: DualLegPassthroughPolicy,
+) -> Result<(), SdpError> {
     let num_medias = msg.medias_len() as usize;
     if num_medias == 0 {
         return Err(SdpError::NoMedia);
@@ -31,12 +37,10 @@ pub(crate) fn reject_unsupported_multi_media(msg: &SDPMessage) -> Result<(), Sdp
         return Err(SdpError::TooManyMediaBlocks(num_medias));
     }
     if num_medias == 2 {
-        let first = msg.media(0).and_then(|m| m.media()).unwrap_or("");
-        let second = msg.media(1).and_then(|m| m.media()).unwrap_or("");
-        if !first.eq_ignore_ascii_case(second) {
-            return Err(SdpError::MultiMediaMixedEssence);
+        match policy {
+            DualLegPassthroughPolicy::RejectDualLeg => return Err(SdpError::DualLegNotSupported),
+            DualLegPassthroughPolicy::AllowDualLeg => sdp::validate_dual_leg_sdp(msg)?,
         }
-        return Err(SdpError::MultipleMedia(2));
     }
     Ok(())
 }
@@ -58,7 +62,10 @@ pub(crate) fn apply_session_overrides_in_place(
     Ok(())
 }
 
-/// Apply media-level [`SdpOverrides`] to every `m=` block in `msg`.
+/// Apply media-level [`SdpOverrides`] in place.
+///
+/// `caps_mode` applies to every `m=` block; IS-05 GObject transport scalars
+/// splice leg 0 only (no `-2` suffixed leg-2 property surface).
 pub(crate) fn apply_media_overrides_in_place(
     msg: &mut SDPMessage,
     overrides: &SdpOverrides<'_>,
@@ -68,27 +75,38 @@ pub(crate) fn apply_media_overrides_in_place(
         let Some(m) = msg.media_mut(idx) else {
             continue;
         };
-        apply_media_overrides_on_leg(m, overrides)?;
+        apply_caps_mode_override(m, overrides.caps_mode);
+    }
+    if let Some(m) = msg.media_mut(0) {
+        apply_primary_leg_transport_overrides(m, overrides)?;
     }
     Ok(())
 }
 
-/// Parse an SDP transport file, apply [`SdpOverrides`] in place, and
-/// serialise the result without round-tripping through [`crate::session::udp::types::UdpMedia`].
+/// Passthrough with an explicit dual-leg policy (`transport=nvdsudp` allows two `m=` blocks).
 pub(crate) fn passthrough_with_overrides(
     text: &str,
     overrides: &SdpOverrides<'_>,
+    policy: DualLegPassthroughPolicy,
 ) -> Result<String, SdpError> {
     let mut msg = SDPMessage::parse_buffer(text.as_bytes())
         .map_err(|e| SdpError::Parse(e.to_string()))?;
-    reject_unsupported_multi_media(&msg)?;
+    reject_unsupported_multi_media(&msg, policy)?;
     apply_session_overrides_in_place(&mut msg, overrides)?;
     apply_media_overrides_in_place(&mut msg, overrides)?;
     msg.as_text()
         .map_err(|e| SdpError::Serialise(e.to_string()))
 }
 
-fn apply_media_overrides_on_leg(
+fn transport_scalar_override_set(overrides: &SdpOverrides<'_>) -> bool {
+    overrides.destination_ip.is_some()
+        || overrides.interface_ip.is_some()
+        || overrides.destination_port.is_some()
+        || overrides.source_ip.is_some()
+        || overrides.source_port.is_some()
+}
+
+fn apply_primary_leg_transport_overrides(
     m: &mut SDPMediaRef,
     overrides: &SdpOverrides<'_>,
 ) -> Result<(), SdpError> {
@@ -143,7 +161,9 @@ fn apply_media_overrides_on_leg(
         }
     }
 
-    apply_caps_mode_override(m, overrides.caps_mode);
+    if transport_scalar_override_set(overrides) {
+        remove_media_attributes_by_key(m, "inactive");
+    }
 
     Ok(())
 }
@@ -385,7 +405,7 @@ mod tests {
             interface_ip: Some(&ip_str),
             ..Default::default()
         };
-        let out = passthrough_with_overrides(VIDEO_WITH_STALE_IFACE, &overrides).expect("splice");
+        let out = passthrough_with_overrides(VIDEO_WITH_STALE_IFACE, &overrides, DualLegPassthroughPolicy::RejectDualLeg).expect("splice");
         assert!(
             out.contains(&format!("a=x-nvnmos-iface-ip:{ip}")),
             "iface-ip must be overridden: {out}",
@@ -409,7 +429,7 @@ mod tests {
             ..Default::default()
         };
         let out =
-            passthrough_with_overrides(VIDEO_WITH_STALE_IFACE, &overrides).expect("splice");
+            passthrough_with_overrides(VIDEO_WITH_STALE_IFACE, &overrides, DualLegPassthroughPolicy::RejectDualLeg).expect("splice");
         assert!(
             out.contains("a=x-nvnmos-iface-ip:192.0.2.254"),
             "iface-ip override: {out}",
