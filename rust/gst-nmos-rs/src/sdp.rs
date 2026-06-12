@@ -525,6 +525,7 @@ fn parse_media_essence(msg: &SDPMessage, media: &SDPMediaRef) -> Result<ParsedMe
             "format dispatch above never produces FlowFormat::Unspecified"
         ),
     };
+    let raw_caps = crate::essence_caps::caps_from(&raw_caps, Some(&rtp_caps));
 
     Ok(ParsedMediaEssence {
         format,
@@ -1364,7 +1365,17 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
         FlowFormat::Audio => {
             let (ptime_ns, maxptime_ns) = resolve_audio_ptime(input.transport_caps);
             let resolved = resolved_audio_caps(input.essence_caps, input.transport_caps)?;
-            rtp_caps_from_raw_audio(&resolved, payload_type, ptime_ns, maxptime_ns)?
+            let channel_order = input
+                .transport_caps
+                .and_then(|c| c.structure(0))
+                .and_then(crate::essence_caps::channel_order_from_rtp_structure);
+            rtp_caps_from_raw_audio(
+                &resolved,
+                payload_type,
+                ptime_ns,
+                maxptime_ns,
+                channel_order.as_deref(),
+            )?
         }
         FlowFormat::Data => rtp_caps_from_raw_data(input.essence_caps, payload_type)?,
         FlowFormat::Unspecified => {
@@ -1372,12 +1383,14 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
         }
     };
 
+    let raw_caps = crate::essence_caps::caps_from(input.essence_caps, Some(&rtp_caps));
+
     let media = UdpMedia {
         format,
         primary: udp_leg_from_input(input),
         secondary: None,
         rtp_caps,
-        raw_caps: input.essence_caps.clone(),
+        raw_caps,
     };
 
     let origin_address = if input.interface_ip.is_empty() {
@@ -2154,6 +2167,7 @@ fn rtp_caps_from_raw_audio(
     payload_type: u8,
     ptime_ns: u64,
     maxptime_ns: Option<u64>,
+    channel_order: Option<&str>,
 ) -> Result<gst::Caps, SdpError> {
     let s = raw_caps
         .structure(0)
@@ -2192,8 +2206,16 @@ fn rtp_caps_from_raw_audio(
         let maxptime = format_ptime_ns_as_ms(max);
         caps_text.push_str(&format!(",a-maxptime=(string){maxptime}"));
     }
-    gst::Caps::from_str(&caps_text)
-        .map_err(|e| SdpError::UnsupportedEssence(format!("constructing rtp caps: {e}")))
+    let mut caps = gst::Caps::from_str(&caps_text)
+        .map_err(|e| SdpError::UnsupportedEssence(format!("constructing rtp caps: {e}")))?;
+    let order = channel_order
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::essence_caps::default_smpte2110_channel_order(channels));
+    let caps_mut = caps.make_mut();
+    if let Some(s) = caps_mut.structure_mut(0) {
+        s.set("channel-order", &order);
+    }
+    Ok(caps)
 }
 
 /// Build an `application/x-rtp,...` caps describing an RFC 8331 /
@@ -2820,6 +2842,11 @@ mod tests {
             "0.125",
             "ptime rides on rtp caps as `a-ptime` for the depayloader and SDP round-trip",
         );
+        assert_eq!(
+            rtp_s.get::<&str>("channel-order").unwrap(),
+            "SMPTE2110.(ST)",
+            "fmtp channel-order lands on rtp caps from parse",
+        );
 
         let raw_s = media.raw_caps.structure(0).expect("raw caps");
         assert_eq!(raw_s.name().as_str(), "audio/x-raw");
@@ -2827,6 +2854,15 @@ mod tests {
         assert_eq!(raw_s.get::<i32>("rate").unwrap(), 48_000);
         assert_eq!(raw_s.get::<i32>("channels").unwrap(), 2);
         assert_eq!(raw_s.get::<&str>("layout").unwrap(), "interleaved");
+        assert!(
+            raw_s.get::<gst::Bitmask>("channel-mask").is_ok(),
+            "parse path adds a default channel-mask for downstream elements",
+        );
+        assert_eq!(
+            raw_s.get::<&str>("channel-order").unwrap(),
+            "SMPTE2110.(ST)",
+            "fmtp channel-order is copied onto audio/x-raw for payloader/depayloader",
+        );
         assert!(
             raw_s.get::<&str>("ptime").is_err() && raw_s.get::<&str>("a-ptime").is_err(),
             "ptime must not leak onto audio/x-raw caps",
@@ -4539,7 +4575,7 @@ mod tests {
         init_gst();
         let raw = raw_audio_caps("S24BE", 48_000, 2);
         let rtp =
-            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None).expect("synth");
+            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("media").unwrap(), "audio");
         assert_eq!(s.get::<&str>("encoding-name").unwrap(), "L24");
@@ -4558,7 +4594,7 @@ mod tests {
         init_gst();
         let raw = raw_audio_caps("S16BE", 48_000, 2);
         let rtp =
-            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None).expect("synth");
+            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("encoding-name").unwrap(), "L16");
     }
@@ -4567,7 +4603,7 @@ mod tests {
     fn rtp_caps_from_raw_audio_emits_decimal_ptime_for_sub_millisecond() {
         init_gst();
         let raw = raw_audio_caps("S24BE", 48_000, 2);
-        let rtp = rtp_caps_from_raw_audio(&raw, 97, 125_000, None).expect("synth");
+        let rtp = rtp_caps_from_raw_audio(&raw, 97, 125_000, None, None).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(
             s.get::<&str>("a-ptime").unwrap(),
@@ -4581,7 +4617,7 @@ mod tests {
         init_gst();
         let raw = raw_audio_caps("S24BE", 48_000, 2);
         let rtp =
-            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, Some(4_000_000))
+            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, Some(4_000_000), None)
                 .expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("a-maxptime").unwrap(), "4");
@@ -4592,7 +4628,7 @@ mod tests {
         init_gst();
         let raw = raw_audio_caps("S32LE", 48_000, 2);
         let err =
-            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None).expect_err("reject");
+            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect_err("reject");
         assert!(matches!(err, SdpError::UnsupportedEssence(ref m) if m.contains("S32LE")));
     }
 
@@ -4601,14 +4637,35 @@ mod tests {
         init_gst();
         let original = raw_audio_caps("S24BE", 48_000, 2);
         let rtp =
-            rtp_caps_from_raw_audio(&original, 97, defaults::AUDIO_PTIME_NS, None).expect("synth");
-        let round_tripped = raw_caps_from_rtp_audio(&rtp).expect("parse back");
+            rtp_caps_from_raw_audio(&original, 97, defaults::AUDIO_PTIME_NS, None, None)
+                .expect("synth");
+        let round_tripped = crate::essence_caps::caps_from(
+            &raw_caps_from_rtp_audio(&rtp).expect("parse back"),
+            Some(&rtp),
+        );
         let rt = round_tripped.structure(0).expect("rt raw");
         let orig = original.structure(0).expect("orig");
         assert_eq!(rt.name(), orig.name());
         assert_eq!(rt.get::<&str>("format"), orig.get::<&str>("format"));
         assert_eq!(rt.get::<i32>("rate"), orig.get::<i32>("rate"));
         assert_eq!(rt.get::<i32>("channels"), orig.get::<i32>("channels"));
+        assert!(
+            rt.get::<gst::Bitmask>("channel-mask").is_ok(),
+            "round-trip parse adds default channel-mask",
+        );
+    }
+
+    #[test]
+    fn rtp_caps_from_raw_audio_emits_default_channel_order_for_six_channels() {
+        init_gst();
+        let raw = raw_audio_caps("S24BE", 48_000, 6);
+        let rtp =
+            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect("synth");
+        let s = rtp.structure(0).expect("rtp");
+        assert_eq!(
+            s.get::<&str>("channel-order").unwrap(),
+            "SMPTE2110.(U06)",
+        );
     }
 
     // -- rtp_caps_from_raw_data
@@ -4989,6 +5046,10 @@ mod tests {
         assert!(text.contains("m=audio 5004 RTP/AVP 97"));
         assert!(text.contains("a=rtpmap:97 L24/48000/2"));
         assert!(text.contains("a=ptime:1"), "default 1ms ptime:\n{text}");
+        assert!(
+            text.contains("channel-order=SMPTE2110.(ST)"),
+            "synthesised stereo SDP must include default channel-order:\n{text}",
+        );
         assert!(
             !text.contains("a=maxptime"),
             "maxptime omitted when unset:\n{text}",
