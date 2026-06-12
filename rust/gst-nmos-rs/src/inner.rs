@@ -82,11 +82,12 @@ const ANCHOR_NAME: &str = "anchor";
 const PROBE_WAIT: Duration = Duration::from_secs(2);
 
 /// How long to wait for the freshly-added inner chain to reach the
-/// outer bin's current state. Generous for the same reason — basesink
-/// is configured with `async=false` so READY→PAUSED is synchronous,
-/// and basesrc's start() typically completes in milliseconds; a 2s
-/// budget catches genuine stalls (e.g. libmxl `createFlowWriter`
-/// failing) without dragging out a healthy activation.
+/// outer bin's current state. Healthy swaps usually finish in
+/// milliseconds: on [`nmossink`] sender sinks are pinned `async=false`
+/// in `build_real_sink` (READY→PAUSED without preroll); on [`nmossrc`]
+/// receiver sources `start()` is typically fast. The 2s budget catches
+/// genuine stalls (e.g. libmxl `createFlowWriter` failing) without
+/// dragging out a healthy activation.
 const STATE_WAIT: gst::ClockTime = gst::ClockTime::from_seconds(2);
 
 /// Options for [`rebuild_chain_with_opts`]. When `drain_downstream` is
@@ -409,13 +410,12 @@ fn block_and_wait(
 /// would return `StateChangeError`, so the pipeline could never
 /// reach `READY` in the first place.
 ///
-/// The 2-second budget is deliberately generous: state changes on
-/// the streaming thread of a basesink can take O(100 ms) when
-/// preroll has to fire, but with `async=false` (see `build_mxlsink`)
-/// READY→PAUSED is synchronous and the whole transition completes
-/// in milliseconds. Anything longer is almost certainly a real
-/// stall worth surfacing to the controller rather than a slow
-/// transition we should wait out.
+/// The 2-second budget ([`STATE_WAIT`]) is deliberately generous.
+/// Sender inner chains (`nmossink`) rely on `async=false` pinned in
+/// `build_real_sink`; receiver inner chains (`nmossrc`) rely on a
+/// quick source `start()`. Anything longer is almost certainly a real
+/// stall worth surfacing to the controller rather than a slow transition
+/// we should wait out.
 fn wait_for_chain_state(
     cat: &gst::DebugCategory,
     bin: &gst::Bin,
@@ -571,20 +571,6 @@ pub(crate) fn build_fake_src(
 /// Build the inner `mxlsink` for `nmossink`. Fails with a clear
 /// message if the `mxl` plugin isn't on `GST_PLUGIN_PATH` or the
 /// element factory rejects the supplied properties.
-///
-/// `async=false` is critical for mid-stream IS-05 re-enables.
-/// `GstBaseSink`'s default `async=true` makes `READY→PAUSED`
-/// return `ASYNC` while it waits for the first buffer to preroll
-/// — fine when the whole pipeline is being brought up together
-/// (the bin's latency query + live-source detection drive things
-/// to PLAYING), but a deadlock when the sink is added to a
-/// running bin **and** the data path is gated by the anchor
-/// probe: no buffer can preroll because the probe is blocking
-/// downstream flow, so the state change never resolves. With
-/// `async=false` READY→PAUSED returns synchronously, the
-/// [`wait_for_chain_state`] check passes, the probe is removed,
-/// and the next buffer pushed through the anchor triggers
-/// `set_caps` + `render()` in the expected order.
 #[derive(Debug)]
 pub(crate) struct MxlSinkChain {
     /// Inner `mxlsink` added directly to the outer bin (same object as [`Self::bin`]).
@@ -644,7 +630,6 @@ pub(crate) fn build_mxlsink(domain_path: &str, flow_id: &str) -> Result<MxlSinkC
         .name("nmossink-mxl")
         .property("domain", domain_path)
         .property("flow-id", flow_id)
-        .property("async", false)
         .build()
         .with_context(|| {
             format!(
@@ -771,11 +756,9 @@ pub(crate) fn build_mxlsrc(
 /// instance) — the daemon-published SDP does not advertise an
 /// SSRC.
 ///
-/// `udpsink.async=false` mirrors `mxlsink`'s rationale (see
-/// [`build_mxlsink`]'s doc): mid-stream activation behind the
-/// anchor's block-probe needs synchronous READY→PAUSED so the
-/// state-change resolves before the probe is removed and buffers
-/// start flowing. `sync=true` preserves RTP packet timing.
+/// `sync=true` on `udpsink` preserves RTP packet timing. Sender
+/// `async=false` is applied by `nmossink` in `build_real_sink` after
+/// `transport-properties`.
 ///
 /// `bind-port` is set when `primary.source_port` is `Some` so
 /// the IS-04 / IS-05 advertised source port matches the wire.
@@ -858,7 +841,6 @@ pub(crate) fn build_udpsink(
         .name("nmossink-udpsink")
         .property("host", &media.primary.destination_ip)
         .property("port", i32::from(media.primary.destination_port))
-        .property("async", false)
         .build()
         .with_context(|| {
             format!(
@@ -1838,7 +1820,6 @@ mod tests {
         assert_eq!(udpsink.factory().expect("udpsink has a factory").name(), "udpsink");
         assert_eq!(udpsink.property::<String>("host"), "239.1.1.1");
         assert_eq!(udpsink.property::<i32>("port"), 5004);
-        assert!(!udpsink.property::<bool>("async"));
         assert!(udpsink.property::<bool>("sync"));
         let ghost = bin
             .static_pad("sink")
@@ -2885,6 +2866,86 @@ mod tests {
     #[test]
     fn rebuild_chain_opts_drain_defaults_to_false() {
         assert!(!RebuildChainOpts::default().drain_downstream);
+    }
+
+    /// Minimal nmossink topology with a live upstream source at PLAYING.
+    fn playing_nmossink_sim_bin() -> (gst::Pipeline, gst::Bin, gst::GhostPad) {
+        let caps = gst::Caps::from_str(
+            "video/x-raw,format=RGBA,width=320,height=240,framerate=30/1",
+        )
+        .expect("test caps");
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .build()
+            .expect("videotestsrc");
+        let filt = gst::ElementFactory::make("capsfilter")
+            .property("caps", &caps)
+            .build()
+            .expect("capsfilter");
+        let nmos_bin = gst::Bin::with_name("nmossink-sim");
+        let initial = build_fake_sink().expect("initial fake sink");
+        let ghost = build_initial(&nmos_bin, initial, "sink", gst::PadDirection::Sink)
+            .expect("build_initial");
+        nmos_bin.add_pad(&ghost).expect("add ghost pad");
+        let nmos_elem: &gst::Element = nmos_bin.upcast_ref();
+        pipeline
+            .add_many([&src, &filt, nmos_elem])
+            .expect("add pipeline children");
+        gst::Element::link_many([&src, &filt]).expect("link src to capsfilter");
+        filt.link_pads(Some("src"), &nmos_bin, Some("sink"))
+            .expect("link capsfilter to nmossink ghost");
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline -> PLAYING");
+        let (_ret, state, _pending) = pipeline.state(gst::ClockTime::from_seconds(5));
+        assert_eq!(state, gst::State::Playing, "pipeline must reach PLAYING");
+        (pipeline, nmos_bin, ghost)
+    }
+
+    fn fakesink_for_rebuild_test(name: &str, async_flag: bool) -> gst::Element {
+        gst::ElementFactory::make("fakesink")
+            .name(name)
+            .property("async", async_flag)
+            .property("sync", true)
+            .build()
+            .unwrap_or_else(|e| panic!("fakesink `{name}` (async={async_flag}): {e}"))
+    }
+
+    /// `GstBaseSink` defaults to `async=true`. Mid-stream [`rebuild_chain`]
+    /// blocks the anchor pad, so a newly-added sink cannot preroll and
+    /// [`wait_for_chain_state`] times out.
+    #[test]
+    fn rebuild_chain_mid_playing_fails_when_inner_sink_async_true() {
+        init_gst();
+        let cat = test_log_cat();
+        let (pipeline, nmos_bin, ghost) = playing_nmossink_sim_bin();
+        let async_sink = fakesink_for_rebuild_test("inner-async-true", true);
+
+        let err = rebuild_chain(cat, &nmos_bin, &ghost, &async_sink, "sink")
+            .expect_err("async=true inner must stall behind anchor block probe");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("ASYNC"),
+            "wait_for_chain_state should report ASYNC stall, got: {msg}",
+        );
+
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    /// `async=false` lets READY→PAUSED complete synchronously while the
+    /// anchor probe blocks downstream preroll.
+    #[test]
+    fn rebuild_chain_mid_playing_succeeds_when_inner_sink_async_false() {
+        init_gst();
+        let cat = test_log_cat();
+        let (pipeline, nmos_bin, ghost) = playing_nmossink_sim_bin();
+        let sync_sink = fakesink_for_rebuild_test("inner-async-false", false);
+
+        rebuild_chain(cat, &nmos_bin, &ghost, &sync_sink, "sink")
+            .expect("async=false inner must swap while PLAYING");
+
+        let _ = pipeline.set_state(gst::State::Null);
     }
 
     fn leg_with_source(ip: &str) -> UdpLeg {
