@@ -119,15 +119,16 @@ pub(crate) const TRANSPORT_BLURB: &str =
      Requires ConnectX-5+ and the Rivermax SDK.";
 
 pub(crate) const MXL_DOMAIN_ID_BLURB: &str =
-    "MXL Domain identifier (UUID) advertised in NMOS as \
+    "MXL Domain identifier (UUID) included as \
      `urn:x-nvnmos:tag:mxl-domain-id` in the transport file. \
      Required when transport=mxl, but may be omitted if \
      `mxl-domain-path` points at a directory containing a \
      `domain_def.json` (AMWA BCP-007-03 WIP): the file's `id` is \
      then used. Overrides the transport file's tag when both are \
      supplied. Cross-checked against `domain_def.json` when both \
-     are supplied (mismatch is an error — this is host-level \
-     identity, not just labelling).";
+     are supplied (mismatch is an error). On `nmossrc`, set before \
+     NULL\u{2192}READY; on `nmossink` it may also be set in READY \
+     for deferred sender registration.";
 
 pub(crate) const TRANSPORT_FILE_PATH_BLURB: &str =
     "Filesystem path read at NULL\u{2192}READY into `transport-file`. \
@@ -159,14 +160,13 @@ pub(crate) const DEPAY_PROPERTIES_BLURB: &str =
      logged if non-empty). Takes effect on the next chain build.";
 
 pub(crate) const AUTO_ACTIVATE_BLURB: &str =
-    "Bring the inner `mxlsink` / `mxlsrc` up immediately at \
-     NULL\u{2192}READY (or, for deferred-mode senders, READY\u{2192}PAUSED) \
-     once the configuring flow_def has been resolved, and call \
-     `SyncResourceState` on the daemon to advertise the resource as \
-     active on IS-04/IS-05 without waiting for an IS-05 PATCH. \
-     Default `false` gives canonical NMOS behaviour: the resource is \
-     registered (so it appears on IS-04) but the data path stays on \
-     the fake chain until an external IS-05 controller activates it.";
+    "When `true`, swap in the real transport sink or source (instead of the \
+     fake chain) once the configuring transport file has been resolved at \
+     NULL\u{2192}READY (or READY\u{2192}PAUSED for deferred senders), and call \
+     `SyncResourceState` so IS-04/IS-05 show active without an IS-05 PATCH. \
+     Does not force PLAYING — child state still follows the bin. Default \
+     `false`: register on IS-04 but keep the fake chain until an external \
+     IS-05 controller activates the resource.";
 
 /// Snapshot of the properties needed to open a session, taken under
 /// the per-element settings lock so the lock isn't held over the
@@ -195,7 +195,7 @@ pub(crate) struct CommonSettings {
     /// `by_name` index by `(node_seed, side, name)` and the activation
     /// callback surfaces the side alongside the name.
     pub(crate) name: String,
-    /// MXL Domain identifier (UUID) advertised in NMOS via
+    /// MXL Domain identifier (UUID) included as
     /// `urn:x-nvnmos:tag:mxl-domain-id` in the flow_def. If
     /// `mxl_domain_path` is also set and contains a `domain_def.json`
     /// (AMWA BCP-007-03 WIP), the file's `id` is cross-checked

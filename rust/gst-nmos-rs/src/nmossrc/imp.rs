@@ -151,12 +151,10 @@ impl ObjectImpl for NmosSrc {
                     .nick("Daemon URI")
                     .blurb(crate::session::DAEMON_URI_BLURB)
                     .default_value(Some(DEFAULT_DAEMON_URI))
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("node-seed")
                     .nick("Node seed")
                     .blurb(crate::session::NODE_SEED_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecUInt::builder("http-port")
                     .nick("HTTP port")
@@ -164,32 +162,26 @@ impl ObjectImpl for NmosSrc {
                     .minimum(0)
                     .maximum(65535)
                     .default_value(0)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("host-name")
                     .nick("Host name")
                     .blurb(crate::session::HOST_NAME_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("domain")
                     .nick("NMOS DNS domain")
                     .blurb(crate::session::DOMAIN_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("registration-url")
                     .nick("Registration URL")
                     .blurb(crate::session::REGISTRATION_URL_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("system-url")
                     .nick("System URL")
                     .blurb(crate::session::SYSTEM_URL_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecEnum::builder_with_default("transport", Transport::Mxl)
                     .nick("Transport")
                     .blurb(crate::session::TRANSPORT_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("receiver-name")
                     .nick("NMOS receiver name")
@@ -203,23 +195,22 @@ impl ObjectImpl for NmosSrc {
                          Overrides the transport file's tag when both \
                          are supplied.",
                     )
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("mxl-domain-id")
-                    .nick("MXL Domain id")
+                    .nick("MXL domain id")
                     .blurb(crate::session::MXL_DOMAIN_ID_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("mxl-domain-path")
-                    .nick("MXL Domain path")
+                    .nick("MXL domain path")
                     .blurb(
                         "Local filesystem path identifying the MXL Domain on \
                          this host. If the directory contains a \
                          `domain_def.json` (AMWA BCP-007-03 WIP) its `id` is \
                          used to populate `mxl-domain-id` (or cross-checked \
                          against it when both are set). Fed into the inner \
-                         `mxlsrc` `domain=` property at NULL→READY when an \
-                         `mxl-flow-id` is also pinned.",
+                         `mxlsrc` `domain=` property when the real inner \
+                         chain is installed (after IS-05 activation, or at \
+                         startup when `auto-activate=true`).",
                     )
                     .mutable_ready()
                     .build(),
@@ -235,13 +226,11 @@ impl ObjectImpl for NmosSrc {
                          external controller. Overrides the transport \
                          file's top-level `id` when both are supplied.",
                     )
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecBoolean::builder("auto-activate")
                     .nick("Auto-activate")
                     .blurb(crate::session::AUTO_ACTIVATE_BLURB)
                     .default_value(false)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("label")
                     .nick("Label")
@@ -250,7 +239,6 @@ impl ObjectImpl for NmosSrc {
                          the transport file's top-level `label` when both \
                          are supplied.",
                     )
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("description")
                     .nick("Description")
@@ -259,7 +247,6 @@ impl ObjectImpl for NmosSrc {
                          Overrides the transport file's top-level \
                          `description` when both are supplied.",
                     )
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("transport-file")
                     .nick("Transport file")
@@ -271,12 +258,10 @@ impl ObjectImpl for NmosSrc {
                          use `transport-file-path` instead. Mutually exclusive with \
                          `transport-file-path`. Required unless `caps` is provided.",
                     )
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("transport-file-path")
                     .nick("Transport file path")
                     .blurb(crate::session::TRANSPORT_FILE_PATH_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Caps>("caps")
                     .nick("Essence caps")
@@ -289,12 +274,10 @@ impl ObjectImpl for NmosSrc {
                          mismatch is a hard error (the caps and the flow's essence shape \
                          must describe the same thing).",
                     )
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Caps>("transport-caps")
                     .nick("Transport caps")
                     .blurb(crate::session::TRANSPORT_CAPS_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Structure>("transport-properties")
                     .nick("Transport source properties")
@@ -322,7 +305,6 @@ impl ObjectImpl for NmosSrc {
                          for wide is \"present + non-empty\").",
                     )
                     .default_value(CapsMode::Auto)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("source-ip")
                     .nick("Source IP")
@@ -339,7 +321,6 @@ impl ObjectImpl for NmosSrc {
                          Honoured only on the RTP transports; ignored \
                          on `mxl`.",
                     )
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("interface-ip")
                     .nick("Interface IP")
@@ -353,7 +334,6 @@ impl ObjectImpl for NmosSrc {
                          (let the kernel pick). Honoured only on the \
                          RTP transports; ignored on `mxl`.",
                     )
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("multicast-ip")
                     .nick("Multicast IP")
@@ -365,7 +345,6 @@ impl ObjectImpl for NmosSrc {
                          unset (unicast reception). Honoured only on \
                          the RTP transports; ignored on `mxl`.",
                     )
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecUInt::builder("destination-port")
                     .nick("Destination port")
@@ -382,7 +361,6 @@ impl ObjectImpl for NmosSrc {
                     .minimum(0)
                     .maximum(65535)
                     .default_value(0)
-                    .mutable_ready()
                     .build(),
             ]
         });
