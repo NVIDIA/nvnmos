@@ -136,6 +136,7 @@ use gstreamer as gst;
 
 mod daemon;
 mod domain;
+mod essence_caps;
 mod flow_def;
 mod iface;
 mod inner;
