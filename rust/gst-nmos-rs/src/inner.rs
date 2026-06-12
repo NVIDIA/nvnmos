@@ -297,6 +297,58 @@ fn swap_chain_inner(
     wait_for_chain_state(cat, bin, new_chain)
 }
 
+/// Push a downstream CAPS renegotiation on an [`nmossrc`] ghost `src`
+/// pad after a wide-receiver activation swap.
+///
+/// Downstream peers may have negotiated against an earlier fake chain
+/// or a previous activation's essence shape. Pushing CAPS on the ghost
+/// (and storing it sticky on the anchor outer pad) tells them the new
+/// format before the first buffer arrives.
+pub(crate) fn push_downstream_caps_renegotiation(
+    cat: &gst::DebugCategory,
+    ghost: &gst::GhostPad,
+    caps: &gst::Caps,
+) -> bool {
+    if ghost.direction() != gst::PadDirection::Src {
+        return false;
+    }
+    if ghost.peer().is_none() {
+        gst::debug!(
+            cat,
+            "downstream caps renegotiation: no peer on ghost `{}`, skipping",
+            ghost.name(),
+        );
+        return false;
+    }
+
+    if let Some(anchor_outer) = ghost.target() {
+        let sticky = gst::event::Caps::new(caps);
+        if anchor_outer.store_sticky_event(&sticky).is_err() {
+            gst::warning!(
+                cat,
+                "downstream caps renegotiation: failed to store sticky CAPS on `{}`",
+                anchor_outer.name(),
+            );
+        }
+    }
+
+    let pushed = ghost.push_event(gst::event::Caps::new(caps));
+    if pushed {
+        gst::info!(
+            cat,
+            "downstream caps renegotiation: pushed `{caps}` on ghost `{}`",
+            ghost.name(),
+        );
+    } else {
+        gst::warning!(
+            cat,
+            "downstream caps renegotiation: ghost `{}` rejected CAPS event",
+            ghost.name(),
+        );
+    }
+    pushed
+}
+
 /// Link the anchor to a new inner chain without caps/template checks
 /// so a prior inner's sticky caps on the anchor do not block the swap.
 fn link_pads_for_chain_swap(

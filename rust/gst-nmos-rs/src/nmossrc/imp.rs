@@ -134,6 +134,9 @@ pub struct NmosSrc {
     /// the fake chain and a real `mxlsrc` sub-bin as configuration
     /// / activations land.
     ghost: Mutex<Option<gst::GhostPad>>,
+    /// Last essence caps pushed downstream after a wide-receiver
+    /// activation (skip redundant CAPS events when unchanged).
+    last_downstream_caps: Mutex<Option<gst::Caps>>,
 }
 
 #[glib::object_subclass]
@@ -1008,6 +1011,9 @@ impl NmosSrc {
                 reason: format!("nmossrc: swapping inner element: {e:#}"),
             };
         }
+        if matches!(&plan.ack, ActivationAck::Success) {
+            self.maybe_push_wide_receiver_downstream_caps(plan);
+        }
         match &plan.ack {
             ActivationAck::Success => ActivationOutcome::Applied,
             ActivationAck::Failure { reason } => ActivationOutcome::Failed {
@@ -1028,6 +1034,38 @@ fn install_initial_fake_chain(bin: &gst::Bin) -> Result<gst::GhostPad, glib::Boo
     bin.add_pad(&ghost)
         .map_err(|e| glib::bool_error!("adding ghost pad to nmossrc: {e}"))?;
     Ok(ghost)
+}
+
+/// Detect wide Receiver Caps from the effective configuring transport
+/// artifact for this activation (`a=x-nvnmos-caps` in SDP, or the MXL
+/// flow_def wide-caps tag). Dispatches on [`TransportConfig`] so each
+/// transport uses the same marker as its inner-chain policy.
+fn transport_config_indicates_wide_receiver(config: &TransportConfig) -> bool {
+    match config {
+        TransportConfig::Udp { transport_file, .. }
+        | TransportConfig::NvDsUdp { transport_file, .. } => transport_file
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .is_some_and(crate::sdp::indicates_wide_receiver_caps),
+        TransportConfig::Mxl { transport_file, .. } => transport_file
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .is_some_and(mxl_indicates_wide_receiver_caps),
+    }
+}
+
+/// Essence caps to advertise downstream after a wide-receiver activation.
+fn wide_activation_downstream_caps(plan: &ActivationPlan) -> Option<gst::Caps> {
+    match &plan.inner {
+        InnerConfig::Real(TransportConfig::Udp { media, .. })
+        | InnerConfig::Real(TransportConfig::NvDsUdp { media, .. }) => {
+            Some(media.raw_caps.clone())
+        }
+        InnerConfig::Real(TransportConfig::Mxl { transport_file, .. }) => {
+            caps_from_flow_def(transport_file.as_deref()).ok().flatten()
+        }
+        _ => None,
+    }
 }
 
 /// Flow-def transport file → enriched essence caps (for capssetter / fake chain).
@@ -1089,6 +1127,39 @@ fn mxl_indicates_wide_receiver_caps(text: &str) -> bool {
             );
         })
         .unwrap_or(false)
+}
+
+impl NmosSrc {
+    fn maybe_push_wide_receiver_downstream_caps(&self, plan: &ActivationPlan) {
+        let InnerConfig::Real(config) = &plan.inner else {
+            return;
+        };
+        if !transport_config_indicates_wide_receiver(config) {
+            return;
+        }
+        let Some(caps) = wide_activation_downstream_caps(plan) else {
+            gst::debug!(
+                CAT,
+                "nmossrc: wide activation has no downstream essence caps to push",
+            );
+            return;
+        };
+        let mut last = self.last_downstream_caps.lock().unwrap();
+        if last.as_ref().is_some_and(|prev| prev == &caps) {
+            gst::debug!(
+                CAT,
+                "nmossrc: wide activation downstream caps unchanged (`{caps}`), skipping push",
+            );
+            return;
+        }
+        let ghost = self.ghost.lock().unwrap();
+        let Some(ghost) = ghost.as_ref() else {
+            return;
+        };
+        if inner::push_downstream_caps_renegotiation(&CAT, ghost, &caps) {
+            *last = Some(caps);
+        }
+    }
 }
 
 /// Caps for the optional MXL inner `capssetter`. When the effective
@@ -1482,6 +1553,97 @@ mod tests {
                 .expect("narrow udp")
                 .is_some(),
         );
+    }
+
+    #[test]
+    fn transport_config_indicates_wide_receiver_reads_activation_marker() {
+        let _ = gst::init();
+        const WIDE_SDP: &str = concat!(
+            "v=0\r\n",
+            "o=- 1 0 IN IP4 192.0.2.10\r\n",
+            "s=Example\r\n",
+            "t=0 0\r\n",
+            "m=video 5004 RTP/AVP 96\r\n",
+            "c=IN IP4 239.2.2.2/64\r\n",
+            "a=rtpmap:96 raw/90000\r\n",
+            "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=25/1; depth=10\r\n",
+            "a=x-nvnmos-caps:96\r\n",
+        );
+        const NARROW_SDP: &str = concat!(
+            "v=0\r\n",
+            "o=- 1 0 IN IP4 192.0.2.10\r\n",
+            "s=Example\r\n",
+            "t=0 0\r\n",
+            "m=video 5004 RTP/AVP 96\r\n",
+            "c=IN IP4 239.2.2.2/64\r\n",
+            "a=rtpmap:96 raw/90000\r\n",
+            "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=25/1; depth=10\r\n",
+        );
+        let wide_udp = udp_activation_plan(WIDE_SDP).inner;
+        let narrow_udp = udp_activation_plan(NARROW_SDP).inner;
+        let InnerConfig::Real(wide_udp_cfg) = &wide_udp else {
+            panic!("udp plan");
+        };
+        let InnerConfig::Real(narrow_udp_cfg) = &narrow_udp else {
+            panic!("udp plan");
+        };
+        let wide_mxl = mxl_activation_plan(
+            r#"{"format":"urn:x-nmos:format:video","tags":{"urn:x-nvnmos:tag:caps":[""]}}"#,
+        )
+        .inner;
+        let InnerConfig::Real(wide_mxl_cfg) = &wide_mxl else {
+            panic!("mxl plan");
+        };
+
+        assert!(transport_config_indicates_wide_receiver(wide_udp_cfg));
+        assert!(!transport_config_indicates_wide_receiver(narrow_udp_cfg));
+        assert!(transport_config_indicates_wide_receiver(wide_mxl_cfg));
+    }
+
+    #[test]
+    fn wide_activation_downstream_caps_returns_essence_from_activation() {
+        use std::str::FromStr;
+        let _ = gst::init();
+        const WIDE_SDP: &str = concat!(
+            "v=0\r\n",
+            "o=- 1 0 IN IP4 192.0.2.10\r\n",
+            "s=Example\r\n",
+            "t=0 0\r\n",
+            "m=video 5004 RTP/AVP 96\r\n",
+            "c=IN IP4 239.2.2.2/64\r\n",
+            "a=rtpmap:96 raw/90000\r\n",
+            "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=25/1; depth=10\r\n",
+            "a=x-nvnmos-caps:96\r\n",
+        );
+        const WIDE_MXL: &str = r#"{
+            "format":"urn:x-nmos:format:video",
+            "media_type":"video/v210",
+            "grain_rate":{"numerator":25,"denominator":1},
+            "frame_width":1920,
+            "frame_height":1080,
+            "tags":{"urn:x-nvnmos:tag:caps":[""]}
+        }"#;
+        let udp_plan = udp_activation_plan(WIDE_SDP);
+        let udp_caps = wide_activation_downstream_caps(&udp_plan).expect("udp essence");
+        let media = crate::sdp::parse_sdp(WIDE_SDP).expect("parse");
+        assert_eq!(udp_caps, media.raw_caps);
+
+        let mxl_plan = mxl_activation_plan(WIDE_MXL);
+        let mxl_caps = wide_activation_downstream_caps(&mxl_plan).expect("mxl essence");
+        let expected = gst::Caps::from_str(
+            "video/x-raw,format=v210,width=1920,height=1080,framerate=25/1",
+        )
+        .expect("expected caps");
+        assert_eq!(mxl_caps, expected);
+
+        let fake_plan = ActivationPlan {
+            inner: InnerConfig::Fake {
+                kind: crate::session::FakeKind::NotActive,
+                detail: "deactivation".into(),
+            },
+            ack: ActivationAck::Success,
+        };
+        assert!(wide_activation_downstream_caps(&fake_plan).is_none());
     }
 
     #[test]
