@@ -5,14 +5,11 @@
 
 pub(crate) mod types;
 
-use std::sync::Mutex;
-
 use anyhow::{Context, bail};
 use gstreamer as gst;
 
 use super::{CommonSettings, FakeKind, InnerConfig, TransportConfig};
 use super::types::Side;
-use crate::daemon::Session;
 use crate::sdp::{self, DualLegPassthroughPolicy, SdpOverrides};
 use crate::types::{CapsMode, Transport};
 
@@ -58,7 +55,7 @@ pub(super) fn receiver_connection_address(settings: &CommonSettings) -> &str {
 
 /// Build [`sdp::SdpBuildInput`] from element settings and essence caps.
 /// Shared by NULL→READY caps synthesis and READY→PAUSED deferred
-/// sender registration.
+/// sender AddSender.
 pub(super) fn sdp_build_input<'a>(
     settings: &'a CommonSettings,
     essence_caps: &'a gst::Caps,
@@ -119,7 +116,7 @@ pub(super) fn synthesise_or_passthrough_udp(
 }
 
 /// When a Sender opens without `transport-file*` or `caps`, keep the
-/// fake chain until READY→PAUSED deferred registration (mirrors MXL).
+/// fake chain until READY→PAUSED deferred AddSender (mirrors MXL).
 fn gate_deferred_sender_udp(inner: InnerConfig, settings: &CommonSettings) -> InnerConfig {
     if settings.side == Side::Sender
         && matches!(
@@ -140,8 +137,8 @@ fn gate_deferred_sender_udp(inner: InnerConfig, settings: &CommonSettings) -> In
 }
 
 /// Synthesise configuring SDP and resolve the inner chain for deferred
-/// RTP sender registration from fixated upstream peer caps.
-pub(super) fn synthesise_deferred_sender_rtp(
+/// RTP sender AddSender from fixated upstream peer caps.
+pub(super) fn synthesise_deferred_sender_udp(
     element: &str,
     settings: &CommonSettings,
     essence_caps: &gst::Caps,
@@ -174,19 +171,6 @@ pub(super) fn synthesise_deferred_sender_rtp(
     };
     let inner = super::apply_auto_activate_gate(inner, settings.auto_activate);
     Ok((text, inner))
-}
-
-/// Register an RTP Sender from fixated peer caps at READY→PAUSED.
-pub(super) fn register_deferred_rtp(
-    cat: &gst::DebugCategory,
-    element: &str,
-    settings: &CommonSettings,
-    session: &Mutex<Option<Session>>,
-    fixated: &gst::Caps,
-) -> Result<InnerConfig, anyhow::Error> {
-    let (text, inner) = synthesise_deferred_sender_rtp(element, settings, fixated)?;
-    gst::info!(cat, "{element}: deferred mode: synthesised SDP");
-    super::finish_deferred_add_sender(cat, element, session, inner, &text, settings)
 }
 
 pub(crate) fn property_overrides_udp(settings: &CommonSettings) -> SdpOverrides<'_> {
@@ -296,7 +280,7 @@ pub(crate) fn decide_inner_config_udp(
     let Some(text) = transport_file else {
         return Ok(InnerConfig::Fake {
             kind: FakeKind::Misconfigured,
-            detail: "caps or transport-file required for NMOS registration".into(),
+            detail: "caps or transport-file required for AddSender / AddReceiver".into(),
         });
     };
     finish_udp_inner_config(
@@ -324,7 +308,7 @@ pub(crate) fn decide_inner_config_nvdsudp(
     let Some(text) = transport_file else {
         return Ok(InnerConfig::Fake {
             kind: FakeKind::Misconfigured,
-            detail: "caps or transport-file required for NMOS registration".into(),
+            detail: "caps or transport-file required for AddSender / AddReceiver".into(),
         });
     };
     finish_udp_inner_config(
@@ -1096,7 +1080,7 @@ mod tests {
         /// the empty-string / zero "unset" sentinel convention
         /// flows through to the splice helper as "leave the
         /// file's value alone". The shared `settings()` fixture
-        /// pre-fills `name` for IS-04 registration coverage; we
+        /// pre-fills `name` for IS-04 add-resource coverage; we
         /// clear it here together with the other identity /
         /// network fields so the test asserts on the splice
         /// builder's behaviour, not the fixture's defaults.
@@ -1221,7 +1205,7 @@ mod tests {
         }
 
         /// Sender with no `transport_file` and no `caps` defers
-        /// registration to READY→PAUSED (fake `NotConfigured`).
+        /// AddSender to READY→PAUSED (fake `NotConfigured`).
         #[test]
         fn resolve_inner_config_udp_sender_no_caps_no_file_is_not_configured() {
             let s = CommonSettings {
@@ -1920,8 +1904,8 @@ mod tests {
         }
     }
 
-    mod register_deferred {
-        use super::super::super::register_deferred;
+    mod add_deferred_sender {
+        use super::super::super::add_deferred_sender;
         use super::*;
         use std::str::FromStr;
 
@@ -1953,9 +1937,9 @@ mod tests {
         }
 
         #[test]
-        fn synthesise_deferred_sender_rtp_video_udp_builds_real_inner() {
+        fn synthesise_deferred_sender_udp_video_udp_builds_real_inner() {
             let s = sender_udp_settings(Transport::Udp);
-            let (text, inner) = synthesise_deferred_sender_rtp(
+            let (text, inner) = synthesise_deferred_sender_udp(
                 "nmossink",
                 &s,
                 &video_peer_caps(),
@@ -1967,9 +1951,9 @@ mod tests {
         }
 
         #[test]
-        fn synthesise_deferred_sender_rtp_anc_nvdsudp_builds_real_inner() {
+        fn synthesise_deferred_sender_udp_anc_nvdsudp_builds_real_inner() {
             let s = sender_udp_settings(Transport::NvDsUdp);
-            let (text, inner) = synthesise_deferred_sender_rtp(
+            let (text, inner) = synthesise_deferred_sender_udp(
                 "nmossink",
                 &s,
                 &anc_peer_caps(),
@@ -1980,12 +1964,12 @@ mod tests {
         }
 
         #[test]
-        fn synthesise_deferred_sender_rtp_unset_destination_ip_uses_zero_address() {
+        fn synthesise_deferred_sender_udp_unset_destination_ip_uses_zero_address() {
             let s = CommonSettings {
                 destination_ip: String::new(),
                 ..sender_udp_settings(Transport::Udp)
             };
-            let (text, inner) = synthesise_deferred_sender_rtp("nmossink", &s, &video_peer_caps())
+            let (text, inner) = synthesise_deferred_sender_udp("nmossink", &s, &video_peer_caps())
                 .expect("unset destination-ip synthesises");
             assert!(
                 text.contains("c=IN IP4 0.0.0.0"),
@@ -1995,10 +1979,10 @@ mod tests {
         }
 
         #[test]
-        fn register_deferred_rtp_unsupported_video_format_is_error() {
+        fn add_deferred_sender_udp_unsupported_video_format_is_error() {
             let caps = gst::Caps::from_str("video/x-raw,format=I420,width=1920,height=1080")
                 .expect("caps");
-            let err = register_deferred(
+            let err = add_deferred_sender(
                 &cat(),
                 "nmossink",
                 &sender_udp_settings(Transport::Udp),
@@ -2013,8 +1997,8 @@ mod tests {
         }
 
         #[test]
-        fn register_deferred_rtp_no_open_session_is_error() {
-            let err = register_deferred(
+        fn add_deferred_sender_udp_no_open_session_is_error() {
+            let err = add_deferred_sender(
                 &cat(),
                 "nmossink",
                 &sender_udp_settings(Transport::Udp2),

@@ -38,7 +38,7 @@ use crate::types::FlowFormat;
 /// scalars (`destination-ip`, `interface-ip`, …); there is no `-2`
 /// suffixed leg-2 property surface. ST 2022-7 uses a dual-`m=`
 /// **transport file** on `transport=nvdsudp` (configuring passthrough
-/// preserves both legs for NMOS registration) and inner-element
+/// preserves both legs for AddSender / AddReceiver) and inner-element
 /// redundancy properties on receive (comma-separated `st2022-7-streams`,
 /// `local-iface-ip`, and `source-address` on `nvdsudpsrc`). Dual-leg
 /// `transport-file*` on `udp` / `udp2` is rejected at element creation.

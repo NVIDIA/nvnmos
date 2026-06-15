@@ -34,7 +34,7 @@ To cover:
 We pick an out-of-process design after considering the in-process bin alternative:
 
 - **Daemon `nvnmosd`** wraps NvNmos and owns one or more NMOS Nodes. Survives pipeline restarts. Hosts multiple pipelines and multiple client processes under one or more shared Nodes.
-- **`nmossrc` and `nmossink`** are single-pad Rust GStreamer elements. Each opens a session with `nvnmosd`, registers its `transport-file`, subscribes to activations, and wraps an inner transport src/sink:
+- **`nmossrc` and `nmossink`** are single-pad Rust GStreamer elements. Each opens a session with `nvnmosd`, adds its Sender or Receiver from the transport file (or synthesised flow_def), subscribes to activations, and wraps an inner transport src/sink:
   - MXL: `mxlsrc` / `mxlsink` from `gst-mxl-rs` (Rust).
   - ST 2110 with Rivermax: `nvdsudpsrc` / `nvdsudpsink` (C, DeepStream).
   - ST 2110 without Rivermax: `udpsrc` / `udpsink` + appropriate RTP (de)payloaders.
@@ -105,7 +105,7 @@ service NvnmosDaemon {
   // Many sessions across many client processes may share a Node by
   // node_seed. The session handle distinguishes them so that the daemon
   // can refcount Node lifetime correctly, route activations only to the
-  // session that registered the affected resource, and drop the right
+  // session that added the affected resource, and drop the right
   // resources when a stream dies.
   rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
   rpc CloseSession(CloseSessionRequest) returns (Empty);
@@ -283,20 +283,20 @@ For MXL the per-format mapping to `flow_def.json` is derivable from essence caps
 
 #### Deferred mode (`nmossink` only)
 
-If neither `transport-file` nor `caps` is provided, `nmossink` defers NMOS registration to **READY → PAUSED** and derives `caps` from a `gst_pad_peer_query_caps` against upstream. Standard GStreamer caps negotiation does the work; the user can constrain with `capsfilter ! nmossink` the way they would with any other sink. `sender-name` (and `iface-ip` or `mxl-domain-id` as relevant) is still required as a property because it's not derivable from the pipeline. `nmossrc` cannot use deferred mode — there is no peer to query.
+If neither `transport-file` nor `caps` is provided, `nmossink` defers AddSender to **READY → PAUSED** and derives `caps` from a `gst_pad_peer_query_caps` against upstream. Standard GStreamer caps negotiation does the work; the user can constrain with `capsfilter ! nmossink` the way they would with any other sink. `sender-name` (and `iface-ip` or `mxl-domain-id` as relevant) is still required as a property because it's not derivable from the pipeline. `nmossrc` cannot use deferred mode — there is no peer to query.
 
-**No data needs to flow for the sender to register.** Caps negotiation in GStreamer is a query-based mechanism (pad template caps + `peer_query_caps`), not a buffer-driven one. For a typical flow-transform pipeline `nmossrc ! transform ! nmossink`:
+**No data needs to flow for the sender to be added.** Caps negotiation in GStreamer is a query-based mechanism (pad template caps + `peer_query_caps`), not a buffer-driven one. For a typical flow-transform pipeline `nmossrc ! transform ! nmossink`:
 
 - `nmossrc`'s source-pad caps are fixed from its `transport-file` at NULL→READY (these are the caps the receiver *would* receive, known the moment the session is opened — independent of whether the receiver has been activated by a controller or whether any data has arrived on the wire).
 - They propagate downstream during READY→PAUSED.
-- The deferred `nmossink`'s peer query lands on those caps and registers the sender with the daemon.
+- The deferred `nmossink`'s peer query lands on those caps and runs `AddSender` against the daemon.
 - The pipeline reaches PAUSED as part of any normal `set_state(PLAYING)` transition — typically in milliseconds, well before the receiver is activated or starts producing buffers.
 
 Both endpoints are at IS-04 by the time the pipeline is up, and there is no Catch-22 (PAUSED ≠ streaming-to-network). The internal gating mechanism (Phase 1 as-built: the inner chain is a `fakesink` behind the anchor while deactivated — see [*Phase 1 as-built: anchor + block-probe*](#phase-1-as-built-anchor--block-probe); originally planned as `output-selector → fakesink`, per *Sink deactivation*) keeps the inner wire sink out of the data path until an IS-05 activation arrives.
 
-**Where deferred mode does break:** any chain where an intermediate element determines its output caps from buffer content — `h264parse` needing SPS/PPS, decoders inferring colorimetry from packet headers, etc. The peer query at PAUSED can't fix caps if upstream hasn't seen data. For those pipelines, declare `caps` explicitly on `nmossink` (Route B) and the sender registers at NULL→READY instead, alongside the receiver.
+**Where deferred mode does break:** any chain where an intermediate element determines its output caps from buffer content — `h264parse` needing SPS/PPS, decoders inferring colorimetry from packet headers, etc. The peer query at PAUSED can't fix caps if upstream hasn't seen data. For those pipelines, declare `caps` explicitly on `nmossink` (Route B) and the sender is added at NULL→READY instead, alongside the receiver.
 
-**Timing subtlety to be aware of.** In deferred mode the sender registers one state transition after the receiver (PAUSED vs READY). A controller polling IS-04 during the narrow window between NULL→READY and READY→PAUSED will see the receiver listed but not the sender. Harmless in practice (the window is tens to hundreds of milliseconds for a normal pipeline startup), but if a deployment cares — for instance because a discovery scan is running in parallel with pipeline startup — declare `caps` explicitly and registration moves to READY for both.
+**Timing subtlety to be aware of.** In deferred mode the sender is added one state transition after the receiver (PAUSED vs READY). A controller polling IS-04 during the narrow window between NULL→READY and READY→PAUSED will see the receiver listed but not the sender. Harmless in practice (the window is tens to hundreds of milliseconds for a normal pipeline startup), but if a deployment cares — for instance because a discovery scan is running in parallel with pipeline startup — declare `caps` explicitly and AddSender / AddReceiver both run at READY.
 
 #### Narrow vs wide caps (`receiver-caps-mode`)
 
@@ -376,7 +376,7 @@ ST 2022-7 NIC selection, jitter-buffer overrides, and similar per-transport knob
 
 - Pad set is **fixed at PLAYING**. Adding/removing elements (and thus NMOS resources) is supported while the pipeline is NULL, not while running.
 - **NULL → READY**: open daemon session, subscribe to activations. Register the resource here too if `transport-file` or `caps` is present (Routes A / B / C).
-- **READY → PAUSED**: per-transport prep on inner src/sink. For `nmossink` in deferred mode, this is where `caps` is derived from upstream peer caps query and the resource registered with the daemon.
+- **READY → PAUSED**: per-transport prep on inner src/sink. For `nmossink` in deferred mode, this is where `caps` is derived from upstream peer caps query and `AddSender` runs against the daemon.
 - **PAUSED → PLAYING**: live data flow begins (see Source behaviour below). Wire transmission gated by activation regardless of pipeline state.
 
 ### Sink (`nmossink`) deactivation
@@ -510,7 +510,7 @@ State refers to GStreamer element state; "Activated" tracks the latest IS-05 act
 | State        | Activated | `nmossink` data path                                   | `nmossrc` data path                                                       | Notes |
 |---           |---        |---                                                     |---                                                                        |---|
 | `NULL`       | n/a       | (no resource)                                          | (no resource)                                                             | Pre-`OpenSession` |
-| `READY`      | unknown   | selector built; selector → blackhole                   | input-selector built; input-selector → disabled_pad; no inner src yet     | Session open; resource registered if `transport-file`/`caps` known |
+| `READY`      | unknown   | selector built; selector → blackhole                   | input-selector built; input-selector → disabled_pad; no inner src yet     | Session open; resource added if `transport-file`/`caps` known |
 | `PAUSED`     | unknown   | as `READY` (deferred mode resolves `caps` here)        | as `READY`                                                                | Caps negotiation completes; no wire I/O |
 | `PLAYING`    | inactive  | selector → blackhole                                   | input-selector → disabled_pad; inner src absent or `locked_state=TRUE` at NULL | No wire I/O for this element; siblings unaffected |
 | `PLAYING`    | active    | selector → inner sink                                  | inner src built+linked via `sync_state_with_parent`; input-selector → receiver_pad | Wire I/O on |

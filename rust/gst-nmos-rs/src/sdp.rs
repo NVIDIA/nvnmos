@@ -349,7 +349,7 @@ pub(crate) struct SdpSession<'a> {
     pub name: Option<&'a str>,
     /// Whether to emit a media-level `a=x-nvnmos-caps:<pt>` line
     /// for the resulting Receiver. `true` advertises *wide* caps
-    /// (the daemon registers the IS-04 Receiver with the
+    /// (the daemon adds the IS-04 Receiver with the
     /// format-derived capability constraints omitted, so any
     /// compatible Sender of the same media type can connect);
     /// `false` advertises *narrow* caps (capability constraints
@@ -403,7 +403,7 @@ pub(crate) struct SdpSession<'a> {
 /// Whether an SDP transport file advertises wide Receiver Caps via
 /// media-level `a=x-nvnmos-caps:` (libnvnmos adds this on IS-05
 /// activation for wide receivers; configuring SDPs may carry it when
-/// `receiver-caps-mode=wide` splices it in at registration).
+/// `receiver-caps-mode=wide` splices it in at AddReceiver).
 ///
 /// Both `a=x-nvnmos-caps` (flag form) and `a=x-nvnmos-caps:<pt>`
 /// (property form) signal wide to libnvnmos. Unparseable input is

@@ -175,16 +175,7 @@ impl ObjectImpl for NmosSink {
                     .build(),
                 glib::ParamSpecString::builder("sender-name")
                     .nick("NMOS sender name")
-                    .blurb(
-                        "Name for this Sender within the Node (becomes the \
-                         `x-nvnmos-name` SDP attribute or the \
-                         `urn:x-nvnmos:tag:name` flow-def tag in the \
-                         transport file). Unique across Senders on the \
-                         Node; a Receiver on the same Node may share the \
-                         same name (the daemon scopes names by side). \
-                         Overrides the transport file's tag when both \
-                         are supplied.",
-                    )
+                    .blurb(crate::session::SENDER_NAME_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("mxl-domain-id")
@@ -222,33 +213,17 @@ impl ObjectImpl for NmosSink {
                     .build(),
                 glib::ParamSpecString::builder("label")
                     .nick("Label")
-                    .blurb(
-                        "NMOS label for the Sender. Optional. Overrides \
-                         the transport file's top-level `label` when both \
-                         are supplied.",
-                    )
+                    .blurb(crate::session::LABEL_BLURB_SENDER)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("description")
                     .nick("Description")
-                    .blurb(
-                        "NMOS description for the Sender. Optional. \
-                         Overrides the transport file's top-level \
-                         `description` when both are supplied.",
-                    )
+                    .blurb(crate::session::DESCRIPTION_BLURB_SENDER)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("transport-file")
                     .nick("Transport file")
-                    .blurb(
-                        "Literal contents of the NvNmos transport file: MXL flow_def \
-                         JSON today; SDP later. The daemon registers it with the \
-                         resource and re-publishes it via IS-05. Pass the text, not a \
-                         path. Convenient for programmatic callers; from gst-launch \
-                         use `transport-file-path` instead. Mutually exclusive with \
-                         `transport-file-path`. When unset and `caps` is supplied the \
-                         element synthesises a flow_def from the essence caps.",
-                    )
+                    .blurb(crate::session::TRANSPORT_FILE_BLURB_SENDER)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("transport-file-path")
@@ -258,15 +233,7 @@ impl ObjectImpl for NmosSink {
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Caps>("caps")
                     .nick("Essence caps")
-                    .blurb(
-                        "Essence caps used to synthesise the MXL `flow_def` JSON when \
-                         `transport-file` / `transport-file-path` are unset. Supported \
-                         shapes match `mxlsink`'s pad template: `video/x-raw,format=v210,…`, \
-                         `audio/x-raw,format=F32LE,…`, and `meta/x-st-2038,framerate=…`. \
-                         Requires `mxl-flow-id` to be set. Cross-checked against the \
-                         transport file's `format` field when both are supplied — \
-                         mismatch is a hard error.",
-                    )
+                    .blurb(crate::session::CAPS_BLURB_SENDER)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Caps>("transport-caps")
@@ -541,14 +508,14 @@ impl ElementImpl for NmosSink {
                 // Children transition up first so caps negotiate
                 // (the fake-chain fakesink accepts whatever upstream
                 // proposes); we then query the negotiated peer caps
-                // and, if no resource is yet registered, drive the
+                // and, if no resource is yet added, drive the
                 // deferred AddSender.
                 let res = self.parent_change_state(transition)?;
-                if let Err(e) = self.maybe_register_deferred() {
+                if let Err(e) = self.maybe_add_deferred_sender() {
                     gst::element_imp_error!(
                         self,
                         gst::ResourceError::OpenWrite,
-                        ["nmossink READY\u{2192}PAUSED deferred registration failed: {e:#}"]
+                        ["nmossink READY\u{2192}PAUSED deferred AddSender failed: {e:#}"]
                     );
                     return Err(gst::StateChangeError);
                 }
@@ -598,7 +565,7 @@ impl NmosSink {
         self.swap_inner(bin, &new_inner)?;
         // Reaching the `Real` branch at NULL→READY / READY→PAUSED
         // implies `auto-activate=true` (the `validate_and_open` and
-        // `register_deferred` gates downgrade to a fake chain
+        // `add_deferred_sender` gates downgrade to a fake chain
         // otherwise). Tell the daemon to bring the resource's
         // IS-04/IS-05 view up to match the live data path so
         // external state stays consistent without an external
@@ -652,24 +619,24 @@ impl NmosSink {
     }
 
     /// Drive a deferred `AddSender` from inside
-    /// `change_state(ReadyToPaused)`. Only attempts registration when
+    /// `change_state(ReadyToPaused)`. Only attempts AddSender when
     /// the session is open without a resource and neither
     /// `transport-file*` nor `caps` were supplied at NULL→READY. The
     /// ghost sink pad is queried for the upstream peer's caps, which
-    /// are then fed to the shared caps-driven flow_def builder; on
-    /// success the inner element is swapped to a real `mxlsink`.
+    /// are then fed to the shared caps-driven transport-file builder; on
+    /// success the inner element is swapped to the real transport chain.
     ///
     /// Returns `Ok(())` both when deferred mode is not applicable and
-    /// when registration succeeds. Errors are propagated only on real
+    /// when AddSender succeeds. Errors are propagated only on real
     /// failures (ANY/EMPTY caps, builder rejection, AddSender RPC
     /// failure) so that change_state surfaces a clear,
     /// pipeline-visible error.
-    fn maybe_register_deferred(&self) -> Result<(), anyhow::Error> {
+    fn maybe_add_deferred_sender(&self) -> Result<(), anyhow::Error> {
         let snapshot = self.settings.lock().unwrap().clone();
         let static_inputs_set = !snapshot.transport_file.is_empty()
             || !snapshot.transport_file_path.is_empty()
             || snapshot.caps.is_some();
-        let resource_registered = self
+        let resource_added = self
             .session
             .lock()
             .unwrap()
@@ -677,7 +644,7 @@ impl NmosSink {
             .and_then(|s| s.resource_id().map(|_| ()))
             .is_some();
         let session_open = self.session.lock().unwrap().is_some();
-        if !session_open || resource_registered || static_inputs_set {
+        if !session_open || resource_added || static_inputs_set {
             return Ok(());
         }
 
@@ -691,7 +658,7 @@ impl NmosSink {
         gst::debug!(CAT, imp = self, "deferred mode peer_query_caps -> {peer_caps}");
 
         let common: crate::session::CommonSettings = snapshot.into();
-        let outcome = crate::session::register_deferred(
+        let outcome = crate::session::add_deferred_sender(
             &CAT,
             "nmossink",
             &common,

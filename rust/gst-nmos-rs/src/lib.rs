@@ -8,7 +8,7 @@
 //! for the architecture. The elements declare their property surface
 //! and run the session lifecycle: NULL→READY opens a session against
 //! `nvnmosd`, subscribes to activations, and (when `transport-file`
-//! is set) registers the Sender or Receiver via `AddSender` /
+//! is set) adds the Sender or Receiver via `AddSender` /
 //! `AddReceiver`; READY→NULL closes it.
 //!
 //! Each `ActivationEvent` arriving on the subscription is routed
@@ -44,24 +44,25 @@
 //! property:
 //!
 //! - `auto-activate=false` (default, canonical NMOS): the element
-//!   registers the resource so it appears on IS-04 but leaves the
-//!   inner on the fake chain. The daemon's
+//!   adds the Sender or Receiver to the daemon so it appears on
+//!   IS-04 but leaves the inner on the fake chain. The daemon's
 //!   `/single/{senders,receivers}/{id}/active` reports
 //!   `master_enable: false` until an IS-05 PATCH activates it; the
 //!   activation event then flows through `apply_activation` and
 //!   swaps the inner.
 //! - `auto-activate=true`: the element brings the inner up
-//!   immediately from the resolved configuring flow_def and calls
-//!   [`session::sync_active`] (which dispatches the daemon's
+//!   immediately from the resolved configuring transport file and
+//!   calls [`session::sync_active`] (which dispatches the daemon's
 //!   `SyncResourceState` RPC) so the daemon's IS-04/IS-05 view of
 //!   the resource flips to active without requiring an IS-05
 //!   controller. This is a development / no-controller shortcut.
 //!
-//! The toggle is orthogonal to where the configuring flow_def came
-//! from. The flow id may have been supplied by `mxl-flow-id` as a
-//! plain property override, taken from the transport file's
-//! top-level `id`, or produced by caps→flow_def synthesis — all
-//! three routes funnel into the same gate.
+//! The toggle is orthogonal to where the configuring transport file
+//! came from. The flow id may have been supplied by `mxl-flow-id` as a
+//! plain property override, taken from the transport file's top-level
+//! `id`, or produced by caps-driven synthesis (MXL `flow_def` or SDP,
+//! depending on `transport`) — all three routes funnel into the same
+//! gate.
 //!
 //! If the resolved configuration is incomplete (no Domain path, no
 //! flow id, or no Flow format on the receiver), the element stays
@@ -99,36 +100,38 @@
 //! `capsfilter`" hint. Receiver-side deferred mode is intentionally
 //! out of scope (no peer to query).
 //!
-//! `nmossrc` advertises essence caps on its ghost source pad when a
-//! configuring transport file is in play, except for receivers whose
-//! effective transport file indicates wide Receiver Caps: MXL receivers
-//! use the `urn:x-nvnmos:tag:caps` tag (after NULL→READY property
-//! splice, or on the daemon activation file) and use bare `mxlsrc` so
-//! runtime caps come from the filesystem flow_def; UDP receivers use
-//! media-level `a=x-nvnmos-caps:` (spliced at registration or emitted
-//! by libnvnmos on IS-05 activation) and omit the trailing
-//! `capssetter` so runtime caps come from the live RTP flow.
-//! Otherwise the configuring transport file is reverse-mapped and
-//! pinned by an internal `capssetter` so downstream caps queries see
-//! the concrete shape the flow will carry — the canonical
-//! `nmossrc ! transform ! nmossink` pipeline then resolves end-to-end
-//! at READY→PAUSED: the deferred `nmossink`'s peer_query_caps lands
-//! on the pinned caps and `AddSender` runs against the right
-//! configuring transport file.
+//! `nmossrc` pins essence caps on its ghost source pad from the
+//! configuring transport file when the Receiver is *narrow* (BCP-004-01:
+//! Receiver Caps are advertised on IS-04). *Wide* receivers advertise
+//! no Receiver Caps; on MXL the `urn:x-nvnmos:tag:caps` flow_def tag
+//! marks wide and bare `mxlsrc` is used so runtime caps come from the
+//! filesystem flow_def; on RTP/UDP `a=x-nvnmos-caps:` marks wide and the
+//! inner chain omits `capssetter` so runtime caps come from the live RTP
+//! depay. Narrow receivers reverse-map the configuring file and pin
+//! essence caps via an internal `capssetter` so downstream caps queries
+//! see the concrete shape — the canonical `nmossrc ! transform !
+//! nmossink` pipeline then resolves end-to-end at READY→PAUSED: the
+//! deferred `nmossink`'s peer_query_caps lands on the pinned caps and
+//! `AddSender` runs against the right configuring transport file.
 //!
-//! Receiver-side caps→flow_def synthesis is symmetric with the
-//! Sender path: `nmossrc` with `caps` + `mxl-flow-id` (no transport
-//! file) builds a configuring flow_def that the daemon then
-//! advertises as BCP-004-01 narrow Receiver Caps on IS-04, with the
-//! `urn:x-nvnmos:tag:caps` tag spliced by `receiver-caps-mode` to
-//! indicate narrow vs wide. The semantic distinction from a Sender's
-//! flow_def is that a Receiver's configuring file describes "what
-//! this Receiver expects to consume"; the live transport file
-//! arriving via IS-05 PATCH later replaces the subscription fields
-//! (mxl-flow-id, etc.) without overwriting the Receiver Caps
-//! advertisement. When `mxl-flow-id` is unset there is no stable
-//! subscription target yet, so the bare `mxlsrc` is used and its
-//! broad pad template propagates until IS-05 activation supplies one.
+//! Receiver-side caps-driven synthesis is symmetric with the Sender
+//! path: `nmossrc` with `caps` (no transport file) builds a
+//! configuring transport file — MXL `flow_def` or SDP depending on
+//! `transport`. For narrow receivers the daemon advertises BCP-004-01
+//! Receiver Caps on IS-04 from that file; for wide receivers none are
+//! advertised. `receiver-caps-mode` splices the wide/narrow marker:
+//! `urn:x-nvnmos:tag:caps` on MXL, `a=x-nvnmos-caps:` on RTP/UDP.
+//! The configuring file describes the Receiver at AddReceiver time;
+//! IS-05 activation then supplies the real config. On MXL, the
+//! activation transport file (typically synthesized by libnvnmos from
+//! the PATCH) updates subscription fields such as `mxl-flow-id` without
+//! changing the IS-04 caps advertisement. On RTP, activation
+//! usually delivers a full activation SDP in the `ActivationEvent`; the
+//! element builds the inner chain from that file — not from the
+//! configuring SDP passed at AddReceiver. On MXL, when `mxl-flow-id` is
+//! unset there is no stable subscription target yet, so bare `mxlsrc`
+//! is used and its broad pad template propagates until IS-05 activation
+//! supplies one.
 
 use std::sync::LazyLock;
 

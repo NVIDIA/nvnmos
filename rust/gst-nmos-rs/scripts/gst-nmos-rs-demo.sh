@@ -441,7 +441,7 @@ transport_identity_from_active() {
 # `autoaudiosink` spends up to ~60 s probing PipeWire / PulseAudio /
 # ALSA before falling back, which serialises against every other
 # element in Node 2's pipeline (GStreamer's bin state-change is
-# synchronous) and delays both Node 2 receivers' registration with
+# synchronous) and delays both Node 2 receivers' IS-04 visibility with
 # the daemon by the same ~60 s. If the script prints
 # "[poll] collect_urls: still missing after 90s: receivers/video2@…
 # receivers/audio2@…" or similar, override:
@@ -1192,7 +1192,7 @@ Activation state out of the box:
     so audio + video are flowing already.
 
   Node 3: \`auto-activate=false\` — the Receiver+Sender pairs are
-    registered (visible on IS-04) but the data path stays on the
+    added (visible on IS-04) but the data path stays on the
     caps-aware placeholder (an idle \`appsrc\` advertising the
     user-supplied caps so downstream negotiation completes) until
     you PATCH /staged on the Connection API. Until then no real
@@ -1253,7 +1253,7 @@ environment if a slow host needs more time at startup.
 Example PATCHes (copy/paste):
 
   # ---- Activate Node 3 (Receiver+Sender on each side) ----
-  # By default Node 3 is registered but inactive (auto-activate=false).
+  # By default Node 3 is added but inactive (auto-activate=false).
   # PATCH each /staged endpoint with master_enable=true to bring the
   # video processor live (the inner $LABEL_INNER_CHAIN instantiate
   # and data flows from Node 1 via Node 3's videoflip to Node 3's

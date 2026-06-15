@@ -185,16 +185,7 @@ impl ObjectImpl for NmosSrc {
                     .build(),
                 glib::ParamSpecString::builder("receiver-name")
                     .nick("NMOS receiver name")
-                    .blurb(
-                        "Name for this Receiver within the Node (becomes the \
-                         `x-nvnmos-name` SDP attribute or the \
-                         `urn:x-nvnmos:tag:name` flow-def tag in the \
-                         transport file). Unique across Receivers on the \
-                         Node; a Sender on the same Node may share the \
-                         same name (the daemon scopes names by side). \
-                         Overrides the transport file's tag when both \
-                         are supplied.",
-                    )
+                    .blurb(crate::session::RECEIVER_NAME_BLURB)
                     .build(),
                 glib::ParamSpecString::builder("mxl-domain-id")
                     .nick("MXL domain id")
@@ -234,30 +225,15 @@ impl ObjectImpl for NmosSrc {
                     .build(),
                 glib::ParamSpecString::builder("label")
                     .nick("Label")
-                    .blurb(
-                        "NMOS label for the Receiver. Optional. Overrides \
-                         the transport file's top-level `label` when both \
-                         are supplied.",
-                    )
+                    .blurb(crate::session::LABEL_BLURB_RECEIVER)
                     .build(),
                 glib::ParamSpecString::builder("description")
                     .nick("Description")
-                    .blurb(
-                        "NMOS description for the Receiver. Optional. \
-                         Overrides the transport file's top-level \
-                         `description` when both are supplied.",
-                    )
+                    .blurb(crate::session::DESCRIPTION_BLURB_RECEIVER)
                     .build(),
                 glib::ParamSpecString::builder("transport-file")
                     .nick("Transport file")
-                    .blurb(
-                        "Literal contents of the NvNmos transport file: MXL flow_def \
-                         JSON today; SDP later. The daemon registers it with the \
-                         resource and re-publishes it via IS-05. Pass the text, not a \
-                         path. Convenient for programmatic callers; from gst-launch \
-                         use `transport-file-path` instead. Mutually exclusive with \
-                         `transport-file-path`. Required unless `caps` is provided.",
-                    )
+                    .blurb(crate::session::TRANSPORT_FILE_BLURB_RECEIVER)
                     .build(),
                 glib::ParamSpecString::builder("transport-file-path")
                     .nick("Transport file path")
@@ -265,15 +241,7 @@ impl ObjectImpl for NmosSrc {
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Caps>("caps")
                     .nick("Essence caps")
-                    .blurb(
-                        "Essence-shaped pad caps. Required if `transport-file` is not \
-                         provided: the media-type structure name (`video/x-raw` / \
-                         `audio/x-raw` / `meta/x-st-2038`) decides which `mxlsrc` flow-id \
-                         slot receives `mxl-flow-id`. Cross-checked against the \
-                         transport file's `format` field when both are supplied — \
-                         mismatch is a hard error (the caps and the flow's essence shape \
-                         must describe the same thing).",
-                    )
+                    .blurb(crate::session::CAPS_BLURB_RECEIVER)
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Caps>("transport-caps")
                     .nick("Transport caps")
@@ -292,17 +260,14 @@ impl ObjectImpl for NmosSrc {
                 glib::ParamSpecEnum::builder::<CapsMode>("receiver-caps-mode")
                     .nick("Receiver caps mode")
                     .blurb(
-                        "Selects whether the published NMOS Receiver advertises narrow \
-                         or wide Receiver Caps in IS-04. On MXL (`transport=mxl`) this \
-                         is encoded via the `urn:x-nvnmos:tag:caps` flow_def tag; on \
-                         RTP/UDP it is encoded via the media-level SDP \
-                         `a=x-nvnmos-caps` attribute. `auto` (default) leaves both \
-                         untouched in the spliced transport file: the result is narrow \
-                         when the file is present and the marker is absent (or no \
-                         transport file is in play), and wide when the marker is \
-                         already there. `narrow` strips the tag / attribute if \
-                         present. `wide` ensures each is present (libnvnmos's rule \
-                         for wide is \"present + non-empty\").",
+                        "Whether the Receiver advertises BCP-004-01 Receiver Caps \
+                         on IS-04 (narrow) or none (wide). On MXL, wide is \
+                         encoded via `urn:x-nvnmos:tag:caps`; on RTP/UDP via \
+                         media-level `a=x-nvnmos-caps:`. `auto` (default) \
+                         leaves the marker untouched in the spliced transport \
+                         file — narrow when absent (or with no transport file), \
+                         wide when present. `narrow` strips it; `wide` ensures \
+                         it is present (libnvnmos: present + non-empty = wide).",
                     )
                     .default_value(CapsMode::Auto)
                     .build(),
