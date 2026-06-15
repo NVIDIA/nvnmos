@@ -594,43 +594,7 @@ impl NmosSink {
             return Ok(());
         };
         let settings = self.settings.lock().unwrap();
-        let new_inner = match transport {
-            TransportConfig::Mxl { domain_path, flow_id, .. } => {
-                let chain = inner::build_mxlsink(domain_path, flow_id)?;
-                inner::apply_mxl_sink_inner_properties(
-                    &CAT,
-                    "nmossink",
-                    &chain,
-                    settings.transport_properties.as_ref(),
-                    settings.pay_properties.as_ref(),
-                );
-                chain.bin
-            }
-            TransportConfig::Udp { variant, media, .. } => {
-                let chain = inner::build_udpsink(media, *variant)?;
-                inner::apply_udp_sink_inner_properties(
-                    &CAT,
-                    "nmossink",
-                    &chain,
-                    settings.transport_properties.as_ref(),
-                    settings.pay_properties.as_ref(),
-                );
-                chain.bin
-            }
-            TransportConfig::NvDsUdp { media, transport_file, .. } => {
-                let sdp = transport_file.as_deref().unwrap_or("");
-                let chain = inner::build_nvdsudpsink(media, sdp)?;
-                inner::apply_nvdsudp_sink_inner_properties(
-                    &CAT,
-                    "nmossink",
-                    &chain,
-                    media,
-                    settings.transport_properties.as_ref(),
-                    settings.pay_properties.as_ref(),
-                );
-                chain.bin
-            }
-        };
+        let new_inner = build_real_sink(transport, &settings)?;
         self.swap_inner(bin, &new_inner)?;
         // Reaching the `Real` branch at NULL→READY / READY→PAUSED
         // implies `auto-activate=true` (the `validate_and_open` and
@@ -837,68 +801,13 @@ impl NmosSink {
         }
 
         let new_inner = match &plan.inner {
-            InnerConfig::Real(TransportConfig::Mxl { domain_path, flow_id, .. }) => {
+            InnerConfig::Real(transport) => {
                 let settings = self.settings.lock().unwrap();
-                match inner::build_mxlsink(domain_path, flow_id) {
-                    Ok(chain) => {
-                        inner::apply_mxl_sink_inner_properties(
-                            &CAT,
-                            "nmossink",
-                            &chain,
-                            settings.transport_properties.as_ref(),
-                            settings.pay_properties.as_ref(),
-                        );
-                        chain.bin
-                    }
+                match build_real_sink(transport, &settings) {
+                    Ok(bin) => bin,
                     Err(e) => {
                         return ActivationOutcome::Failed {
-                            reason: format!("nmossink: building inner mxlsink: {e:#}"),
-                        };
-                    }
-                }
-            }
-            InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
-                let settings = self.settings.lock().unwrap();
-                match inner::build_udpsink(media, *variant) {
-                    Ok(chain) => {
-                        inner::apply_udp_sink_inner_properties(
-                            &CAT,
-                            "nmossink",
-                            &chain,
-                            settings.transport_properties.as_ref(),
-                            settings.pay_properties.as_ref(),
-                        );
-                        chain.bin
-                    }
-                    Err(e) => {
-                        return ActivationOutcome::Failed {
-                            reason: format!("nmossink: building inner udpsink: {e:#}"),
-                        };
-                    }
-                }
-            }
-            InnerConfig::Real(TransportConfig::NvDsUdp {
-                media,
-                transport_file,
-                ..
-            }) => {
-                let settings = self.settings.lock().unwrap();
-                let sdp = transport_file.as_deref().unwrap_or("");
-                match inner::build_nvdsudpsink(media, sdp) {
-                    Ok(chain) => {
-                        inner::apply_nvdsudp_sink_inner_properties(
-                            &CAT,
-                            "nmossink",
-                            &chain,
-                            media,
-                            settings.transport_properties.as_ref(),
-                            settings.pay_properties.as_ref(),
-                        );
-                        chain.bin
-                    }
-                    Err(e) => {
-                        return ActivationOutcome::Failed {
-                            reason: format!("nmossink: building inner nvdsudpsink: {e:#}"),
+                            reason: format!("nmossink: building inner transport chain: {e:#}"),
                         };
                     }
                 }
@@ -941,6 +850,60 @@ impl NmosSink {
             },
         }
     }
+}
+
+/// Build the real transport inner element for `nmossink` — counterpart to
+/// [`inner::build_fake_sink`]. Applies `transport-properties` /
+/// `pay-properties`, then pins the transport sink for mid-stream swap.
+fn build_real_sink(
+    transport: &TransportConfig,
+    settings: &Settings,
+) -> Result<gst::Element, anyhow::Error> {
+    let (bin, transport_sink) = match transport {
+        TransportConfig::Mxl { domain_path, flow_id, .. } => {
+            let chain = inner::build_mxlsink(domain_path, flow_id)?;
+            inner::apply_mxl_sink_inner_properties(
+                &CAT,
+                "nmossink",
+                &chain,
+                settings.transport_properties.as_ref(),
+                settings.pay_properties.as_ref(),
+            );
+            (chain.bin, chain.transport)
+        }
+        TransportConfig::Udp { variant, media, .. } => {
+            let chain = inner::build_udpsink(media, *variant)?;
+            inner::apply_udp_sink_inner_properties(
+                &CAT,
+                "nmossink",
+                &chain,
+                settings.transport_properties.as_ref(),
+                settings.pay_properties.as_ref(),
+            );
+            (chain.bin, chain.transport)
+        }
+        TransportConfig::NvDsUdp { media, transport_file, .. } => {
+            let sdp = transport_file.as_deref().unwrap_or("");
+            let chain = inner::build_nvdsudpsink(media, sdp)?;
+            inner::apply_nvdsudp_sink_inner_properties(
+                &CAT,
+                "nmossink",
+                &chain,
+                media,
+                settings.transport_properties.as_ref(),
+                settings.pay_properties.as_ref(),
+            );
+            (chain.bin, chain.transport)
+        }
+    };
+    // GstBaseSink defaults to async=true, which makes READY→PAUSED wait for
+    // preroll — fine at pipeline start, but a deadlock when rebuild_chain
+    // swaps a sink behind the anchor block probe. Pin after
+    // transport-properties so users cannot override back to async=true.
+    if transport_sink.has_property("async") {
+        transport_sink.set_property("async", false);
+    }
+    Ok(bin)
 }
 
 fn install_initial_fake_chain(bin: &gst::Bin) -> Result<gst::GhostPad, glib::BoolError> {
