@@ -140,12 +140,10 @@ impl ObjectImpl for NmosSink {
                     .nick("Daemon URI")
                     .blurb(crate::session::DAEMON_URI_BLURB)
                     .default_value(Some(DEFAULT_DAEMON_URI))
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("node-seed")
                     .nick("Node seed")
                     .blurb(crate::session::NODE_SEED_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecUInt::builder("http-port")
                     .nick("HTTP port")
@@ -153,27 +151,22 @@ impl ObjectImpl for NmosSink {
                     .minimum(0)
                     .maximum(65535)
                     .default_value(0)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("host-name")
                     .nick("Host name")
                     .blurb(crate::session::HOST_NAME_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("domain")
                     .nick("NMOS DNS domain")
                     .blurb(crate::session::DOMAIN_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("registration-url")
                     .nick("Registration URL")
                     .blurb(crate::session::REGISTRATION_URL_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("system-url")
                     .nick("System URL")
                     .blurb(crate::session::SYSTEM_URL_BLURB)
-                    .mutable_ready()
                     .build(),
                 glib::ParamSpecEnum::builder_with_default("transport", Transport::Mxl)
                     .nick("Transport")
@@ -195,12 +188,12 @@ impl ObjectImpl for NmosSink {
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("mxl-domain-id")
-                    .nick("MXL Domain id")
+                    .nick("MXL domain id")
                     .blurb(crate::session::MXL_DOMAIN_ID_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("mxl-domain-path")
-                    .nick("MXL Domain path")
+                    .nick("MXL domain path")
                     .blurb(
                         "Local filesystem path identifying the MXL Domain on \
                          this host. If the directory contains a \
