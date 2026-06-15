@@ -324,16 +324,20 @@ pub(crate) struct CommonSettings {
     /// [`crate::iface::iface_name_for_ip`] and threaded into
     /// `udpsrc.multicast-iface`). Also emitted in the configuring
     /// SDP as the `a=x-nvnmos-iface-ip:` attribute. Empty string =
-    /// unset. Ignored on the Sender side (senders use `source_ip`
-    /// for the same wire concept).
+    /// unset. When `multicast_ip` is also unset,
+    /// [`receiver_connection_address`](udp::receiver_connection_address)
+    /// uses this for the SDP `c=` line on synthesis and passthrough
+    /// — see that helper's doc for the multicast-file caveat. Ignored
+    /// on the Sender side (senders use `source_ip` for the origin /
+    /// connection slots on synthesis).
     pub(crate) interface_ip: String,
     /// IS-05 RTP receiver transport_params `multicast_ip` —
     /// Receiver-only. Multicast group to join (or empty for
-    /// unicast reception). Becomes the `c=` line address in the
-    /// configuring SDP and the `udpsrc.address` property. Empty
-    /// string = unset (unicast / let the SDP / daemon resolve).
+    /// unicast reception). Takes precedence over `interface_ip` for
+    /// the `c=` line when set. Empty string = unset (unicast / let
+    /// the SDP / daemon resolve).
     /// Ignored on the Sender side (senders use `destination_ip`
-    /// for the same wire concept).
+    /// for the egress destination on synthesis).
     pub(crate) multicast_ip: String,
     /// Whether the element brings its inner `mxlsink` / `mxlsrc` up
     /// immediately at NULL→READY (or, for a deferred-mode sender,
@@ -573,7 +577,7 @@ pub(crate) use udp::{
 };
 
 use mxl::{resolve_activation_inner_mxl, resolve_inner_config_mxl};
-use udp::{resolve_inner_config_nvdsudp, resolve_inner_config_udp};
+use udp::{register_deferred_rtp, resolve_inner_config_nvdsudp, resolve_inner_config_udp};
 
 fn udp_inner_summary(
     family: &str,
@@ -750,49 +754,16 @@ fn apply_auto_activate_gate(inner: InnerConfig, auto_activate: bool) -> InnerCon
     inner
 }
 
-/// Register a Sender via the deferred-mode path: synthesise a
-/// flow_def from upstream peer caps and call `AddSender` against a
-/// session that was opened without one. Used by `nmossink` from
-/// inside `change_state(ReadyToPaused)` when neither `transport-file*`
-/// nor `caps` was set at NULL→READY.
-///
-/// `peer_caps` is what `gst_pad_peer_query_caps()` returned, before
-/// fixation. The helper fixates internally and rejects ANY / EMPTY
-/// caps with a clear, user-facing error message telling them to
-/// declare `caps=…` or insert a `capsfilter` upstream — that's the
-/// same recipe the plan doc spells out for pipelines where the peer
-/// query can't fix caps (h264parse pre-data, etc.).
-///
-/// Returns the [`InnerConfig`] the element should install on the
-/// data path; today always [`InnerConfig::Real`] on success because
-/// deferred-mode registration is only attempted when `mxl-domain-path`
-/// is set (the fake chain is the alternative the caller picks when
-/// this helper isn't called).
-pub(crate) fn register_deferred(
-    cat: &gst::DebugCategory,
+/// Fixate upstream peer caps for deferred sender registration.
+fn prepare_deferred_peer_caps(
     element: &str,
-    settings: &CommonSettings,
-    session: &Mutex<Option<Session>>,
     peer_caps: gst::Caps,
-) -> Result<InnerConfig, anyhow::Error> {
-    if settings.transport != Transport::Mxl {
-        bail!(
-            "{element}: deferred registration unsupported for transport `{:?}`",
-            settings.transport
-        );
-    }
-    if settings.side != Side::Sender {
-        // Receiver deferred mode is explicitly out of scope (plan doc:
-        // “`nmossrc` cannot use deferred mode — there is no peer to
-        // query.”). Reject so we don't accidentally try.
-        bail!("{element}: deferred registration is sender-only");
-    }
-
+) -> Result<gst::Caps, anyhow::Error> {
     if peer_caps.is_empty() {
         bail!(
             "{element}: deferred registration: upstream peer offered no caps. \
              Declare `caps=\"…\"` on the element or insert a `capsfilter` \
-             upstream so the element knows what flow_def to register."
+             upstream so the element knows what transport file to register."
         );
     }
     if peer_caps.is_any() {
@@ -800,21 +771,56 @@ pub(crate) fn register_deferred(
             "{element}: deferred registration: upstream peer offered ANY caps \
              (likely no negotiated caps yet — e.g. `fakesrc` with no upstream \
              capsfilter). Declare `caps=\"…\"` on the element or insert a \
-             `capsfilter` upstream so the element knows what flow_def to register."
+             `capsfilter` upstream so the element knows what transport file to \
+             register."
         );
     }
-
-    // Fixate the (possibly under-constrained) peer caps into a single,
-    // concrete shape — the same operation any sink performs to decide
-    // its negotiated caps. The fixated caps drive the flow_def
-    // builder.
     let mut fixated = peer_caps;
     fixated.fixate();
+    Ok(fixated)
+}
+
+/// Register a Sender via the deferred-mode path: synthesise a
+/// configuring transport file from upstream peer caps and call
+/// `AddSender` against a session that was opened without one. Used by
+/// `nmossink` from inside `change_state(ReadyToPaused)` when neither
+/// `transport-file*` nor `caps` was set at NULL→READY.
+///
+/// MXL senders synthesise a `flow_def` JSON; RTP senders (`udp` /
+/// `udp2` / `nvdsudp`) synthesise SDP. `peer_caps` is what
+/// `gst_pad_peer_query_caps()` returned, before fixation.
+pub(crate) fn register_deferred(
+    cat: &gst::DebugCategory,
+    element: &str,
+    settings: &CommonSettings,
+    session: &Mutex<Option<Session>>,
+    peer_caps: gst::Caps,
+) -> Result<InnerConfig, anyhow::Error> {
+    if settings.side != Side::Sender {
+        bail!("{element}: deferred registration is sender-only");
+    }
+
+    let fixated = prepare_deferred_peer_caps(element, peer_caps)?;
     gst::info!(
         cat,
         "{element}: deferred mode: peer caps fixated to `{fixated}`",
     );
 
+    match settings.transport {
+        Transport::Mxl => register_deferred_mxl(cat, element, settings, session, &fixated),
+        Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => {
+            register_deferred_rtp(cat, element, settings, session, &fixated)
+        }
+    }
+}
+
+fn register_deferred_mxl(
+    cat: &gst::DebugCategory,
+    element: &str,
+    settings: &CommonSettings,
+    session: &Mutex<Option<Session>>,
+    fixated: &gst::Caps,
+) -> Result<InnerConfig, anyhow::Error> {
     let domain_resolution =
         domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path)
             .with_context(|| {
@@ -834,14 +840,14 @@ pub(crate) fn register_deferred(
         mxl_domain_id: &domain_resolution.id,
         label: &settings.label,
         description: &settings.description,
-        caps: &fixated,
+        caps: fixated,
     })
     .with_context(|| format!("{element}: synthesising flow_def from peer caps"))?;
     gst::info!(cat, "{element}: deferred mode: synthesised flow_def");
 
     let flow = flow_def::resolve_mxl_flow_meta(
         &settings.mxl_flow_id,
-        FlowFormat::from_caps(&fixated),
+        FlowFormat::from_caps(fixated),
         Some(&json),
     )
     .with_context(|| {
@@ -851,15 +857,25 @@ pub(crate) fn register_deferred(
         decide_inner_config_mxl(settings, &flow, Some(&json)),
         settings.auto_activate,
     );
+    finish_deferred_add_sender(cat, element, session, inner, &json, settings)
+}
 
+/// Call `AddSender` after deferred synthesis. Shared by MXL and RTP paths.
+pub(super) fn finish_deferred_add_sender(
+    cat: &gst::DebugCategory,
+    element: &str,
+    session: &Mutex<Option<Session>>,
+    inner: InnerConfig,
+    transport_file: &str,
+    settings: &CommonSettings,
+) -> Result<InnerConfig, anyhow::Error> {
     let transport = transport_to_proto(settings.transport);
     let side = settings.side;
     let name = settings.name.clone();
     // Take the Session out of the std::Mutex before doing async work
-    // (clippy's `await_holding_lock` lint, same pattern `close()` uses
-    // for the symmetrical CloseSession call). The session is put back
-    // afterwards whether AddSender succeeded or failed so READY→NULL
-    // still has something to close.
+    // (clippy's `await_holding_lock` lint, same pattern `close()` uses).
+    // Put it back before checking the RPC result so READY→NULL always
+    // has a session to close whether AddSender succeeded or failed.
     let mut taken = session.lock().unwrap().take().ok_or_else(|| {
         anyhow::anyhow!(
             "{element}: deferred registration but no open session — was NULL→READY skipped?"
@@ -868,7 +884,7 @@ pub(crate) fn register_deferred(
     let rpc_result = SHARED_RUNTIME.block_on(async {
         tokio::time::timeout(
             OPEN_TIMEOUT,
-            taken.add_resource(side, &name, transport, &json),
+            taken.add_resource(side, &name, transport, transport_file),
         )
         .await
         .with_context(|| format!("{element}: AddSender for deferred registration timed out"))?

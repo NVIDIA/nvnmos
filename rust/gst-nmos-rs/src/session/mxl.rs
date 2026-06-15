@@ -632,35 +632,6 @@ mod tests {
         }
 
         #[test]
-        fn unsupported_transport_is_error() {
-            // Deferred mode rejects non-`mxl` transports up-front,
-            // mirroring `validate_and_open`'s same check. This test
-            // covers the synchronous branch; the async sibling is
-            // covered by integration tests.
-            for t in [Transport::Udp, Transport::Udp2, Transport::NvDsUdp] {
-                let s = CommonSettings {
-                    transport: t,
-                    ..sender_settings()
-                };
-                let res = register_deferred(
-                    &cat(),
-                    "nmossink",
-                    &s,
-                    &no_session(),
-                    good_caps(),
-                );
-                let err = res.expect_err(
-                    "non-mxl transport must be rejected by deferred path",
-                );
-                let msg = format!("{err:#}");
-                assert!(
-                    msg.contains("deferred registration unsupported"),
-                    "expected deferred-transport rejection reason for {t:?}: {msg}",
-                );
-            }
-        }
-
-        #[test]
         fn missing_domain_id_is_error() {
             let s = CommonSettings {
                 mxl_domain_id: String::new(),

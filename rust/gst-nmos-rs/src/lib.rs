@@ -91,8 +91,9 @@
 //! opened without a resource and the actual `AddSender` is driven
 //! from `change_state(ReadyToPaused)`. The ghost sink pad's upstream
 //! peer is queried for caps, the result is fixated and fed to the
-//! shared caps-driven flow_def builder, and on success the inner is
-//! swapped to `mxlsink`. State-change errors propagate when peer
+//! caps-driven transport-file builder (`flow_def` on MXL, SDP on
+//! `udp` / `udp2` / `nvdsudp`), and on success the inner is swapped to
+//! the real transport chain. State-change errors propagate when peer
 //! caps are ANY/EMPTY or unsupported by the builder so the user gets
 //! a clear, pipeline-visible "declare `caps=…` or insert a
 //! `capsfilter`" hint. Receiver-side deferred mode is intentionally
@@ -113,7 +114,7 @@
 //! `nmossrc ! transform ! nmossink` pipeline then resolves end-to-end
 //! at READY→PAUSED: the deferred `nmossink`'s peer_query_caps lands
 //! on the pinned caps and `AddSender` runs against the right
-//! flow_def.
+//! configuring transport file.
 //!
 //! Receiver-side caps→flow_def synthesis is symmetric with the
 //! Sender path: `nmossrc` with `caps` + `mxl-flow-id` (no transport
