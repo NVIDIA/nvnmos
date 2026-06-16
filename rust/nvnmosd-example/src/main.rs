@@ -36,9 +36,9 @@
 //!     and start a background task that auto-acks each event with
 //!     `success = true`. Stays alive for the rest of the resource phase
 //!     so IS-05 PATCHes against libnvnmos can drive the round-trip.
-//! 11. `AddSender` — register a sender, assert `resource_id` matches
+//! 11. `AddSender` — create a sender, assert `resource_id` matches
 //!     `nvnmos::make_sender_id(seed, name)`.
-//! 12. `AddReceiver` — register a receiver with the same `name` as the
+//! 12. `AddReceiver` — create a receiver with the same `name` as the
 //!     sender in (11) to exercise the side-disambiguated namespace, and
 //!     assert `resource_id` matches `nvnmos::make_receiver_id(seed,
 //!     name)` (a distinct UUID from the sender's).

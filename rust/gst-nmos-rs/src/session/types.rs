@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Session types shared across transport families (MXL, UDP/RTP).
+//! Session types shared across transport families (MXL, RTP/UDP).
 
 /// Whether the snapshot came from `nmossink` or `nmossrc`. Surfaces in
 /// error/log messages so validation failures point the user at the

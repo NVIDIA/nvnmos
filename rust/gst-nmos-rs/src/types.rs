@@ -15,7 +15,7 @@ use gstreamer::glib;
 ///
 /// [`Transport::Mxl`] uses the MXL shared-memory pair (`mxlsrc` /
 /// `mxlsink`). [`Transport::Udp`] and [`Transport::Udp2`] both
-/// drive an OSS RTP-over-UDP chain (RFC 4175 video, ST 2110-30
+/// drive an RTP-over-UDP chain (RFC 4175 video, ST 2110-30
 /// audio, RFC 8331 / ST 2110-40 ancillary), differing only in
 /// which factory family is preferred when both are installed:
 /// `Udp` picks gst-plugins-good (`udpsrc` / `udpsink` + the
@@ -34,16 +34,16 @@ pub enum Transport {
     #[default]
     #[enum_value(name = "MXL shared-memory transport", nick = "mxl")]
     Mxl = 0,
-    /// ST 2110 via OSS gst-plugins-good `udpsrc` / `udpsink` plus
+    /// ST 2110 via gst-plugins-good `udpsrc` / `udpsink` plus
     /// the matching gst-plugins-good RTP (de)payloaders.
-    #[enum_value(name = "OSS udp + RTP via gst-plugins-good", nick = "udp")]
+    #[enum_value(name = "RTP/UDP via gst-plugins-good", nick = "udp")]
     Udp = 1,
     /// ST 2110 via gst-plugins-rs' `udpsrc2` plus the
-    /// gst-plugins-rs `*pay2` / `*depay2` RTP elements where
+    /// gst-plugins-rs `rtp*pay2` / `rtp*depay2` RTP elements where
     /// available, falling back to gst-plugins-good per-element
     /// for any V1-only piece (notably `udpsink` — no `udpsink2`
     /// exists).
-    #[enum_value(name = "OSS udp + RTP via gst-plugins-rs", nick = "udp2")]
+    #[enum_value(name = "RTP/UDP via gst-plugins-rs", nick = "udp2")]
     Udp2 = 2,
     /// ST 2110 via DeepStream's `nvdsudpsrc` / `nvdsudpsink` (Rivermax).
     #[enum_value(name = "NvDsUdp / Rivermax (DeepStream nvdsudp*)", nick = "nvdsudp")]

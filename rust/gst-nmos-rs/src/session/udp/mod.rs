@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! UDP/RTP transport session setup and activation.
+//! RTP/UDP transport session setup and activation.
 
 pub(crate) mod types;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use gstreamer as gst;
 
 use super::{CommonSettings, FakeKind, InnerConfig, TransportConfig};
@@ -33,6 +33,80 @@ pub(crate) enum UdpVariant {
     V2,
 }
 
+/// Receiver SDP connection address for the `c=` line from IS-05
+/// properties. Matches nmos-cpp `get_connection_address`:
+/// `multicast_ip` when set, else `interface_ip` (unicast reception /
+/// caps synthesis).
+///
+/// On the passthrough path this same dispatch feeds
+/// [`SdpOverrides::destination_ip`], so `interface-ip` alone rewrites
+/// `c=` even when the transport file already carries a multicast
+/// address — it is not a "join NIC only, leave `c=` alone" override.
+/// To pin IGMP join NIC on multicast without changing the group, put
+/// `a=x-nvnmos-iface-ip` in the file or set `multicast-ip` to the
+/// group's address alongside `interface-ip`.
+pub(super) fn receiver_connection_address(settings: &CommonSettings) -> &str {
+    if !settings.multicast_ip.is_empty() {
+        settings.multicast_ip.as_str()
+    } else {
+        settings.interface_ip.as_str()
+    }
+}
+
+/// Minimum IS-05 endpoint properties required to synthesise a configuring
+/// SDP for AddSender / AddReceiver. Wire destinations may be omitted.
+pub(super) fn validate_rtp_configuring_minimum(
+    element: &str,
+    settings: &CommonSettings,
+) -> Result<(), anyhow::Error> {
+    match settings.side {
+        Side::Sender if settings.source_ip.is_empty() => {
+            bail!(
+                "{element}: `source-ip` is required to synthesise configuring SDP for AddSender"
+            );
+        }
+        Side::Receiver if settings.interface_ip.is_empty() => {
+            bail!(
+                "{element}: `interface-ip` is required to synthesise configuring SDP for AddReceiver"
+            );
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Build [`sdp::SdpBuildInput`] from element settings and essence caps.
+/// Shared by NULL→READY caps synthesis and READY→PAUSED deferred
+/// sender AddSender.
+pub(super) fn sdp_build_input<'a>(
+    settings: &'a CommonSettings,
+    essence_caps: &'a gst::Caps,
+) -> sdp::SdpBuildInput<'a> {
+    let destination_ip = match settings.side {
+        Side::Sender => settings.destination_ip.as_str(),
+        Side::Receiver => receiver_connection_address(settings),
+    };
+    let advertise_caps = match settings.caps_mode {
+        CapsMode::Auto | CapsMode::Narrow => false,
+        CapsMode::Wide => true,
+    };
+    sdp::SdpBuildInput {
+        essence_caps,
+        transport_caps: settings.transport_caps.as_ref(),
+        side: settings.side,
+        label: &settings.label,
+        description: &settings.description,
+        name: &settings.name,
+        source_ip: &settings.source_ip,
+        source_port: settings.source_port,
+        destination_ip,
+        destination_port: settings.destination_port,
+        interface_ip: &settings.interface_ip,
+        advertise_caps,
+        node_seed: &settings.node_seed,
+        narrow_traffic_profile: settings.transport == Transport::NvDsUdp,
+    }
+}
+
 pub(super) fn synthesise_or_passthrough_udp(
     cat: &gst::DebugCategory,
     element: &str,
@@ -49,43 +123,8 @@ pub(super) fn synthesise_or_passthrough_udp(
         }
         (Some(text), None) => Ok(Some(text)),
         (None, Some(essence_caps)) => {
-            // Per-side dispatch on the IS-05 destination slot:
-            // Senders carry it as `destination_ip`, Receivers
-            // as `multicast_ip`. The single wire slot on the
-            // SDP `m=` / `c=` line is named `destination_ip`
-            // on `sdp::SdpBuildInput`.
-            let destination_ip = match settings.side {
-                Side::Sender => settings.destination_ip.as_str(),
-                Side::Receiver => settings.multicast_ip.as_str(),
-            };
-            let advertise_caps = match settings.caps_mode {
-                // Auto resolves to narrow for synthesised
-                // SDPs — the splice path can promote to wide
-                // later if `receiver-caps-mode=Wide` is set.
-                // (For synthesis we always know
-                // `caps_mode` directly, so we can apply it
-                // here without going through the splice's
-                // text-rewrite.)
-                CapsMode::Auto | CapsMode::Narrow => false,
-                CapsMode::Wide => true,
-            };
-            let input = sdp::SdpBuildInput {
-                essence_caps,
-                transport_caps: settings.transport_caps.as_ref(),
-                side: settings.side,
-                label: &settings.label,
-                description: &settings.description,
-                name: &settings.name,
-                source_ip: &settings.source_ip,
-                source_port: settings.source_port,
-                destination_ip,
-                destination_port: settings.destination_port,
-                interface_ip: &settings.interface_ip,
-                advertise_caps,
-                node_seed: &settings.node_seed,
-                narrow_traffic_profile: settings.transport == Transport::NvDsUdp,
-            };
-            let text = sdp::from_caps(&input)
+            validate_rtp_configuring_minimum(element, settings)?;
+            let text = sdp::from_caps(&sdp_build_input(settings, essence_caps))
                 .with_context(|| format!("{element}: synthesising SDP from caps"))?;
             gst::info!(
                 cat,
@@ -97,6 +136,74 @@ pub(super) fn synthesise_or_passthrough_udp(
         (None, None) => Ok(None),
     }
 }
+
+/// `decide_inner_config_*` treats missing SDP as [`FakeKind::Misconfigured`].
+/// For senders with neither `transport-file*` nor `caps`, that is deferred
+/// mode — rewrite to [`FakeKind::NotConfigured`] so NULL→READY opens the
+/// session without AddSender and waits for peer caps at READY→PAUSED.
+/// Receivers without input stay misconfigured (no deferred path).
+fn gate_deferred_sender_udp(inner: InnerConfig, settings: &CommonSettings) -> InnerConfig {
+    if settings.side == Side::Sender
+        && matches!(
+            inner,
+            InnerConfig::Fake {
+                kind: FakeKind::Misconfigured,
+                ..
+            }
+        )
+    {
+        InnerConfig::Fake {
+            kind: FakeKind::NotConfigured,
+            detail: String::new(),
+        }
+    } else {
+        inner
+    }
+}
+
+/// Synthesise configuring SDP and resolve the inner chain for deferred
+/// RTP sender AddSender from fixated upstream peer caps.
+pub(super) fn synthesise_deferred_sender_udp(
+    element: &str,
+    settings: &CommonSettings,
+    essence_caps: &gst::Caps,
+) -> Result<(String, InnerConfig), anyhow::Error> {
+    validate_rtp_configuring_minimum(element, settings)?;
+    let text = sdp::from_caps(&sdp_build_input(settings, essence_caps))
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("{element}: synthesising SDP from peer caps"))?;
+    let inner = match settings.transport {
+        Transport::Udp => decide_inner_config_udp(
+            element,
+            settings,
+            UdpVariant::V1,
+            Some(&text),
+            sdp::EssenceCrossCheckMode::Full,
+        )?,
+        Transport::Udp2 => decide_inner_config_udp(
+            element,
+            settings,
+            UdpVariant::V2,
+            Some(&text),
+            sdp::EssenceCrossCheckMode::Full,
+        )?,
+        Transport::NvDsUdp => decide_inner_config_nvdsudp(
+            element,
+            settings,
+            Some(&text),
+            sdp::EssenceCrossCheckMode::Full,
+        )?,
+        Transport::Mxl => bail!("{element}: internal: MXL is not an RTP/UDP transport"),
+    };
+    let inner = super::apply_auto_activate_policy(
+        &crate::CAT,
+        element,
+        settings,
+        inner,
+    );
+    Ok((text, inner))
+}
+
 pub(crate) fn property_overrides_udp(settings: &CommonSettings) -> SdpOverrides<'_> {
     fn opt(s: &str) -> Option<&str> {
         if s.is_empty() { None } else { Some(s) }
@@ -115,8 +222,11 @@ pub(crate) fn property_overrides_udp(settings: &CommonSettings) -> SdpOverrides<
         ),
         Side::Receiver => (
             opt(&settings.source_ip),
+            // `x-nvnmos-iface-ip` (join NIC). When `multicast-ip` is
+            // unset, [`receiver_connection_address`] also maps this into
+            // `destination_ip` for the `c=` splice — see its doc.
             opt(&settings.interface_ip),
-            opt(&settings.multicast_ip),
+            opt(receiver_connection_address(settings)),
             None,
         ),
     };
@@ -201,7 +311,7 @@ pub(crate) fn decide_inner_config_udp(
     let Some(text) = transport_file else {
         return Ok(InnerConfig::Fake {
             kind: FakeKind::Misconfigured,
-            detail: "caps or transport-file required for NMOS registration".into(),
+            detail: "caps or transport-file required for AddSender / AddReceiver".into(),
         });
     };
     finish_udp_inner_config(
@@ -229,7 +339,7 @@ pub(crate) fn decide_inner_config_nvdsudp(
     let Some(text) = transport_file else {
         return Ok(InnerConfig::Fake {
             kind: FakeKind::Misconfigured,
-            detail: "caps or transport-file required for NMOS registration".into(),
+            detail: "caps or transport-file required for AddSender / AddReceiver".into(),
         });
     };
     finish_udp_inner_config(
@@ -270,12 +380,15 @@ pub(super) fn resolve_inner_config_nvdsudp(
         ),
         other => other,
     };
-    let inner = decide_inner_config_nvdsudp(
-        element,
+    let inner = gate_deferred_sender_udp(
+        decide_inner_config_nvdsudp(
+            element,
+            settings,
+            resolved_transport_file.as_deref(),
+            sdp::EssenceCrossCheckMode::Full,
+        )?,
         settings,
-        resolved_transport_file.as_deref(),
-        sdp::EssenceCrossCheckMode::Full,
-    )?;
+    );
     Ok((inner, resolved_transport_file))
 }
 
@@ -333,13 +446,16 @@ pub(super) fn resolve_inner_config_udp(
         ),
         other => other,
     };
-    let inner = decide_inner_config_udp(
-        element,
+    let inner = gate_deferred_sender_udp(
+        decide_inner_config_udp(
+            element,
+            settings,
+            variant,
+            resolved_transport_file.as_deref(),
+            sdp::EssenceCrossCheckMode::Full,
+        )?,
         settings,
-        variant,
-        resolved_transport_file.as_deref(),
-        sdp::EssenceCrossCheckMode::Full,
-    )?;
+    );
     Ok((inner, resolved_transport_file))
 }
 
@@ -527,7 +643,7 @@ mod tests {
                     Some(&sdp),
                     sdp::EssenceCrossCheckMode::Full,
                 )
-                .expect_err("dual-leg SDP must be rejected for OSS UDP");
+                .expect_err("dual-leg SDP must be rejected for transport=udp/udp2");
                 assert!(
                     format!("{err:#}").contains("dual-leg SDP requires transport=nvdsudp"),
                     "unexpected error: {err:#}",
@@ -717,13 +833,9 @@ mod tests {
             assert_eq!(o.destination_port, Some(5004));
         }
 
-        /// Pure-function: a Receiver's `multicast_ip` populates
-        /// `SdpOverrides.destination_ip` (the SDP `c=` line wire
-        /// slot, which IS-05 splits between sender's
-        /// `destination_ip` and receiver's `multicast_ip` by
-        /// resource direction). `source_port` is forced to
-        /// `None` because the IS-05 receiver schema doesn't
-        /// define that slot.
+        /// Receiver `multicast_ip` wins over `interface_ip` for the
+        /// `c=` override slot; `interface_ip` still drives
+        /// `a=x-nvnmos-iface-ip` separately.
         #[test]
         fn property_overrides_udp_receiver_maps_multicast_ip_to_destination_ip() {
             let s = CommonSettings {
@@ -749,11 +861,257 @@ mod tests {
             );
         }
 
+        /// Unicast receiver: empty `multicast_ip` maps `interface_ip`
+        /// into `SdpOverrides.destination_ip` (the `c=` slot).
+        #[test]
+        fn property_overrides_udp_receiver_unicast_maps_interface_ip_to_destination_ip() {
+            let s = CommonSettings {
+                side: Side::Receiver,
+                interface_ip: "192.0.2.30".to_owned(),
+                ..udp_settings(Side::Receiver, Transport::Udp)
+            };
+            let o = property_overrides_udp(&s);
+            assert_eq!(o.destination_ip, Some("192.0.2.30"));
+            assert_eq!(o.interface_ip, Some("192.0.2.30"));
+            assert_eq!(o.source_ip, None);
+        }
+
+        // -- receiver passthrough override matrix ----------------
+
+        /// Passthrough property-override matrix (3 SDP baselines × 8
+        /// property combos). Notable case: multicast configuring SDP with
+        /// `interface-ip` only (no `multicast-ip`) rewrites `c=` to the
+        /// unicast NIC — see
+        /// `receiver_passthrough_multicast_file_interface_ip_only_rewrites_c`.
+        mod receiver_passthrough_matrix {
+            use super::*;
+
+            const FILE_MCAST: &str = "239.1.1.1";
+            const FILE_UNICAST: &str = "192.0.2.50";
+            const FILE_SSM_SRC: &str = "192.0.2.100";
+            const PROP_MCAST: &str = "232.99.99.1";
+            const PROP_IFACE: &str = "192.0.2.30";
+            const PROP_SRC: &str = "192.0.2.20";
+
+            const MCAST_ASM_SDP: &str = concat!(
+                "v=0\r\n",
+                "o=- 1 0 IN IP4 192.0.2.10\r\n",
+                "s=test\r\n",
+                "t=0 0\r\n",
+                "m=video 5004 RTP/AVP 96\r\n",
+                "c=IN IP4 239.1.1.1/64\r\n",
+                "a=rtpmap:96 raw/90000\r\n",
+                "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080;",
+                " exactframerate=50; depth=10\r\n",
+            );
+
+            const MCAST_SSM_SDP: &str = concat!(
+                "v=0\r\n",
+                "o=- 1 0 IN IP4 192.0.2.10\r\n",
+                "s=test\r\n",
+                "t=0 0\r\n",
+                "m=video 5004 RTP/AVP 96\r\n",
+                "c=IN IP4 239.1.1.1/64\r\n",
+                "a=rtpmap:96 raw/90000\r\n",
+                "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080;",
+                " exactframerate=50; depth=10\r\n",
+                "a=source-filter: incl IN IP4 239.1.1.1 192.0.2.100\r\n",
+            );
+
+            const UNICAST_SDP: &str = concat!(
+                "v=0\r\n",
+                "o=- 1 0 IN IP4 192.0.2.10\r\n",
+                "s=test\r\n",
+                "t=0 0\r\n",
+                "m=video 5004 RTP/AVP 96\r\n",
+                "c=IN IP4 192.0.2.50\r\n",
+                "a=rtpmap:96 raw/90000\r\n",
+                "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080;",
+                " exactframerate=50; depth=10\r\n",
+            );
+
+            #[derive(Debug, Clone, Copy)]
+            enum SdpKind {
+                McastAsm,
+                McastSsm,
+                Unicast,
+            }
+
+            impl SdpKind {
+                fn sdp(self) -> &'static str {
+                    match self {
+                        Self::McastAsm => MCAST_ASM_SDP,
+                        Self::McastSsm => MCAST_SSM_SDP,
+                        Self::Unicast => UNICAST_SDP,
+                    }
+                }
+
+                fn baseline_c(self) -> &'static str {
+                    match self {
+                        Self::McastAsm | Self::McastSsm => FILE_MCAST,
+                        Self::Unicast => FILE_UNICAST,
+                    }
+                }
+
+                fn baseline_has_ssm(self) -> bool {
+                    matches!(self, Self::McastSsm)
+                }
+            }
+
+            fn receiver_settings(
+                multicast: bool,
+                interface: bool,
+                source: bool,
+            ) -> CommonSettings {
+                let mut s = udp_settings(Side::Receiver, Transport::Udp);
+                if multicast {
+                    s.multicast_ip = PROP_MCAST.to_owned();
+                }
+                if interface {
+                    s.interface_ip = PROP_IFACE.to_owned();
+                }
+                if source {
+                    s.source_ip = PROP_SRC.to_owned();
+                }
+                s
+            }
+
+            fn splice(sdp: &str, settings: &CommonSettings) -> String {
+                sdp::passthrough_with_overrides(
+                    sdp,
+                    &property_overrides_udp(settings),
+                    DualLegPassthroughPolicy::RejectDualLeg,
+                )
+                .unwrap_or_else(|e| panic!("passthrough splice: {e}"))
+            }
+
+            fn expected_c(
+                multicast: bool,
+                interface: bool,
+                baseline: &'static str,
+            ) -> &'static str {
+                if multicast {
+                    PROP_MCAST
+                } else if interface {
+                    PROP_IFACE
+                } else {
+                    baseline
+                }
+            }
+
+            fn assert_c_contains(spliced: &str, addr: &str) {
+                let is_mcast = addr
+                    .parse::<std::net::Ipv4Addr>()
+                    .is_ok_and(|ip| ip.is_multicast());
+                if is_mcast {
+                    assert!(
+                        spliced.contains(&format!("c=IN IP4 {addr}/")),
+                        "expected multicast c= for {addr} in:\n{spliced}",
+                    );
+                } else {
+                    assert!(
+                        spliced.contains(&format!("c=IN IP4 {addr}\r\n"))
+                            || spliced.contains(&format!("c=IN IP4 {addr}\n")),
+                        "expected unicast c= for {addr} in:\n{spliced}",
+                    );
+                }
+            }
+
+            fn assert_source_filter(spliced: &str, expect: Option<(&str, &str)>) {
+                match expect {
+                    None => assert!(
+                        !spliced.contains("a=source-filter:"),
+                        "expected no source-filter in:\n{spliced}",
+                    ),
+                    Some((dest, src)) => {
+                        let needle = format!("incl IN IP4 {dest} {src}");
+                        assert!(
+                            spliced.contains(&needle),
+                            "expected source-filter containing `{needle}` in:\n{spliced}",
+                        );
+                    }
+                }
+            }
+
+            fn assert_iface_attr(spliced: &str, expect: Option<&str>) {
+                match expect {
+                    None => assert!(
+                        !spliced.contains("a=x-nvnmos-iface-ip:"),
+                        "expected no x-nvnmos-iface-ip in:\n{spliced}",
+                    ),
+                    Some(ip) => assert!(
+                        spliced.contains(&format!("a=x-nvnmos-iface-ip:{ip}")),
+                        "expected x-nvnmos-iface-ip:{ip} in:\n{spliced}",
+                    ),
+                }
+            }
+
+            /// Multicast file + `interface-ip` only: `c=` becomes the
+            /// property value (unicast), not the file's multicast
+            /// group. This follows nmos-cpp `get_connection_address`
+            /// but can surprise users who expected join-NIC-only.
+            /// To keep the group, set `multicast-ip` or embed
+            /// `a=x-nvnmos-iface-ip` in the file without setting the
+            /// property.
+            #[test]
+            fn receiver_passthrough_multicast_file_interface_ip_only_rewrites_c() {
+                let settings = receiver_settings(false, true, false);
+                let spliced = splice(MCAST_ASM_SDP, &settings);
+                assert_c_contains(&spliced, PROP_IFACE);
+                assert!(
+                    !spliced.contains(FILE_MCAST),
+                    "multicast c= must be replaced when only interface-ip \
+                     is set; got:\n{spliced}",
+                );
+                assert_iface_attr(&spliced, Some(PROP_IFACE));
+            }
+
+            #[test]
+            fn receiver_passthrough_property_override_matrix() {
+                for sdp_kind in [SdpKind::McastAsm, SdpKind::McastSsm, SdpKind::Unicast] {
+                    for multicast in [false, true] {
+                        for interface in [false, true] {
+                            for source in [false, true] {
+                                let settings = receiver_settings(multicast, interface, source);
+                                let spliced = splice(sdp_kind.sdp(), &settings);
+                                let c = expected_c(
+                                    multicast,
+                                    interface,
+                                    sdp_kind.baseline_c(),
+                                );
+
+                                assert_c_contains(
+                                    &spliced,
+                                    c,
+                                );
+
+                                let sf = if source {
+                                    Some((c, PROP_SRC))
+                                } else if sdp_kind.baseline_has_ssm() {
+                                    // Baseline SSM filter survives; `c=`
+                                    // overrides rewrite its dest address.
+                                    Some((c, FILE_SSM_SRC))
+                                } else {
+                                    None
+                                };
+                                assert_source_filter(&spliced, sf);
+
+                                assert_iface_attr(
+                                    &spliced,
+                                    interface.then_some(PROP_IFACE),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         /// All slots `None` when no property is set. Pins that
         /// the empty-string / zero "unset" sentinel convention
         /// flows through to the splice helper as "leave the
         /// file's value alone". The shared `settings()` fixture
-        /// pre-fills `name` for IS-04 registration coverage; we
+        /// pre-fills `name` for IS-04 add-resource coverage; we
         /// clear it here together with the other identity /
         /// network fields so the test asserts on the splice
         /// builder's behaviour, not the fixture's defaults.
@@ -852,14 +1210,11 @@ mod tests {
             }
         }
 
-        /// No `transport_file` and no `caps` → neither synthesis
-        /// nor splice fires; inner stays misconfigured (no NMOS
-        /// resource can be registered).
+        /// Receiver with no `transport_file` and no `caps` stays
+        /// misconfigured — receivers cannot use deferred mode.
         #[test]
-        fn resolve_inner_config_udp_no_transport_file_and_no_caps_is_misconfigured() {
+        fn resolve_inner_config_udp_receiver_no_transport_file_and_no_caps_is_misconfigured() {
             let s = CommonSettings {
-                // IS-05 endpoint property set but no caps and no
-                // transport file — nothing to synthesise from.
                 multicast_ip: "232.0.0.1".to_owned(),
                 ..udp_settings(Side::Receiver, Transport::Udp)
             };
@@ -880,10 +1235,90 @@ mod tests {
             }
         }
 
+        /// Sender with no `transport_file` and no `caps` defers
+        /// AddSender to READY→PAUSED (fake `NotConfigured`).
+        #[test]
+        fn resolve_inner_config_udp_sender_no_caps_no_file_is_not_configured() {
+            let s = CommonSettings {
+                destination_ip: "239.1.1.1".to_owned(),
+                ..udp_settings(Side::Sender, Transport::Udp)
+            };
+            let (inner, text) = resolve_inner_config_udp(
+                &cat(),
+                "nmossink",
+                &s,
+                UdpVariant::V1,
+                None,
+            )
+            .expect("no error");
+            assert!(text.is_none());
+            match inner {
+                InnerConfig::Fake { kind, .. } => {
+                    assert_eq!(kind, FakeKind::NotConfigured);
+                }
+                other => panic!("expected not-configured fake, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn resolve_inner_config_nvdsudp_sender_no_caps_no_file_is_not_configured() {
+            let s = CommonSettings {
+                destination_ip: "239.1.1.1".to_owned(),
+                ..udp_settings(Side::Sender, Transport::NvDsUdp)
+            };
+            let (inner, text) = resolve_inner_config_nvdsudp(&cat(), "nmossink", &s, None)
+                .expect("no error");
+            assert!(text.is_none());
+            assert!(matches!(
+                inner,
+                InnerConfig::Fake {
+                    kind: FakeKind::NotConfigured,
+                    ..
+                }
+            ));
+        }
+
         /// `caps` supplied but no transport_file →
         /// `synthesise_or_passthrough_udp` builds an SDP from
         /// caps + transport_caps + IS-05 endpoint properties.
         /// The resolved config is now `Real`, not `Fake`.
+        #[test]
+        fn resolve_inner_config_udp_synthesises_unicast_receiver_from_caps_only() {
+            let mut s = udp_settings(Side::Receiver, Transport::Udp);
+            s.caps = Some(
+                gst::Caps::from_str(
+                    "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved",
+                )
+                .unwrap(),
+            );
+            s.interface_ip = "192.0.2.30".to_owned();
+            s.destination_port = 5004;
+            let (inner, text) = resolve_inner_config_udp(
+                &cat(),
+                "nmossrc",
+                &s,
+                UdpVariant::V1,
+                None,
+            )
+            .expect("unicast receiver caps synthesis");
+            let text = text.expect("synthesised SDP");
+            assert!(
+                text.contains("c=IN IP4 192.0.2.30"),
+                "unicast receiver c= comes from interface-ip, not multicast-ip:\n{text}",
+            );
+            assert!(
+                !text.contains("source-filter:"),
+                "unicast receiver synthesis omits source-filter when source-ip unset:\n{text}",
+            );
+            match inner {
+                InnerConfig::Real(TransportConfig::Udp { media, .. }) => {
+                    assert_eq!(media.primary.destination_ip, "192.0.2.30");
+                    assert_eq!(media.primary.interface_ip.as_deref(), Some("192.0.2.30"));
+                }
+                other => panic!("expected Real(Udp) from unicast caps synthesis, got {other:?}"),
+            }
+        }
+
         #[test]
         fn resolve_inner_config_udp_synthesises_sdp_from_caps_only() {
             let essence = gst::Caps::from_str(
@@ -1497,6 +1932,120 @@ mod tests {
                     other => panic!("expected Real for {transport:?} ANC, got {other:?}"),
                 }
             }
+        }
+    }
+
+    mod add_deferred_sender {
+        use super::super::super::add_deferred_sender;
+        use super::*;
+        use std::str::FromStr;
+
+        fn sender_udp_settings(transport: Transport) -> CommonSettings {
+            cat();
+            CommonSettings {
+                transport,
+                destination_ip: "239.99.99.1".to_owned(),
+                destination_port: 5004,
+                source_ip: "192.0.2.10".to_owned(),
+                auto_activate: true,
+                ..settings(Side::Sender)
+            }
+        }
+
+        fn video_peer_caps() -> gst::Caps {
+            cat();
+            gst::Caps::from_str(
+                "video/x-raw,format=UYVP,width=1920,height=1080,framerate=50/1,\
+                 interlace-mode=progressive",
+            )
+            .expect("video caps")
+        }
+
+        fn anc_peer_caps() -> gst::Caps {
+            cat();
+            gst::Caps::from_str("meta/x-st-2038,alignment=frame,framerate=30/1")
+                .expect("anc caps")
+        }
+
+        #[test]
+        fn synthesise_deferred_sender_udp_video_udp_builds_real_inner() {
+            let s = sender_udp_settings(Transport::Udp);
+            let (text, inner) = synthesise_deferred_sender_udp(
+                "nmossink",
+                &s,
+                &video_peer_caps(),
+            )
+            .expect("synth");
+            assert!(text.contains("m=video 5004 RTP/AVP 96"), "SDP:\n{text}");
+            assert!(text.contains("c=IN IP4 239.99.99.1/"));
+            assert!(matches!(inner, InnerConfig::Real(TransportConfig::Udp { .. })));
+        }
+
+        #[test]
+        fn synthesise_deferred_sender_udp_anc_nvdsudp_builds_real_inner() {
+            let s = sender_udp_settings(Transport::NvDsUdp);
+            let (text, inner) = synthesise_deferred_sender_udp(
+                "nmossink",
+                &s,
+                &anc_peer_caps(),
+            )
+            .expect("synth");
+            assert!(text.contains("smpte291/90000"), "ANC SDP:\n{text}");
+            assert!(matches!(inner, InnerConfig::Real(TransportConfig::NvDsUdp { .. })));
+        }
+
+        #[test]
+        fn synthesise_deferred_sender_udp_unset_destination_ip_uses_zero_address() {
+            let s = CommonSettings {
+                destination_ip: String::new(),
+                ..sender_udp_settings(Transport::Udp)
+            };
+            let (text, inner) = synthesise_deferred_sender_udp("nmossink", &s, &video_peer_caps())
+                .expect("unset destination-ip synthesises");
+            assert!(
+                text.contains("c=IN IP4 0.0.0.0"),
+                "expected unspecified c= line, got:\n{text}",
+            );
+            match inner {
+                InnerConfig::Fake { kind, .. } => assert_eq!(kind, FakeKind::NotActive),
+                InnerConfig::Real(_) => {
+                    panic!("configuring-only sender keeps fake inner until activation")
+                }
+            }
+        }
+
+        #[test]
+        fn add_deferred_sender_udp_unsupported_video_format_is_error() {
+            let caps = gst::Caps::from_str("video/x-raw,format=I420,width=1920,height=1080")
+                .expect("caps");
+            let err = add_deferred_sender(
+                &cat(),
+                "nmossink",
+                &sender_udp_settings(Transport::Udp),
+                &Mutex::new(None),
+                caps,
+            )
+            .expect_err("I420 unsupported for ST 2110 synthesis");
+            assert!(
+                format!("{err:#}").contains("synthesising SDP from peer caps"),
+                "expected synthesis context: {err:#}",
+            );
+        }
+
+        #[test]
+        fn add_deferred_sender_udp_no_open_session_is_error() {
+            let err = add_deferred_sender(
+                &cat(),
+                "nmossink",
+                &sender_udp_settings(Transport::Udp2),
+                &Mutex::new(None),
+                video_peer_caps(),
+            )
+            .expect_err("missing session");
+            assert!(
+                format!("{err:#}").contains("no open session"),
+                "expected no-open-session reason: {err:#}",
+            );
         }
     }
 }

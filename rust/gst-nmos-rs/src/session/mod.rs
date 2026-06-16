@@ -18,8 +18,6 @@ use gstreamer as gst;
 use nvnmos_rpc::v1::Transport as ProtoTransport;
 
 use crate::daemon::{ActivationHandler, ActivationRequest, Session};
-use crate::domain;
-use crate::flow_def::{self, FlowDefBuildInput};
 use crate::runtime::SHARED_RUNTIME;
 use crate::types::{CapsMode, DEFAULT_DAEMON_URI, FlowFormat, Transport};
 
@@ -128,12 +126,87 @@ pub(crate) const MXL_DOMAIN_ID_BLURB: &str =
      supplied. Cross-checked against `domain_def.json` when both \
      are supplied (mismatch is an error). On `nmossrc`, set before \
      NULL\u{2192}READY; on `nmossink` it may also be set in READY \
-     for deferred sender registration.";
+     for deferred AddSender.";
+
+pub(crate) const SENDER_NAME_BLURB: &str =
+    "Name for this Sender within the Node (becomes the \
+     `x-nvnmos-name` SDP attribute or the `urn:x-nvnmos:tag:name` \
+     flow-def tag in the transport file). Unique across Senders on the \
+     Node; a Receiver on the same Node may share the same name (the \
+     daemon scopes names by side). Overrides the transport file's value \
+     when both are supplied.";
+
+pub(crate) const RECEIVER_NAME_BLURB: &str =
+    "Name for this Receiver within the Node (becomes the \
+     `x-nvnmos-name` SDP attribute or the `urn:x-nvnmos:tag:name` \
+     flow-def tag in the transport file). Unique across Receivers on the \
+     Node; a Sender on the same Node may share the same name (the \
+     daemon scopes names by side). Overrides the transport file's value \
+     when both are supplied.";
+
+pub(crate) const LABEL_BLURB_SENDER: &str =
+    "NMOS label for the Sender. Optional. Overrides the transport \
+     file when both are supplied (top-level `label` in an MXL \
+     `flow_def`; SDP `s=` line for RTP/UDP).";
+
+pub(crate) const LABEL_BLURB_RECEIVER: &str =
+    "NMOS label for the Receiver. Optional. Overrides the transport \
+     file when both are supplied (top-level `label` in an MXL \
+     `flow_def`; SDP `s=` line for RTP/UDP).";
+
+pub(crate) const DESCRIPTION_BLURB_SENDER: &str =
+    "NMOS description for the Sender. Optional. Overrides the \
+     transport file when both are supplied (top-level `description` \
+     in an MXL `flow_def`; SDP `i=` line for RTP/UDP).";
+
+pub(crate) const DESCRIPTION_BLURB_RECEIVER: &str =
+    "NMOS description for the Receiver. Optional. Overrides the \
+     transport file when both are supplied (top-level `description` \
+     in an MXL `flow_def`; SDP `i=` line for RTP/UDP).";
 
 pub(crate) const TRANSPORT_FILE_PATH_BLURB: &str =
     "Filesystem path read at NULL\u{2192}READY into `transport-file`. \
      Convenience for gst-launch; mutually exclusive with \
      `transport-file`.";
+
+pub(crate) const TRANSPORT_FILE_BLURB_SENDER: &str =
+    "Literal contents of the NvNmos transport file: MXL `flow_def` JSON \
+     for `transport=mxl`, SDP text for `transport=udp` / `udp2` / \
+     `nvdsudp`. The daemon adds the Sender via AddSender and \
+     re-publishes the transport file on IS-05 activation. Pass the \
+     text, not a path. Convenient for programmatic callers; from \
+     gst-launch use `transport-file-path` instead. Mutually exclusive \
+     with `transport-file-path`. When unset and `caps` is supplied the \
+     element synthesises a configuring transport file from the essence \
+     caps (MXL `flow_def` or SDP, depending on `transport`).";
+
+pub(crate) const TRANSPORT_FILE_BLURB_RECEIVER: &str =
+    "Literal contents of the NvNmos transport file: MXL `flow_def` JSON \
+     for `transport=mxl`, SDP text for `transport=udp` / `udp2` / \
+     `nvdsudp`. The daemon adds the Receiver via AddReceiver and \
+     re-publishes the transport file on IS-05 activation. Pass the \
+     text, not a path. Convenient for programmatic callers; from \
+     gst-launch use `transport-file-path` instead. Mutually exclusive \
+     with `transport-file-path`. Required unless `caps` is provided.";
+
+pub(crate) const CAPS_BLURB_SENDER: &str =
+    "Essence caps for this Sender. Synthesises the configuring transport \
+     file when `transport-file*` is unset (MXL `flow_def` or SDP depending \
+     on `transport`). On `transport=mxl`, requires `mxl-flow-id`; supported \
+     shapes: v210 video, F32LE audio, `meta/x-st-2038` data. On RTP \
+     transports, requires the relevant IS-05 endpoint properties. When \
+     `transport-file*` is also set, the file wins and `caps` are \
+     cross-checked against it — mismatch is a hard error.";
+
+pub(crate) const CAPS_BLURB_RECEIVER: &str =
+    "Essence caps for this Receiver. Required when `transport-file*` is \
+     unset; synthesises the configuring transport file (MXL `flow_def` or \
+     SDP depending on `transport`). On `transport=mxl`, requires \
+     `mxl-flow-id` (media-type structure name picks the matching `mxlsrc` \
+     flow-id slot); supported shapes: v210 video, F32LE audio, \
+     `meta/x-st-2038` data. On RTP transports, requires the relevant IS-05 \
+     endpoint properties. When `transport-file*` is also set, the file wins \
+     and `caps` are cross-checked against it — mismatch is a hard error.";
 
 pub(crate) const TRANSPORT_CAPS_BLURB: &str =
     "Per-transport overrides (SDP fmtp-style). Typically empty for MXL.";
@@ -165,7 +238,7 @@ pub(crate) const AUTO_ACTIVATE_BLURB: &str =
      NULL\u{2192}READY (or READY\u{2192}PAUSED for deferred senders), and call \
      `SyncResourceState` so IS-04/IS-05 show active without an IS-05 PATCH. \
      Does not force PLAYING — child state still follows the bin. Default \
-     `false`: register on IS-04 but keep the fake chain until an external \
+     `false`: add via AddSender / AddReceiver (visible on IS-04) but keep the fake chain until an external \
      IS-05 controller activates the resource.";
 
 /// Snapshot of the properties needed to open a session, taken under
@@ -212,32 +285,35 @@ pub(crate) struct CommonSettings {
     /// against the transport file's top-level `id` when both are
     /// supplied; either source alone is enough.
     pub(crate) mxl_flow_id: String,
-    /// Literal transport file contents (MXL `flow_def` JSON today).
-    /// Convenient for programmatic callers (e.g. Rust/C apps that
-    /// compute the flow_def in memory) but awkward to pass from
-    /// `gst-launch-1.0` because the JSON contains newlines and
-    /// quotes — those callers use `transport_file_path` instead.
+    /// Literal transport file contents: MXL `flow_def` JSON or SDP
+    /// text, depending on `transport`. Convenient for programmatic
+    /// callers; `gst-launch` users typically pass `transport_file_path`
+    /// instead because multi-line JSON / SDP is awkward on the command
+    /// line.
     pub(crate) transport_file: String,
     /// Filesystem path that's read into `transport_file` at
     /// NULL→READY. Mutually exclusive with `transport_file`.
     pub(crate) transport_file_path: String,
-    /// NMOS `label` for the synthesised flow_def. Optional: the
-    /// builder falls back to the flow id when this is empty.
+    /// NMOS `label` spliced into the configuring transport file (MXL
+    /// top-level `label`; SDP `s=`). Optional; overrides a supplied
+    /// file when non-empty. When synthesising from `caps` only, defaults
+    /// to the resource name on MXL and `"nvnmos"` on SDP.
     pub(crate) label: String,
-    /// NMOS `description` for the synthesised flow_def. Optional;
-    /// omitted from the JSON when empty.
+    /// NMOS `description` spliced into the configuring transport file
+    /// (MXL top-level `description`; SDP `i=`). Optional; omitted
+    /// when empty.
     pub(crate) description: String,
     /// Essence caps. On `nmossink`, when no `transport_file*` is
-    /// supplied, the element synthesises a flow_def JSON from these
-    /// caps plus the resolved property state
-    /// (see [`crate::flow_def::from_caps`]). On `nmossrc`,
-    /// the media-type structure name decides which `mxlsrc` flow-id
-    /// slot receives `mxl-flow-id` and the caps are pinned on the
-    /// ghost source pad so downstream caps queries see the concrete
-    /// shape the flow will carry. When `transport_file*` is supplied
-    /// the file is authoritative; for `nmossink` the caps are
-    /// ignored; for `nmossrc` the caps-derived format is
-    /// cross-checked against the file's `format` field.
+    /// supplied, synthesises a configuring transport file (MXL
+    /// `flow_def` via [`crate::flow_def::from_caps`], SDP via
+    /// [`crate::sdp::from_caps`]). On `nmossrc`, the
+    /// media-type structure name decides which `mxlsrc` flow-id slot
+    /// receives `mxl-flow-id` and the caps are pinned on the ghost
+    /// source pad so downstream caps queries see the concrete shape
+    /// the flow will carry. When `transport_file*` is supplied the
+    /// file is authoritative; for `nmossink` the caps are ignored;
+    /// for `nmossrc` the caps-derived format is cross-checked against
+    /// the file's essence fields.
     pub(crate) caps: Option<gst::Caps>,
     /// Per-transport overrides (`application/x-rtp,…` shape for the
     /// RTP transports; typically empty / unused for `mxl`). Carries
@@ -324,38 +400,43 @@ pub(crate) struct CommonSettings {
     /// [`crate::iface::iface_name_for_ip`] and threaded into
     /// `udpsrc.multicast-iface`). Also emitted in the configuring
     /// SDP as the `a=x-nvnmos-iface-ip:` attribute. Empty string =
-    /// unset. Ignored on the Sender side (senders use `source_ip`
-    /// for the same wire concept).
+    /// unset. When `multicast_ip` is also unset,
+    /// [`receiver_connection_address`](udp::receiver_connection_address)
+    /// uses this for the SDP `c=` line on synthesis and passthrough
+    /// — see that helper's doc for the multicast-file caveat. Ignored
+    /// on the Sender side (senders use `source_ip` for the origin /
+    /// connection slots on synthesis).
     pub(crate) interface_ip: String,
     /// IS-05 RTP receiver transport_params `multicast_ip` —
     /// Receiver-only. Multicast group to join (or empty for
-    /// unicast reception). Becomes the `c=` line address in the
-    /// configuring SDP and the `udpsrc.address` property. Empty
-    /// string = unset (unicast / let the SDP / daemon resolve).
+    /// unicast reception). Takes precedence over `interface_ip` for
+    /// the `c=` line when set. Empty string = unset (unicast / let
+    /// the SDP / daemon resolve).
     /// Ignored on the Sender side (senders use `destination_ip`
-    /// for the same wire concept).
+    /// for the egress destination on synthesis).
     pub(crate) multicast_ip: String,
-    /// Whether the element brings its inner `mxlsink` / `mxlsrc` up
+    /// Whether the element brings its inner transport src/sink up
     /// immediately at NULL→READY (or, for a deferred-mode sender,
     /// READY→PAUSED) once the configuring transport file has been
     /// resolved, and synchronises the daemon's IS-04/IS-05 state to
     /// match via `SyncResourceState`.
     ///
     /// `false` (default) gives canonical NMOS behaviour: the
-    /// element registers the resource (so it appears on IS-04) but
+    /// element adds the Sender or Receiver to the daemon (so it appears on IS-04) but
     /// leaves the data path on the fake chain until an IS-05 PATCH
     /// against `/single/{senders,receivers}/{id}/staged` activates
     /// it. `true` is the "no-controller" shortcut for development
     /// and for pipelines whose flow identity is entirely property /
     /// transport-file driven.
     ///
-    /// The toggle is orthogonal to how the configuring flow_def
+    /// The toggle is orthogonal to how the configuring transport file
     /// itself was obtained (property override of `mxl-flow-id`,
-    /// supplied `transport-file*`, or caps→flow_def synthesis): as
-    /// long as one of those routes produces a usable flow_def at
-    /// NULL→READY (or READY→PAUSED for a deferred sender),
-    /// `auto-activate=true` brings the inner up and informs the
-    /// daemon; `auto-activate=false` leaves it for the controller.
+    /// supplied `transport-file*`, or caps→transport-file synthesis):
+    /// as long as one of those routes produces a usable configuring
+    /// transport file (MXL `flow_def` or SDP) at NULL→READY (or
+    /// READY→PAUSED for a deferred sender), `auto-activate=true`
+    /// brings the inner up and informs the daemon;
+    /// `auto-activate=false` leaves it for the controller.
     pub(crate) auto_activate: bool,
 }
 
@@ -396,7 +477,7 @@ impl Default for CommonSettings {
 /// Outcome of resolving `transport_file` / `transport_file_path`.
 /// `Some(text)` means a non-empty literal was supplied (directly or
 /// loaded from the path); `None` means neither was set and no
-/// resource will be registered.
+/// resource will be added.
 fn resolve_transport_file(
     element: &str,
     settings: &CommonSettings,
@@ -434,12 +515,12 @@ fn resolve_transport_file(
 /// dormant IS-05 state) live in [`InnerConfig::Fake::detail`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FakeKind {
-    /// Not enough state to register or build a real chain yet (e.g.
+    /// Not enough state to add a resource or build a real chain yet (e.g.
     /// MXL sender awaiting peer caps for deferred `AddSender`).
     NotConfigured,
     /// Invalid or inconsistent configuration — cannot honour activation.
     Misconfigured,
-    /// Registered and valid, but no live RTP/media path (initial
+    /// Created and valid, but no live RTP/media path (initial
     /// `auto-activate=false`, deactivated, or all SDP legs inactive).
     NotActive,
 }
@@ -466,15 +547,16 @@ impl FakeKind {
 /// `validate_and_open`.
 ///
 /// [`InnerConfig::Real`] carries everything the element needs to
-/// instantiate a real transport chain (today only MXL, captured in
-/// [`TransportConfig::Mxl`]). [`InnerConfig::Fake`] means the
+/// instantiate a real transport chain ([`TransportConfig::Mxl`] or
+/// [`TransportConfig::Udp`]). [`InnerConfig::Fake`] means the
 /// resolved configuration didn't pin enough state to build a real
-/// chain (e.g. no Flow id, no Domain path) and the element keeps
-/// its fake data path in place (`fakesink` on the sink side, an
-/// `appsrc` configured with the resolved essence caps on the
-/// source side — see [`crate::inner`]). A later step
-/// (caps→flow_def, IS-05 activation) will supply the missing pieces
-/// and the bin will swap from fake to real.
+/// chain (e.g. missing MXL domain/flow id, or incomplete RTP
+/// SDP/endpoints) and the element keeps its fake data path in place
+/// (`fakesink` on the sink side, an `appsrc` configured with the
+/// resolved essence caps on the source side — see [`crate::inner`]).
+/// A later step (caps→transport-file synthesis or IS-05 activation)
+/// will supply the missing pieces and the bin will swap from fake to
+/// real.
 #[derive(Debug, Clone)]
 pub(crate) enum InnerConfig {
     Real(TransportConfig),
@@ -488,9 +570,8 @@ pub(crate) enum InnerConfig {
     },
 }
 
-/// Per-transport state needed to build a real chain. New transports
-/// (NVDS-UDP, ...) get their own variants alongside the two
-/// implemented today.
+/// Per-transport state needed to build a real chain: [`Mxl`] for
+/// MXL and [`Udp`] for RTP/UDP (`udp`, `udp2`, and `nvdsudp`).
 #[derive(Debug, Clone)]
 pub(crate) enum TransportConfig {
     Mxl {
@@ -511,9 +592,9 @@ pub(crate) enum TransportConfig {
         /// Receivers whose `mxl-flow-id` will arrive via IS-05 PATCH).
         transport_file: Option<String>,
     },
-    /// OSS UDP/RTP transport. The inner chain is
-    /// `rtp*pay ! udpsink` for senders and
-    /// `udpsrc ! rtp*depay [! capssetter(raw_caps)]` for receivers.
+    /// RTP/UDP transport. The inner chain is `rtp*pay ! udpsink` for
+    /// senders and `udpsrc ! rtp*depay [! capssetter(raw_caps)]` for
+    /// receivers.
     /// Wide receivers (activation SDP carries `a=x-nvnmos-caps:`)
     /// omit `capssetter`; narrow receivers pin configuring essence
     /// caps parsed from the transport file. The exact element factory
@@ -567,13 +648,12 @@ mod mxl;
 pub(crate) mod udp;
 
 pub(crate) use udp::UdpVariant;
-pub(crate) use mxl::decide_inner_config_mxl;
 pub(crate) use udp::{
     decide_inner_config_nvdsudp, decide_inner_config_udp, udp_essence_cross_check_mode,
 };
 
-use mxl::{resolve_activation_inner_mxl, resolve_inner_config_mxl};
-use udp::{resolve_inner_config_nvdsudp, resolve_inner_config_udp};
+use mxl::{resolve_activation_inner_mxl, resolve_inner_config_mxl, synthesise_deferred_sender_mxl};
+use udp::{resolve_inner_config_nvdsudp, resolve_inner_config_udp, synthesise_deferred_sender_udp};
 
 fn udp_inner_summary(
     family: &str,
@@ -654,7 +734,7 @@ pub(crate) fn validate_and_open(
         }
     };
 
-    inner = apply_auto_activate_gate(inner, settings.auto_activate);
+    inner = apply_auto_activate_policy(cat, element, settings, inner);
 
     let transport = transport_to_proto(settings.transport);
     let side = settings.side;
@@ -680,8 +760,8 @@ pub(crate) fn validate_and_open(
         .with_context(|| format!("{element}: OpenSession against {}", settings.daemon_uri))?;
 
     let resource_summary = match new_session.resource_id() {
-        Some((handle, id)) => format!("resource registered: resource_handle={handle} resource_id={id}"),
-        None => "no resource registered (transport-file unset)".to_owned(),
+        Some((handle, id)) => format!("resource added: resource_handle={handle} resource_id={id}"),
+        None => "no resource added (transport-file unset)".to_owned(),
     };
     // For MXL, `mxl-domain-id` is already logged at resolution time
     // by `resolve_inner_config_mxl`; for UDP there's no equivalent
@@ -730,16 +810,91 @@ pub(super) fn caps_format(settings: &CommonSettings) -> FlowFormat {
         .map(FlowFormat::from_caps)
         .unwrap_or(FlowFormat::Unspecified)
 }
-/// Honour `auto-activate` at setup time. When `auto_activate` is
-/// `false` and `decide_inner_config_mxl` / `decide_inner_config_udp`
-/// would have produced a real transport chain, downgrade to
+/// IS-05 transport parameters that may be omitted at AddSender /
+/// AddReceiver but are required to bring up the inner data path when
+/// `auto-activate=true`.
+pub(super) fn deferred_transport_params(settings: &CommonSettings) -> Vec<&'static str> {
+    match settings.transport {
+        Transport::Mxl => {
+            if settings.mxl_flow_id.is_empty() {
+                vec!["mxl-flow-id"]
+            } else {
+                vec![]
+            }
+        }
+        Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => match settings.side {
+            Side::Sender => {
+                let mut missing = Vec::new();
+                if settings.destination_ip.is_empty() {
+                    missing.push("destination-ip");
+                }
+                if settings.destination_port == 0 {
+                    missing.push("destination-port");
+                }
+                missing
+            }
+            Side::Receiver => {
+                let mut missing = Vec::new();
+                if settings.destination_port == 0 {
+                    missing.push("destination-port");
+                }
+                missing
+            }
+        },
+    }
+}
+
+/// Honour `auto-activate` at setup time and warn when eager activation
+/// was requested but deferred transport parameters are still unset.
+///
+/// When `auto_activate` is `false` and `decide_inner_config_*` would
+/// have produced a real transport chain, downgrade to
 /// [`InnerConfig::Fake`] so the data path stays inactive until an
 /// IS-05 PATCH activates the resource (the canonical NMOS path).
 ///
-/// The resource registration itself isn't affected — that's driven
-/// by whether a configuring transport file is in play, not by the
-/// gate — so a resource opened with `auto-activate=false` still
-/// appears on IS-04 immediately, ready to be PATCHed.
+/// When `auto_activate` is `true` but wire/MXL flow parameters needed
+/// for the inner chain are still unset, log a warning and keep (or
+/// downgrade to) a fake chain — AddSender / AddReceiver still proceeds
+/// when a configuring transport file is available.
+pub(super) fn apply_auto_activate_policy(
+    cat: &gst::DebugCategory,
+    element: &str,
+    settings: &CommonSettings,
+    inner: InnerConfig,
+) -> InnerConfig {
+    let missing = deferred_transport_params(settings);
+
+    if settings.auto_activate && !missing.is_empty() {
+        gst::warning!(
+            cat,
+            "{element}: auto-activate=true ignored — missing transport properties: {}",
+            missing.join(", "),
+        );
+        if matches!(inner, InnerConfig::Real(_)) {
+            return InnerConfig::Fake {
+                kind: FakeKind::NotActive,
+                detail: format!(
+                    "auto-activate=true but {} unset; waiting for IS-05 PATCH",
+                    missing.join(", "),
+                ),
+            };
+        }
+        return inner;
+    }
+
+    if !settings.auto_activate && matches!(inner, InnerConfig::Real(_)) {
+        return InnerConfig::Fake {
+            kind: FakeKind::NotActive,
+            detail: "auto-activate=false; waiting for IS-05 PATCH to activate".into(),
+        };
+    }
+
+    inner
+}
+
+/// Honour `auto-activate=false` for a fully-resolved inner chain.
+/// Used by unit tests that already supply complete transport state.
+#[cfg(test)]
 fn apply_auto_activate_gate(inner: InnerConfig, auto_activate: bool) -> InnerConfig {
     if !auto_activate && matches!(inner, InnerConfig::Real(_)) {
         return InnerConfig::Fake {
@@ -750,129 +905,100 @@ fn apply_auto_activate_gate(inner: InnerConfig, auto_activate: bool) -> InnerCon
     inner
 }
 
-/// Register a Sender via the deferred-mode path: synthesise a
-/// flow_def from upstream peer caps and call `AddSender` against a
-/// session that was opened without one. Used by `nmossink` from
-/// inside `change_state(ReadyToPaused)` when neither `transport-file*`
-/// nor `caps` was set at NULL→READY.
+/// Fixate upstream peer caps for deferred AddSender.
+fn prepare_deferred_peer_caps(
+    element: &str,
+    peer_caps: gst::Caps,
+) -> Result<gst::Caps, anyhow::Error> {
+    if peer_caps.is_empty() {
+        bail!(
+            "{element}: deferred AddSender: upstream peer offered no caps. \
+             Declare `caps=\"…\"` on the element or insert a `capsfilter` \
+             upstream so the element knows what transport file to add."
+        );
+    }
+    if peer_caps.is_any() {
+        bail!(
+            "{element}: deferred AddSender: upstream peer offered ANY caps \
+             (likely no negotiated caps yet — e.g. `fakesrc` with no upstream \
+             capsfilter). Declare `caps=\"…\"` on the element or insert a \
+             `capsfilter` upstream so the element knows what transport file to \
+             add."
+        );
+    }
+    let mut fixated = peer_caps;
+    fixated.fixate();
+    Ok(fixated)
+}
+
+/// Add a Sender via the deferred-mode path: synthesise a
+/// configuring transport file from upstream peer caps and call
+/// `AddSender` against a session that was opened without one. Used by
+/// `nmossink` from inside `change_state(ReadyToPaused)` when neither
+/// `transport-file*` nor `caps` was set at NULL→READY.
 ///
-/// `peer_caps` is what `gst_pad_peer_query_caps()` returned, before
-/// fixation. The helper fixates internally and rejects ANY / EMPTY
-/// caps with a clear, user-facing error message telling them to
-/// declare `caps=…` or insert a `capsfilter` upstream — that's the
-/// same recipe the plan doc spells out for pipelines where the peer
-/// query can't fix caps (h264parse pre-data, etc.).
-///
-/// Returns the [`InnerConfig`] the element should install on the
-/// data path; today always [`InnerConfig::Real`] on success because
-/// deferred-mode registration is only attempted when `mxl-domain-path`
-/// is set (the fake chain is the alternative the caller picks when
-/// this helper isn't called).
-pub(crate) fn register_deferred(
+/// MXL senders synthesise a `flow_def` JSON; RTP senders (`udp` /
+/// `udp2` / `nvdsudp`) synthesise SDP. `peer_caps` is what
+/// `gst_pad_peer_query_caps()` returned, before fixation.
+pub(crate) fn add_deferred_sender(
     cat: &gst::DebugCategory,
     element: &str,
     settings: &CommonSettings,
     session: &Mutex<Option<Session>>,
     peer_caps: gst::Caps,
 ) -> Result<InnerConfig, anyhow::Error> {
-    if settings.transport != Transport::Mxl {
-        bail!(
-            "{element}: deferred registration unsupported for transport `{:?}`",
-            settings.transport
-        );
-    }
     if settings.side != Side::Sender {
-        // Receiver deferred mode is explicitly out of scope (plan doc:
-        // “`nmossrc` cannot use deferred mode — there is no peer to
-        // query.”). Reject so we don't accidentally try.
-        bail!("{element}: deferred registration is sender-only");
+        bail!("{element}: deferred AddSender is sender-only");
     }
 
-    if peer_caps.is_empty() {
-        bail!(
-            "{element}: deferred registration: upstream peer offered no caps. \
-             Declare `caps=\"…\"` on the element or insert a `capsfilter` \
-             upstream so the element knows what flow_def to register."
-        );
-    }
-    if peer_caps.is_any() {
-        bail!(
-            "{element}: deferred registration: upstream peer offered ANY caps \
-             (likely no negotiated caps yet — e.g. `fakesrc` with no upstream \
-             capsfilter). Declare `caps=\"…\"` on the element or insert a \
-             `capsfilter` upstream so the element knows what flow_def to register."
-        );
-    }
-
-    // Fixate the (possibly under-constrained) peer caps into a single,
-    // concrete shape — the same operation any sink performs to decide
-    // its negotiated caps. The fixated caps drive the flow_def
-    // builder.
-    let mut fixated = peer_caps;
-    fixated.fixate();
+    let fixated = prepare_deferred_peer_caps(element, peer_caps)?;
     gst::info!(
         cat,
         "{element}: deferred mode: peer caps fixated to `{fixated}`",
     );
 
-    let domain_resolution =
-        domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path)
-            .with_context(|| {
-                format!("{element}: resolving MXL Domain identity for deferred registration")
-            })?;
-    if domain_resolution.id.is_empty() {
-        bail!(
-            "{element}: deferred registration: `mxl-domain-id` is required \
-             (set the property directly or supply an `mxl-domain-path` whose \
-             `domain_def.json` provides the id)"
-        );
-    }
-
-    let json = flow_def::from_caps(&FlowDefBuildInput {
-        flow_id: &settings.mxl_flow_id,
-        name: &settings.name,
-        mxl_domain_id: &domain_resolution.id,
-        label: &settings.label,
-        description: &settings.description,
-        caps: &fixated,
-    })
-    .with_context(|| format!("{element}: synthesising flow_def from peer caps"))?;
-    gst::info!(cat, "{element}: deferred mode: synthesised flow_def");
-
-    let flow = flow_def::resolve_mxl_flow_meta(
-        &settings.mxl_flow_id,
-        FlowFormat::from_caps(&fixated),
-        Some(&json),
-    )
-    .with_context(|| {
-        format!("{element}: resolving MXL flow id / format for deferred registration")
-    })?;
-    let inner = apply_auto_activate_gate(
-        decide_inner_config_mxl(settings, &flow, Some(&json)),
-        settings.auto_activate,
+    let (transport_file, inner) = match settings.transport {
+        Transport::Mxl => synthesise_deferred_sender_mxl(element, settings, &fixated)?,
+        Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => {
+            synthesise_deferred_sender_udp(element, settings, &fixated)?
+        }
+    };
+    gst::info!(
+        cat,
+        "{element}: deferred mode: synthesised configuring transport file",
     );
+    finish_deferred_add_sender(cat, element, session, inner, &transport_file, settings)
+}
 
+/// Call `AddSender` after deferred synthesis. Shared by MXL and RTP paths.
+fn finish_deferred_add_sender(
+    cat: &gst::DebugCategory,
+    element: &str,
+    session: &Mutex<Option<Session>>,
+    inner: InnerConfig,
+    transport_file: &str,
+    settings: &CommonSettings,
+) -> Result<InnerConfig, anyhow::Error> {
     let transport = transport_to_proto(settings.transport);
     let side = settings.side;
     let name = settings.name.clone();
     // Take the Session out of the std::Mutex before doing async work
-    // (clippy's `await_holding_lock` lint, same pattern `close()` uses
-    // for the symmetrical CloseSession call). The session is put back
-    // afterwards whether AddSender succeeded or failed so READY→NULL
-    // still has something to close.
+    // (clippy's `await_holding_lock` lint, same pattern `close()` uses).
+    // Put it back before checking the RPC result so READY→NULL always
+    // has a session to close whether AddSender succeeded or failed.
     let mut taken = session.lock().unwrap().take().ok_or_else(|| {
         anyhow::anyhow!(
-            "{element}: deferred registration but no open session — was NULL→READY skipped?"
+            "{element}: deferred AddSender but no open session — was NULL→READY skipped?"
         )
     })?;
     let rpc_result = SHARED_RUNTIME.block_on(async {
         tokio::time::timeout(
             OPEN_TIMEOUT,
-            taken.add_resource(side, &name, transport, &json),
+            taken.add_resource(side, &name, transport, transport_file),
         )
         .await
-        .with_context(|| format!("{element}: AddSender for deferred registration timed out"))?
-        .with_context(|| format!("{element}: AddSender for deferred registration"))
+        .with_context(|| format!("{element}: AddSender (deferred) timed out"))?
+        .with_context(|| format!("{element}: AddSender (deferred)"))
     });
     let summary = taken
         .resource_id()
@@ -883,17 +1009,17 @@ pub(crate) fn register_deferred(
 
     gst::info!(
         cat,
-        "{element}: deferred registration complete: {summary}; inner data path: {:?}",
+        "{element}: deferred AddSender complete: {summary}; inner data path: {:?}",
         inner,
     );
     Ok(inner)
 }
 
-/// Tell the daemon to sync its IS-04/IS-05 view of the registered
+/// Tell the daemon to sync its IS-04/IS-05 view of the added
 /// resource to "active" (`master_enable: true`) with `transport_file`
 /// as the live configuration. Used by the `auto-activate=true` path
-/// after the element has already swapped its inner `mxlsink` /
-/// `mxlsrc` directly from the resolved configuring flow_def.
+/// after the element has already swapped its inner transport src/sink
+/// directly from the resolved configuring transport file.
 ///
 /// Pass `None` for `transport_file` to sync to "inactive" (the
 /// reverse direction, for symmetry — currently unused; the element
@@ -906,7 +1032,7 @@ pub(crate) fn register_deferred(
 /// `mxlsrc` without `AddSender` / `AddReceiver` having succeeded
 /// first; in practice unreachable since `decide_inner_config` plus
 /// the `auto-activate` gate only let that happen after a successful
-/// registration). Other RPC failures are returned so the caller can
+/// AddSender / AddReceiver). Other RPC failures are returned so the caller can
 /// log them without forcing the inner swap itself to roll back.
 pub(crate) fn sync_active(
     cat: &gst::DebugCategory,
@@ -1412,13 +1538,13 @@ mod tests {
             )
             .expect("synthesis must succeed")
             .expect("caps + flow id must synthesise");
-            let flow = flow_def::resolve_mxl_flow_meta(
+            let flow = crate::flow_def::resolve_mxl_flow_meta(
                 &s.mxl_flow_id,
                 FlowFormat::Video,
                 Some(&synth),
             )
             .expect("resolve_mxl_flow_meta");
-            let inner = crate::session::decide_inner_config_mxl(&s, &flow, Some(&synth));
+            let inner = mxl::decide_inner_config_mxl(&s, &flow, Some(&synth));
             assert!(
                 matches!(inner, InnerConfig::Real(_)),
                 "fixture must produce Real before the gate"
@@ -1440,6 +1566,132 @@ mod tests {
                     panic!("auto-activate=false: caps-synthesised flow_id must defer to IS-05")
                 }
             }
+        }
+
+        #[test]
+        fn policy_downgrades_eager_mxl_without_flow_id() {
+            let s = CommonSettings {
+                mxl_flow_id: String::new(),
+                auto_activate: true,
+                ..settings(Side::Sender)
+            };
+            let inner = InnerConfig::Fake {
+                kind: FakeKind::NotActive,
+                detail: "configuring-only".into(),
+            };
+            let after = super::super::apply_auto_activate_policy(&cat(), "nmossink", &s, inner);
+            assert!(matches!(after, InnerConfig::Fake { .. }));
+        }
+
+        #[test]
+        fn policy_downgrades_eager_rtp_sender_without_destination() {
+            let s = CommonSettings {
+                transport: Transport::Udp,
+                side: Side::Sender,
+                auto_activate: true,
+                source_ip: "192.0.2.1".to_owned(),
+                destination_ip: String::new(),
+                destination_port: 0,
+                ..settings(Side::Sender)
+            };
+            let inner = InnerConfig::Real(TransportConfig::Mxl {
+                domain_path: "/var/lib/mxl/domain-a".to_owned(),
+                flow_id: FLOW_ID_A.to_owned(),
+                format: FlowFormat::Video,
+                transport_file: None,
+            });
+            let after = super::super::apply_auto_activate_policy(&cat(), "nmossink", &s, inner);
+            match after {
+                InnerConfig::Fake { kind, detail } => {
+                    assert_eq!(kind, FakeKind::NotActive);
+                    assert!(detail.contains("destination-ip"));
+                }
+                InnerConfig::Real(_) => panic!("must not eager-activate without destination-ip"),
+            }
+        }
+    }
+
+    mod configuring_minimum {
+        use super::*;
+
+        #[test]
+        fn deferred_transport_params_mxl_without_flow_id() {
+            let s = settings(Side::Receiver);
+            assert_eq!(
+                super::super::deferred_transport_params(&s),
+                vec!["mxl-flow-id"]
+            );
+        }
+
+        #[test]
+        fn deferred_transport_params_rtp_sender_wire_endpoints() {
+            let s = CommonSettings {
+                transport: Transport::Udp,
+                side: Side::Sender,
+                source_ip: "192.0.2.1".to_owned(),
+                ..settings(Side::Sender)
+            };
+            assert_eq!(
+                super::super::deferred_transport_params(&s),
+                vec!["destination-ip", "destination-port"]
+            );
+        }
+
+        #[test]
+        fn deferred_transport_params_rtp_receiver_unicast_omits_multicast_ip() {
+            let s = CommonSettings {
+                transport: Transport::Udp,
+                side: Side::Receiver,
+                interface_ip: "192.0.2.1".to_owned(),
+                ..settings(Side::Receiver)
+            };
+            assert_eq!(
+                super::super::deferred_transport_params(&s),
+                vec!["destination-port"]
+            );
+        }
+
+        #[test]
+        fn deferred_transport_params_rtp_receiver_multicast_with_port_is_complete() {
+            let s = CommonSettings {
+                transport: Transport::Udp,
+                side: Side::Receiver,
+                interface_ip: "192.0.2.1".to_owned(),
+                multicast_ip: "239.1.1.1".to_owned(),
+                destination_port: 5004,
+                ..settings(Side::Receiver)
+            };
+            assert!(super::super::deferred_transport_params(&s).is_empty());
+        }
+
+        #[test]
+        fn rtp_sender_caps_synthesis_requires_source_ip() {
+            let s = CommonSettings {
+                transport: Transport::Udp,
+                side: Side::Sender,
+                caps: Some(video_caps()),
+                ..settings(Side::Sender)
+            };
+            let err = super::udp::validate_rtp_configuring_minimum("nmossink", &s).unwrap_err();
+            assert!(
+                err.to_string().contains("source-ip"),
+                "expected source-ip requirement: {err:#}"
+            );
+        }
+
+        #[test]
+        fn rtp_receiver_caps_synthesis_requires_interface_ip() {
+            let s = CommonSettings {
+                transport: Transport::Udp,
+                side: Side::Receiver,
+                caps: Some(video_caps()),
+                ..settings(Side::Receiver)
+            };
+            let err = super::udp::validate_rtp_configuring_minimum("nmossrc", &s).unwrap_err();
+            assert!(
+                err.to_string().contains("interface-ip"),
+                "expected interface-ip requirement: {err:#}"
+            );
         }
     }
 }

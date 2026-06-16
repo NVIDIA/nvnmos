@@ -994,8 +994,8 @@ impl NodeServer {
 
     /// Look up a sender's NMOS UUID by its name.
     ///
-    /// Returns `Ok(None)` if no sender with the given `sender_name` is
-    /// currently registered with this server.
+    /// Returns `Ok(None)` if no sender with the given `sender_name`
+    /// currently exists on this server.
     pub fn sender_id(&self, sender_name: &str) -> Result<Option<String>> {
         let cname = CString::new(sender_name)?;
         let mut buf = [0u8; ID_BUF_LEN];
@@ -1015,8 +1015,8 @@ impl NodeServer {
 
     /// Look up a receiver's NMOS UUID by its name.
     ///
-    /// Returns `Ok(None)` if no receiver with the given `receiver_name` is
-    /// currently registered with this server.
+    /// Returns `Ok(None)` if no receiver with the given `receiver_name`
+    /// currently exists on this server.
     pub fn receiver_id(&self, receiver_name: &str) -> Result<Option<String>> {
         let cname = CString::new(receiver_name)?;
         let mut buf = [0u8; ID_BUF_LEN];

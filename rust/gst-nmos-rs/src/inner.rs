@@ -13,14 +13,21 @@
 //!
 //! * a **fake chain** while no real flow is wired up (`fakesink` for
 //!   sinks, `appsrc` for sources, both idle in PLAYING), or
-//! * a **real chain** for a specific transport (today only MXL:
-//!   `mxlsink` on the sink side; on the source side a sub-bin
-//!   wrapping `mxlsrc ! capssetter`) once enough configuration is
-//!   pinned to instantiate it.
+//! * a **real chain** for the selected transport once enough
+//!   configuration is pinned to instantiate it:
+//!   * **MXL** — `mxlsink` on the sink side; on the source side a
+//!     sub-bin wrapping `mxlsrc ! capssetter` when advertise-caps
+//!     are known ([`build_mxlsink`] / [`build_mxlsrc`]).
+//!   * **UDP** (`udp` / `udp2`) — `rtp*pay ! udpsink` on the sink
+//!     side; `udpsrc ! rtp*depay` (optionally followed by
+//!     `capssetter` on the source side) ([`build_udpsink`] /
+//!     [`build_udpsrc`]).
+//!   * **nvdsudp** — DeepStream `nvdsudpsink` / `nvdsudpsrc`
+//!     ([`build_nvdsudpsink`] / [`build_nvdsudpsrc`]).
 //!
-//! Future transports (NVDS-UDP, plain UDP/RTP, ...) plug in as
-//! additional `build_real_*` factories alongside [`build_mxlsink`]
-//! / [`build_mxlsrc`]; the swap mechanics here are transport-agnostic.
+//! The swap mechanics here are transport-agnostic; each factory
+//! returns a chain element (or small bin) whose sink/src pad is
+//! linked behind the anchor.
 //!
 //! `nmossink` topology (data flows from the ghost into the chain):
 //!
@@ -526,7 +533,7 @@ pub(crate) fn current_chain_is_real(ghost: &gst::GhostPad) -> bool {
 /// looks valid in the pipeline before configuration is complete
 /// (it sinks any caps and drops everything). The `-fake` suffix on
 /// the element name is what [`current_chain_is_real`] checks to
-/// decide whether to insert a fake hop on real → real activations.
+/// decide whether to insert a fake hop into real → real re-activations.
 pub(crate) fn build_fake_sink() -> Result<gst::Element, anyhow::Error> {
     gst::ElementFactory::make("fakesink")
         .name("nmossink-fake")
@@ -540,11 +547,11 @@ pub(crate) fn build_fake_sink() -> Result<gst::Element, anyhow::Error> {
 /// buffers pushed into it. Its basesrc loop blocks in `create()` so
 /// no data flows; when `caps` is `Some` the appsrc also answers
 /// downstream caps queries with a concrete shape so negotiation
-/// completes. Replaced by a real chain (today `mxlsrc` in a
-/// `mxlsrc ! capssetter` sub-bin) once an IS-05 activation pins a
-/// Flow id. The `-fake` suffix on the element name is what
-/// [`current_chain_is_real`] checks to decide whether to insert a
-/// fake hop on real → real activations.
+/// completes. Replaced by the transport-specific real inner source
+/// chain once configuration is complete (via NULL→READY properties
+/// or an IS-05 activation). The `-fake` suffix on the element name
+/// is what [`current_chain_is_real`] checks to decide whether to
+/// insert a fake hop into real → real re-activations.
 ///
 /// When `caps` is `None` (typical at construction time, before any
 /// properties have been set) the appsrc is built without caps;
@@ -722,7 +729,7 @@ pub(crate) fn build_mxlsrc(
     })
 }
 
-/// Build the inner UDP/RTP sink chain for `nmossink`. Always
+/// Build the inner RTP/UDP sink chain for `nmossink`. Always
 /// constructs a sub-bin: `rtp<essence>pay ! udpsink` (or the
 /// gst-plugins-rs `*pay2` family + `udpsink` for [`UdpVariant::V2`])
 /// with the payloader's sink pad ghosted out so the outer
@@ -930,7 +937,7 @@ fn select_rtp_factory(
         (FlowFormat::Audio, "L16") => "rtpL16",
         (FlowFormat::Data, "SMPTE291") => "rtpsmpte291",
         _ => bail!(
-            "unsupported essence for UDP/RTP `{suffix}`: format={format:?}, \
+            "unsupported essence for RTP/UDP `{suffix}`: format={format:?}, \
              encoding-name=`{encoding_name}` (today RFC 4175 `RAW` video, \
              ST 2110-30 `L24` / `L16` audio, and RFC 8331 / ST 2110-40 \
              `SMPTE291` ANC are supported)"
@@ -1055,7 +1062,7 @@ fn multicast_iface_name(destination_ip: &str, interface_ip: Option<&str>) -> Opt
     crate::iface::iface_name_for_ip(iface)
 }
 
-/// Build the inner UDP/RTP source chain for `nmossrc`. Always
+/// Build the inner RTP/UDP source chain for `nmossrc`. Always
 /// constructs a sub-bin:
 /// `udpsrc(caps=rtp_caps) ! rtp<essence>depay [! capsfilter(advertise_caps)]`
 /// (with the udpsrc factory picked via [`select_udpsrc_factory`]
@@ -1082,7 +1089,7 @@ fn multicast_iface_name(destination_ip: &str, interface_ip: Option<&str>) -> Opt
 /// latency cost (an `rtp-latency` element property + an `rtp-stats`
 /// readback or a periodic element `GstMessage`). Strict ST 2110
 /// reception with kernel-bypass + PTP-aligned timing belongs to
-/// `nvdsudpsrc` rather than this OSS chain.
+/// `nvdsudpsrc` rather than this chain.
 ///
 /// `udpsrc.caps` is set to `media.rtp_caps` so downstream caps
 /// queries (and the depayloader's pad negotiation) see the exact
@@ -1252,10 +1259,11 @@ fn nvdsudp_log_cat() -> &'static gst::DebugCategory {
 fn require_nvdsudp_factory(name: &'static str) -> Result<(), anyhow::Error> {
     if gst::ElementFactory::find(name).is_none() {
         return Err(anyhow!(
-            "GStreamer factory `{name}` not found; install DeepStream's \
-             `gst-nvdsudp` plugin (Rivermax SDK + ConnectX-5 or newer NIC), \
-             set `GST_PLUGIN_PATH`, and ensure the host binary has \
-             `CAP_NET_RAW` (e.g. `sudo setcap CAP_NET_RAW=ep $(which gst-launch-1.0)`)"
+            "GStreamer factory `{name}` not found; install DeepStream 9.0 and \
+             Rivermax SDK (see DeepStream installation guide), ensure DeepStream \
+             plugins (e.g. `libnvdsgst_udp.so`) are on `GST_PLUGIN_PATH`, and \
+             ensure the host binary has `CAP_NET_RAW` (e.g. \
+             `sudo setcap CAP_NET_RAW=ep $(which gst-launch-1.0)`)"
         ));
     }
     Ok(())
@@ -1489,8 +1497,8 @@ fn require_mxl_factory(name: &'static str) -> Result<(), anyhow::Error> {
 ///
 /// The ghost pad target is set here and **never changed** by
 /// [`rebuild_chain`]; all subsequent activations swap the fake
-/// chain (or its real successor `mxlsink` / `mxlsrc`) behind the
-/// anchor while the ghost continues to point at the anchor.
+/// chain (or its real successor) behind the anchor while the ghost
+/// continues to point at the anchor.
 pub(crate) fn build_initial(
     bin: &gst::Bin,
     fake_chain: gst::Element,

@@ -108,8 +108,10 @@ use crate::types::{CapsMode, FlowFormat};
 /// [`build_sdp`], the per-essence payload-type constants by
 /// [`resolve_payload_type`], [`AUDIO_PTIME_NS`](self::defaults::AUDIO_PTIME_NS)
 /// by [`resolve_audio_ptime`], [`RTP_PORT`](self::defaults::RTP_PORT)
-/// by [`udp_leg_from_input`], [`ORIGIN_ADDRESS`](self::defaults::ORIGIN_ADDRESS)
-/// by [`from_caps`], and the video / ANC constants by
+/// by [`udp_leg_from_input`] (including empty
+/// `destination_ip` → [`UNSPECIFIED_ADDRESS`](self::defaults::UNSPECIFIED_ADDRESS)
+/// on the `c=` line), [`UNSPECIFIED_ADDRESS`] by [`from_caps`]'s
+/// `o=` fallback, and the video / ANC constants by
 /// [`rtp_caps_from_raw_video`] / [`rtp_caps_from_raw_data`].
 pub(crate) mod defaults {
     /// Default RTP payload type for `video/x-raw` (RFC 4175,
@@ -145,14 +147,12 @@ pub(crate) mod defaults {
     /// time — and is the de-facto SMPTE ST 2110 convention.
     pub(crate) const RTP_PORT: u16 = 5004;
 
-    /// `o=` line `<unicast-address>` fallback used before any
-    /// caps negotiation pins a NIC. Per RFC 4566 §5.2 this
-    /// slot may carry any address when the originator's real
-    /// address isn't known; `0.0.0.0` is the canonical
-    /// "unspecified" form. `build_sdp` substitutes the real
-    /// address once an `interface_ip` / `source_ip` property
-    /// or activation SDP resolves one.
-    pub(crate) const ORIGIN_ADDRESS: &str = "0.0.0.0";
+    /// RFC 4566 unspecified IPv4 address (`0.0.0.0`). Synthesis
+    /// fallback when an endpoint IP slot (`o=`, `c=`, …) is not
+    /// set yet; libnvnmos maps this to IS-05 `auto` where
+    /// applicable. Passthrough SDPs are never rewritten to this
+    /// value.
+    pub(crate) const UNSPECIFIED_ADDRESS: &str = "0.0.0.0";
 
     /// TTL applied when the `c=` line address is multicast.
     /// Per RFC 4566 §5.7 the `<addr>/<ttl>` suffix MUST be
@@ -349,7 +349,7 @@ pub(crate) struct SdpSession<'a> {
     pub name: Option<&'a str>,
     /// Whether to emit a media-level `a=x-nvnmos-caps:<pt>` line
     /// for the resulting Receiver. `true` advertises *wide* caps
-    /// (the daemon registers the IS-04 Receiver with the
+    /// (the daemon adds the IS-04 Receiver with the
     /// format-derived capability constraints omitted, so any
     /// compatible Sender of the same media type can connect);
     /// `false` advertises *narrow* caps (capability constraints
@@ -396,14 +396,14 @@ pub(crate) struct SdpSession<'a> {
     pub advertise_caps: bool,
     /// When true, emit `a=ts-refclk:ptp=IEEE1588-2008:traceable` on the
     /// media block (Rivermax / `transport=nvdsudp` sender synthesis).
-    /// OSS `udp` / `udp2` and all receivers leave this false.
+    /// `transport=udp` / `udp2` and all receivers leave this false.
     pub emit_ptp_ts_refclk: bool,
 }
 
 /// Whether an SDP transport file advertises wide Receiver Caps via
 /// media-level `a=x-nvnmos-caps:` (libnvnmos adds this on IS-05
 /// activation for wide receivers; configuring SDPs may carry it when
-/// `receiver-caps-mode=wide` splices it in at registration).
+/// `receiver-caps-mode=wide` splices it in at AddReceiver).
 ///
 /// Both `a=x-nvnmos-caps` (flag form) and `a=x-nvnmos-caps:<pt>`
 /// (property form) signal wide to libnvnmos. Unparseable input is
@@ -683,7 +683,7 @@ pub(crate) fn normalise_to_single_active_leg(text: &str) -> Result<String, SdpEr
     let origin = msg.origin();
     let origin_address = origin
         .and_then(|o| o.addr())
-        .unwrap_or(defaults::ORIGIN_ADDRESS);
+        .unwrap_or(defaults::UNSPECIFIED_ADDRESS);
     let origin_session_id = origin
         .and_then(|o| o.sess_id())
         .unwrap_or("0");
@@ -1256,10 +1256,9 @@ fn cross_check_transport_caps(media: &UdpMedia, transport_caps: &gst::Caps) -> R
 /// `c=` lines:
 /// * Sender: the egress destination (unicast peer or multicast
 ///   group) — `nmossink`'s `destination-ip` property.
-/// * Receiver: the multicast group to join (or unicast bind
-///   address) — `nmossrc`'s `multicast-ip` property. The two
-///   GObject property names differ but the SDP wire slot is the
-///   same.
+/// * Receiver: the `c=` address — `nmossrc`'s `multicast-ip`
+///   when joining a group, otherwise `interface-ip` for unicast
+///   reception (mirrors nmos-cpp `get_connection_address`).
 ///
 /// `interface_ip` is the local NIC:
 /// * Sender: unused — Senders re-use `source_ip` as the egress
@@ -1323,7 +1322,7 @@ pub(crate) struct SdpBuildInput<'a> {
     /// `<sess-id>` on the synthesis path.
     pub node_seed: &'a str,
     /// When true, emit `TP=2110TPN` on video fmtp (Rivermax / `nvdsudp`
-    /// narrow traffic profile). OSS `udp` / `udp2` leave this unset.
+    /// narrow traffic profile). `udp` / `udp2` leave this unset.
     pub narrow_traffic_profile: bool,
 }
 
@@ -1395,7 +1394,7 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
 
     let origin_address = if input.interface_ip.is_empty() {
         if input.source_ip.is_empty() {
-            defaults::ORIGIN_ADDRESS
+            defaults::UNSPECIFIED_ADDRESS
         } else {
             input.source_ip
         }
@@ -1596,8 +1595,16 @@ fn udp_leg_from_input(input: &SdpBuildInput<'_>) -> UdpLeg {
         Side::Sender if input.source_port != 0 => Some(input.source_port),
         _ => None,
     };
+    // Unset `destination-ip` / `multicast-ip`: emit
+    // [`defaults::UNSPECIFIED_ADDRESS`] on the `c=` line (synthesis
+    // only — passthrough SDPs are never rewritten here).
+    let destination_ip = if input.destination_ip.is_empty() {
+        defaults::UNSPECIFIED_ADDRESS.to_owned()
+    } else {
+        input.destination_ip.to_owned()
+    };
     UdpLeg {
-        destination_ip: input.destination_ip.to_owned(),
+        destination_ip,
         destination_port,
         interface_ip,
         source_ip,
@@ -2340,15 +2347,11 @@ mod tests {
     }
 
     #[test]
-    fn defaults_origin_address_is_rfc_4566_unspecified() {
-        // RFC 4566 §5.2: any IPv4 address is permitted when
-        // the originator's real address is unknown; `0.0.0.0`
-        // is the canonical "unspecified" form.
-        assert_eq!(defaults::ORIGIN_ADDRESS, "0.0.0.0");
-        // Sanity: parseable as `Ipv4Addr::UNSPECIFIED`.
-        let parsed: std::net::Ipv4Addr = defaults::ORIGIN_ADDRESS
+    fn defaults_unspecified_address_is_ipv4_unspecified() {
+        assert_eq!(defaults::UNSPECIFIED_ADDRESS, "0.0.0.0");
+        let parsed: std::net::Ipv4Addr = defaults::UNSPECIFIED_ADDRESS
             .parse()
-            .expect("ORIGIN_ADDRESS must parse as an Ipv4Addr");
+            .expect("UNSPECIFIED_ADDRESS must parse as an Ipv4Addr");
         assert_eq!(parsed, std::net::Ipv4Addr::UNSPECIFIED);
     }
 
@@ -4905,6 +4908,16 @@ mod tests {
     }
 
     #[test]
+    fn udp_leg_from_input_empty_destination_ip_falls_back_to_unspecified_address() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let mut input = build_input(&essence, Side::Sender, None);
+        input.destination_ip = "";
+        let leg = udp_leg_from_input(&input);
+        assert_eq!(leg.destination_ip, defaults::UNSPECIFIED_ADDRESS);
+    }
+
+    #[test]
     fn udp_leg_from_input_zero_destination_port_falls_back_to_rtp_default() {
         init_gst();
         let essence = raw_audio_caps("S24BE", 48_000, 2);
@@ -4948,7 +4961,7 @@ mod tests {
             !text.contains("a=ts-refclk:"),
             "udp sender synthesis must omit ts-refclk:\n{text}",
         );
-        assert!(!text.contains("TP=2110TPN"), "OSS udp must not narrow profile:\n{text}");
+        assert!(!text.contains("TP=2110TPN"), "udp sender must not indicate narrow profile:\n{text}");
     }
 
     #[test]

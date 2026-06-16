@@ -34,7 +34,7 @@ To cover:
 We pick an out-of-process design after considering the in-process bin alternative:
 
 - **Daemon `nvnmosd`** wraps NvNmos and owns one or more NMOS Nodes. Survives pipeline restarts. Hosts multiple pipelines and multiple client processes under one or more shared Nodes.
-- **`nmossrc` and `nmossink`** are single-pad Rust GStreamer elements. Each opens a session with `nvnmosd`, registers its `transport-file`, subscribes to activations, and wraps an inner transport src/sink:
+- **`nmossrc` and `nmossink`** are single-pad Rust GStreamer elements. Each opens a session with `nvnmosd`, adds its Sender or Receiver from the transport file (or synthesised flow_def), subscribes to activations, and wraps an inner transport src/sink:
   - MXL: `mxlsrc` / `mxlsink` from `gst-mxl-rs` (Rust).
   - ST 2110 with Rivermax: `nvdsudpsrc` / `nvdsudpsink` (C, DeepStream).
   - ST 2110 without Rivermax: `udpsrc` / `udpsink` + appropriate RTP (de)payloaders.
@@ -105,7 +105,7 @@ service NvnmosDaemon {
   // Many sessions across many client processes may share a Node by
   // node_seed. The session handle distinguishes them so that the daemon
   // can refcount Node lifetime correctly, route activations only to the
-  // session that registered the affected resource, and drop the right
+  // session that added the affected resource, and drop the right
   // resources when a stream dies.
   rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
   rpc CloseSession(CloseSessionRequest) returns (Empty);
@@ -218,7 +218,7 @@ When trim is enabled, the daemon calls `malloc_trim` after `RemoveResource`, `Cl
 
 ### Pad config
 
-The `nmossrc`/`nmossink` elements expose **essence** on their external pads (`video/x-raw`, `audio/x-raw`, `meta/x-st-2038`), never the wire form. Depayloaders / payloaders are added internally when needed (for `udpsrc` / `udpsink` paths); for `mxlsrc`/`mxlsink` and `nvdsudpsrc`/`nvdsudpsink` no extra (de)payloader is needed because those inner elements already operate on essence buffers. The choice of wire transport is something the element *configures*, not something it exposes — so a `gst-launch-1.0` user sees the same essence-shaped pad regardless of whether the inner chain is MXL, RTP via Rivermax, or RTP via OSS.
+The `nmossrc`/`nmossink` elements expose **essence** on their external pads (`video/x-raw`, `audio/x-raw`, `meta/x-st-2038`), never the wire form. Depayloaders / payloaders are added internally when needed (for `udpsrc` / `udpsink` paths); for `mxlsrc`/`mxlsink` and `nvdsudpsrc`/`nvdsudpsink` no extra (de)payloader is needed because those inner elements already operate on essence buffers. The choice of wire transport is something the element *configures*, not something it exposes — so a `gst-launch-1.0` user sees the same essence-shaped pad regardless of whether the inner chain is MXL, RTP via Rivermax, or RTP via GStreamer RTP/UDP plugins.
 
 #### Connection / Node
 
@@ -235,7 +235,7 @@ Each value names the inner GStreamer element family the user is signing up for, 
 |---|---|---|---|---|
 | `mxl` | `mxlsrc` | `mxlsink` | 1 | MXL shared-memory; requires `mxl-domain-id`. |
 | `nvdsudp` | `nvdsudpsrc` | `nvdsudpsink` | 2 | RFC 4175 / ST 2110 via the DeepStream `nvdsudp*` elements (built on Rivermax SDK); high-precision packet pacing. Required for ST 2022-7. |
-| `udp` | `udpsrc` + `rtp*depay` | `rtp*pay` + `udpsink` | 3 | RFC 4175 / ST 2110 via OSS GStreamer `udp*` + RTP (de)payloaders; no perfect pacing. Cannot support ST 2022-7. |
+| `udp` | `udpsrc` + `rtp*depay` | `rtp*pay` + `udpsink` | 3 | RFC 4175 / ST 2110 via GStreamer RTP/UDP plugins; no perfect pacing. Cannot support ST 2022-7. |
 
 Required property on both `nmossrc` and `nmossink`. The element refuses an unsupported transport value with a clear error at element-construction time. The `transport` value also gates which per-transport defaults the element applies (notably `TP=2110TPN` for `nvdsudp` vs `TP=2110TPW` for `udp`, per *Defaults the element synthesises*).
 
@@ -277,26 +277,26 @@ For RTP, the element fills the SDP from essence caps + per-format defaults + per
 - **`colorimetry`** — from `video/x-raw, colorimetry=` if present (mapped to the ST 2110 form, e.g. `bt709` → `BT709`); otherwise `BT709`.
 - **`PM` (Packing Mode)** — `2110GPM`. `2110BPM` requires explicit override.
 - **`SSN`** — by essence: `ST2110-20:2017` / `ST2110-30:2017` / `ST2110-40:2018` / `ST2110-22:2022`.
-- **`TP` (Traffic Profile)** — by `transport`: `nvdsudp` (Rivermax-paced) → `2110TPN` (narrow); `udp` (OSS) → `2110TPW` (wide).
+- **`TP` (Traffic Profile)** — by `transport`: `nvdsudp` (Rivermax-paced) → `2110TPN` (narrow); `udp` / `udp2` → `2110TPW` (wide).
 
 For MXL the per-format mapping to `flow_def.json` is derivable from essence caps in the same way; `transport-caps` is essentially unused.
 
 #### Deferred mode (`nmossink` only)
 
-If neither `transport-file` nor `caps` is provided, `nmossink` defers NMOS registration to **READY → PAUSED** and derives `caps` from a `gst_pad_peer_query_caps` against upstream. Standard GStreamer caps negotiation does the work; the user can constrain with `capsfilter ! nmossink` the way they would with any other sink. `sender-name` (and `iface-ip` or `mxl-domain-id` as relevant) is still required as a property because it's not derivable from the pipeline. `nmossrc` cannot use deferred mode — there is no peer to query.
+If neither `transport-file` nor `caps` is provided, `nmossink` defers AddSender to **READY → PAUSED** and derives `caps` from a `gst_pad_peer_query_caps` against upstream. Standard GStreamer caps negotiation does the work; the user can constrain with `capsfilter ! nmossink` the way they would with any other sink. `sender-name` (and `iface-ip` or `mxl-domain-id` as relevant) is still required as a property because it's not derivable from the pipeline. `nmossrc` cannot use deferred mode — there is no peer to query.
 
-**No data needs to flow for the sender to register.** Caps negotiation in GStreamer is a query-based mechanism (pad template caps + `peer_query_caps`), not a buffer-driven one. For a typical flow-transform pipeline `nmossrc ! transform ! nmossink`:
+**No data needs to flow for the sender to be added.** Caps negotiation in GStreamer is a query-based mechanism (pad template caps + `peer_query_caps`), not a buffer-driven one. For a typical flow-transform pipeline `nmossrc ! transform ! nmossink`:
 
 - `nmossrc`'s source-pad caps are fixed from its `transport-file` at NULL→READY (these are the caps the receiver *would* receive, known the moment the session is opened — independent of whether the receiver has been activated by a controller or whether any data has arrived on the wire).
 - They propagate downstream during READY→PAUSED.
-- The deferred `nmossink`'s peer query lands on those caps and registers the sender with the daemon.
+- The deferred `nmossink`'s peer query lands on those caps and runs `AddSender` against the daemon.
 - The pipeline reaches PAUSED as part of any normal `set_state(PLAYING)` transition — typically in milliseconds, well before the receiver is activated or starts producing buffers.
 
 Both endpoints are at IS-04 by the time the pipeline is up, and there is no Catch-22 (PAUSED ≠ streaming-to-network). The internal gating mechanism (Phase 1 as-built: the inner chain is a `fakesink` behind the anchor while deactivated — see [*Phase 1 as-built: anchor + block-probe*](#phase-1-as-built-anchor--block-probe); originally planned as `output-selector → fakesink`, per *Sink deactivation*) keeps the inner wire sink out of the data path until an IS-05 activation arrives.
 
-**Where deferred mode does break:** any chain where an intermediate element determines its output caps from buffer content — `h264parse` needing SPS/PPS, decoders inferring colorimetry from packet headers, etc. The peer query at PAUSED can't fix caps if upstream hasn't seen data. For those pipelines, declare `caps` explicitly on `nmossink` (Route B) and the sender registers at NULL→READY instead, alongside the receiver.
+**Where deferred mode does break:** any chain where an intermediate element determines its output caps from buffer content — `h264parse` needing SPS/PPS, decoders inferring colorimetry from packet headers, etc. The peer query at PAUSED can't fix caps if upstream hasn't seen data. For those pipelines, declare `caps` explicitly on `nmossink` (Route B) and the sender is added at NULL→READY instead, alongside the receiver.
 
-**Timing subtlety to be aware of.** In deferred mode the sender registers one state transition after the receiver (PAUSED vs READY). A controller polling IS-04 during the narrow window between NULL→READY and READY→PAUSED will see the receiver listed but not the sender. Harmless in practice (the window is tens to hundreds of milliseconds for a normal pipeline startup), but if a deployment cares — for instance because a discovery scan is running in parallel with pipeline startup — declare `caps` explicitly and registration moves to READY for both.
+**Timing subtlety to be aware of.** In deferred mode the sender is added one state transition after the receiver (PAUSED vs READY). A controller polling IS-04 during the narrow window between NULL→READY and READY→PAUSED will see the receiver listed but not the sender. Harmless in practice (the window is tens to hundreds of milliseconds for a normal pipeline startup), but if a deployment cares — for instance because a discovery scan is running in parallel with pipeline startup — declare `caps` explicitly and AddSender / AddReceiver both run at READY.
 
 #### Narrow vs wide caps (`receiver-caps-mode`)
 
@@ -324,7 +324,7 @@ gst-launch-1.0 \
 
 (`caps` not strictly required here — upstream caps from the `videotestsrc!filter` already specify v210 1080p30000/1001, and deferred mode picks them up at READY → PAUSED.)
 
-A minimal RTP sender via OSS `udpsink` — no `transport-caps` needed, the element synthesises the SDP from upstream caps and defaults:
+A minimal RTP sender via `udpsink` — no `transport-caps` needed, the element synthesises the SDP from upstream caps and defaults:
 
 ```bash
 gst-launch-1.0 \
@@ -376,7 +376,7 @@ ST 2022-7 NIC selection, jitter-buffer overrides, and similar per-transport knob
 
 - Pad set is **fixed at PLAYING**. Adding/removing elements (and thus NMOS resources) is supported while the pipeline is NULL, not while running.
 - **NULL → READY**: open daemon session, subscribe to activations. Register the resource here too if `transport-file` or `caps` is present (Routes A / B / C).
-- **READY → PAUSED**: per-transport prep on inner src/sink. For `nmossink` in deferred mode, this is where `caps` is derived from upstream peer caps query and the resource registered with the daemon.
+- **READY → PAUSED**: per-transport prep on inner src/sink. For `nmossink` in deferred mode, this is where `caps` is derived from upstream peer caps query and `AddSender` runs against the daemon.
 - **PAUSED → PLAYING**: live data flow begins (see Source behaviour below). Wire transmission gated by activation regardless of pipeline state.
 
 ### Sink (`nmossink`) deactivation
@@ -413,7 +413,7 @@ Our design separates these problems by phase rather than trying to solve them al
 
 - **Phase 1 (MXL).** Problem (B) probably doesn't apply — `mxlsrc` reads from MXL shared memory and is not (we expect) the providing clock for the pipeline. We can avoid pausing the top-level pipeline entirely, and the workflow reduces to: divert via input-selector → flush-start downstream → lock-state + NULL the inner mxlsrc → (re)build for the new MXL flow → unlock-state + sync-state-with-parent → switch input-selector → flush-stop. The two MR fixes (locked-state on disable; downstream flush dance) are adopted from day one. If `mxlsrc` supports switching the flow id at runtime via a `GST_PARAM_MUTABLE_PLAYING` property, we may be able to skip the tear-down step entirely; that's an `mxlsrc` capability check, not a design choice for `nmossrc`.
 - **Phase 2 (`nvdsudpsrc`).** Problem (B) may return when `use-rtp-timestamp` makes `nvdsudpsrc` the pipeline clock provider. The `nvdsudp` software path is landed; the open design question is whether pausing the top-level pipeline stays inside `nmossrc` (matching the prior art) or moves up the stack to somewhere with a global view of which receivers share a pipeline — defer until Rivermax hardware soak.
-- **Phase 3+ (OSS `udpsrc` payloaders).** Lighter clock-provider story than `nvdsudpsrc`; revisit whether (B) applies on a case-by-case basis.
+- **Phase 3+ (`udpsrc` + depayloaders).** Lighter clock-provider story than `nvdsudpsrc`; revisit whether (B) applies on a case-by-case basis.
 
 **Will multi-element composition change the calculus?** Possibly, and worth flagging explicitly. In `nvdsnmosbin` all receivers are pads on one bin, so they unavoidably share a top-level pipeline — `find_top_level_pipeline` always lands on the user's pipeline and the pause/resume blast radius is fixed by that topology. With independent `nmossrc` elements the application *chooses* the blast radius:
 
@@ -474,17 +474,17 @@ A `timestamp-mode` property (passthrough vs. regenerated wire timestamps) was sk
 
 - **Phase 0 — Daemon + test client**. Build the foundation: `nvnmos-sys` (FFI bindings to `libnvnmos`), `nvnmos-rpc` (proto + generated stubs), and `nvnmosd` itself. The Phase 0 daemon is **Linux-first**, supports **multi-Node**, uses **UDS for local IPC (plain TCP `localhost` as a portable fallback)**, and implements **`SyncResourceState`** from the start — real (non-gst-launch) clients will need the out-of-band data-plane sync path, and bolting it on later complicates the daemon's threading model. Alongside the daemon, build a **Rust test client modelled on the existing `nvnmos-example`** (the C app in `src/main.c`): opens a session, registers a few MXL and RTP senders/receivers, drives through the same interactive stages (remove some, add back, observe activations, deactivate, destroy session), and exercises `OpenSession` / `AddSender` / `AddReceiver` / `SubscribeActivations` / `AckActivation` / `SyncResourceState` end-to-end. This proves the daemon works without GStreamer in the loop, and gives us a regression harness for every subsequent phase. (A C++ test client could be added later but isn't part of Phase 0. Cross-host TCP + TLS and Windows/macOS daemon targets are deferred to Phase N.)
 - **Phase 1 — MXL (all essences)**: `nmossrc` + `nmossink` for the full set of MXL flows `gst-mxl-rs` already supports — `video/x-raw` v210, `audio/x-raw` F32LE, and `meta/x-st-2038` ANC (what MXL flow_def.json calls `video/smpte291`). Single Node, gst-launch demoable. No nvdsudp involvement (so no Rivermax requirement). All three routes from the Pad config section are live (`transport-file`, property route, deferred mode on `nmossink`); `transport-caps` is typically empty for MXL.
-- **Phase 2 — ST 2110 via nvdsudp** (**software landed** in `gst-nmos-rs`; Rivermax hardware soak outstanding): ST 2110-20 video, ST 2110-30 audio, and ST 2110-40 ANC (`meta/x-st-2038`) via DeepStream `nvdsudpsrc` / `nvdsudpsink` Mode 3 (`transport=nvdsudp`). OSS `udp` / `udp2` ANC uses `rtp*pay` / `rtp*depay`. Property-route SDP synthesis, `TP=2110TPN`, temp SDP files for `nvdsudpsink`, and IS-05 activation are implemented — see [`gst-nmos-rs-nvdsudp-plan.md`](../gst-nmos-rs-nvdsudp-plan.md). End-to-end `receiver-caps-mode=wide` renegotiation remains a follow-up.
-- **Phase 3 — OSS `udpsrc`/`udpsink`** with payloaders (**software landed**). Same NMOS surface, different inner chain.
+- **Phase 2 — ST 2110 via nvdsudp** (**software landed** in `gst-nmos-rs`; Rivermax hardware soak outstanding): ST 2110-20 video, ST 2110-30 audio, and ST 2110-40 ANC (`meta/x-st-2038`) via DeepStream `nvdsudpsrc` / `nvdsudpsink` Mode 3 (`transport=nvdsudp`). `udp` / `udp2` ANC uses `rtp*pay` / `rtp*depay`. Property-route SDP synthesis, `TP=2110TPN`, temp SDP files for `nvdsudpsink`, and IS-05 activation are implemented — see [`gst-nmos-rs-nvdsudp-plan.md`](../gst-nmos-rs-nvdsudp-plan.md). End-to-end `receiver-caps-mode=wide` renegotiation remains a follow-up.
+- **Phase 3 — `udpsrc`/`udpsink`** with (de)payloaders (**software landed**). Same NMOS surface, different inner chain.
 - **Phase 4 — `video/x-jxsv` (ST 2110-22)** once nvdsudp changes merge. **`video/v210a`** stub if GStreamer support is still missing.
-- **Phase 5 — ST 2022-7** redundancy (**software landed** in `gst-nmos-rs` for `transport=nvdsudp`; dual-`m=` transport-file passthrough + inner `st2022-7-streams`; not available on OSS `udp`/`udpsink` — see [`gst-nmos-rs-st2022-7-dual-leg-plan.md`](../gst-nmos-rs-st2022-7-dual-leg-plan.md)).
+- **Phase 5 — ST 2022-7** redundancy (**software landed** in `gst-nmos-rs` for `transport=nvdsudp`; dual-`m=` transport-file passthrough + inner `st2022-7-streams`; not available on `udpsink` — see [`gst-nmos-rs-st2022-7-dual-leg-plan.md`](../gst-nmos-rs-st2022-7-dual-leg-plan.md)).
 - **Phase N — deferred**: cross-host gRPC + TLS; Windows + macOS daemon targets (Phase 0 designs to keep these tractable but doesn't ship them); optional non-gRPC fallback (JSON-RPC over WebSocket) only if there's a concrete adoption blocker.
 
 ## Risks called out
 
 - **Connection API responsiveness**: slow elements stall PATCH responses. Mitigation: tight default `AckActivation` timeout; document the failure mode.
 - **Daemon discovery**: `daemon-uri` property with a sensible default. Document; don't auto-spawn.
-- **Daemon reconnect**: long-lived `SubscribeActivations` streams must reconnect cleanly across daemon restarts. Session id durable across reconnects; daemon keeps session state until explicit close or TTL.
+- **Daemon reconnect / session liveness**: clients must call `CloseSession` on teardown; there is no GC today. Aspirational: durable `session_handle` across client reconnect and daemon restart with TTL.
 - **Inner-sink state under gating**: the originally-planned `output-selector` pattern removes the inner sink from the data path on deactivation. We still need to confirm per-transport that `nvdsudpsink`/`mxlsink` cleanly handle being de-pathed at runtime; if either disagrees, fall back to keeping it on the path with `fakesink sync=true async=false` *downstream* of the inner sink instead of *replacing* it (slightly more expensive, more conservative). (Phase 1 update: the as-built mechanism tears down and rebuilds the inner sink across activations rather than de-pathing it; this has been validated against `mxlsink`. Phase 2 must still validate the same against `nvdsudpsink`. See [*Phase 1 as-built: anchor + block-probe*](#phase-1-as-built-anchor--block-probe).)
 - **Cross-platform paths**: UDS on Linux/macOS, named pipe on Windows, TCP fallback. gRPC supports all three.
 - **NvNmos C-API thread safety**: confirmed thread-safe — every state mutation in `nvnmos_impl.cpp` takes `model.write_lock()` before touching the nmos-cpp model. The daemon can call NvNmos from any worker thread; no daemon-side serialisation needed.
@@ -510,7 +510,7 @@ State refers to GStreamer element state; "Activated" tracks the latest IS-05 act
 | State        | Activated | `nmossink` data path                                   | `nmossrc` data path                                                       | Notes |
 |---           |---        |---                                                     |---                                                                        |---|
 | `NULL`       | n/a       | (no resource)                                          | (no resource)                                                             | Pre-`OpenSession` |
-| `READY`      | unknown   | selector built; selector → blackhole                   | input-selector built; input-selector → disabled_pad; no inner src yet     | Session open; resource registered if `transport-file`/`caps` known |
+| `READY`      | unknown   | selector built; selector → blackhole                   | input-selector built; input-selector → disabled_pad; no inner src yet     | Session open; resource added if `transport-file`/`caps` known |
 | `PAUSED`     | unknown   | as `READY` (deferred mode resolves `caps` here)        | as `READY`                                                                | Caps negotiation completes; no wire I/O |
 | `PLAYING`    | inactive  | selector → blackhole                                   | input-selector → disabled_pad; inner src absent or `locked_state=TRUE` at NULL | No wire I/O for this element; siblings unaffected |
 | `PLAYING`    | active    | selector → inner sink                                  | inner src built+linked via `sync_state_with_parent`; input-selector → receiver_pad | Wire I/O on |

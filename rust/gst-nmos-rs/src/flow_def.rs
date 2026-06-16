@@ -4,10 +4,10 @@
 //! MXL `flow_def` JSON helpers.
 //!
 //! The NvNmos transport file for transport=mxl is a JSON document
-//! whose top-level `id` is the MXL flow id and whose `format` is the
-//! NMOS format URN (`urn:x-nmos:format:video|audio|data`). The
-//! element needs both to configure the inner `mxlsink` / `mxlsrc`
-//! (`mxlsink.flow-id=` and `mxlsrc.{video,audio,data}-flow-id=`).
+//! whose top-level `id` is the MXL flow id (when present) and whose
+//! `format` is the NMOS format URN (`urn:x-nmos:format:video|audio|data`).
+//! At activation time the element consumes `id` to configure the inner
+//! `mxlsink` / `mxlsrc` (`flow-id=` / `{video,audio,data}-flow-id=`).
 //!
 //! [`read_flow_def_meta`] parses the JSON into [`FlowDefMeta`].
 //! [`resolve_mxl_flow_meta`] combines that with the `mxl-flow-id`
@@ -34,12 +34,24 @@
 //! wins silently.
 //!
 //! [`from_caps`] is the reverse path: given GStreamer essence
-//! caps plus property state, emit a `flow_def` JSON document that
-//! satisfies the MXL `FlowParser` (its hard requirements: `id`,
-//! `format`, non-empty `label`, non-empty `tags["urn:x-nmos:tag:grouphint/v1.0"]`,
-//! plus per-format dimensions/rates). Only the caps shapes that
-//! `mxlsink` advertises today are accepted: v210 video, F32LE audio,
-//! ST 2038 ANC.
+//! caps plus property state, emit a configuring `flow_def` JSON
+//! document for **libnvnmos** at AddSender / AddReceiver. libnvnmos
+//! parses this as JSON (via nmos-cpp field accessors) — it does **not**
+//! pass it through the MXL SDK's `FlowParser`. Essence-shape fields
+//! (`grain_rate`, `frame_width`, `frame_height`, `components`, …)
+//! are required by libnvnmos and are derived from `caps`; omitting
+//! `caps` leaves nothing to synthesise. Cosmetic / identity fields
+//! (`format`, non-empty `label`, `tags["urn:x-nmos:tag:grouphint/v1.0"]`,
+//! `urn:x-nvnmos:tag:*`) are also emitted. The top-level `id` is
+//! omitted when `flow_id` is empty so libnvnmos can create the
+//! resource and resolve the MXL flow id at activation (Senders fall
+//! back to the generated NMOS Flow id; Receivers ignore `id` at
+//! AddReceiver). When the inner data path later goes live, `mxlsink`
+//! creates the domain flow via the MXL SDK using its own JSON built
+//! from upstream caps and the `flow-id` property — that is a separate
+//! `FlowParser` path from this configuring document. Only the caps
+//! shapes that `mxlsink` advertises today are accepted: v210 video,
+//! F32LE audio, ST 2038 ANC.
 
 use gstreamer as gst;
 use serde::Deserialize;
@@ -119,8 +131,6 @@ pub(crate) enum FlowDefError {
     // — matching the [`crate::sdp::SdpError`] shape — and lets
     // future cross-helpers (e.g. parse-then-rebuild splice) chain
     // without `map_err` between submodules.
-    #[error("synthesising flow_def from caps requires a non-empty `mxl-flow-id`")]
-    MissingFlowId,
     #[error("synthesising flow_def from caps requires a non-empty `sender-name` / `receiver-name`")]
     MissingName,
     #[error("synthesising flow_def from caps requires a non-empty `mxl-domain-id`")]
@@ -373,13 +383,15 @@ pub(crate) fn indicates_wide_receiver_caps(text: &str) -> Result<bool, FlowDefEr
 /// hold any of these beyond the call.
 #[derive(Debug)]
 pub(crate) struct FlowDefBuildInput<'a> {
-    /// MXL flow id (UUID). Required and non-empty — this is the value
-    /// `mxlsink.flow-id=` / `mxlsrc.{video,audio,data}-flow-id=` ends
-    /// up consuming.
+    /// MXL flow id (UUID). When non-empty, emitted as the top-level
+    /// `id` and later passed to `mxlsink.flow-id=` /
+    /// `mxlsrc.{video,audio,data}-flow-id=`. When empty, omitted from
+    /// the configuring JSON so libnvnmos can register without a
+    /// concrete MXL flow id (the inner chain stays fake until IS-05
+    /// activation supplies one).
     pub(crate) flow_id: &'a str,
-    /// NMOS resource name. Used both as the `<group>` portion of the
-    /// `urn:x-nmos:tag:grouphint/v1.0` tag (required by MXL
-    /// `FlowParser`) and as the value of the
+    /// NMOS resource name. Used as the `<group>` portion of the
+    /// `urn:x-nmos:tag:grouphint/v1.0` tag and as the value of the
     /// `urn:x-nvnmos:tag:name` tag (required by `libnvnmos`).
     /// Required non-empty.
     pub(crate) name: &'a str,
@@ -388,8 +400,9 @@ pub(crate) struct FlowDefBuildInput<'a> {
     /// resolve the IS-05 `mxl_domain_id` transport parameter at
     /// activation time.
     pub(crate) mxl_domain_id: &'a str,
-    /// NMOS `label`. The MXL `FlowParser` rejects an empty label, so
-    /// the builder falls back to `flow_id` when this is empty.
+    /// NMOS `label`. libnvnmos requires a non-empty `label` field in
+    /// the configuring JSON; the builder falls back to `name` when
+    /// this is empty.
     pub(crate) label: &'a str,
     /// NMOS `description`. Optional; omitted from the JSON when empty.
     pub(crate) description: &'a str,
@@ -397,19 +410,19 @@ pub(crate) struct FlowDefBuildInput<'a> {
     pub(crate) caps: &'a gst::Caps,
 }
 
-/// Build an MXL `flow_def` JSON document from essence caps and
-/// property state. The shape matches the reference flows in the MXL
-/// SDK (`mxl/lib/tests/data/{v210,audio,data}_flow.json`).
+/// Build a configuring MXL `flow_def` JSON document from essence caps
+/// and property state for libnvnmos AddSender / AddReceiver. The shape
+/// matches the reference flows in the MXL SDK
+/// (`mxl/lib/tests/data/{v210,audio,data}_flow.json`) closely enough
+/// for nmos-cpp's JSON accessors.
 ///
-/// Only the fields directly derivable from the caps are emitted —
-/// the builder doesn't synthesise `colorspace`, `components`, or
-/// `transfer_characteristic` from `format=v210` alone. The user can
-/// add those by supplying a `transport-file` (which then wins over
-/// the builder).
+/// Per-format essence fields (`grain_rate`, `frame_width`, …) are
+/// taken from `caps` and are **required** by libnvnmos. Fields not
+/// present in the caps (`colorspace`, `components`, … for v210) are
+/// derived deterministically where libnvnmos requires them — see
+/// [`build_video_body`]. Users wanting non-default values should
+/// supply a `transport-file` instead.
 pub(crate) fn from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDefError> {
-    if input.flow_id.is_empty() {
-        return Err(FlowDefError::MissingFlowId);
-    }
     if input.name.is_empty() {
         return Err(FlowDefError::MissingName);
     }
@@ -449,14 +462,13 @@ pub(crate) fn from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDef
         .expect("body builders never return Unspecified");
 
     let mut value = serde_json::json!({
-        "id": input.flow_id,
         "format": format_urn,
         "label": label,
         // `description` is `field_as_string` (required) in nmos-cpp;
         // emit the property value as-is, even if it's empty.
         "description": input.description,
         // The three tags consumed by `libnvnmos` (`name`, `mxl-domain-id`)
-        // and by the MXL `FlowParser` (`grouphint`).
+        // and the group-hint tag required in configuring flow_def JSON.
         "tags": {
             "urn:x-nmos:tag:grouphint/v1.0": [grouphint],
             "urn:x-nvnmos:tag:name": [input.name],
@@ -465,6 +477,9 @@ pub(crate) fn from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDef
         "parents": [],
     });
     let object = value.as_object_mut().unwrap();
+    if !input.flow_id.is_empty() {
+        object.insert("id".to_owned(), serde_json::json!(input.flow_id));
+    }
     for (k, v) in body {
         object.insert(k, v);
     }
@@ -1170,11 +1185,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_flow_id_is_hard_error() {
+    fn omitted_flow_id_omits_top_level_id_for_registration() {
         let caps =
             caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
-        let err = from_caps(&input("", "cam-1", &caps)).unwrap_err();
-        assert!(matches!(err, FlowDefError::MissingFlowId), "got: {err:?}");
+        let json = from_caps(&input("", "cam-1", &caps)).expect("registration synthesis");
+        let v = parse(&json);
+        assert!(v.get("id").is_none(), "empty flow_id must omit top-level `id`");
+        assert_eq!(v["format"], "urn:x-nmos:format:video");
     }
 
     #[test]

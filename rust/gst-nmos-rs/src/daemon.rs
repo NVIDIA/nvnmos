@@ -4,7 +4,7 @@
 //! gRPC client glue for the `nvnmosd` daemon.
 //!
 //! [`Session`] wraps the per-element gRPC state: a `tonic` channel, the
-//! daemon's session handle, an optional registered resource, and a
+//! daemon's session handle, an optional added resource, and a
 //! background task subscribed to [`SubscribeActivations`]. Constructed
 //! at NULL→READY and torn down at READY→NULL by the element's
 //! `change_state` override.
@@ -12,9 +12,9 @@
 //! When [`Session::open`] is called with a non-empty `transport_file`
 //! it also drives `AddSender` / `AddReceiver` (selected by `side`) so
 //! the resource is published in IS-04 immediately. With no
-//! `transport_file` the session is opened but no resource is
-//! registered — a future change will build the transport file from
-//! upstream caps and the element's properties.
+//! `transport_file` the session is opened but no resource is added
+//! yet — deferred AddSender at READY→PAUSED synthesises the
+//! transport file from upstream peer caps and element properties.
 //!
 //! Each `ActivationEvent` arriving on the subscription is routed to
 //! the element-supplied [`ActivationHandler`] (see [`Session::open`]).
@@ -124,11 +124,11 @@ pub(crate) enum DaemonError {
     #[error("RPC error: {0}")]
     Rpc(#[from] Box<tonic::Status>),
     #[error(
-        "session already has a resource registered; deferred registration is a one-shot operation"
+        "session already has a resource added; deferred AddSender is a one-shot operation"
     )]
     AlreadyRegistered,
     #[error(
-        "session has no resource registered yet; auto-activate sync cannot run before AddSender / AddReceiver"
+        "session has no resource added yet; auto-activate sync cannot run before AddSender / AddReceiver"
     )]
     NoResource,
 }
@@ -148,7 +148,7 @@ impl From<tonic::Status> for DaemonError {
 impl Session {
     /// Open a session against the daemon at `daemon_uri` for Node
     /// `node_seed`, subscribe to activations, and (when
-    /// `transport_file` is `Some`) register `name` as a Sender or
+    /// `transport_file` is `Some`) add `name` as a Sender or
     /// Receiver via `AddSender` / `AddReceiver`.
     ///
     /// Only `unix:/path/to/sock` URIs are supported. `NodeConfig` is
@@ -162,7 +162,7 @@ impl Session {
     /// the daemon delivers on this session. See
     /// [`ActivationHandler`].
     ///
-    /// If the resource registration fails the partially-open session
+    /// If the AddSender / AddReceiver fails the partially-open session
     /// is rolled back via `CloseSession` so the daemon doesn't leak
     /// state.
     #[allow(clippy::too_many_arguments)]
@@ -240,12 +240,12 @@ impl Session {
     /// with no resource (because neither `transport-file*` nor `caps`
     /// was supplied), and the actual `AddSender` / `AddReceiver` is
     /// driven later from inside `change_state(ReadyToPaused)` once
-    /// upstream peer caps have negotiated and a flow_def can be
-    /// synthesised.
+    /// upstream peer caps have negotiated and a configuring transport
+    /// file can be synthesised.
     ///
     /// Errors with [`DaemonError::AlreadyRegistered`] if called on a
     /// session that already has a resource (caller bug —
-    /// deferred-mode registration is one-shot).
+    /// deferred-mode AddSender is one-shot).
     pub(crate) async fn add_resource(
         &mut self,
         side: Side,
@@ -286,7 +286,7 @@ impl Session {
     /// already knows; other subscribers learn via IS-04 / IS-05
     /// state).
     ///
-    /// Errors when called on a session with no registered resource
+    /// Errors when called on a session with no added resource
     /// (caller bug — `auto-activate` paths only call this after
     /// `add_resource` succeeded).
     pub(crate) async fn sync_resource_state(

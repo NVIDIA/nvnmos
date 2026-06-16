@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # `gst-nmos-rs` — `transport=nvdsudp` (DeepStream `nvdsudpsrc` / `nvdsudpsink`)
 
-Design and implementation record for Phase 2 of the NMOS daemon + GStreamer plugin work: `nmossrc` / `nmossink` wired to DeepStream's Rivermax-backed `nvdsudp*` elements when `transport=nvdsudp`. The software path is landed in `gst-nmos-rs`; Rivermax hardware soak remains outstanding. This document is scoped to that increment only; it assumes Phase 1 (`mxl`, anchor + block-probe chain swap, `transport-properties`, OSS `udp` / `udp2`) is already landed.
+Design and implementation record for Phase 2 of the NMOS daemon + GStreamer plugin work: `nmossrc` / `nmossink` wired to DeepStream's Rivermax-backed `nvdsudp*` elements when `transport=nvdsudp`. The software path is landed in `gst-nmos-rs`; Rivermax hardware soak remains outstanding. This document is scoped to that increment only; it assumes Phase 1 (`mxl`, anchor + block-probe chain swap, `transport-properties`, `udp` / `udp2`) is already landed.
 
 Parent context: [`nvnmosd/README.md`](nvnmosd/README.md) (architecture, transport table, essence-on-pad contract), [`gst-nmos-rs-inner-properties-plan.md`](gst-nmos-rs-inner-properties-plan.md) (`transport-properties` lifecycle).
 
@@ -56,7 +56,7 @@ Proto mapping treats `NvDsUdp` as RTP (`transport_to_proto` → `ProtoTransport:
 
 ### Topology
 
-Unlike OSS UDP, there is **no wrapper sub-bin with a payloader/depayloader**. Each side is depth-1, analogous to MXL:
+Unlike the GStreamer RTP/UDP plugins, there is **no wrapper sub-bin with a payloader/depayloader**. Each side is depth-1, analogous to MXL:
 
 ```text
 nmossink ghost(sink) → anchor → nvdsudpsink
@@ -161,7 +161,7 @@ From SDP / caps:
 4. `src.header-size = 12`
 5. `src.payload-multiple`: default to `max(1, round(16 ms / ptime_ms))` (16 ms buffer cadence from 2ch/48k example) unless user overrides in `transport-properties`.
 
-Supported formats: `S24BE` (L24), `S16BE` (L16) — matching current OSS UDP scope.
+Supported formats: `S24BE` (L24), `S16BE` (L16) — matching current scope with the GStreamer RTP/UDP plugins.
 
 ### ANC / ST 2110-40
 
@@ -171,7 +171,7 @@ uses `m=video` + `encoding-name=SMPTE291` per RFC 8331. Auto packetization:
 `header-size=20` on `nvdsudpsrc` only (HDS for RFC 8331); ANC RTP packet sizes
 are variable — `payload-size` is left at plugin defaults. No `packets-per-line`.
 GPU Direct is disabled for ANC in the plugin. Override via
-`transport-properties` when needed. OSS `udp` / `udp2` use `rtpsmpte291pay` /
+`transport-properties` when needed. `udp` / `udp2` use `rtpsmpte291pay` /
 `rtpsmpte291depay` from `gst-plugins-rs`.
 
 ### Interaction with `transport-properties`
@@ -197,7 +197,7 @@ If user pre-sets `payload-size` / `packets-per-line` in `transport-properties`, 
 
 When building SDP from caps (`from_caps`), set:
 
-- `TP=2110TPN` (narrow traffic profile) — parent design and `sdp.rs` comment; today omitted for OSS transports.
+- `TP=2110TPN` (narrow traffic profile) — parent design and `sdp.rs` comment; today omitted for `udp` / `udp2` transports.
 - Keep `PM=2110GPM`, `SSN=…`, `colorimetry`, etc. as today.
 
 Cross-check `caps` vs `transport-file` unchanged.
@@ -234,7 +234,7 @@ At `validate_and_open` (NULL→READY), after config resolution:
 ensure_factory("nvdsudpsink") // or nvdsudpsrc on nmossrc
 ```
 
-Clear error: install DeepStream gst-nvdsudp plugin + Rivermax SDK; ConnectX-5+; `CAP_NET_RAW` on the host binary. Do **not** silently fall back to OSS `udp`.
+Clear error: install DeepStream gst-nvdsudp plugin + Rivermax SDK; ConnectX-5+; `CAP_NET_RAW` on the host binary. Do **not** silently fall back to `udp` / `udp2`.
 
 ### `nmossink/imp.rs` / `nmossrc/imp.rs`
 
@@ -303,7 +303,7 @@ Implemented as `gst-nmos-rs: implement transport=nvdsudp via DeepStream Mode 3`:
 - `factory_find_nvdsudpsink` — skip if not installed.
 - `build_nvdsudpsink_sets_host_port_local_iface` — read back GObject properties.
 - `nmossink_nvdsudp_transport_properties_roundtrip` — `buffer-size` or `gpu-id` if set.
-- `activation_single_leg_video` — `nmossink` + `nmossrc`, IS-05 PATCH, essences match OSS smoke layout but `transport=nvdsudp`.
+- `activation_single_leg_video` — `nmossink` + `nmossrc`, IS-05 PATCH, essences match `udp` / `udp2` smoke layout but `transport=nvdsudp`.
 - `receiver_use_rtp_timestamp_default` — read back from built `nvdsudpsrc`.
 
 ### Manual soak (Rivermax host)

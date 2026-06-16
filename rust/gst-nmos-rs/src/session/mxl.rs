@@ -32,15 +32,6 @@ pub(crate) fn synthesise_or_passthrough_mxl(
         }
         (Some(text), None) => Ok(Some(text)),
         (None, Some(caps)) => {
-            if settings.mxl_flow_id.is_empty() {
-                gst::debug!(
-                    cat,
-                    "{element}: `caps` set but `mxl-flow-id` empty; deferring flow_def \
-                     synthesis (the fake chain will be in use until an IS-05 \
-                     activation supplies the flow id)"
-                );
-                return Ok(None);
-            }
             let json = flow_def::from_caps(&FlowDefBuildInput {
                 flow_id: &settings.mxl_flow_id,
                 name: &settings.name,
@@ -50,16 +41,74 @@ pub(crate) fn synthesise_or_passthrough_mxl(
                 caps,
             })
             .with_context(|| format!("{element}: synthesising flow_def from caps"))?;
-            gst::info!(
-                cat,
-                "{element}: synthesised flow_def from `caps` (side={:?})",
-                settings.side,
-            );
+            if settings.mxl_flow_id.is_empty() {
+                gst::debug!(
+                    cat,
+                    "{element}: synthesised flow_def from `caps` without \
+                     top-level `id` (libnvnmos resolves the MXL flow id at activation; \
+                     side={:?})",
+                    settings.side,
+                );
+            } else {
+                gst::info!(
+                    cat,
+                    "{element}: synthesised flow_def from `caps` (side={:?})",
+                    settings.side,
+                );
+            }
             Ok(Some(json))
         }
         (None, None) => Ok(None),
     }
 }
+
+/// Synthesise configuring flow_def JSON and resolve the inner chain for
+/// deferred MXL sender AddSender from fixated upstream peer caps.
+pub(super) fn synthesise_deferred_sender_mxl(
+    element: &str,
+    settings: &CommonSettings,
+    fixated: &gst::Caps,
+) -> Result<(String, InnerConfig), anyhow::Error> {
+    let domain_resolution =
+        domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path)
+            .with_context(|| {
+                format!("{element}: resolving MXL Domain identity for deferred AddSender")
+            })?;
+    if domain_resolution.id.is_empty() {
+        bail!(
+            "{element}: deferred AddSender: `mxl-domain-id` is required \
+             (set the property directly or supply an `mxl-domain-path` whose \
+             `domain_def.json` provides the id)"
+        );
+    }
+
+    let json = flow_def::from_caps(&FlowDefBuildInput {
+        flow_id: &settings.mxl_flow_id,
+        name: &settings.name,
+        mxl_domain_id: &domain_resolution.id,
+        label: &settings.label,
+        description: &settings.description,
+        caps: fixated,
+    })
+    .with_context(|| format!("{element}: synthesising flow_def from peer caps"))?;
+
+    let flow = flow_def::resolve_mxl_flow_meta(
+        &settings.mxl_flow_id,
+        FlowFormat::from_caps(fixated),
+        Some(&json),
+    )
+    .with_context(|| {
+        format!("{element}: resolving MXL flow id / format for deferred AddSender")
+    })?;
+    let inner = super::apply_auto_activate_policy(
+        &crate::CAT,
+        element,
+        settings,
+        decide_inner_config_mxl(settings, &flow, Some(&json)),
+    );
+    Ok((json, inner))
+}
+
 pub(crate) fn property_overrides_mxl<'a>(
     settings: &'a CommonSettings,
     resolved_mxl_domain_id: &'a str,
@@ -97,6 +146,13 @@ pub(crate) fn decide_inner_config_mxl(
         };
     }
     if flow.id.is_empty() {
+        if transport_file.is_some() {
+            return InnerConfig::Fake {
+                kind: FakeKind::NotActive,
+                detail: "`mxl-flow-id` unset; waiting for IS-05 activation to supply the MXL flow id"
+                    .into(),
+            };
+        }
         return InnerConfig::Fake {
             kind: FakeKind::Misconfigured,
             detail: "`mxl-flow-id` unset (neither property nor transport file supplied it)".into(),
@@ -182,22 +238,29 @@ pub(super) fn resolve_inner_config_mxl(
     log_flow_origin(cat, "mxl-flow-id", flow.id_origin);
     log_flow_origin(cat, "caps format", flow.format_origin);
 
-    let mut inner = decide_inner_config_mxl(settings, &flow, transport_file.as_deref());
+    let inner = super::apply_auto_activate_policy(
+        cat,
+        element,
+        settings,
+        decide_inner_config_mxl(settings, &flow, transport_file.as_deref()),
+    );
     // Deferred-mode case (sender only): no resource is going to be
-    // registered at NULL→READY because neither `transport-file*` nor
+    // added at NULL→READY because neither `transport-file*` nor
     // `caps` was supplied. Keep the fake chain so we don't bring
-    // `mxlsink` up against an unregistered Flow (which would fail to
+    // `mxlsink` up against an un-added Flow (which would fail to
     // preroll); the inner is swapped to `mxlsink` only after
-    // `register_deferred` registers the Sender at READY→PAUSED.
-    if transport_file.is_none()
+    // `add_deferred_sender` calls AddSender at READY→PAUSED.
+    let inner = if transport_file.is_none()
         && settings.side == Side::Sender
         && matches!(inner, InnerConfig::Real(_))
     {
-        inner = InnerConfig::Fake {
+        InnerConfig::Fake {
             kind: FakeKind::NotConfigured,
             detail: String::new(),
-        };
-    }
+        }
+    } else {
+        inner
+    };
 
     Ok((inner, transport_file))
 }
@@ -560,7 +623,7 @@ mod tests {
         assert!(matches!(plan.ack, ActivationAck::Failure { .. }));
     }
 
-    mod register_deferred {
+    mod add_deferred_sender {
         use super::*;
         use std::str::FromStr;
 
@@ -586,7 +649,7 @@ mod tests {
 
         #[test]
         fn empty_caps_is_error() {
-            let res = register_deferred(
+            let res = add_deferred_sender(
                 &cat(),
                 "nmossink",
                 &sender_settings(),
@@ -602,7 +665,7 @@ mod tests {
 
         #[test]
         fn any_caps_is_error() {
-            let res = register_deferred(
+            let res = add_deferred_sender(
                 &cat(),
                 "nmossink",
                 &sender_settings(),
@@ -623,41 +686,12 @@ mod tests {
                 side: Side::Receiver,
                 ..sender_settings()
             };
-            let res = register_deferred(&cat(), "nmossrc", &s, &no_session(), good_caps());
+            let res = add_deferred_sender(&cat(), "nmossrc", &s, &no_session(), good_caps());
             let err = res.expect_err("receiver deferred mode is out of scope");
             assert!(
                 format!("{err:#}").contains("sender-only"),
                 "expected sender-only reason: {err:#}"
             );
-        }
-
-        #[test]
-        fn unsupported_transport_is_error() {
-            // Deferred mode rejects non-`mxl` transports up-front,
-            // mirroring `validate_and_open`'s same check. This test
-            // covers the synchronous branch; the async sibling is
-            // covered by integration tests.
-            for t in [Transport::Udp, Transport::Udp2, Transport::NvDsUdp] {
-                let s = CommonSettings {
-                    transport: t,
-                    ..sender_settings()
-                };
-                let res = register_deferred(
-                    &cat(),
-                    "nmossink",
-                    &s,
-                    &no_session(),
-                    good_caps(),
-                );
-                let err = res.expect_err(
-                    "non-mxl transport must be rejected by deferred path",
-                );
-                let msg = format!("{err:#}");
-                assert!(
-                    msg.contains("deferred registration unsupported"),
-                    "expected deferred-transport rejection reason for {t:?}: {msg}",
-                );
-            }
         }
 
         #[test]
@@ -667,7 +701,7 @@ mod tests {
                 mxl_domain_path: String::new(),
                 ..sender_settings()
             };
-            let res = register_deferred(&cat(), "nmossink", &s, &no_session(), good_caps());
+            let res = add_deferred_sender(&cat(), "nmossink", &s, &no_session(), good_caps());
             let err = res.expect_err("missing mxl-domain-id must be rejected");
             assert!(
                 format!("{err:#}").contains("mxl-domain-id"),
@@ -676,17 +710,23 @@ mod tests {
         }
 
         #[test]
-        fn missing_flow_id_is_error_via_builder() {
+        fn missing_flow_id_still_synthesises_for_deferred_add_sender() {
             let s = CommonSettings {
                 mxl_flow_id: String::new(),
                 ..sender_settings()
             };
-            let res = register_deferred(&cat(), "nmossink", &s, &no_session(), good_caps());
-            let err = res.expect_err("missing mxl-flow-id must be rejected");
-            assert!(
-                format!("{err:#}").contains("flow_id") || format!("{err:#}").contains("flow-id"),
-                "expected mxl-flow-id reason: {err:#}"
-            );
+            let caps = good_caps();
+            let json = flow_def::from_caps(&FlowDefBuildInput {
+                flow_id: &s.mxl_flow_id,
+                name: &s.name,
+                mxl_domain_id: DOMAIN_ID,
+                label: &s.label,
+                description: &s.description,
+                caps: &caps,
+            })
+            .expect("deferred AddSender may synthesise without mxl-flow-id");
+            let v = serde_json::from_str::<serde_json::Value>(&json).expect("json");
+            assert!(v.get("id").is_none());
         }
 
         #[test]
@@ -695,7 +735,7 @@ mod tests {
             // reject it, and the user is expected to add a capsfilter.
             let caps = gst::Caps::from_str("video/x-raw,format=I420,width=1920,height=1080")
                 .expect("static caps parse");
-            let res = register_deferred(&cat(), "nmossink", &sender_settings(), &no_session(), caps);
+            let res = add_deferred_sender(&cat(), "nmossink", &sender_settings(), &no_session(), caps);
             let err = res.expect_err("unsupported caps must be rejected");
             // exact message is owned by from_caps; we just want
             // the synthesis-context wrapper to be present.
@@ -709,7 +749,7 @@ mod tests {
         fn no_open_session_is_error() {
             // Caps are valid and validation passes; we should reach
             // the session-take step and surface a clear error.
-            let res = register_deferred(
+            let res = add_deferred_sender(
                 &cat(),
                 "nmossink",
                 &sender_settings(),
@@ -759,13 +799,10 @@ mod tests {
             assert_eq!(v["tags"]["urn:x-nvnmos:tag:mxl-domain-id"][0], DOMAIN_ID);
         }
 
-        /// Receiver synthesis is gated on `mxl-flow-id`: without it
-        /// we have nothing to subscribe to and no stable id for the
-        /// configuring flow_def. Returning `None` puts the element
-        /// on the fake chain until an IS-05 activation supplies the
-        /// missing piece.
+        /// Caps without `mxl-flow-id` still synthesise a configuring
+        /// flow_def (top-level `id` omitted) for AddReceiver.
         #[test]
-        fn receiver_caps_without_flow_id_returns_none() {
+        fn receiver_caps_without_flow_id_synthesises_configuring_flow_def() {
             let s = CommonSettings {
                 caps: Some(video_caps()),
                 ..settings(Side::Receiver)
@@ -773,7 +810,29 @@ mod tests {
             assert!(s.mxl_flow_id.is_empty(), "test precondition");
             let out = super::synthesise_or_passthrough_mxl(&cat(), "nmossrc", &s, DOMAIN_ID, None)
                 .expect("absent flow id must not error");
-            assert!(out.is_none(), "Receiver without flow id must not synthesise");
+            let text = out.expect("Receiver without flow id must synthesise configuring flow_def");
+            let v = parse(&text);
+            assert!(v.get("id").is_none());
+            assert_eq!(v["format"], "urn:x-nmos:format:video");
+        }
+
+        /// Receiver with configuring flow_def but no flow id keeps a
+        /// fake inner chain until IS-05 activation supplies one.
+        #[test]
+        fn receiver_without_flow_id_keeps_fake_inner() {
+            let s = CommonSettings {
+                caps: Some(video_caps()),
+                ..settings(Side::Receiver)
+            };
+            let synth = super::synthesise_or_passthrough_mxl(&cat(), "nmossrc", &s, DOMAIN_ID, None)
+                .expect("synthesis")
+                .expect("some json");
+            let flow = flow_def::resolve_mxl_flow_meta("", FlowFormat::Video, Some(&synth)).unwrap();
+            let inner = super::decide_inner_config_mxl(&s, &flow, Some(&synth));
+            match inner {
+                InnerConfig::Fake { kind, .. } => assert_eq!(kind, FakeKind::NotActive),
+                InnerConfig::Real(_) => panic!("must not build mxlsrc without mxl-flow-id"),
+            }
         }
 
         /// Sender synthesis still works the same way. Sanity check

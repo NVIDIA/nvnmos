@@ -18,10 +18,15 @@
 #                                   gst-plugins-rs's `udpsrc2` and
 #                                   `*pay2` / `*depay2` siblings
 #                                   where available.
+#   DEMO_TRANSPORT=nvdsudp          ST 2110 via DeepStream `nvdsudpsrc` /
+#                                   `nvdsudpsink` (Rivermax). Requires
+#                                   DeepStream 9.0 and the Rivermax SDK —
+#                                   see their installation guides.
 #
 # The topology and interactive control loop are identical across
-# transports; only the per-Sender / per-Receiver property surface,
-# the essence caps, and the diagnostics differ. The MXL path uses
+# transports. Video is matched at 1920×1080 @ 25 fps 10-bit 4:2:2
+# (MXL `v210`, UDP `UYVP`); only the per-Sender / per-Receiver property
+# surface and diagnostics differ. The MXL path uses
 # `mxl-domain-id` / `mxl-domain-path` / `mxl-flow-id` to identify
 # Flows; the UDP path uses the IS-05 endpoint properties
 # (`destination-ip` etc. on senders, `multicast-ip` etc. on
@@ -36,8 +41,9 @@
 #
 #   Node 2 (consumer):  one pipeline with two `nmossrc` Receivers (one
 #                       per format) on the same Node, fed to `autoaudiosink`
-#                       and `autovideosink` (override AUDIO_SINK / VIDEO_SINK
-#                       via env for WSL / headless setups). Set
+#                       and `autovideosink` (override DEMO_AUDIO_SINK /
+#                       DEMO_VIDEO_SINK via env for WSL / headless setups).
+#                       Set
 #                       `DEMO_RECEIVER_CAPS_MODE` to `wide` or `narrow`
 #                       (default `auto`) on both receivers.
 #
@@ -85,60 +91,22 @@ set -u
 # the helper functions are in place.
 DEMO_TRANSPORT=${DEMO_TRANSPORT:-mxl}
 
-# Short queues on live paths (nmossrc → processing → nmossink / sinks).
-# Video: buffer count (2 frames @ 59.94 ≈ 33 ms); buffers=1 caused visible skips.
-DEMO_VIDEO_QUEUE_MAX_BUFFERS=${DEMO_VIDEO_QUEUE_MAX_BUFFERS:-2}
-# Audio: time limit — mxlsrc emits ~48 samples/buffer (1 ms @ 48 kHz).
-DEMO_AUDIO_QUEUE_MAX_TIME_MS=${DEMO_AUDIO_QUEUE_MAX_TIME_MS:-50}
-# Local NIC IP used by the UDP path: drives the receiver's
-# `interface-ip` (the IGMP-join interface, resolved to an iface name
-# for `udpsrc.multicast-iface`) and the sender's `source-ip`
-# (`udpsink.bind-address` plus the SDP `a=source-filter:`
-# include-source). Ignored when DEMO_TRANSPORT=mxl. Defaults to the
-# host's first non-loopback IPv4 address (typically `eth0` on
-# WSL / Docker; the primary physical NIC otherwise). libnvnmos
-# walks the host's iface list and skips `lo` when resolving the
-# SDP `a=x-nvnmos-iface-ip` attribute back to an iface, so anything
-# assigned to the loopback iface is rejected — including non-127.x
-# global-scope IPs like WSL2's quirky `10.255.255.254/32` on `lo`.
-_default_nic_ip() {
-    local addr
-    if command -v ip >/dev/null 2>&1; then
-        # `ip -4 -o addr show` prints one line per address; column
-        # 2 is the iface name, column 4 is the CIDR. Skip the
-        # loopback iface explicitly (WSL2 can land a global-scope
-        # IP on `lo`, so `scope global` alone isn't sufficient) and
-        # take the first surviving address.
-        addr=$(ip -4 -o addr show 2>/dev/null \
-            | awk '$2 != "lo" {print $4; exit}' \
-            | cut -d/ -f1)
-    fi
-    if [[ -z "${addr:-}" ]]; then
-        # Fallback: `hostname -I` (space-separated list, already
-        # excludes 127.0.0.1 by `hostname(1)` convention). Safety
-        # net for systems with iproute2 deinstalled / replaced.
-        addr=$(hostname -I 2>/dev/null | awk '{print $1}')
-    fi
-    echo "${addr:-127.0.0.1}"
-}
-DEMO_NIC_IP=${DEMO_NIC_IP:-$(_default_nic_ip)}
-
-# Inner `udpsrc` / `udpsrc2` / `udpsink` SO_RCVBUF / SO_SNDBUF (bytes) on
-# **video** flows only (audio stays at the element default). Applied via
-# nmossrc/nmossink `transport-properties` on UDP transports. Must be <=
-# `net.core.rmem_max` / `wmem_max`; see the sysctl note at demo startup.
-# Default 16 MiB. `DEMO_UDP_BUFFER_SIZE` is a deprecated alias.
-DEMO_UDP_VIDEO_BUFFER_SIZE=${DEMO_UDP_VIDEO_BUFFER_SIZE:-${DEMO_UDP_BUFFER_SIZE:-16777216}}
-
 # Resolve the script's own directory so `REPO` works in any checkout
 # without an env override. Layout assumed: <repo>/rust/gst-nmos-rs/scripts/
-# i.e. three `..` to reach the repo root.
 _SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=${REPO:-$(cd "$_SCRIPT_DIR/../../.." && pwd)}
 MXL_REPO=${MXL_REPO:-$REPO/../mxl}
 
+# Demo MXL domain — set before sourcing env.sh so `uuidgen` is not used.
+DEMO_MXL_DOMAIN_ID=${DEMO_MXL_DOMAIN_ID:-1ac254d9-c9be-475a-93a7-f80b9c1063a8}
+DEMO_MXL_DOMAIN_PATH=${DEMO_MXL_DOMAIN_PATH:-/dev/shm/gst-nmos-rs-demo}
+
+# Shared flow identity, caps, NIC, and UDP multicast defaults.
+# shellcheck source=env.sh
+source "$_SCRIPT_DIR/env.sh"
+
 # `libnvnmos.so` (consumed by nvnmosd) and the gst-mxl-rs plugin +
-# libmxl.so runtime (consumed by the inner mxlsink/mxlsrc swaps).
+# libmxl.so runtime (required for the MXL inner transport chain).
 LIB=${NVNMOS_LIB_DIR:-$REPO/build}
 MXL_PLUGIN_DIR=${MXL_PLUGIN_DIR:-$MXL_REPO/rust/target/debug}
 MXL_RT_LIB_DIR=${MXL_RT_LIB_DIR:-$MXL_REPO/build/Linux-Clang-Debug/lib}
@@ -200,12 +168,6 @@ _assert_single_nvnmosd_on_sock() {
     fi
 }
 
-# Shared MXL Domain (tmpfs-backed). All three Nodes operate inside
-# it. Only used when DEMO_TRANSPORT=mxl; the bootstrap block below
-# only creates the directory + `domain_def.json` in that case.
-MXL_DOMAIN_ID=1ac254d9-c9be-475a-93a7-f80b9c1063a8
-MXL_DOMAIN_PATH=/dev/shm/gst-nmos-rs-demo
-
 # Three NMOS Nodes (one daemon, three node_seeds, three HTTP ports).
 # Spaced 10 apart deliberately: nmos-cpp's settings normaliser
 # auto-assigns each Node `ws_port = http_port + 1` (IS-07 events ws,
@@ -220,32 +182,9 @@ NODE2_SEED=demo-node2; NODE2_PORT=18021
 NODE3_SEED=demo-node3; NODE3_PORT=18031
 NODE4_SEED=demo-node4; NODE4_PORT=18041
 
-# Per-flow identity. Each Flow has a transport-specific identifier
-# used to wire Senders to their Receiver counterparts:
-#   MXL:  `mxl-flow-id` (UUID), shared between sender + matching receivers.
-#   UDP:  destination multicast group + port, joined by any receiver
-#         that wants to subscribe.
-# The MXL ids and UDP groups / ports stay stable here so the printed
-# curl recipes are deterministic.
-FLOW_VIDEO_NODE1=11111111-aaaa-1111-aaaa-111111111111
-FLOW_AUDIO_NODE1=11111111-bbbb-1111-bbbb-111111111111
-FLOW_VIDEO_NODE3=33333333-aaaa-3333-aaaa-333333333333
-FLOW_AUDIO_NODE3=33333333-bbbb-3333-bbbb-333333333333
-FLOW_VIDEO_NODE4=44444444-aaaa-4444-aaaa-444444444444
-FLOW_AUDIO_NODE4=44444444-bbbb-4444-bbbb-444444444444
-
-# UDP multicast groups + ports, one per flow. Picked from the
-# AD-HOC III administratively-scoped block (232.0.0.0/8 — SSM)
-# so they don't collide with any well-known group. Per-flow ports
-# (rather than a single 5004 across the board) keep wireshark /
-# tcpdump filters one-line and make per-flow log lines easy to
-# tell apart.
-FLOW_VIDEO1_GROUP=232.99.99.1;     FLOW_VIDEO1_PORT=5004
-FLOW_AUDIO1_GROUP=232.99.99.2;     FLOW_AUDIO1_PORT=5006
-FLOW_VIDEO_OUT_GROUP=232.99.99.3;  FLOW_VIDEO_OUT_PORT=5008
-FLOW_AUDIO_OUT_GROUP=232.99.99.4;  FLOW_AUDIO_OUT_PORT=5010
-FLOW_VIDEO4_GROUP=232.99.99.5;     FLOW_VIDEO4_PORT=5012
-FLOW_AUDIO4_GROUP=232.99.99.6;     FLOW_AUDIO4_PORT=5014
+# Per-flow identity — MXL flow IDs and RTP multicast pairs from env.sh.
+# Demo flow handles (`video1`, `video-out`, …) map to pair indices in
+# `transport_sender_props` / `transport_receiver_props` below.
 
 # Node 2 IS-04 Receiver Caps policy (`nmossrc` `receiver-caps-mode`).
 # `auto` (default) leaves the configuring transport file untouched;
@@ -261,31 +200,23 @@ case "$DEMO_RECEIVER_CAPS_MODE" in
         ;;
 esac
 
-# Essence caps. Chosen per transport because each transport has its
-# own GStreamer raw-format vocabulary in this plugin:
-#   MXL: v210 (10-bit 4:2:2 video) + F32LE (32-bit float audio) per
-#        the gst-mxl-rs `video_data_sync` integration test reference.
-#   UDP: UYVY (8-bit 4:2:2 video) + S24BE (L24 audio) per the
-#        rtpvrawdepay / rtpL24depay common case. Resolution is
-#        smaller for UDP so a multicast loopback run stays well
-#        below 1 Gbps (UYVY 1280x720@25 ≈ 368 Mbps; UYVY 192x108@25
-#        ≈ 8 Mbps).
+# Essence caps — local aliases from env.sh (`DEMO_MXL_*` / `DEMO_UDP_*`).
+# Node 4 uses the alternate shapes for wide-receiver tests.
 case "$DEMO_TRANSPORT" in
     mxl)
-        VIDEO_CAPS='video/x-raw,format=v210,width=1920,height=1080,framerate=60000/1001,interlace-mode=progressive'
-        AUDIO_CAPS='audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved'
-        # Node 4: different frame rate + channel count (wide-receiver soak).
-        VIDEO_CAPS_ALT='video/x-raw,format=v210,width=1920,height=1080,framerate=25/1,interlace-mode=progressive'
-        AUDIO_CAPS_ALT='audio/x-raw,format=F32LE,rate=48000,channels=6,layout=interleaved'
+        VIDEO_CAPS=$DEMO_MXL_VIDEO_CAPS
+        AUDIO_CAPS=$DEMO_MXL_AUDIO_CAPS
+        VIDEO_CAPS_ALT=$DEMO_MXL_VIDEO_CAPS_ALT
+        AUDIO_CAPS_ALT=$DEMO_MXL_AUDIO_CAPS_ALT
         ;;
-    udp|udp2)
-        VIDEO_CAPS='video/x-raw,format=UYVY,width=1280,height=720,framerate=25/1,interlace-mode=progressive'
-        AUDIO_CAPS='audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved'
-        VIDEO_CAPS_ALT='video/x-raw,format=UYVY,width=1280,height=720,framerate=30000/1001,interlace-mode=progressive'
-        AUDIO_CAPS_ALT='audio/x-raw,format=S24BE,rate=48000,channels=6,layout=interleaved'
+    udp|udp2|nvdsudp)
+        VIDEO_CAPS=$DEMO_UDP_VIDEO_CAPS
+        AUDIO_CAPS=$DEMO_UDP_AUDIO_CAPS
+        VIDEO_CAPS_ALT=$DEMO_UDP_VIDEO_CAPS_ALT
+        AUDIO_CAPS_ALT=$DEMO_UDP_AUDIO_CAPS_ALT
         ;;
     *)
-        echo "[error] DEMO_TRANSPORT=$DEMO_TRANSPORT not recognised; use one of mxl, udp, udp2"
+        echo "[error] DEMO_TRANSPORT=$DEMO_TRANSPORT not recognised; use one of mxl, udp, udp2, nvdsudp"
         exit 1
         ;;
 esac
@@ -312,25 +243,25 @@ transport_sender_props() {
     case "$DEMO_TRANSPORT" in
         mxl)
             case "$flow" in
-                video1)     flow_id=$FLOW_VIDEO_NODE1 ;;
-                audio1)     flow_id=$FLOW_AUDIO_NODE1 ;;
-                video4)     flow_id=$FLOW_VIDEO_NODE4 ;;
-                audio4)     flow_id=$FLOW_AUDIO_NODE4 ;;
-                video-out)  flow_id=$FLOW_VIDEO_NODE3 ;;
-                audio-out)  flow_id=$FLOW_AUDIO_NODE3 ;;
+                video1)     flow_id=$DEMO_MXL_VIDEO_FLOW_ID1 ;;
+                audio1)     flow_id=$DEMO_MXL_AUDIO_FLOW_ID1 ;;
+                video4)     flow_id=$DEMO_MXL_VIDEO_FLOW_ID4 ;;
+                audio4)     flow_id=$DEMO_MXL_AUDIO_FLOW_ID4 ;;
+                video-out)  flow_id=$DEMO_MXL_VIDEO_FLOW_ID3 ;;
+                audio-out)  flow_id=$DEMO_MXL_AUDIO_FLOW_ID3 ;;
                 *) echo "[error] transport_sender_props: unknown flow $flow" >&2; return 1 ;;
             esac
             printf 'mxl-domain-id=%s mxl-domain-path=%s mxl-flow-id=%s' \
-                "$MXL_DOMAIN_ID" "$MXL_DOMAIN_PATH" "$flow_id"
+                "$DEMO_MXL_DOMAIN_ID" "$DEMO_MXL_DOMAIN_PATH" "$flow_id"
             ;;
-        udp|udp2)
+        udp|udp2|nvdsudp)
             case "$flow" in
-                video1)     group=$FLOW_VIDEO1_GROUP;     port=$FLOW_VIDEO1_PORT ;;
-                audio1)     group=$FLOW_AUDIO1_GROUP;     port=$FLOW_AUDIO1_PORT ;;
-                video4)     group=$FLOW_VIDEO4_GROUP;     port=$FLOW_VIDEO4_PORT ;;
-                audio4)     group=$FLOW_AUDIO4_GROUP;     port=$FLOW_AUDIO4_PORT ;;
-                video-out)  group=$FLOW_VIDEO_OUT_GROUP;  port=$FLOW_VIDEO_OUT_PORT ;;
-                audio-out)  group=$FLOW_AUDIO_OUT_GROUP;  port=$FLOW_AUDIO_OUT_PORT ;;
+                video1)     group=$DEMO_UDP_VIDEO_MCAST_IP1; port=$DEMO_UDP_VIDEO_MCAST_PORT1 ;;
+                audio1)     group=$DEMO_UDP_AUDIO_MCAST_IP1; port=$DEMO_UDP_AUDIO_MCAST_PORT1 ;;
+                video4)     group=$DEMO_UDP_VIDEO_MCAST_IP4; port=$DEMO_UDP_VIDEO_MCAST_PORT4 ;;
+                audio4)     group=$DEMO_UDP_AUDIO_MCAST_IP4; port=$DEMO_UDP_AUDIO_MCAST_PORT4 ;;
+                video-out)  group=$DEMO_UDP_VIDEO_MCAST_IP3; port=$DEMO_UDP_VIDEO_MCAST_PORT3 ;;
+                audio-out)  group=$DEMO_UDP_AUDIO_MCAST_IP3; port=$DEMO_UDP_AUDIO_MCAST_PORT3 ;;
                 *) echo "[error] transport_sender_props: unknown flow $flow" >&2; return 1 ;;
             esac
             # Sender-side IS-05 endpoint properties: destination = the
@@ -350,14 +281,14 @@ transport_receiver_props() {
         mxl)
             transport_sender_props "$flow"
             ;;
-        udp|udp2)
+        udp|udp2|nvdsudp)
             case "$flow" in
-                video1)     group=$FLOW_VIDEO1_GROUP;     port=$FLOW_VIDEO1_PORT ;;
-                audio1)     group=$FLOW_AUDIO1_GROUP;     port=$FLOW_AUDIO1_PORT ;;
-                video4)     group=$FLOW_VIDEO4_GROUP;     port=$FLOW_VIDEO4_PORT ;;
-                audio4)     group=$FLOW_AUDIO4_GROUP;     port=$FLOW_AUDIO4_PORT ;;
-                video-out)  group=$FLOW_VIDEO_OUT_GROUP;  port=$FLOW_VIDEO_OUT_PORT ;;
-                audio-out)  group=$FLOW_AUDIO_OUT_GROUP;  port=$FLOW_AUDIO_OUT_PORT ;;
+                video1)     group=$DEMO_UDP_VIDEO_MCAST_IP1; port=$DEMO_UDP_VIDEO_MCAST_PORT1 ;;
+                audio1)     group=$DEMO_UDP_AUDIO_MCAST_IP1; port=$DEMO_UDP_AUDIO_MCAST_PORT1 ;;
+                video4)     group=$DEMO_UDP_VIDEO_MCAST_IP4; port=$DEMO_UDP_VIDEO_MCAST_PORT4 ;;
+                audio4)     group=$DEMO_UDP_AUDIO_MCAST_IP4; port=$DEMO_UDP_AUDIO_MCAST_PORT4 ;;
+                video-out)  group=$DEMO_UDP_VIDEO_MCAST_IP3; port=$DEMO_UDP_VIDEO_MCAST_PORT3 ;;
+                audio-out)  group=$DEMO_UDP_AUDIO_MCAST_IP3; port=$DEMO_UDP_AUDIO_MCAST_PORT3 ;;
                 *) echo "[error] transport_receiver_props: unknown flow $flow" >&2; return 1 ;;
             esac
             # Receiver-side IS-05 endpoint properties: multicast-ip =
@@ -368,18 +299,6 @@ transport_receiver_props() {
             # the demo since all four senders live on this host).
             printf 'multicast-ip=%s destination-port=%d interface-ip=%s source-ip=%s' \
                 "$group" "$port" "$DEMO_NIC_IP" "$DEMO_NIC_IP"
-            ;;
-    esac
-}
-
-# `transport-properties` for video UDP sockets only. High-rate ST 2110-20
-# needs a large kernel receive buffer; ST 2110-30 audio does not. No-op
-# on MXL. Output is one gst-launch token (quoted value), or empty.
-udp_video_buffer_props() {
-    case "$DEMO_TRANSPORT" in
-        udp|udp2)
-            printf 'transport-properties="properties,buffer-size=%s"' \
-                "$DEMO_UDP_VIDEO_BUFFER_SIZE"
             ;;
     esac
 }
@@ -395,18 +314,8 @@ udp_video_buffer_props() {
 #   MXL:          `flow=11111111-aaaa-1111-aaaa-111111111111`
 #   UDP sender:   `dest=232.99.99.1:5004`
 #   UDP receiver: `join=232.99.99.1:5004`
-# GstQueue after each nmossrc: video by frame count, audio by duration (mxlsrc ~1 ms/buffer).
-_demo_video_queue() {
-    local name=$1
-    echo queue name="$name" "max-size-buffers=$DEMO_VIDEO_QUEUE_MAX_BUFFERS" max-size-bytes=0 max-size-time=0
-}
-
-_demo_audio_queue() {
-    local name=$1
-    local max_time_ns=$(( DEMO_AUDIO_QUEUE_MAX_TIME_MS * 1000000 ))
-    echo queue name="$name" max-size-time="$max_time_ns" max-size-buffers=0 max-size-bytes=0
-}
-
+# GstQueue after each nmossrc: video by frame count, audio by duration
+# (inner source ~1 ms/buffer on MXL; RTP varies by ptime and payload-multiple).
 transport_identity_from_active() {
     local side=$1 body=$2
     case "$DEMO_TRANSPORT" in
@@ -415,7 +324,7 @@ transport_identity_from_active() {
             flow=$(jq -r '.transport_params[0].mxl_flow_id // "n/a"' <<< "$body" 2>/dev/null)
             printf 'flow=%s' "$flow"
             ;;
-        udp|udp2)
+        udp|udp2|nvdsudp)
             local addr port
             case "$side" in
                 sender)
@@ -436,24 +345,11 @@ transport_identity_from_active() {
     esac
 }
 
-# Sinks for Node 2. The defaults (`autoaudiosink` / `autovideosink`)
-# Just Work on a desktop. On WSL or other headless setups
-# `autoaudiosink` spends up to ~60 s probing PipeWire / PulseAudio /
-# ALSA before falling back, which serialises against every other
-# element in Node 2's pipeline (GStreamer's bin state-change is
-# synchronous) and delays both Node 2 receivers' registration with
-# the daemon by the same ~60 s. If the script prints
-# "[poll] collect_urls: still missing after 90s: receivers/video2@…
-# receivers/audio2@…" or similar, override:
-#
-#     AUDIO_SINK=fakesink VIDEO_SINK=fakesink \\
-#         ./gst-nmos-rs-demo.sh
-#
-# (or `AUDIO_SINK=pulsesink`/`VIDEO_SINK=glimagesink` if your distro
-# / WSLg needs an explicit element). `fakesink` skips the probe
-# entirely; the data path still flows, it just isn't played back.
-AUDIO_SINK=${AUDIO_SINK:-autoaudiosink}
-VIDEO_SINK=${VIDEO_SINK:-autovideosink}
+# Node 2 playback sinks: DEMO_AUDIO_SINK / DEMO_VIDEO_SINK in env.sh
+# (element names only; this script adds audioconvert/videoconvert).
+# On WSL or headless hosts `autoaudiosink` can spend ~60 s probing
+# PipeWire / PulseAudio / ALSA — override, e.g.:
+#     DEMO_AUDIO_SINK=fakesink DEMO_VIDEO_SINK=fakesink ./gst-nmos-rs-demo.sh
 
 HOST=${HOST:-localhost}
 
@@ -477,13 +373,12 @@ echo "Node 2 receiver-caps-mode: $DEMO_RECEIVER_CAPS_MODE"
 echo "Queues after each nmossrc: video max-size-buffers=$DEMO_VIDEO_QUEUE_MAX_BUFFERS; audio max-size-time=${DEMO_AUDIO_QUEUE_MAX_TIME_MS}ms (Node 2 consumer + Node 3 processor)"
 
 # Re-create the MXL Domain directory. Only needed when
-# DEMO_TRANSPORT=mxl: the UDP / UDP2 transports go straight from
-# `nmossink` to `udpsink` and don't touch `/dev/shm` at all.
+# DEMO_TRANSPORT=mxl.
 if [[ "$DEMO_TRANSPORT" == mxl ]]; then
-    rm -rf  "$MXL_DOMAIN_PATH"
-    mkdir -p "$MXL_DOMAIN_PATH"
-    cat > "$MXL_DOMAIN_PATH/domain_def.json" <<EOF
-{"id":"$MXL_DOMAIN_ID","label":"gst-nmos-rs demo domain"}
+    rm -rf  "$DEMO_MXL_DOMAIN_PATH"
+    mkdir -p "$DEMO_MXL_DOMAIN_PATH"
+    cat > "$DEMO_MXL_DOMAIN_PATH/domain_def.json" <<EOF
+{"id":"$DEMO_MXL_DOMAIN_ID","label":"gst-nmos-rs demo domain"}
 EOF
 fi
 
@@ -601,7 +496,7 @@ export LD_LIBRARY_PATH="$LIB:$MXL_RT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH
 
 case "$DEMO_TRANSPORT" in
     udp|udp2)
-        echo "[udp] video socket buffer-size=$DEMO_UDP_VIDEO_BUFFER_SIZE (video flows only; override with DEMO_UDP_VIDEO_BUFFER_SIZE=...)"
+        echo "[udp] video udpsrc buffer-size=$DEMO_UDP_VIDEO_BUFFER_SIZE (video flows only; override with DEMO_UDP_VIDEO_BUFFER_SIZE=...)"
         if [[ -r /proc/sys/net/core/rmem_max ]]; then
             _rmem_max=$(cat /proc/sys/net/core/rmem_max)
             if (( DEMO_UDP_VIDEO_BUFFER_SIZE > _rmem_max )); then
@@ -619,6 +514,19 @@ case "$DEMO_TRANSPORT" in
                 echo "[udp2] install gst-plugins-rs (GStreamer 1.30+) or use DEMO_TRANSPORT=udp"
             fi
         fi
+        ;;
+    nvdsudp)
+        if ! command -v gst-inspect-1.0 >/dev/null 2>&1 \
+            || ! gst-inspect-1.0 nvdsudpsink >/dev/null 2>&1; then
+            echo "[nvdsudp] nvdsudpsink not found (GST_PLUGIN_PATH=${GST_PLUGIN_PATH:-<unset>})"
+            echo "[nvdsudp] install DeepStream 9.0 and Rivermax, then add the DeepStream"
+            echo "[nvdsudp] plugin directory to GST_PLUGIN_PATH (e.g."
+            echo "[nvdsudp] /opt/nvidia/deepstream/deepstream-9.0/lib/gst-plugins)"
+            echo "[nvdsudp] https://docs.nvidia.com/metropolis/deepstream/dev-guide/text/DS_Installation.html"
+            echo "[nvdsudp] https://developer.nvidia.com/networking/rivermax"
+            exit 1
+        fi
+        echo "[nvdsudp] DeepStream nvdsudpsrc / nvdsudpsink available (Rivermax; CAP_NET_RAW may be required)"
         ;;
 esac
 
@@ -652,20 +560,21 @@ _rotate_log() {
 #
 # Sends SIGINT (not SIGTERM) deliberately: `gst-launch-1.0 -e`
 # installs a SIGINT handler that sends EOS through the pipeline and
-# waits for clean shutdown -- which is what gives `mxlsink::stop()`
+# waits for clean shutdown. On MXL, SIGINT gives `mxlsink::stop()`
 # (and through it, `libmxl`'s `releaseWriter` and the `Instance`
 # destructor) a chance to call `deleteFlow`, removing the
-# `.mxl-flow/` directory from `MXL_DOMAIN_PATH`. SIGTERM has no
-# handler in gst-launch, so the kernel terminates the process
-# immediately, the C++ destructors never run, and the flow files
-# stay on disk with stale internal state. A subsequent `launch_*`
-# of the same producer then opens those leaked files via
-# `Instance::createOrOpenDiscreteFlowData`, and the new writer can't
-# produce fresh grains -- which makes every consumer (existing
-# nmossrc, a relaunched Node 2, even a fresh bare mxlsrc preview)
-# see a frozen flow. SIGKILL after the 2s grace remains a safety
-# net for the case where the pipeline is wedged and SIGINT-driven
-# EOS can't drain.
+# `.mxl-flow/` directory from `DEMO_MXL_DOMAIN_PATH`. UDP/nvdsudp
+# also benefit from EOS-driven teardown, but the critical case is
+# MXL flow-file cleanup. SIGTERM has no handler in gst-launch, so
+# the kernel terminates the process immediately, the C++ destructors
+# never run, and the flow files stay on disk with stale internal
+# state. A subsequent `launch_*` of the same producer then opens
+# those leaked files via `Instance::createOrOpenDiscreteFlowData`,
+# and the new writer can't produce fresh grains -- which makes every
+# consumer (existing nmossrc, a relaunched Node 2, even a fresh bare
+# mxlsrc) see a frozen flow. SIGKILL after the 2s grace remains a
+# safety net for the case where the pipeline is wedged and
+# SIGINT-driven EOS can't drain.
 teardown_pipeline() {
     local pid_var_name=$1 label=$2
     local -n pid_ref=$pid_var_name
@@ -781,8 +690,9 @@ launch_node4() {
                     node-seed="$NODE4_SEED" \
                     sender-name=audio4 \
                     $(transport_sender_props audio4) \
+                    $(udp_audio_transport_caps_alt) \
                     caps="$AUDIO_CAPS_ALT" \
-                    label="Node 4 / audio4 (880 Hz sine, 6 ch)" \
+                    label="Node 4 / audio4 (880 Hz sine, 8 ch)" \
                     auto-activate=true \
         > "$LOG_DIR/node4-producer.log" 2>&1 &
     NODE4_PID=$!
@@ -798,8 +708,8 @@ launch_node4() {
 # negotiation completes and the pipeline can reach PLAYING) until the
 # controller PATCHes both Connection API /staged endpoints (the
 # inbound Receiver to attach to Node 1's flow, the outbound Sender to
-# publish the processed flow). Until then the inner mxlsink / mxlsrc
-# are not instantiated and no MXL writes / reads happen on this side.
+# publish the processed flow). Until then the inner transport chain
+# is not instantiated and no real data-path I/O happens on this side.
 # This shows off NMOS PATCH-driven activation vs. the eager
 # `auto-activate=true` shortcut Node 1 and Node 2 use.
 
@@ -824,7 +734,7 @@ launch_node3_video() {
                 caps="$VIDEO_CAPS" \
                 label="Node 3 / video-in" \
                 auto-activate=false ! \
-            $(_demo_video_queue n3-v-in) ! \
+            $(demo_video_queue n3-v-in) ! \
             videoconvert ! videoflip method=horizontal-flip ! videoconvert ! \
                 nmossink \
                     daemon-uri="unix:$SOCK" \
@@ -861,7 +771,7 @@ launch_node3_audio() {
                 caps="$AUDIO_CAPS" \
                 label="Node 3 / audio-in" \
                 auto-activate=false ! \
-            $(_demo_audio_queue n3-a-in) ! \
+            $(demo_audio_queue n3-a-in) ! \
             audioconvert ! volume volume=0.3 ! audioconvert ! \
                 nmossink \
                     daemon-uri="unix:$SOCK" \
@@ -880,8 +790,8 @@ launch_node3_audio() {
 # ---- Node 2: consumer (one pipeline, 2 nmossrcs) ------------------
 #
 # Node 2 is the always-on consumer: auto-activate=true on both
-# Receivers so the inner mxlsrc is built at NULL→READY and the
-# consumer attaches to Node 1's flows immediately (no IS-05 PATCH
+# Receivers so the inner transport chain is built at NULL→READY and
+# the consumer attaches to Node 1's flows immediately (no IS-05 PATCH
 # needed to play back). To re-route to Node 3's processed flows,
 # PATCH the Connection API /staged endpoint of either Receiver with
 # the corresponding Node 3 flow id (see the control commands printed
@@ -891,7 +801,7 @@ launch_node2() {
         echo "[node2] already running (pid $NODE2_PID)"
         return 1
     fi
-    echo "[node2] starting consumer pipeline (nmossrc --> queue(${DEMO_VIDEO_QUEUE_MAX_BUFFERS} buffers) --> ${VIDEO_SINK}; nmossrc --> queue(${DEMO_AUDIO_QUEUE_MAX_TIME_MS}ms) --> ${AUDIO_SINK})"
+    echo "[node2] starting consumer pipeline (nmossrc --> queue(${DEMO_VIDEO_QUEUE_MAX_BUFFERS} buffers) --> ${DEMO_VIDEO_SINK}; nmossrc --> queue(${DEMO_AUDIO_QUEUE_MAX_TIME_MS}ms) --> ${DEMO_AUDIO_SINK})"
     _rotate_log "$LOG_DIR/node2-consumer.log"
     pipeline_dots_prepare_launch node2
     GST_DEBUG=${GST_DEBUG:-nmossrc:3} \
@@ -908,8 +818,8 @@ launch_node2() {
                 caps="$VIDEO_CAPS" \
                 label="Node 2 / video2" \
                 auto-activate=true ! \
-            $(_demo_video_queue n2-v-in) ! \
-                videoconvert ! "$VIDEO_SINK" sync=false \
+            $(demo_video_queue n2-v-in) ! \
+                videoconvert ! "$DEMO_VIDEO_SINK" sync=false \
             nmossrc \
                 daemon-uri="unix:$SOCK" \
                 transport="$DEMO_TRANSPORT" \
@@ -921,8 +831,8 @@ launch_node2() {
                 caps="$AUDIO_CAPS" \
                 label="Node 2 / audio2" \
                 auto-activate=true ! \
-            $(_demo_audio_queue n2-a-in) ! \
-                audioconvert ! "$AUDIO_SINK" sync=false \
+            $(demo_audio_queue n2-a-in) ! \
+                audioconvert ! "$DEMO_AUDIO_SINK" sync=false \
         > "$LOG_DIR/node2-consumer.log" 2>&1 &
     NODE2_PID=$!
 }
@@ -936,7 +846,7 @@ launch_node2() {
 # Node 2 receiver. Useful for isolating whether a "frozen video"
 # symptom is mxlsrc/libmxl-level or nmossrc-level.
 #
-# Use VIDEO_SINK=autovideosink to see a window (the demo default),
+# Use DEMO_VIDEO_SINK=autovideosink to see a window (the default),
 # fakesink for headless capture. The file `bare-preview.log` will
 # contain mxlsrc/basesrc/fakesink chatter.
 launch_bare_preview() {
@@ -948,16 +858,16 @@ launch_bare_preview() {
         echo "[preview] already running (pid $BARE_PREVIEW_PID)"
         return 1
     fi
-    echo "[preview] starting bare mxlsrc -> $VIDEO_SINK"
+    echo "[preview] starting bare mxlsrc -> $DEMO_VIDEO_SINK"
     _rotate_log "$LOG_DIR/bare-preview.log"
     pipeline_dots_prepare_launch bare-preview
     GST_DEBUG=${GST_DEBUG:-mxlsrc:5,basesrc:4} \
         _demo_line_buffered gst-launch-1.0 -e \
             mxlsrc \
-                domain="$MXL_DOMAIN_PATH" \
-                video-flow-id="$FLOW_VIDEO_NODE1" \
+                domain="$DEMO_MXL_DOMAIN_PATH" \
+                video-flow-id="$DEMO_MXL_VIDEO_FLOW_ID1" \
                 name=bare-preview ! \
-            videoconvert ! "$VIDEO_SINK" sync=false \
+            videoconvert ! "$DEMO_VIDEO_SINK" sync=false \
         > "$LOG_DIR/bare-preview.log" 2>&1 &
     BARE_PREVIEW_PID=$!
 }
@@ -1041,14 +951,14 @@ resource_url() {
 #
 #   * `autoaudiosink` spending up to ~60 s probing PipeWire /
 #     PulseAudio / ALSA before falling back, on WSL or other
-#     headless setups. Override `AUDIO_SINK=fakesink` (see the
+#     headless setups. Override `DEMO_AUDIO_SINK=fakesink` (see env.sh;
 #     leading-comment knobs) to skip that altogether. Because
 #     GStreamer's bin state-change is synchronous, this delay
 #     gates every other element in Node 2's pipeline — including
 #     both `nmossrc`s — so neither the audio nor the video
 #     receiver registers with the daemon until ~60 s in.
-#   * `mxlsrc` opening Node 1's /dev/shm flow files and blocking
-#     until they exist — fine in practice (Node 1 is started
+#   * On MXL, `mxlsrc` opening Node 1's /dev/shm flow files and
+#     blocking until they exist — fine in practice (Node 1 is started
 #     first + `sleep 2`), but can add a few seconds under load.
 #
 # Each resource that resolves is recorded in `URLS[<key>]`;
@@ -1088,7 +998,7 @@ collect_urls() {
         sleep 0.5
     done
     echo "[warn] collect_urls: still missing after ${WAIT_TIMEOUT}s: ${missing[*]}" >&2
-    echo "[warn]   (if Node 2 endpoints are stuck, try \`AUDIO_SINK=fakesink VIDEO_SINK=fakesink\` to skip the autoaudiosink/autovideosink probe; or bump \`WAIT_TIMEOUT\`)" >&2
+    echo "[warn]   (if Node 2 endpoints are stuck, try \`DEMO_AUDIO_SINK=fakesink DEMO_VIDEO_SINK=fakesink\` to skip the autoaudiosink/autovideosink probe; or bump \`WAIT_TIMEOUT\`)" >&2
     return 1
 }
 echo "[poll] waiting for all 10 IS-04 resources to register (timeout ${WAIT_TIMEOUT}s)..."
@@ -1123,34 +1033,38 @@ URL_NODE3_SENDER_AUDIO=${URLS[node3_sender_audio]:-}
 # in one place. Both transports define every variable in this block.
 case "$DEMO_TRANSPORT" in
     mxl)
-        LABEL_FLOW_VIDEO1="flow $FLOW_VIDEO_NODE1"
-        LABEL_FLOW_AUDIO1="flow $FLOW_AUDIO_NODE1"
-        LABEL_FLOW_VIDEO4="flow $FLOW_VIDEO_NODE4"
-        LABEL_FLOW_AUDIO4="flow $FLOW_AUDIO_NODE4"
-        LABEL_FLOW_VIDEO_OUT="flow $FLOW_VIDEO_NODE3"
-        LABEL_FLOW_AUDIO_OUT="flow $FLOW_AUDIO_NODE3"
+        LABEL_FLOW_VIDEO1="flow $DEMO_MXL_VIDEO_FLOW_ID1"
+        LABEL_FLOW_AUDIO1="flow $DEMO_MXL_AUDIO_FLOW_ID1"
+        LABEL_FLOW_VIDEO4="flow $DEMO_MXL_VIDEO_FLOW_ID4"
+        LABEL_FLOW_AUDIO4="flow $DEMO_MXL_AUDIO_FLOW_ID4"
+        LABEL_FLOW_VIDEO_OUT="flow $DEMO_MXL_VIDEO_FLOW_ID3"
+        LABEL_FLOW_AUDIO_OUT="flow $DEMO_MXL_AUDIO_FLOW_ID3"
         LABEL_INNER_CHAIN="mxlsink / mxlsrc"
         LABEL_PREWIRED="via mxl-flow-id"
-        REROUTE_VIDEO_BODY="{\"transport_params\": [{\"mxl_flow_id\": \"$FLOW_VIDEO_NODE3\"}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
-        REROUTE_AUDIO_BODY="{\"transport_params\": [{\"mxl_flow_id\": \"$FLOW_AUDIO_NODE3\"}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
+        REROUTE_VIDEO_BODY="{\"transport_params\": [{\"mxl_flow_id\": \"$DEMO_MXL_VIDEO_FLOW_ID3\"}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
+        REROUTE_AUDIO_BODY="{\"transport_params\": [{\"mxl_flow_id\": \"$DEMO_MXL_AUDIO_FLOW_ID3\"}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
         ;;
-    udp|udp2)
-        LABEL_FLOW_VIDEO1="dest $FLOW_VIDEO1_GROUP:$FLOW_VIDEO1_PORT"
-        LABEL_FLOW_AUDIO1="dest $FLOW_AUDIO1_GROUP:$FLOW_AUDIO1_PORT"
-        LABEL_FLOW_VIDEO4="dest $FLOW_VIDEO4_GROUP:$FLOW_VIDEO4_PORT"
-        LABEL_FLOW_AUDIO4="dest $FLOW_AUDIO4_GROUP:$FLOW_AUDIO4_PORT"
-        LABEL_FLOW_VIDEO_OUT="dest $FLOW_VIDEO_OUT_GROUP:$FLOW_VIDEO_OUT_PORT"
-        LABEL_FLOW_AUDIO_OUT="dest $FLOW_AUDIO_OUT_GROUP:$FLOW_AUDIO_OUT_PORT"
-        if [[ "$DEMO_TRANSPORT" == udp2 ]] \
+    udp|udp2|nvdsudp)
+        LABEL_FLOW_VIDEO1="dest $DEMO_UDP_VIDEO_MCAST_IP1:$DEMO_UDP_VIDEO_MCAST_PORT1"
+        LABEL_FLOW_AUDIO1="dest $DEMO_UDP_AUDIO_MCAST_IP1:$DEMO_UDP_AUDIO_MCAST_PORT1"
+        LABEL_FLOW_VIDEO4="dest $DEMO_UDP_VIDEO_MCAST_IP4:$DEMO_UDP_VIDEO_MCAST_PORT4"
+        LABEL_FLOW_AUDIO4="dest $DEMO_UDP_AUDIO_MCAST_IP4:$DEMO_UDP_AUDIO_MCAST_PORT4"
+        LABEL_FLOW_VIDEO_OUT="dest $DEMO_UDP_VIDEO_MCAST_IP3:$DEMO_UDP_VIDEO_MCAST_PORT3"
+        LABEL_FLOW_AUDIO_OUT="dest $DEMO_UDP_AUDIO_MCAST_IP3:$DEMO_UDP_AUDIO_MCAST_PORT3"
+        if [[ "$DEMO_TRANSPORT" == nvdsudp ]]; then
+            LABEL_INNER_CHAIN="nvdsudpsink / nvdsudpsrc (DeepStream Rivermax)"
+            LABEL_PREWIRED="via destination multicast group + port (interface $DEMO_NIC_IP)"
+        elif [[ "$DEMO_TRANSPORT" == udp2 ]] \
             && command -v gst-inspect-1.0 >/dev/null 2>&1 \
             && gst-inspect-1.0 udpsrc2 >/dev/null 2>&1; then
             LABEL_INNER_CHAIN="udpsink + RTP payloader / udpsrc2 + RTP depayloader (gst-plugins-rs)"
+            LABEL_PREWIRED="via destination multicast group + port (interface $DEMO_NIC_IP); video udpsrc buffer-size=$DEMO_UDP_VIDEO_BUFFER_SIZE"
         else
             LABEL_INNER_CHAIN="udpsink + RTP payloader / udpsrc + RTP depayloader"
+            LABEL_PREWIRED="via destination multicast group + port (interface $DEMO_NIC_IP); video udpsrc buffer-size=$DEMO_UDP_VIDEO_BUFFER_SIZE"
         fi
-        LABEL_PREWIRED="via destination multicast group + port (interface $DEMO_NIC_IP); video udpsrc buffer-size=$DEMO_UDP_VIDEO_BUFFER_SIZE"
-        REROUTE_VIDEO_BODY="{\"transport_params\": [{\"source_ip\": \"$DEMO_NIC_IP\", \"multicast_ip\": \"$FLOW_VIDEO_OUT_GROUP\", \"interface_ip\": \"$DEMO_NIC_IP\", \"destination_port\": $FLOW_VIDEO_OUT_PORT, \"rtp_enabled\": true}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
-        REROUTE_AUDIO_BODY="{\"transport_params\": [{\"source_ip\": \"$DEMO_NIC_IP\", \"multicast_ip\": \"$FLOW_AUDIO_OUT_GROUP\", \"interface_ip\": \"$DEMO_NIC_IP\", \"destination_port\": $FLOW_AUDIO_OUT_PORT, \"rtp_enabled\": true}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
+        REROUTE_VIDEO_BODY="{\"transport_params\": [{\"source_ip\": \"$DEMO_NIC_IP\", \"multicast_ip\": \"$DEMO_UDP_VIDEO_MCAST_IP3\", \"interface_ip\": \"$DEMO_NIC_IP\", \"destination_port\": $DEMO_UDP_VIDEO_MCAST_PORT3, \"rtp_enabled\": true}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
+        REROUTE_AUDIO_BODY="{\"transport_params\": [{\"source_ip\": \"$DEMO_NIC_IP\", \"multicast_ip\": \"$DEMO_UDP_AUDIO_MCAST_IP3\", \"interface_ip\": \"$DEMO_NIC_IP\", \"destination_port\": $DEMO_UDP_AUDIO_MCAST_PORT3, \"rtp_enabled\": true}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
         ;;
 esac
 
@@ -1169,8 +1083,8 @@ Topology:
     videotestsrc(smpte)  -> nmossink Sender video1 ($LABEL_FLOW_VIDEO1)
 
   Node 2 (port $NODE2_PORT, seed $NODE2_SEED)  -- consumer
-    Receiver audio2  -> $AUDIO_SINK
-    Receiver video2  -> $VIDEO_SINK
+    Receiver audio2  -> $DEMO_AUDIO_SINK
+    Receiver video2  -> $DEMO_VIDEO_SINK
     receiver-caps-mode=$DEMO_RECEIVER_CAPS_MODE on both receivers
 
   Node 3 (port $NODE3_PORT, seed $NODE3_SEED)  -- processor (two gst processes)
@@ -1178,7 +1092,7 @@ Topology:
     Receiver video-in  --(videoflip h-flip)-->   Sender video-out ($LABEL_FLOW_VIDEO_OUT)
 
   Node 4 (port $NODE4_PORT, seed $NODE4_SEED)  -- alternate producer
-    audiotestsrc(880Hz, 6ch) -> nmossink Sender audio4 ($LABEL_FLOW_AUDIO4)
+    audiotestsrc(880Hz, 8ch) -> nmossink Sender audio4 ($LABEL_FLOW_AUDIO4)
     videotestsrc(snow)       -> nmossink Sender video4 ($LABEL_FLOW_VIDEO4)
     (different frame rate + channel count vs Node 1)
 
@@ -1192,7 +1106,7 @@ Activation state out of the box:
     so audio + video are flowing already.
 
   Node 3: \`auto-activate=false\` — the Receiver+Sender pairs are
-    registered (visible on IS-04) but the data path stays on the
+    added (visible on IS-04) but the data path stays on the
     caps-aware placeholder (an idle \`appsrc\` advertising the
     user-supplied caps so downstream negotiation completes) until
     you PATCH /staged on the Connection API. Until then no real
@@ -1243,7 +1157,7 @@ The most common cause of a missing Node 2 URL is autoaudiosink
 spending up to ~60 s probing PipeWire / PulseAudio / ALSA on
 WSL / headless setups before falling back. Re-run with:
 
-  AUDIO_SINK=fakesink VIDEO_SINK=fakesink ./$(basename "$0")
+  DEMO_AUDIO_SINK=fakesink DEMO_VIDEO_SINK=fakesink ./$(basename "$0")
 
 to skip the probe entirely; the data path still flows end-to-end,
 it just isn't played back locally. Or bump WAIT_TIMEOUT in the
@@ -1253,7 +1167,7 @@ environment if a slow host needs more time at startup.
 Example PATCHes (copy/paste):
 
   # ---- Activate Node 3 (Receiver+Sender on each side) ----
-  # By default Node 3 is registered but inactive (auto-activate=false).
+  # By default Node 3 is added but inactive (auto-activate=false).
   # PATCH each /staged endpoint with master_enable=true to bring the
   # video processor live (the inner $LABEL_INNER_CHAIN instantiate
   # and data flows from Node 1 via Node 3's videoflip to Node 3's
@@ -1530,7 +1444,7 @@ subscription_transport_params() {
         mxl)
             printf '%s' "$sender_transport_params"
             ;;
-        udp|udp2)
+        udp|udp2|nvdsudp)
             jq -c \
                 --arg iface_ip "$DEMO_NIC_IP" \
                 '[ .[] | {
@@ -1796,7 +1710,7 @@ menu_connect_receiver_to_sender() {
 #
 #   * Every Sender + Receiver `/active` and `/staged` as full JSON
 #     (so a later `diff` between snapshot dirs is a one-liner).
-#   * `ls -la $MXL_DOMAIN_PATH` plus a per-flow file inventory
+#   * `ls -la $DEMO_MXL_DOMAIN_PATH` plus a per-flow file inventory
 #     (grain count, newest grain filename). We deliberately do NOT
 #     report mtime-based liveness: libmxl writes grains via mmap on
 #     tmpfs which does not bump the file mtime on every write, so any
@@ -1907,13 +1821,13 @@ diag_snapshot() {
     # state to inspect; the equivalent for those is the per-pipeline
     # log tails captured below.
     if [[ "$DEMO_TRANSPORT" == mxl ]]; then
-        echo "  Flow directories ($MXL_DOMAIN_PATH):"
-        ls -la "$MXL_DOMAIN_PATH" > "$outdir/shm-ls.txt" 2>/dev/null || true
-        if [[ -d "$MXL_DOMAIN_PATH" ]]; then
-            ls -laR "$MXL_DOMAIN_PATH" > "$outdir/shm-ls-R.txt" 2>/dev/null || true
+        echo "  Flow directories ($DEMO_MXL_DOMAIN_PATH):"
+        ls -la "$DEMO_MXL_DOMAIN_PATH" > "$outdir/shm-ls.txt" 2>/dev/null || true
+        if [[ -d "$DEMO_MXL_DOMAIN_PATH" ]]; then
+            ls -laR "$DEMO_MXL_DOMAIN_PATH" > "$outdir/shm-ls-R.txt" 2>/dev/null || true
             local d base grains_dir grain_count newest_grain
             shopt -s nullglob
-            for d in "$MXL_DOMAIN_PATH"/*.mxl-flow; do
+            for d in "$DEMO_MXL_DOMAIN_PATH"/*.mxl-flow; do
                 base=${d##*/}
                 grains_dir="$d/grains"
                 grain_count=0
@@ -1981,10 +1895,10 @@ menu_diag_snapshot() {
 # Teardown + (re)launch as separate operations supports the primary
 # "fresh consumer after producer disable/re-enable" diagnostic:
 # relaunching Node 2 (or the bare preview) after a disable+re-enable
-# cycle of Node 1 tells us whether new mxlsrc instances can attach to
-# the recreated flow (i.e. producer-side recreation is fine; the
+# cycle of Node 1 tells us whether new inner source instances can attach
+# to the recreated flow (i.e. producer-side recreation is fine; the
 # issue is stale reader handles), versus whether even fresh consumers
-# can't attach (i.e. flow-file recreation itself is broken). Keeping
+# can't attach (e.g. MXL flow recreation itself is broken). Keeping
 # the two as separate options also lets the user stop a pipeline,
 # inspect with action 5 / shell tools, and then bring it back without
 # a forced immediate relaunch. Action 8 exports GStreamer pipeline

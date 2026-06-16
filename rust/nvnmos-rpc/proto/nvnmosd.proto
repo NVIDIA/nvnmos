@@ -48,7 +48,7 @@ service NvnmosDaemon {
   // (across many client processes) may share a Node by reusing the
   // same `seed`. The session handle distinguishes them so that the
   // daemon can refcount Node lifetime correctly, route activations
-  // only to the session that registered the affected resource, and
+  // only to the session that added the affected resource, and
   // drop the right resources when a stream dies.
 
   // Open a session on the Node identified by `node_config.seed`.
