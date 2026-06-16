@@ -3,11 +3,12 @@
 
 //! `nmossink` impl: GstBin subclass that opens a session against
 //! `nvnmosd` at NULL→READY and closes it at READY→NULL. The inner
-//! data path is a *real* chain — today a `mxlsink` — when the
-//! resolved configuration pins a Domain path + Flow id; otherwise
-//! the bin keeps a *fake* chain (`fakesink`) so the element looks
-//! valid in the pipeline until an IS-05 activation (or a later
-//! configuration update) supplies the missing pieces.
+//! data path is a *real* transport chain (`mxlsink`, `udpsink` with
+//! RTP payloader, or `nvdsudpsink`) when configuration is complete
+//! for the chosen `transport`; otherwise the bin keeps a *fake* chain
+//! (`fakesink`) so the element looks valid in the pipeline until an
+//! IS-05 activation (or a later configuration update) supplies the
+//! missing pieces.
 //!
 //! Activations arriving on the daemon subscription are dispatched to
 //! [`NmosSink::apply_activation`], which marshals the work onto a
@@ -120,8 +121,8 @@ pub struct NmosSink {
     session: Mutex<Option<Session>>,
     /// Ghost pad that hides the current inner chain behind the bin.
     /// Created at `constructed`; the chain behind it swaps between
-    /// the fake chain and a real `mxlsink` as configuration /
-    /// activations land.
+    /// the fake chain and a real inner transport chain as configuration
+    /// / activations land.
     ghost: Mutex<Option<gst::GhostPad>>,
 }
 
@@ -606,10 +607,10 @@ impl NmosSink {
         inner::rebuild_chain(&CAT, bin, ghost, new_inner, "sink")
     }
 
-    /// True iff the bin's current inner chain is a real chain
-    /// (today only `mxlsink`) — not the fake `fakesink`. Used by
-    /// [`execute_activation_plan`] to insert a fake hop on real → real
-    /// re-activations.
+    /// True iff the bin's current inner chain is a real transport
+    /// chain — not the fake one (`fakesink`). Used by
+    /// [`execute_activation_plan`] to insert a fake hop into
+    /// real → real re-activations.
     fn current_chain_is_real(&self) -> bool {
         self.ghost
             .lock()

@@ -33,15 +33,15 @@
 //! file — the element rewrites the matching field/tag before handing
 //! it to the daemon. Essence-shape properties (`caps`,
 //! `transport-caps`) are **cross-checked** against the file and
-//! mismatch is a hard error. See `flow_def::splice_overrides` for the
-//! splice mechanics and `rust/gst-nmos-rs/README.md` ("Property
-//! interaction with `transport-file`") for the full property matrix.
+//! mismatch is a hard error. See `flow_def::splice_overrides` (MXL)
+//! and `sdp::passthrough_with_overrides` (RTP/UDP) for the splice
+//! mechanics and `rust/gst-nmos-rs/README.md` ("Property interaction
+//! with `transport-file`") for the full property matrix.
 //!
-//! Inner data path: when the resolved configuration pins a Domain
-//! path and a Flow id (plus a Flow format on the receiver), the bin
-//! is *capable* of running the real `mxlsink` / `mxlsrc`. Whether it
-//! does so eagerly is controlled by the `auto-activate` boolean
-//! property:
+//! Inner data path: when the resolved configuration is complete for
+//! the chosen `transport`, the bin is *capable* of running the real
+//! inner transport chain. Whether it does so eagerly is controlled
+//! by the `auto-activate` boolean property:
 //!
 //! - `auto-activate=false` (default, canonical NMOS): the element
 //!   adds the Sender or Receiver to the daemon so it appears on
@@ -64,11 +64,11 @@
 //! depending on `transport`) — all three routes funnel into the same
 //! gate.
 //!
-//! If the resolved configuration is incomplete (no Domain path, no
-//! flow id, or no Flow format on the receiver), the element stays
-//! on the fake chain regardless of `auto-activate` — the gate only
-//! upgrades configurations that *could* run; it never invents
-//! missing pieces.
+//! If the resolved configuration is incomplete for the chosen
+//! `transport` (e.g. missing MXL domain path / flow id, or incomplete
+//! RTP SDP / IS-05 endpoints), the element stays on the fake chain
+//! regardless of `auto-activate` — the gate only upgrades configurations
+//! that *could* run; it never invents missing pieces.
 //!
 //! Fake chain: while the inner is on the fake chain, the bin still
 //! has to look like a valid GStreamer element to the rest of the
@@ -80,8 +80,8 @@
 //! or caps synthesised from `transport-file*`) and `is-live=true`;
 //! we never push buffers into it, so its basesrc loop blocks idle
 //! in `create()` and the bin holds at PLAYING waiting for an IS-05
-//! activation to swap in a real `mxlsrc`. When no caps source is
-//! yet available (constructed-time, before any properties have
+//! activation to swap in the real inner source chain. When no caps
+//! are yet available (constructed-time, before any properties have
 //! been set) the appsrc is built without caps and downstream caps
 //! negotiation will fail; the NULL→READY transition replaces it
 //! with a caps-aware `appsrc` as soon as a caps source is
@@ -129,9 +129,9 @@
 //! usually delivers a full activation SDP in the `ActivationEvent`; the
 //! element builds the inner chain from that file — not from the
 //! configuring SDP passed at AddReceiver. On MXL, when `mxl-flow-id` is
-//! unset there is no stable subscription target yet, so bare `mxlsrc`
-//! is used and its broad pad template propagates until IS-05 activation
-//! supplies one.
+//! unset the element still calls AddSender / AddReceiver (the
+//! synthesised `flow_def` omits top-level `id`) but keeps the fake
+//! inner chain until IS-05 activation supplies the MXL flow id.
 
 use std::sync::LazyLock;
 

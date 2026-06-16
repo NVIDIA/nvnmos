@@ -418,7 +418,7 @@ fn route_activation(
                 "activation for unknown resource (likely a stray from a \
                  prior name mismatch); NACKing",
             );
-            return Err("resource not registered with daemon".to_string());
+            return Err("resource not known to daemon".to_string());
         }
         ActivationDispatch::NoSubscriber => {
             tracing::warn!(

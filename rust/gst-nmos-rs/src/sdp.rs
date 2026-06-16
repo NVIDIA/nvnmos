@@ -396,7 +396,7 @@ pub(crate) struct SdpSession<'a> {
     pub advertise_caps: bool,
     /// When true, emit `a=ts-refclk:ptp=IEEE1588-2008:traceable` on the
     /// media block (Rivermax / `transport=nvdsudp` sender synthesis).
-    /// OSS `udp` / `udp2` and all receivers leave this false.
+    /// `transport=udp` / `udp2` and all receivers leave this false.
     pub emit_ptp_ts_refclk: bool,
 }
 
@@ -1322,7 +1322,7 @@ pub(crate) struct SdpBuildInput<'a> {
     /// `<sess-id>` on the synthesis path.
     pub node_seed: &'a str,
     /// When true, emit `TP=2110TPN` on video fmtp (Rivermax / `nvdsudp`
-    /// narrow traffic profile). OSS `udp` / `udp2` leave this unset.
+    /// narrow traffic profile). `udp` / `udp2` leave this unset.
     pub narrow_traffic_profile: bool,
 }
 
@@ -4961,7 +4961,7 @@ mod tests {
             !text.contains("a=ts-refclk:"),
             "udp sender synthesis must omit ts-refclk:\n{text}",
         );
-        assert!(!text.contains("TP=2110TPN"), "OSS udp must not narrow profile:\n{text}");
+        assert!(!text.contains("TP=2110TPN"), "udp sender must not indicate narrow profile:\n{text}");
     }
 
     #[test]

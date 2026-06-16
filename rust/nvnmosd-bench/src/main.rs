@@ -64,11 +64,11 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     nodes: usize,
 
-    /// Senders to register via `AddSender` (`--senders` alias).
+    /// Senders to create via `AddSender` (`--senders` alias).
     #[arg(long = "add-senders", alias = "senders", default_value_t = 5)]
     add_senders: usize,
 
-    /// Receivers to register via `AddReceiver` (`--receivers` alias).
+    /// Receivers to create via `AddReceiver` (`--receivers` alias).
     #[arg(long = "add-receivers", alias = "receivers", default_value_t = 5)]
     add_receivers: usize,
 
@@ -95,12 +95,12 @@ struct Args {
     interface_ip: Option<String>,
 
     /// Out-of-band `SyncResourceState` workflows (`0` = none). Evenly spaced targets when
-    /// not more than registered senders; otherwise round-robin through them.
+    /// not more than created senders; otherwise round-robin through them.
     #[arg(long, default_value_t = 0)]
     syncs: usize,
 
     /// In-band GET/PATCH activation workflows (`0` = none). Evenly spaced targets when not
-    /// more than registered senders; otherwise round-robin through them.
+    /// more than created senders; otherwise round-robin through them.
     #[arg(long, default_value_t = 0)]
     patches: usize,
 
@@ -580,10 +580,10 @@ async fn main() -> anyhow::Result<()> {
         "patches must be <= {MAX_PATCHES}"
     );
     if args.syncs > 0 && args.add_senders == 0 {
-        anyhow::bail!("syncs > 0 requires at least one registered sender");
+        anyhow::bail!("syncs > 0 requires at least one created sender");
     }
     if args.patches > 0 && args.add_senders == 0 {
-        anyhow::bail!("patches > 0 requires at least one registered sender");
+        anyhow::bail!("patches > 0 requires at least one created sender");
     }
     anyhow::ensure!(
         args.clients <= MAX_CLIENTS,
@@ -597,7 +597,7 @@ async fn main() -> anyhow::Result<()> {
         "sessions must be <= {MAX_SESSIONS}"
     );
     if args.add_senders > 0 || args.add_receivers > 0 {
-        anyhow::ensure!(args.sessions >= 1, "sessions must be >= 1 when registering resources");
+        anyhow::ensure!(args.sessions >= 1, "sessions must be >= 1 when creating resources");
     }
     anyhow::ensure!(
         u32::from(args.base_http_port) + args.nodes as u32 <= u16::MAX as u32,
@@ -1140,10 +1140,10 @@ fn session_for_resource(resource_index: usize, session_count: usize) -> usize {
 }
 
 /// Per-workflow index for sync, PATCH, or RemoveResource. `workflow_count == 0` → none.
-/// When `workflow_count <= registered_count`, targets are evenly spaced; when larger,
-/// round-robin through `[0, registered_count)`.
-fn sender_activation_indices(registered_count: usize, workflow_count: usize) -> Vec<usize> {
-    match (registered_count, workflow_count) {
+/// When `workflow_count <= created_count`, targets are evenly spaced; when larger,
+/// round-robin through `[0, created_count)`.
+fn sender_activation_indices(created_count: usize, workflow_count: usize) -> Vec<usize> {
+    match (created_count, workflow_count) {
         (0, _) | (_, 0) => Vec::new(),
         (n, c) if c <= n => (0..c).map(|i| i * n / c).collect(),
         (n, c) => (0..c).map(|i| i % n).collect(),
@@ -1347,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn activation_indices_round_robin_when_exceeding_registered() {
+    fn activation_indices_round_robin_when_exceeding_created() {
         let indices = sender_activation_indices(1000, 5000);
         assert_eq!(indices.len(), 5000);
         assert_eq!(indices[0], 0);

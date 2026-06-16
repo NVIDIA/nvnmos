@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! UDP/RTP transport session setup and activation.
+//! RTP/UDP transport session setup and activation.
 
 pub(crate) mod types;
 
@@ -50,6 +50,27 @@ pub(super) fn receiver_connection_address(settings: &CommonSettings) -> &str {
         settings.multicast_ip.as_str()
     } else {
         settings.interface_ip.as_str()
+    }
+}
+
+/// Minimum IS-05 endpoint properties required to synthesise a configuring
+/// SDP for AddSender / AddReceiver. Wire destinations may be omitted.
+pub(super) fn validate_rtp_configuring_minimum(
+    element: &str,
+    settings: &CommonSettings,
+) -> Result<(), anyhow::Error> {
+    match settings.side {
+        Side::Sender if settings.source_ip.is_empty() => {
+            bail!(
+                "{element}: `source-ip` is required to synthesise configuring SDP for AddSender"
+            );
+        }
+        Side::Receiver if settings.interface_ip.is_empty() => {
+            bail!(
+                "{element}: `interface-ip` is required to synthesise configuring SDP for AddReceiver"
+            );
+        }
+        _ => Ok(()),
     }
 }
 
@@ -102,6 +123,7 @@ pub(super) fn synthesise_or_passthrough_udp(
         }
         (Some(text), None) => Ok(Some(text)),
         (None, Some(essence_caps)) => {
+            validate_rtp_configuring_minimum(element, settings)?;
             let text = sdp::from_caps(&sdp_build_input(settings, essence_caps))
                 .with_context(|| format!("{element}: synthesising SDP from caps"))?;
             gst::info!(
@@ -115,8 +137,11 @@ pub(super) fn synthesise_or_passthrough_udp(
     }
 }
 
-/// When a Sender opens without `transport-file*` or `caps`, keep the
-/// fake chain until READY→PAUSED deferred AddSender (mirrors MXL).
+/// `decide_inner_config_*` treats missing SDP as [`FakeKind::Misconfigured`].
+/// For senders with neither `transport-file*` nor `caps`, that is deferred
+/// mode — rewrite to [`FakeKind::NotConfigured`] so NULL→READY opens the
+/// session without AddSender and waits for peer caps at READY→PAUSED.
+/// Receivers without input stay misconfigured (no deferred path).
 fn gate_deferred_sender_udp(inner: InnerConfig, settings: &CommonSettings) -> InnerConfig {
     if settings.side == Side::Sender
         && matches!(
@@ -143,6 +168,7 @@ pub(super) fn synthesise_deferred_sender_udp(
     settings: &CommonSettings,
     essence_caps: &gst::Caps,
 ) -> Result<(String, InnerConfig), anyhow::Error> {
+    validate_rtp_configuring_minimum(element, settings)?;
     let text = sdp::from_caps(&sdp_build_input(settings, essence_caps))
         .map_err(anyhow::Error::from)
         .with_context(|| format!("{element}: synthesising SDP from peer caps"))?;
@@ -167,9 +193,14 @@ pub(super) fn synthesise_deferred_sender_udp(
             Some(&text),
             sdp::EssenceCrossCheckMode::Full,
         )?,
-        Transport::Mxl => bail!("{element}: internal: MXL is not an RTP transport"),
+        Transport::Mxl => bail!("{element}: internal: MXL is not an RTP/UDP transport"),
     };
-    let inner = super::apply_auto_activate_gate(inner, settings.auto_activate);
+    let inner = super::apply_auto_activate_policy(
+        &crate::CAT,
+        element,
+        settings,
+        inner,
+    );
     Ok((text, inner))
 }
 
@@ -612,7 +643,7 @@ mod tests {
                     Some(&sdp),
                     sdp::EssenceCrossCheckMode::Full,
                 )
-                .expect_err("dual-leg SDP must be rejected for OSS UDP");
+                .expect_err("dual-leg SDP must be rejected for transport=udp/udp2");
                 assert!(
                     format!("{err:#}").contains("dual-leg SDP requires transport=nvdsudp"),
                     "unexpected error: {err:#}",
@@ -1975,7 +2006,12 @@ mod tests {
                 text.contains("c=IN IP4 0.0.0.0"),
                 "expected unspecified c= line, got:\n{text}",
             );
-            assert!(matches!(inner, InnerConfig::Real(TransportConfig::Udp { .. })));
+            match inner {
+                InnerConfig::Fake { kind, .. } => assert_eq!(kind, FakeKind::NotActive),
+                InnerConfig::Real(_) => {
+                    panic!("configuring-only sender keeps fake inner until activation")
+                }
+            }
         }
 
         #[test]

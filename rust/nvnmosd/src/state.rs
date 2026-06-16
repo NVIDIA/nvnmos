@@ -13,7 +13,7 @@
 //! * **Sessions** are keyed by daemon-allocated `session_handle` strings.
 //!   Each session remembers which `node_seed` it attached to (so
 //!   [`State::close_session`] can find the right [`NodeEntry`] to detach
-//!   from) and which `resource_handle`s it has registered (so the same
+//!   from) and which `resource_handle`s it has created (so the same
 //!   call can drop them via libnvnmos before the Node itself goes away).
 //! * **Resources** (senders and receivers) are keyed by daemon-allocated
 //!   `resource_handle` strings. Each entry remembers the owning session,
@@ -375,7 +375,7 @@ pub enum ActivationDispatch {
         activation_handle: String,
         ack_rx: std_mpsc::Receiver<AckOutcome>,
     },
-    /// No resource is registered for `(node_seed, name)`. Either
+    /// No resource is created for `(node_seed, name)`. Either
     /// the activation is for a stray (a resource that survived the
     /// `AddSender`/`AddReceiver` mismatch path) or for one that was
     /// removed between the IS-05 PATCH arriving and the callback firing.
@@ -590,7 +590,7 @@ impl State {
         })
     }
 
-    /// Count live senders/receivers registered on `node_seed`.
+    /// Count live senders/receivers created on `node_seed`.
     pub fn resource_count_for_node(&self, node_seed: &str) -> usize {
         self.resources
             .values()
@@ -671,7 +671,7 @@ impl State {
         })
     }
 
-    /// Register a sender. Thin wrapper around [`State::add_resource`].
+    /// Create a sender. Thin wrapper around [`State::add_resource`].
     pub fn add_sender(
         &mut self,
         session_handle: &str,
@@ -688,7 +688,7 @@ impl State {
         )
     }
 
-    /// Register a receiver. Thin wrapper around [`State::add_resource`].
+    /// Create a receiver. Thin wrapper around [`State::add_resource`].
     pub fn add_receiver(
         &mut self,
         session_handle: &str,
@@ -714,7 +714,7 @@ impl State {
     /// 1. Daemon-registry pre-check — refuses a duplicate `name`
     ///    on the same Node before any FFI happens.
     /// 2. `add_{sender,receiver}` into libnvnmos. libnvnmos parses the
-    ///    transport file and registers the resource under its embedded
+    ///    transport file and creates the resource under its embedded
     ///    resource name.
     /// 3. `{sender,receiver}_id(claimed_name)` — uses libnvnmos
     ///    itself as the oracle: success proves the transport file's id
@@ -746,7 +746,7 @@ impl State {
         if let Some(existing) = self.by_name.get(&key) {
             return Err(Status::already_exists(format!(
                 "a {} with name {claimed_name:?} is already \
-                 registered on node_seed {node_seed:?} as resource_handle \
+                 created on node_seed {node_seed:?} as resource_handle \
                  {existing:?}",
                 side.label(),
             )));

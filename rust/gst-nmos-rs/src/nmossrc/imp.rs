@@ -3,13 +3,12 @@
 
 //! `nmossrc` impl: GstBin subclass that opens a session against
 //! `nvnmosd` at NULL→READY and closes it at READY→NULL. The inner
-//! data path is a *real* chain — today a `mxlsrc` — when the
-//! resolved configuration pins a Domain path + Flow id + a
-//! recognised essence shape (from `caps` or the transport file's
-//! `format`); otherwise the bin keeps a *fake* chain so the element
-//! looks valid in the pipeline until an IS-05 activation (or a
-//! later configuration update) supplies the missing pieces. The
-//! fake chain is an `appsrc` configured with the best-available
+//! data path is a *real* transport source chain when configuration is
+//! complete for the chosen `transport` (MXL: domain path, flow id, and
+//! format; RTP/UDP: SDP / IS-05 endpoints and format); otherwise the
+//! bin keeps a *fake* chain so the element looks valid in the pipeline
+//! until an IS-05 activation (or a later configuration update) supplies
+//! the missing pieces. The fake chain is an `appsrc` configured with
 //! essence caps (user `caps` property, synthesised from
 //! `transport-file`*); if no caps source is yet available, the
 //! appsrc is built without caps and downstream negotiation will
@@ -131,8 +130,8 @@ pub struct NmosSrc {
     session: Mutex<Option<Session>>,
     /// Ghost pad that hides the current inner chain behind the bin.
     /// Created at `constructed`; the chain behind it swaps between
-    /// the fake chain and a real `mxlsrc` sub-bin as configuration
-    /// / activations land.
+    /// the fake chain and a real inner transport source chain as
+    /// configuration / activations land.
     ghost: Mutex<Option<gst::GhostPad>>,
 }
 
@@ -703,9 +702,9 @@ impl NmosSrc {
         inner::rebuild_chain_with_opts(&CAT, bin, ghost, new_inner, "src", opts)
     }
 
-    /// True iff the bin's current inner chain is a real chain
-    /// (today only the `mxlsrc` sub-bin) — not the fake `appsrc`.
-    /// Used by [`execute_activation_plan`] to insert a fake hop on
+    /// True iff the bin's current inner chain is a real transport
+    /// source chain — not the fake one (`appsrc`). Used by
+    /// [`execute_activation_plan`] to insert a fake hop into
     /// real → real re-activations.
     fn current_chain_is_real(&self) -> bool {
         self.ghost
@@ -847,7 +846,7 @@ impl NmosSrc {
                     }
                     Err(e) => {
                         return ActivationOutcome::Failed {
-                            reason: format!("nmossrc: building inner mxlsrc: {e:#}"),
+                            reason: format!("nmossrc: building inner transport chain: {e:#}"),
                         };
                     }
                 }

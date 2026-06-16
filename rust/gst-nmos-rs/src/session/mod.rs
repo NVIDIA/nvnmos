@@ -415,7 +415,7 @@ pub(crate) struct CommonSettings {
     /// Ignored on the Sender side (senders use `destination_ip`
     /// for the egress destination on synthesis).
     pub(crate) multicast_ip: String,
-    /// Whether the element brings its inner `mxlsink` / `mxlsrc` up
+    /// Whether the element brings its inner transport src/sink up
     /// immediately at NULL→READY (or, for a deferred-mode sender,
     /// READY→PAUSED) once the configuring transport file has been
     /// resolved, and synchronises the daemon's IS-04/IS-05 state to
@@ -431,11 +431,12 @@ pub(crate) struct CommonSettings {
     ///
     /// The toggle is orthogonal to how the configuring transport file
     /// itself was obtained (property override of `mxl-flow-id`,
-    /// supplied `transport-file*`, or caps→flow_def synthesis): as
-    /// long as one of those routes produces a usable flow_def at
-    /// NULL→READY (or READY→PAUSED for a deferred sender),
-    /// `auto-activate=true` brings the inner up and informs the
-    /// daemon; `auto-activate=false` leaves it for the controller.
+    /// supplied `transport-file*`, or caps→transport-file synthesis):
+    /// as long as one of those routes produces a usable configuring
+    /// transport file (MXL `flow_def` or SDP) at NULL→READY (or
+    /// READY→PAUSED for a deferred sender), `auto-activate=true`
+    /// brings the inner up and informs the daemon;
+    /// `auto-activate=false` leaves it for the controller.
     pub(crate) auto_activate: bool,
 }
 
@@ -519,7 +520,7 @@ pub(crate) enum FakeKind {
     NotConfigured,
     /// Invalid or inconsistent configuration — cannot honour activation.
     Misconfigured,
-    /// Registered and valid, but no live RTP/media path (initial
+    /// Created and valid, but no live RTP/media path (initial
     /// `auto-activate=false`, deactivated, or all SDP legs inactive).
     NotActive,
 }
@@ -546,15 +547,16 @@ impl FakeKind {
 /// `validate_and_open`.
 ///
 /// [`InnerConfig::Real`] carries everything the element needs to
-/// instantiate a real transport chain (today only MXL, captured in
-/// [`TransportConfig::Mxl`]). [`InnerConfig::Fake`] means the
+/// instantiate a real transport chain ([`TransportConfig::Mxl`] or
+/// [`TransportConfig::Udp`]). [`InnerConfig::Fake`] means the
 /// resolved configuration didn't pin enough state to build a real
-/// chain (e.g. no Flow id, no Domain path) and the element keeps
-/// its fake data path in place (`fakesink` on the sink side, an
-/// `appsrc` configured with the resolved essence caps on the
-/// source side — see [`crate::inner`]). A later step
-/// (caps→flow_def, IS-05 activation) will supply the missing pieces
-/// and the bin will swap from fake to real.
+/// chain (e.g. missing MXL domain/flow id, or incomplete RTP
+/// SDP/endpoints) and the element keeps its fake data path in place
+/// (`fakesink` on the sink side, an `appsrc` configured with the
+/// resolved essence caps on the source side — see [`crate::inner`]).
+/// A later step (caps→transport-file synthesis or IS-05 activation)
+/// will supply the missing pieces and the bin will swap from fake to
+/// real.
 #[derive(Debug, Clone)]
 pub(crate) enum InnerConfig {
     Real(TransportConfig),
@@ -568,9 +570,8 @@ pub(crate) enum InnerConfig {
     },
 }
 
-/// Per-transport state needed to build a real chain. New transports
-/// (NVDS-UDP, ...) get their own variants alongside the two
-/// implemented today.
+/// Per-transport state needed to build a real chain: [`Mxl`] for
+/// MXL and [`Udp`] for RTP/UDP (`udp`, `udp2`, and `nvdsudp`).
 #[derive(Debug, Clone)]
 pub(crate) enum TransportConfig {
     Mxl {
@@ -591,9 +592,9 @@ pub(crate) enum TransportConfig {
         /// Receivers whose `mxl-flow-id` will arrive via IS-05 PATCH).
         transport_file: Option<String>,
     },
-    /// OSS UDP/RTP transport. The inner chain is
-    /// `rtp*pay ! udpsink` for senders and
-    /// `udpsrc ! rtp*depay [! capssetter(raw_caps)]` for receivers.
+    /// RTP/UDP transport. The inner chain is `rtp*pay ! udpsink` for
+    /// senders and `udpsrc ! rtp*depay [! capssetter(raw_caps)]` for
+    /// receivers.
     /// Wide receivers (activation SDP carries `a=x-nvnmos-caps:`)
     /// omit `capssetter`; narrow receivers pin configuring essence
     /// caps parsed from the transport file. The exact element factory
@@ -733,7 +734,7 @@ pub(crate) fn validate_and_open(
         }
     };
 
-    inner = apply_auto_activate_gate(inner, settings.auto_activate);
+    inner = apply_auto_activate_policy(cat, element, settings, inner);
 
     let transport = transport_to_proto(settings.transport);
     let side = settings.side;
@@ -809,16 +810,91 @@ pub(super) fn caps_format(settings: &CommonSettings) -> FlowFormat {
         .map(FlowFormat::from_caps)
         .unwrap_or(FlowFormat::Unspecified)
 }
-/// Honour `auto-activate` at setup time. When `auto_activate` is
-/// `false` and `decide_inner_config_mxl` / `decide_inner_config_udp`
-/// would have produced a real transport chain, downgrade to
+/// IS-05 transport parameters that may be omitted at AddSender /
+/// AddReceiver but are required to bring up the inner data path when
+/// `auto-activate=true`.
+pub(super) fn deferred_transport_params(settings: &CommonSettings) -> Vec<&'static str> {
+    match settings.transport {
+        Transport::Mxl => {
+            if settings.mxl_flow_id.is_empty() {
+                vec!["mxl-flow-id"]
+            } else {
+                vec![]
+            }
+        }
+        Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => match settings.side {
+            Side::Sender => {
+                let mut missing = Vec::new();
+                if settings.destination_ip.is_empty() {
+                    missing.push("destination-ip");
+                }
+                if settings.destination_port == 0 {
+                    missing.push("destination-port");
+                }
+                missing
+            }
+            Side::Receiver => {
+                let mut missing = Vec::new();
+                if settings.destination_port == 0 {
+                    missing.push("destination-port");
+                }
+                missing
+            }
+        },
+    }
+}
+
+/// Honour `auto-activate` at setup time and warn when eager activation
+/// was requested but deferred transport parameters are still unset.
+///
+/// When `auto_activate` is `false` and `decide_inner_config_*` would
+/// have produced a real transport chain, downgrade to
 /// [`InnerConfig::Fake`] so the data path stays inactive until an
 /// IS-05 PATCH activates the resource (the canonical NMOS path).
 ///
-/// The AddSender / AddReceiver itself isn't affected — that's driven
-/// by whether a configuring transport file is in play, not by the
-/// gate — so a resource opened with `auto-activate=false` still
-/// appears on IS-04 immediately, ready to be PATCHed.
+/// When `auto_activate` is `true` but wire/MXL flow parameters needed
+/// for the inner chain are still unset, log a warning and keep (or
+/// downgrade to) a fake chain — AddSender / AddReceiver still proceeds
+/// when a configuring transport file is available.
+pub(super) fn apply_auto_activate_policy(
+    cat: &gst::DebugCategory,
+    element: &str,
+    settings: &CommonSettings,
+    inner: InnerConfig,
+) -> InnerConfig {
+    let missing = deferred_transport_params(settings);
+
+    if settings.auto_activate && !missing.is_empty() {
+        gst::warning!(
+            cat,
+            "{element}: auto-activate=true ignored — missing transport properties: {}",
+            missing.join(", "),
+        );
+        if matches!(inner, InnerConfig::Real(_)) {
+            return InnerConfig::Fake {
+                kind: FakeKind::NotActive,
+                detail: format!(
+                    "auto-activate=true but {} unset; waiting for IS-05 PATCH",
+                    missing.join(", "),
+                ),
+            };
+        }
+        return inner;
+    }
+
+    if !settings.auto_activate && matches!(inner, InnerConfig::Real(_)) {
+        return InnerConfig::Fake {
+            kind: FakeKind::NotActive,
+            detail: "auto-activate=false; waiting for IS-05 PATCH to activate".into(),
+        };
+    }
+
+    inner
+}
+
+/// Honour `auto-activate=false` for a fully-resolved inner chain.
+/// Used by unit tests that already supply complete transport state.
+#[cfg(test)]
 fn apply_auto_activate_gate(inner: InnerConfig, auto_activate: bool) -> InnerConfig {
     if !auto_activate && matches!(inner, InnerConfig::Real(_)) {
         return InnerConfig::Fake {
@@ -847,7 +923,7 @@ fn prepare_deferred_peer_caps(
              (likely no negotiated caps yet — e.g. `fakesrc` with no upstream \
              capsfilter). Declare `caps=\"…\"` on the element or insert a \
              `capsfilter` upstream so the element knows what transport file to \
-             register."
+             add."
         );
     }
     let mut fixated = peer_caps;
@@ -855,7 +931,7 @@ fn prepare_deferred_peer_caps(
     Ok(fixated)
 }
 
-/// Register a Sender via the deferred-mode path: synthesise a
+/// Add a Sender via the deferred-mode path: synthesise a
 /// configuring transport file from upstream peer caps and call
 /// `AddSender` against a session that was opened without one. Used by
 /// `nmossink` from inside `change_state(ReadyToPaused)` when neither
@@ -1490,6 +1566,132 @@ mod tests {
                     panic!("auto-activate=false: caps-synthesised flow_id must defer to IS-05")
                 }
             }
+        }
+
+        #[test]
+        fn policy_downgrades_eager_mxl_without_flow_id() {
+            let s = CommonSettings {
+                mxl_flow_id: String::new(),
+                auto_activate: true,
+                ..settings(Side::Sender)
+            };
+            let inner = InnerConfig::Fake {
+                kind: FakeKind::NotActive,
+                detail: "configuring-only".into(),
+            };
+            let after = super::super::apply_auto_activate_policy(&cat(), "nmossink", &s, inner);
+            assert!(matches!(after, InnerConfig::Fake { .. }));
+        }
+
+        #[test]
+        fn policy_downgrades_eager_rtp_sender_without_destination() {
+            let s = CommonSettings {
+                transport: Transport::Udp,
+                side: Side::Sender,
+                auto_activate: true,
+                source_ip: "192.0.2.1".to_owned(),
+                destination_ip: String::new(),
+                destination_port: 0,
+                ..settings(Side::Sender)
+            };
+            let inner = InnerConfig::Real(TransportConfig::Mxl {
+                domain_path: "/var/lib/mxl/domain-a".to_owned(),
+                flow_id: FLOW_ID_A.to_owned(),
+                format: FlowFormat::Video,
+                transport_file: None,
+            });
+            let after = super::super::apply_auto_activate_policy(&cat(), "nmossink", &s, inner);
+            match after {
+                InnerConfig::Fake { kind, detail } => {
+                    assert_eq!(kind, FakeKind::NotActive);
+                    assert!(detail.contains("destination-ip"));
+                }
+                InnerConfig::Real(_) => panic!("must not eager-activate without destination-ip"),
+            }
+        }
+    }
+
+    mod configuring_minimum {
+        use super::*;
+
+        #[test]
+        fn deferred_transport_params_mxl_without_flow_id() {
+            let s = settings(Side::Receiver);
+            assert_eq!(
+                super::super::deferred_transport_params(&s),
+                vec!["mxl-flow-id"]
+            );
+        }
+
+        #[test]
+        fn deferred_transport_params_rtp_sender_wire_endpoints() {
+            let s = CommonSettings {
+                transport: Transport::Udp,
+                side: Side::Sender,
+                source_ip: "192.0.2.1".to_owned(),
+                ..settings(Side::Sender)
+            };
+            assert_eq!(
+                super::super::deferred_transport_params(&s),
+                vec!["destination-ip", "destination-port"]
+            );
+        }
+
+        #[test]
+        fn deferred_transport_params_rtp_receiver_unicast_omits_multicast_ip() {
+            let s = CommonSettings {
+                transport: Transport::Udp,
+                side: Side::Receiver,
+                interface_ip: "192.0.2.1".to_owned(),
+                ..settings(Side::Receiver)
+            };
+            assert_eq!(
+                super::super::deferred_transport_params(&s),
+                vec!["destination-port"]
+            );
+        }
+
+        #[test]
+        fn deferred_transport_params_rtp_receiver_multicast_with_port_is_complete() {
+            let s = CommonSettings {
+                transport: Transport::Udp,
+                side: Side::Receiver,
+                interface_ip: "192.0.2.1".to_owned(),
+                multicast_ip: "239.1.1.1".to_owned(),
+                destination_port: 5004,
+                ..settings(Side::Receiver)
+            };
+            assert!(super::super::deferred_transport_params(&s).is_empty());
+        }
+
+        #[test]
+        fn rtp_sender_caps_synthesis_requires_source_ip() {
+            let s = CommonSettings {
+                transport: Transport::Udp,
+                side: Side::Sender,
+                caps: Some(video_caps()),
+                ..settings(Side::Sender)
+            };
+            let err = super::udp::validate_rtp_configuring_minimum("nmossink", &s).unwrap_err();
+            assert!(
+                err.to_string().contains("source-ip"),
+                "expected source-ip requirement: {err:#}"
+            );
+        }
+
+        #[test]
+        fn rtp_receiver_caps_synthesis_requires_interface_ip() {
+            let s = CommonSettings {
+                transport: Transport::Udp,
+                side: Side::Receiver,
+                caps: Some(video_caps()),
+                ..settings(Side::Receiver)
+            };
+            let err = super::udp::validate_rtp_configuring_minimum("nmossrc", &s).unwrap_err();
+            assert!(
+                err.to_string().contains("interface-ip"),
+                "expected interface-ip requirement: {err:#}"
+            );
         }
     }
 }
