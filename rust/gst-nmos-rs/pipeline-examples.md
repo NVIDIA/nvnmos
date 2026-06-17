@@ -141,8 +141,8 @@ By default, essence formats are aligned across transports at
 | Audio (alt) | `DEMO_MXL_AUDIO_CAPS_ALT` — 8 ch `F32LE` | `DEMO_UDP_AUDIO_CAPS_ALT` — 8 ch `S24BE`; `DEMO_UDP_AUDIO_TRANSPORT_CAPS_ALT` — `ptime=0.125` ms |
 
 Primary caps match the table in [`env.sh`](scripts/env.sh).
-Alternate caps are used by demo **Node 4** for wide-receiver caps
-renegotiation tests (not covered by the static example scripts).
+Alternate caps are used by demo **Node 4** for wide-receiver reroute tests
+(menu action 4: switch Node 2 between Node 1 and Node 4 senders).
 
 ## Scenarios
 
