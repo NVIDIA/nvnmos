@@ -1259,9 +1259,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hyper-util",
  "libc",
  "nvnmos",
  "nvnmos-rpc",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",

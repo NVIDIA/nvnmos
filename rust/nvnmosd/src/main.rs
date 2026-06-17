@@ -19,13 +19,17 @@
 // uniformly allow the lint at the crate root instead.
 #![allow(clippy::result_large_err)]
 
+mod env_config;
 mod log_bridge;
 mod malloc_trim;
+mod session_gc;
 mod state;
 
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
+use std::task::{Context as TaskContext, Poll};
 
 use anyhow::Context;
 use clap::Parser;
@@ -40,8 +44,10 @@ use nvnmos_rpc::v1::{
 use tokio::net::UnixListener;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
+use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
+use crate::session_gc::SessionGc;
 use crate::state::{AckOutcome, ActivationDispatch, Side, State};
 
 /// Bound on the per-session activations stream. Small because activations
@@ -63,13 +69,14 @@ struct Args {
 
 struct Daemon {
     state: Arc<Mutex<State>>,
+    session_gc: SessionGc,
 }
 
 impl Daemon {
     fn new() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(State::new())),
-        }
+        let state = Arc::new(Mutex::new(State::new()));
+        let session_gc = SessionGc::new(state.clone());
+        Self { state, session_gc }
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -78,22 +85,6 @@ impl Daemon {
         // no useful recovery and silently continuing risks compounding the
         // inconsistency that triggered the original panic.
         self.state.lock().expect("daemon state mutex poisoned")
-    }
-
-    /// Trim when a node was removed or has no senders/receivers left.
-    fn maybe_malloc_trim(&self, node_seed: &str, via: &'static str, node_removed: bool) {
-        if !malloc_trim::trim_enabled() {
-            return;
-        }
-        let should_trim = if node_removed {
-            true
-        } else {
-            let state = self.lock_state();
-            state.resource_count_for_node(node_seed) == 0
-        };
-        if should_trim {
-            malloc_trim::run(via, node_seed);
-        }
     }
 }
 
@@ -131,14 +122,15 @@ impl NvnmosDaemon for Daemon {
         let req = request.into_inner();
         let outcome = {
             let mut state = self.lock_state();
-            state.remove_node(&req.node_seed)?
+            let outcome = state.remove_node(&req.node_seed)?;
+            malloc_trim::maybe_after_remove_node(&state, &req.node_seed);
+            outcome
         };
         tracing::info!(
             node_seed = %req.node_seed,
             node_id = %outcome.node_id,
             "RemoveNode",
         );
-        self.maybe_malloc_trim(&req.node_seed, "remove_node", true);
         Ok(Response::new(Empty {}))
     }
 
@@ -165,6 +157,8 @@ impl NvnmosDaemon for Daemon {
                 build_node_server(&config, state_for_callback, seed_for_callback)
             })?
         };
+        self.session_gc
+            .start_subscribe_timeout(&outcome.session_handle);
 
         tracing::info!(
             node_seed = %seed,
@@ -186,9 +180,12 @@ impl NvnmosDaemon for Daemon {
         request: Request<CloseSessionRequest>,
     ) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
+        self.session_gc.cancel_timeout(&req.session_handle);
         let outcome = {
             let mut state = self.lock_state();
-            state.close_session(&req.session_handle)?
+            let outcome = state.close_session(&req.session_handle)?;
+            malloc_trim::maybe_after_close_session(&state, &outcome);
+            outcome
         };
         tracing::info!(
             session_handle = %req.session_handle,
@@ -199,7 +196,6 @@ impl NvnmosDaemon for Daemon {
             node_destroyed = outcome.node_destroyed,
             "CloseSession",
         );
-        self.maybe_malloc_trim(&outcome.node_seed, "close_session", outcome.node_destroyed);
         Ok(Response::new(Empty {}))
     }
 
@@ -270,7 +266,10 @@ impl NvnmosDaemon for Daemon {
         let req = request.into_inner();
         let outcome = {
             let mut state = self.lock_state();
-            state.remove_resource(&req.session_handle, &req.resource_handle)?
+            let outcome =
+                state.remove_resource(&req.session_handle, &req.resource_handle)?;
+            malloc_trim::maybe_after_remove_resource(&state, &outcome.node_seed);
+            outcome
         };
         tracing::info!(
             session_handle = %req.session_handle,
@@ -280,11 +279,10 @@ impl NvnmosDaemon for Daemon {
             side = outcome.side.label(),
             "RemoveResource",
         );
-        self.maybe_malloc_trim(&outcome.node_seed, "remove_resource", false);
         Ok(Response::new(Empty {}))
     }
 
-    type SubscribeActivationsStream = ReceiverStream<Result<ActivationEvent, Status>>;
+    type SubscribeActivationsStream = SubscriptionStream;
 
     async fn subscribe_activations(
         &self,
@@ -295,12 +293,19 @@ impl NvnmosDaemon for Daemon {
         {
             let mut state = self.lock_state();
             state.subscribe_activations(&req.session_handle, tx)?;
+            self.session_gc.cancel_timeout(&req.session_handle);
         }
         tracing::info!(
             session_handle = %req.session_handle,
             "SubscribeActivations",
         );
-        Ok(Response::new(ReceiverStream::new(rx)))
+        let stream = SubscriptionStream {
+            inner: ReceiverStream::new(rx),
+            session_handle: req.session_handle,
+            state: self.state.clone(),
+            session_gc: self.session_gc.clone(),
+        };
+        Ok(Response::new(stream))
     }
 
     async fn ack_activation(
@@ -351,6 +356,40 @@ impl NvnmosDaemon for Daemon {
             "SyncResourceState",
         );
         Ok(Response::new(Empty {}))
+    }
+}
+
+/// Server-streaming wrapper that arms the resubscribe watchdog when the
+/// client drops the `SubscribeActivations` stream.
+struct SubscriptionStream {
+    inner: ReceiverStream<Result<ActivationEvent, Status>>,
+    session_handle: String,
+    state: Arc<Mutex<State>>,
+    session_gc: SessionGc,
+}
+
+impl Stream for SubscriptionStream {
+    type Item = Result<ActivationEvent, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl Drop for SubscriptionStream {
+    fn drop(&mut self) {
+        let session_handle = self.session_handle.clone();
+        let state = self.state.clone();
+        let session_gc = self.session_gc.clone();
+        tokio::spawn(async move {
+            let arm = {
+                let mut guard = state.lock().expect("daemon state mutex poisoned");
+                guard.on_subscription_stream_ended(&session_handle)
+            };
+            if arm {
+                session_gc.start_resubscribe_timeout(&session_handle);
+            }
+        });
     }
 }
 

@@ -23,7 +23,7 @@ path = "src/main.rs"
 nvnmos = { path = "../nvnmos" }
 nvnmos-rpc = { path = "../nvnmos-rpc" }
 
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
 tokio-stream.workspace = true
 tonic.workspace = true
 tower.workspace = true
@@ -35,3 +35,12 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+hyper-util = { workspace = true }
+nvnmos-rpc = { path = "../nvnmos-rpc" }
+tempfile = { workspace = true }
+tonic.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tower.workspace = true
+

@@ -735,6 +735,13 @@ impl State {
             return Err(Status::invalid_argument("name must be non-empty"));
         }
 
+        self.reap_closed_subscription(session_handle);
+        if !self.has_active_subscription(session_handle) {
+            return Err(Status::failed_precondition(
+                "SubscribeActivations required before adding a resource",
+            ));
+        }
+
         let session = self.sessions.get(session_handle).ok_or_else(|| {
             Status::not_found(format!(
                 "session_handle {session_handle:?} is not known to this daemon"
@@ -974,6 +981,39 @@ impl State {
         self.subscriptions
             .insert(session_handle.to_string(), ActivationSubscriber { tx });
         Ok(())
+    }
+
+    /// True when `session_handle` has a `SubscribeActivations` slot whose
+    /// receiver is still connected.
+    pub fn has_active_subscription(&self, session_handle: &str) -> bool {
+        self.subscriptions
+            .get(session_handle)
+            .is_some_and(|s| !s.tx.is_closed())
+    }
+
+    /// Remove a subscription entry whose receiver has been dropped.
+    pub fn reap_closed_subscription(&mut self, session_handle: &str) {
+        if self
+            .subscriptions
+            .get(session_handle)
+            .is_some_and(|s| s.tx.is_closed())
+        {
+            self.subscriptions.remove(session_handle);
+        }
+    }
+
+    /// Called when a `SubscribeActivations` server stream is dropped.
+    /// Returns `true` when the session still exists and has no live
+    /// subscription (caller should arm the resubscribe watchdog).
+    pub fn on_subscription_stream_ended(&mut self, session_handle: &str) -> bool {
+        self.reap_closed_subscription(session_handle);
+        self.sessions.contains_key(session_handle)
+            && !self.has_active_subscription(session_handle)
+    }
+
+    /// Whether `session_handle` is still open.
+    pub fn sessions_contains(&self, session_handle: &str) -> bool {
+        self.sessions.contains_key(session_handle)
     }
 
     /// Activation router — called synchronously from a libnvnmos worker
