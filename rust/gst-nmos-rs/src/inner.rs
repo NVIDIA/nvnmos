@@ -1346,9 +1346,6 @@ pub(crate) fn build_nvdsudpsink(
         .property("host", &media.primary.destination_ip)
         .property("port", i32::from(media.primary.destination_port))
         .property("sdp-file", sdp_file.path().to_string_lossy().as_ref())
-        // Rivermax paces egress from buffer timestamps / PTP — not the
-        // pipeline clock. Override via transport-properties if needed.
-        .property("sync", false)
         .build()
         .with_context(|| {
             format!(

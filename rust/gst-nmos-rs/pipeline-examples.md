@@ -303,8 +303,9 @@ cargo test -p gst-nmos-rs --test multi_flow_video_data -- --ignored --test-threa
 ## `transport=nvdsudp` (DeepStream Rivermax)
 
 Same IS-05 endpoint properties and `DEMO_UDP_VIDEO_CAPS` essence as `udp` /
-`udp2`; inner chain is `nvdsudpsrc` / `nvdsudpsink` (no `buffer-size` — use
-`transport-properties` for `gpu-id`, thread cores, etc.).
+`udp2`; inner chain is `nvdsudpsrc` / `nvdsudpsink` tuned via
+`transport-properties` (comma-separated fields in one structure, e.g.
+`properties,gpu-id=0,sync=false`).
 Prerequisites: Install [DeepStream 9.0](https://docs.nvidia.com/metropolis/deepstream/dev-guide/text/DS_Installation.html)
 and [Rivermax](https://developer.nvidia.com/networking/rivermax) — see
 [`README.md`](README.md#transportnvdsudp-deepstream-rivermax).

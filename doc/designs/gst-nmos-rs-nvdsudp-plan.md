@@ -75,7 +75,7 @@ nmossrc: nvdsudpsrc → anchor → ghost(src)
 | Audio packetization | `payload-size` (= src payload + 12) | `header-size` (=12), `payload-size`, `payload-multiple` |
 | ANC packetization | plugin default `payload-size` (variable per RTP packet) | `header-size` (=20) only; plugin default `payload-size`; no `packets-per-line` / `payload-multiple` |
 | SSM | (in SDP `a=source-filter:`) | `source-address` when `UdpLeg.source_ip` set |
-| Sync / clock | `sync=false` (Rivermax paces egress; not pipeline clock) | `use-rtp-timestamp` + `adjust-leap-seconds` — see *Timestamp defaults* |
+| Sync / clock | override via `transport-properties` (e.g. `sync=false`) | `use-rtp-timestamp` + `adjust-leap-seconds` — see *Timestamp defaults* |
 | GPU Direct | `gpu-id` via `transport-properties`; input caps carry `memory:NVMM` | same |
 
 **Critical semantic difference (document clearly):** for video, `nvdsudpsink.payload-size` includes the 20-byte RTP + ST 2110 payload header; `nvdsudpsrc.payload-size` is the raw RTP payload size only. Example for 1080p10 4:2:2: sink `1220` / src `1200`, `packets-per-line=4`.
@@ -346,7 +346,7 @@ Three layers, in precedence order:
 |---|---|---|---|
 | 1 | Temp SDP file location & lifetime | Per-activation file under `std::env::temp_dir()`, unlinked when the inner `nvdsudpsink` is finalized. Atomic create via `tempfile` (create-new / `O_EXCL`); path logged at `GST_DEBUG`. `SdpFileGuard` attached to the element via GObject qdata. | **Done** (`SdpFileGuard`) |
 | 2 | `ptp-src` default on sender | **Derive from `a=ts-refclk:` in the effective SDP** (activation file / configuring transport file written to `nvdsudpsink.sdp-file`), not left blindly unset. When the SDP declares PTP (`a=ts-refclk:ptp=…` — traceable, GMID, domain; RFC 7273 clock identity, not a bind address), set `nvdsudpsink.ptp-src` to `local-iface-ip` / `interface_ip`. Mirror `nvds_nmos_bin`'s `gstnvdssdpsink.cpp` (`ptp-src` preset that is not itself a literal IP → fall back to egress NIC). When the SDP uses `localmac:` or omits `ts-refclk` entirely, leave `ptp-src` unset (system clock). User overrides via `transport-properties` still win (applied last). | **Done** (`nvdsudp::ts_refclk::ptp_src_from_sdp` in `build_nvdsudpsink`) |
-| 3 | `sync` on `nvdsudpsink` | Default `false` — Rivermax paces from buffer timestamps / PTP, not `GstBaseSink` pipeline-clock sync. | **Done** |
+| 3 | `sync` on `nvdsudpsink` | Factory default — not forced by `gst-nmos-rs`. | **Done** |
 | 4 | Fail vs warn on packetization mismatch | Warn + recalculate when user pre-sets mismatched `payload-size` / `packets-per-line` in `transport-properties` (match `nvds_nmos_bin`). | **Done** (`reconcile_sink_video_packetization` after `transport-properties` apply) |
 | 5 | Interlaced video stride | **Same line stride as progressive** for packetization purposes — use `width` + `format` only; `interlace-mode` / field height do not halve the stride. Matches how we already compute stride today and matches nvds_nmos_bin's `configure_nvdsudpsink_for_media_api()` (width-only). Hardware soak still useful to confirm Rivermax agrees. | **Done** (calculator behaviour; no separate interlaced branch) |
 | 6 | 4K packetization | Calculator handles 3840 width; pin with a unit test (UYVP 3840×2160: stride 9600 → `packets-per-line=8`, `src payload-size=1200`, `sink payload-size=1220`). | **Done** (unit test) |
