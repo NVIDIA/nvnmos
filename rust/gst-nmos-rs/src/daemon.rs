@@ -99,6 +99,8 @@ pub(crate) struct Session {
     pub(crate) session_handle: String,
     pub(crate) node_id: String,
     pub(crate) created_node: bool,
+    /// Effective HTTP API port of the attached Node (`OpenSessionResponse.http_port`).
+    pub(crate) http_port: u16,
     /// `Some((resource_handle, resource_id))` when `Session::open` was
     /// called with a non-empty `transport_file` and the daemon
     /// accepted the `AddSender` / `AddReceiver`. `None` otherwise.
@@ -186,6 +188,7 @@ impl Session {
         let session_handle = resp.session_handle.clone();
         let node_id = resp.node_id.clone();
         let created_node = resp.created_node;
+        let http_port = u16::try_from(resp.http_port).unwrap_or(0);
 
         // nvnmosd requires SubscribeActivations before AddSender /
         // AddReceiver; establish the stream on this task before any add.
@@ -244,6 +247,7 @@ impl Session {
             session_handle,
             node_id,
             created_node,
+            http_port,
             resource,
             client,
             activation_task,

@@ -76,6 +76,15 @@ resource.
 | `NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC` | 60 | Subscribe within this many seconds of `OpenSession`. |
 | `NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC` | 5 | Resubscribe within this many seconds after the activation stream ends. |
 
+### Node HTTP Port Allocation
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `NVNMOSD_HTTP_PORT_MIN` | `18080` | Inclusive lower bound when `NodeConfig.http_port` is `0`. |
+| `NVNMOSD_HTTP_PORT_MAX` | `18099` | Inclusive upper bound. |
+
+When `NodeConfig.http_port` is **`0`**, the daemon picks the first port in `[MIN, MAX]` that is not already used by another Node and that the host can bind. When **`http_port` is non-zero**, the client chooses the port; the daemon rejects the create if that port is already taken by another Node or unavailable on the host.
+
 ### glibc Heap Trim (Linux)
 
 | Variable | Default | Meaning |

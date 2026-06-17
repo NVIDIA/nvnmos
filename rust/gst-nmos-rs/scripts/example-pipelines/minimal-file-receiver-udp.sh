@@ -28,7 +28,6 @@ exec gst-launch-1.0 -e \
         daemon-uri="$DEMO_DAEMON_URI" \
         transport="$DEMO_UDP_TRANSPORT" \
         node-seed=example-minimal-consumer \
-        http-port=18112 \
         $(udp_video_buffer_props) \
         transport-file-path="$transport_path" \
         auto-activate=false ! \

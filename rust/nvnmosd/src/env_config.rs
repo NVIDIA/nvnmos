@@ -75,6 +75,36 @@ pub(crate) fn parse_timeout_secs(value: &str) -> Option<Duration> {
     }
 }
 
+/// Parse a TCP port number (`1..=65535`). Returns `None` for zero, out of
+/// range, and non-numeric values.
+pub(crate) fn parse_tcp_port(value: &str) -> Option<u16> {
+    match value.parse::<u32>() {
+        Ok(0) => None,
+        Ok(port) => u16::try_from(port).ok(),
+        Err(_) => None,
+    }
+}
+
+/// Read a TCP port from `name`, falling back to `default` when unset or
+/// invalid (logs a warning for invalid non-empty values).
+pub(crate) fn read_tcp_port(name: &str, default: u16) -> u16 {
+    match std::env::var(name) {
+        Err(_) => default,
+        Ok(value) => match parse_tcp_port(value.trim()) {
+            Some(port) => port,
+            None => {
+                tracing::warn!(
+                    env = name,
+                    value = value.trim(),
+                    default,
+                    "invalid TCP port; using default"
+                );
+                default
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +168,18 @@ mod tests {
     fn timeout_rejects_zero_and_garbage() {
         assert_eq!(parse_timeout_secs("0"), None);
         assert_eq!(parse_timeout_secs("nope"), None);
+    }
+
+    #[test]
+    fn tcp_port_parses_valid_values() {
+        assert_eq!(parse_tcp_port("18080"), Some(18_080));
+        assert_eq!(parse_tcp_port("65535"), Some(65_535));
+    }
+
+    #[test]
+    fn tcp_port_rejects_zero_and_garbage() {
+        assert_eq!(parse_tcp_port("0"), None);
+        assert_eq!(parse_tcp_port("65536"), None);
+        assert_eq!(parse_tcp_port("nope"), None);
     }
 }

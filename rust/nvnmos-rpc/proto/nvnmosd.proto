@@ -180,6 +180,12 @@ message NodeConfig {
 
   string host_name = 2;
   repeated string host_addresses = 3;
+  // TCP port for libnvnmos's NMOS HTTP APIs. `0` (the default) asks the
+  // daemon to allocate from `NVNMOSD_HTTP_PORT_MIN`..`NVNMOSD_HTTP_PORT_MAX`.
+  // Non-zero selects an explicit port; the daemon rejects the create when
+  // the port is already assigned to another Node or not bindable on the host.
+  // Honoured only when this RPC creates the Node; ignored when attaching
+  // to an existing Node (same `seed`).
   uint32 http_port = 4;
 
   // Label and description for the Node. Empty falls back to a
@@ -250,6 +256,10 @@ message AddNodeResponse {
   // `node_config.seed`. Informational; the daemon never accepts this as
   // input.
   string node_id = 1;
+
+  // Effective HTTP API port the Node is listening on (after daemon
+  // allocation when `node_config.http_port` was `0`).
+  uint32 http_port = 2;
 }
 
 message RemoveNodeRequest {
@@ -286,6 +296,10 @@ message OpenSessionResponse {
   // earlier `OpenSession` (session-refcounted). Lets the caller tell
   // whether the rest of `OpenSessionRequest.node_config` was consulted.
   bool created_node = 3;
+
+  // Effective HTTP API port of the Node this session is attached to
+  // (after daemon allocation when the creating call used `http_port = 0`).
+  uint32 http_port = 4;
 }
 
 message CloseSessionRequest {

@@ -1263,6 +1263,7 @@ dependencies = [
  "libc",
  "nvnmos",
  "nvnmos-rpc",
+ "socket2 0.5.10",
  "tempfile",
  "tokio",
  "tokio-stream",
