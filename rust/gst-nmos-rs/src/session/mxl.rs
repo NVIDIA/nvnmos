@@ -15,6 +15,16 @@ use crate::domain::{self, DomainIdOrigin};
 use crate::flow_def::{self, FlowDefBuildInput, FlowDefOverrides, ValueOrigin};
 use crate::types::FlowFormat;
 
+/// Read the NMOS resource name from a flow_def transport file.
+///
+/// Used when the element already has a `transport-file` at NULL→READY.
+/// Caps-only synthesis and deferred AddSender still require the name property.
+pub(super) fn resource_name_from_transport_file(
+    text: &str,
+) -> Result<Option<String>, flow_def::FlowDefError> {
+    flow_def::resource_name_from_transport(text)
+}
+
 pub(crate) fn synthesise_or_passthrough_mxl(
     cat: &gst::DebugCategory,
     element: &str,

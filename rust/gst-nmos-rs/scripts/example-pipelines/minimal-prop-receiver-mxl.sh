@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Minimal MXL receiver for controller-driven IS-05 activation.
+# Minimal properties-driven MXL receiver for controller-driven IS-05 activation.
 #
-# AddReceiver at NULL→READY with configuring flow_def from `caps`
-# and `mxl-domain-*` only.
+# AddReceiver at NULL→READY with configuring flow_def synthesised from `caps`,
+# `mxl-domain-*`, and `receiver-name`.
 # Subscription identity (`mxl-flow-id`) and the data path arrive via
 # IS-05 PATCH on /single/receivers/{id}/staged.
 set -euo pipefail

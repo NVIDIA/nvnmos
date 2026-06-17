@@ -975,6 +975,27 @@ fn install_initial_fake_chain(bin: &gst::Bin) -> Result<gst::GhostPad, glib::Boo
     Ok(ghost)
 }
 
+/// Transport file → enriched essence caps (for capssetter / fake chain).
+fn caps_from_transport_file(
+    transport: Transport,
+    transport_file: &str,
+) -> Result<Option<gst::Caps>, anyhow::Error> {
+    if transport_file.is_empty() {
+        return Ok(None);
+    }
+    match transport {
+        Transport::Mxl => caps_from_flow_def(Some(transport_file)),
+        Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => {
+            let media = crate::sdp::parse_sdp(transport_file).map_err(|e| {
+                anyhow::anyhow!("caps from SDP transport file: {e}")
+            })?;
+            let caps = crate::essence_caps::caps_from(&media.raw_caps, Some(&media.rtp_caps));
+            gst::info!(CAT, "nmossrc: caps `{caps}` from SDP transport file");
+            Ok(Some(caps))
+        }
+    }
+}
+
 /// Flow-def transport file → enriched essence caps (for capssetter / fake chain).
 fn caps_from_flow_def(
     transport_file: Option<&str>,
@@ -1083,9 +1104,9 @@ fn udp_capssetter_caps(
 /// Best-available caps for the bin's fake chain, resolved from
 /// current `Settings` in priority order:
 ///   1. `caps` property (user-supplied; authoritative).
-///   2. Caps synthesised from the literal `transport-file` JSON.
-///   3. Caps synthesised from the JSON loaded from
-///      `transport-file-path`.
+///   2. Caps derived from the literal `transport-file` (MXL flow_def
+///      JSON or RTP/UDP SDP depending on `transport`).
+///   3. Caps derived from the file loaded via `transport-file-path`.
 ///
 /// Returns `Ok(None)` only when none of the three sources is
 /// available (e.g. neither `caps` nor `transport-file*` has been
@@ -1100,7 +1121,7 @@ fn fake_caps_from_settings(
         return Ok(Some(caps.clone()));
     }
     if !settings.transport_file.is_empty() {
-        return caps_from_flow_def(Some(&settings.transport_file));
+        return caps_from_transport_file(settings.transport, &settings.transport_file);
     }
     if !settings.transport_file_path.is_empty() {
         let text = std::fs::read_to_string(&settings.transport_file_path).map_err(|e| {
@@ -1109,7 +1130,7 @@ fn fake_caps_from_settings(
                 settings.transport_file_path
             )
         })?;
-        return caps_from_flow_def(Some(&text));
+        return caps_from_transport_file(settings.transport, &text);
     }
     Ok(None)
 }

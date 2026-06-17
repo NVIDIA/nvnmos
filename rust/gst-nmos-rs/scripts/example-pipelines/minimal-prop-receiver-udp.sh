@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Minimal RTP/UDP receiver for controller-driven IS-05 activation.
+# Minimal properties-driven RTP/UDP receiver for controller-driven IS-05 activation.
 #
-# AddReceiver at NULL→READY with configuring SDP from `caps` and
-# `interface-ip` only.
+# AddReceiver at NULL→READY with configuring SDP synthesised from `caps`,
+# `interface-ip`, and `receiver-name`.
 # Subscription identity (e.g., `multicast-ip`, `destination-port`)
 # and the data path arrive via IS-05 PATCH on
 # /single/receivers/{id}/staged.

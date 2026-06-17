@@ -153,6 +153,10 @@ Alternate caps are used by demo **Node 4** for wide-receiver reroute tests
 | Flip / process | [`1080p25-flipper-mxl.sh`](scripts/example-pipelines/1080p25-flipper-mxl.sh) | [`1080p25-flipper-udp.sh`](scripts/example-pipelines/1080p25-flipper-udp.sh) | Node 3 video |
 | Deferred sender | [`1080p25-deferred-sender-mxl.sh`](scripts/example-pipelines/1080p25-deferred-sender-mxl.sh) | [`1080p25-deferred-sender-udp.sh`](scripts/example-pipelines/1080p25-deferred-sender-udp.sh) | — |
 | Multi-flow sender | [`multi-flow-sender-mxl.sh`](scripts/example-pipelines/multi-flow-sender-mxl.sh) | [`multi-flow-sender-udp.sh`](scripts/example-pipelines/multi-flow-sender-udp.sh) | Node 1 (video + audio) |
+| Minimal sender (properties) | [`minimal-prop-sender-mxl.sh`](scripts/example-pipelines/minimal-prop-sender-mxl.sh) | [`minimal-prop-sender-udp.sh`](scripts/example-pipelines/minimal-prop-sender-udp.sh) | — |
+| Minimal receiver (properties) | [`minimal-prop-receiver-mxl.sh`](scripts/example-pipelines/minimal-prop-receiver-mxl.sh) | [`minimal-prop-receiver-udp.sh`](scripts/example-pipelines/minimal-prop-receiver-udp.sh) | — |
+| Minimal sender (transport file) | [`minimal-file-sender-mxl.sh`](scripts/example-pipelines/minimal-file-sender-mxl.sh) | [`minimal-file-sender-udp.sh`](scripts/example-pipelines/minimal-file-sender-udp.sh) | — |
+| Minimal receiver (transport file) | [`minimal-file-receiver-mxl.sh`](scripts/example-pipelines/minimal-file-receiver-mxl.sh) | [`minimal-file-receiver-udp.sh`](scripts/example-pipelines/minimal-file-receiver-udp.sh) | — |
 | Full lab + IS-05 | — | — | [`gst-nmos-rs-demo.sh`](scripts/gst-nmos-rs-demo.sh) |
 
 ### 1080p25 Sender
@@ -277,6 +281,68 @@ multicast + `source-ip`).
 Expected log sequence: `no resource added` at NULL→READY, then
 `deferred AddSender complete` at READY→PAUSED (MXL synthesises `flow_def`
 JSON; UDP synthesises configuring SDP).
+
+### Minimal (controller-driven IS-05)
+
+[`minimal-prop-sender-mxl.sh`](scripts/example-pipelines/minimal-prop-sender-mxl.sh) ·
+[`minimal-prop-sender-udp.sh`](scripts/example-pipelines/minimal-prop-sender-udp.sh) ·
+[`minimal-prop-receiver-mxl.sh`](scripts/example-pipelines/minimal-prop-receiver-mxl.sh) ·
+[`minimal-prop-receiver-udp.sh`](scripts/example-pipelines/minimal-prop-receiver-udp.sh)
+
+[`minimal-file-sender-mxl.sh`](scripts/example-pipelines/minimal-file-sender-mxl.sh) ·
+[`minimal-file-sender-udp.sh`](scripts/example-pipelines/minimal-file-sender-udp.sh) ·
+[`minimal-file-receiver-mxl.sh`](scripts/example-pipelines/minimal-file-receiver-mxl.sh) ·
+[`minimal-file-receiver-udp.sh`](scripts/example-pipelines/minimal-file-receiver-udp.sh)
+
+Smallest NULL→READY AddSender / AddReceiver paths with
+`auto-activate=false`. Resources register on IS-04 at READY; the controller
+PATCHes `/single/{senders,receivers}/{id}/staged` to bring the data path
+live.
+
+**Properties-driven (`minimal-prop-*`)** — `sender-name` / `receiver-name`
+plus `caps` (and `source-ip` / `interface-ip` for RTP/UDP, or
+`mxl-domain-*` for MXL) synthesise the configuring transport at NULL→READY.
+
+**MXL:**
+
+```sh
+./scripts/example-pipelines/minimal-prop-sender-mxl.sh
+./scripts/example-pipelines/minimal-prop-receiver-mxl.sh
+```
+
+**UDP:**
+
+```sh
+./scripts/example-pipelines/minimal-prop-sender-udp.sh
+./scripts/example-pipelines/minimal-prop-receiver-udp.sh
+```
+
+**Transport-file-driven (`minimal-file-*`)** — configuring SDP / flow_def
+from [`fixtures/minimal-video.sdp.in`](scripts/example-pipelines/fixtures/minimal-video.sdp.in)
+and
+[`fixtures/minimal-video.mxl.json.in`](scripts/example-pipelines/fixtures/minimal-video.mxl.json.in)
+via `transport-file-path`. Resource name comes from the file
+(`a=x-nvnmos-name` or `urn:x-nvnmos:tag:name`); NMOS label from SDP `s=`
+or flow_def `label`. [`render_transport_fixture`](scripts/env.sh) substitutes
+`@NIC_IP@`, `@MXL_DOMAIN_ID@`, and `@LABEL@`. Upstream caps must still
+match the file essence. File-driven MXL scripts need only `mxl-domain-path`
+(`bootstrap_mxl_domain`); they omit `mxl-domain-id`, `caps`, and name
+properties. UDP fixtures set `a=x-nvnmos-iface-ip` only — wire destinations
+via IS-05 PATCH.
+
+**MXL:**
+
+```sh
+./scripts/example-pipelines/minimal-file-sender-mxl.sh
+./scripts/example-pipelines/minimal-file-receiver-mxl.sh
+```
+
+**UDP:**
+
+```sh
+./scripts/example-pipelines/minimal-file-sender-udp.sh
+./scripts/example-pipelines/minimal-file-receiver-udp.sh
+```
 
 ### Multi-Flow (Video + Audio on One Node)
 
