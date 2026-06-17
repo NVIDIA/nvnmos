@@ -21,6 +21,7 @@
 #![allow(clippy::result_large_err)]
 
 mod env_config;
+mod http_port;
 mod log_bridge;
 mod malloc_trim;
 mod session_gc;
@@ -48,6 +49,7 @@ use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
+use crate::http_port::read_http_port_range;
 use crate::session_gc::SessionGc;
 use crate::state::{AckOutcome, ActivationDispatch, Side, State};
 
@@ -71,13 +73,23 @@ struct Args {
 struct Daemon {
     state: Arc<Mutex<State>>,
     session_gc: SessionGc,
+    http_port_range: http_port::PortRange,
 }
 
 impl Daemon {
     fn new() -> Self {
+        let http_port_range = read_http_port_range();
+        tracing::info!(
+            http_port_range = %http_port_range,
+            "HTTP port allocation range for node_config.http_port=0"
+        );
         let state = Arc::new(Mutex::new(State::new()));
         let session_gc = SessionGc::new(state.clone());
-        Self { state, session_gc }
+        Self {
+            state,
+            session_gc,
+            http_port_range,
+        }
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -100,19 +112,22 @@ impl NvnmosDaemon for Daemon {
         let seed = config.seed.clone();
         let state_for_callback = self.state.clone();
         let seed_for_callback = seed.clone();
+        let http_port_range = self.http_port_range;
         let outcome = {
             let mut state = self.lock_state();
-            state.add_node(&seed, || {
-                build_node_server(&config, state_for_callback, seed_for_callback)
+            state.add_node(config, &http_port_range, |config| {
+                build_node_server(config, state_for_callback, seed_for_callback)
             })?
         };
         tracing::info!(
             node_seed = %seed,
             node_id = %outcome.node_id,
+            http_port = outcome.http_port,
             "AddNode",
         );
         Ok(Response::new(AddNodeResponse {
             node_id: outcome.node_id,
+            http_port: u32::from(outcome.http_port),
         }))
     }
 
@@ -146,16 +161,17 @@ impl NvnmosDaemon for Daemon {
         let config = state::translate_config(req.node_config.as_ref())?;
         let seed = config.seed.clone();
 
-        // Hold the state lock only over the registry update (and the
+        // Hold the state lock only over the state update (and the
         // libnvnmos create call inside it, which blocks on mDNS / bind /
         // worker spawn). Acceptable while the daemon is single-client;
         // revisit when multi-client throughput matters.
         let state_for_callback = self.state.clone();
         let seed_for_callback = seed.clone();
+        let http_port_range = self.http_port_range;
         let outcome = {
             let mut state = self.lock_state();
-            state.open_session(&seed, || {
-                build_node_server(&config, state_for_callback, seed_for_callback)
+            state.open_session(config, &http_port_range, |config| {
+                build_node_server(config, state_for_callback, seed_for_callback)
             })?
         };
         self.session_gc
@@ -165,6 +181,7 @@ impl NvnmosDaemon for Daemon {
             node_seed = %seed,
             session_handle = %outcome.session_handle,
             node_id = %outcome.node_id,
+            http_port = outcome.http_port,
             lifetime = outcome.lifetime.label(),
             created_node = outcome.created_node,
             "OpenSession",
@@ -173,6 +190,7 @@ impl NvnmosDaemon for Daemon {
             session_handle: outcome.session_handle,
             node_id: outcome.node_id,
             created_node: outcome.created_node,
+            http_port: u32::from(outcome.http_port),
         }))
     }
 

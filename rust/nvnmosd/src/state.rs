@@ -60,6 +60,7 @@ use nvnmos_rpc::v1::{
 use tokio::sync::mpsc as tokio_mpsc;
 use tonic::Status;
 
+use crate::http_port::{self, PortRange};
 use crate::log_bridge;
 
 /// Upper bound on how long the activation router will wait for a client's
@@ -240,6 +241,8 @@ struct NodeEntry {
     /// [`State::remove_node`] to refuse teardown while sessions are
     /// still around.
     attached_sessions: usize,
+    /// TCP port libnvnmos listens on for this Node's HTTP APIs.
+    http_port: u16,
 }
 
 /// A live session.
@@ -267,6 +270,8 @@ pub struct OpenOutcome {
     /// `SessionRefcounted`); false if it merely attached to an existing
     /// one.
     pub created_node: bool,
+    /// Effective HTTP API port of the attached Node.
+    pub http_port: u16,
 }
 
 /// Outcome of [`State::close_session`], for the caller's log line.
@@ -287,6 +292,7 @@ pub struct CloseOutcome {
 #[derive(Debug)]
 pub struct AddNodeOutcome {
     pub node_id: String,
+    pub http_port: u16,
 }
 
 /// Outcome of [`State::remove_node`].
@@ -407,6 +413,8 @@ pub struct State {
     /// Activations currently waiting on `AckActivation`, keyed by
     /// daemon-allocated `activation_handle`.
     pending_activations: HashMap<String, PendingActivation>,
+    /// `http_port` → `node_seed` for Nodes currently owned by the daemon.
+    http_ports: HashMap<u16, String>,
     next_session_id: AtomicU64,
     next_resource_id: AtomicU64,
     next_activation_id: AtomicU64,
@@ -421,6 +429,7 @@ impl State {
             by_name: HashMap::new(),
             subscriptions: HashMap::new(),
             pending_activations: HashMap::new(),
+            http_ports: HashMap::new(),
             next_session_id: AtomicU64::new(0),
             next_resource_id: AtomicU64::new(0),
             next_activation_id: AtomicU64::new(0),
@@ -443,33 +452,49 @@ impl State {
     /// * Whatever `build_node_server` returns, surfaced verbatim.
     pub fn open_session(
         &mut self,
-        seed: &str,
-        build_node_server: impl FnOnce() -> Result<NodeServer, Status>,
+        mut config: NodeConfig,
+        port_range: &PortRange,
+        build_node_server: impl FnOnce(&NodeConfig) -> Result<NodeServer, Status>,
     ) -> Result<OpenOutcome, Status> {
-        require_non_empty_seed(seed)?;
+        let seed = config.seed.clone();
+        require_non_empty_seed(&seed)?;
 
-        let (created_node, node_id, lifetime) = match self.nodes.get_mut(seed) {
+        let (created_node, node_id, lifetime, http_port) = match self.nodes.get_mut(&seed) {
             Some(entry) => {
                 entry.attached_sessions += 1;
-                (false, entry.node_id.clone(), entry.lifetime)
+                (
+                    false,
+                    entry.node_id.clone(),
+                    entry.lifetime,
+                    entry.http_port,
+                )
             }
             None => {
-                let server = build_node_server()?;
+                let http_port = self.resolve_http_port(config.http_port, port_range)?;
+                config.http_port = http_port;
+                let server = build_node_server(&config)?;
                 let node_id = server.node_id().map_err(|e| {
                     Status::internal(format!(
                         "querying node_id from the new NodeServer failed: {e}"
                     ))
                 })?;
+                self.http_ports.insert(http_port, seed.clone());
                 self.nodes.insert(
-                    seed.to_string(),
+                    seed.clone(),
                     NodeEntry {
                         server,
                         node_id: node_id.clone(),
                         lifetime: Lifetime::SessionRefcounted,
                         attached_sessions: 1,
+                        http_port,
                     },
                 );
-                (true, node_id, Lifetime::SessionRefcounted)
+                (
+                    true,
+                    node_id,
+                    Lifetime::SessionRefcounted,
+                    http_port,
+                )
             }
         };
 
@@ -477,7 +502,7 @@ impl State {
         self.sessions.insert(
             session_handle.clone(),
             SessionEntry {
-                node_seed: seed.to_string(),
+                node_seed: seed,
                 resources: HashSet::new(),
             },
         );
@@ -486,6 +511,7 @@ impl State {
             node_id,
             lifetime,
             created_node,
+            http_port,
         })
     }
 
@@ -538,7 +564,7 @@ impl State {
         // Node's lifetime. Errors are logged but not fatal — the session
         // is going away regardless, and leaking a libnvnmos resource is
         // less bad than refusing to close. Resources are dropped from
-        // the registry whether or not libnvnmos's removal succeeded.
+        // daemon state whether or not libnvnmos's removal succeeded.
         for resource_handle in session.resources {
             let Some(resource) = self.resources.remove(&resource_handle) else {
                 tracing::warn!(
@@ -579,6 +605,7 @@ impl State {
         let node_destroyed =
             lifetime == Lifetime::SessionRefcounted && remaining_sessions == 0;
         if node_destroyed {
+            self.http_ports.remove(&entry.http_port);
             self.nodes.remove(&seed);
         }
         Ok(CloseOutcome {
@@ -607,32 +634,38 @@ impl State {
     /// * Whatever `build_node_server` returns, surfaced verbatim.
     pub fn add_node(
         &mut self,
-        seed: &str,
-        build_node_server: impl FnOnce() -> Result<NodeServer, Status>,
+        mut config: NodeConfig,
+        port_range: &PortRange,
+        build_node_server: impl FnOnce(&NodeConfig) -> Result<NodeServer, Status>,
     ) -> Result<AddNodeOutcome, Status> {
-        require_non_empty_seed(seed)?;
-        if let Some(entry) = self.nodes.get(seed) {
+        let seed = config.seed.clone();
+        require_non_empty_seed(&seed)?;
+        if let Some(entry) = self.nodes.get(&seed) {
             return Err(Status::already_exists(format!(
                 "a {} Node already exists for seed {seed:?}",
                 entry.lifetime.label(),
             )));
         }
-        let server = build_node_server()?;
+        let http_port = self.resolve_http_port(config.http_port, port_range)?;
+        config.http_port = http_port;
+        let server = build_node_server(&config)?;
         let node_id = server.node_id().map_err(|e| {
             Status::internal(format!(
                 "querying node_id from the new NodeServer failed: {e}"
             ))
         })?;
+        self.http_ports.insert(http_port, seed.clone());
         self.nodes.insert(
-            seed.to_string(),
+            seed,
             NodeEntry {
                 server,
                 node_id: node_id.clone(),
                 lifetime: Lifetime::Persistent,
                 attached_sessions: 0,
+                http_port,
             },
         );
-        Ok(AddNodeOutcome { node_id })
+        Ok(AddNodeOutcome { node_id, http_port })
     }
 
     /// Tear down a persistent Node.
@@ -666,6 +699,7 @@ impl State {
         // Safe to unwrap because we just successfully got() the entry and
         // we still hold the &mut self lock.
         let entry = self.nodes.remove(seed).expect("checked above");
+        self.http_ports.remove(&entry.http_port);
         Ok(RemoveNodeOutcome {
             node_id: entry.node_id,
         })
@@ -711,7 +745,7 @@ impl State {
     ///
     /// The validation flow:
     ///
-    /// 1. Daemon-registry pre-check — refuses a duplicate `name`
+    /// 1. Pre-check in daemon state — refuses a duplicate `name`
     ///    on the same Node before any FFI happens.
     /// 2. `add_{sender,receiver}` into libnvnmos. libnvnmos parses the
     ///    transport file and creates the resource under its embedded
@@ -863,7 +897,7 @@ impl State {
             .resources
             .remove(resource_handle);
 
-        // The daemon registry is consistent at this point. libnvnmos
+        // Daemon state is consistent at this point. libnvnmos
         // removal is best-effort — a failure here would leak a resource
         // in libnvnmos's IS-04 model, but our state stays clean.
         if let Some(node) = self.nodes.get(&resource.node_seed) {
@@ -876,7 +910,7 @@ impl State {
                     name = %resource.name,
                     error = %e,
                     "remove_resource: libnvnmos remove_sender/remove_receiver failed; \
-                     daemon registry already cleared"
+                     daemon state already cleared"
                 );
             }
         }
@@ -1182,6 +1216,55 @@ impl State {
         let n = self.next_activation_id.fetch_add(1, Ordering::Relaxed);
         format!("act-{n}")
     }
+
+    /// Resolve `requested` (`0` = allocate from `port_range`) to an
+    /// available TCP port. Skips ports already assigned to another Node
+    /// and runs a bind-only host probe before Node creation.
+    fn resolve_http_port(
+        &self,
+        requested: u16,
+        port_range: &PortRange,
+    ) -> Result<u16, Status> {
+        if requested != 0 {
+            if let Some(owner) = self.http_ports.get(&requested) {
+                return Err(Status::already_exists(format!(
+                    "http_port {requested} is already assigned to node_seed {owner:?}"
+                )));
+            }
+            if !http_port::is_tcp_port_bindable(requested) {
+                return Err(Status::failed_precondition(format!(
+                    "http_port {requested} is not available on this host"
+                )));
+            }
+            return Ok(requested);
+        }
+
+        for port in port_range.iter() {
+            if self.http_ports.contains_key(&port) {
+                continue;
+            }
+            if http_port::is_tcp_port_bindable(port) {
+                return Ok(port);
+            }
+        }
+        Err(Status::resource_exhausted(format!(
+            "no available http_port in daemon range {port_range}"
+        )))
+    }
+
+    #[cfg(test)]
+    pub(super) fn resolve_http_port_for_test(
+        &self,
+        requested: u16,
+        port_range: &PortRange,
+    ) -> Result<u16, Status> {
+        self.resolve_http_port(requested, port_range)
+    }
+
+    #[cfg(test)]
+    pub(super) fn assign_http_port_for_test(&mut self, port: u16, seed: &str) {
+        self.http_ports.insert(port, seed.to_string());
+    }
 }
 
 fn require_non_empty_seed(seed: &str) -> Result<(), Status> {
@@ -1210,7 +1293,7 @@ pub fn translate_transport(proto: ProtoTransport) -> Result<Transport, Status> {
 ///
 /// `node_config.seed` is the canonical Node identifier; the RPC
 /// handler reads it back off the returned [`NodeConfig`] and passes it
-/// to [`State::add_node`] / [`State::open_session`] as the registry
+/// to [`State::add_node`] / [`State::open_session`] as the lookup
 /// key, ensuring the daemon's lookup key and libnvnmos's UUID
 /// derivation key always agree.
 pub fn translate_config(proto: Option<&ProtoNodeConfig>) -> Result<NodeConfig, Status> {
@@ -1336,4 +1419,21 @@ fn translate_network_services(
         system_port,
         system_version: proto.system_version.clone(),
     }))
+}
+
+#[cfg(test)]
+mod http_port_allocation_tests {
+    use super::State;
+    use crate::http_port::PortRange;
+
+    #[test]
+    fn explicit_port_rejects_conflict_with_assigned_port() {
+        let mut state = State::new();
+        let range = PortRange::new(18_080, 18_099).expect("range");
+        state.assign_http_port_for_test(18_010, "other-seed");
+        let err = state
+            .resolve_http_port_for_test(18_010, &range)
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::AlreadyExists);
+    }
 }

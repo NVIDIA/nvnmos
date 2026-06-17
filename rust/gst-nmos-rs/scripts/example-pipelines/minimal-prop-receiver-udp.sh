@@ -18,7 +18,6 @@ exec gst-launch-1.0 -e \
         daemon-uri="$DEMO_DAEMON_URI" \
         transport="$DEMO_UDP_TRANSPORT" \
         node-seed=example-minimal-consumer \
-        http-port=18112 \
         receiver-name=video1 \
         interface-ip="$DEMO_NIC_IP" \
         $(udp_video_buffer_props) \

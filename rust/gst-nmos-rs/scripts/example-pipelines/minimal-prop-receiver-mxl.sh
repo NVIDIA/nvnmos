@@ -18,7 +18,6 @@ exec gst-launch-1.0 -e \
         daemon-uri="$DEMO_DAEMON_URI" \
         transport=mxl \
         node-seed=example-minimal-consumer \
-        http-port=18112 \
         receiver-name=video1 \
         mxl-domain-id="$DEMO_MXL_DOMAIN_ID" \
         mxl-domain-path="$DEMO_MXL_DOMAIN_PATH" \

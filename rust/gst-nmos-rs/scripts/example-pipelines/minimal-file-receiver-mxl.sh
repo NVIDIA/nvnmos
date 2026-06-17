@@ -30,7 +30,6 @@ exec gst-launch-1.0 -e \
         daemon-uri="$DEMO_DAEMON_URI" \
         transport=mxl \
         node-seed=example-minimal-consumer \
-        http-port=18112 \
         mxl-domain-path="$DEMO_MXL_DOMAIN_PATH" \
         transport-file-path="$transport_path" \
         auto-activate=false ! \

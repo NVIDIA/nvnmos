@@ -65,14 +65,13 @@ pub(crate) const NODE_SEED_BLURB: &str =
 
 pub(crate) const HTTP_PORT_BLURB: &str =
     "TCP port libnvnmos serves the NMOS HTTP APIs on \
-     (node_config.http_port). 0 (the default) leaves libnvnmos on \
-     the nmos-cpp per-API defaults (Node API on 3212, Connection \
-     API on 3215). Non-zero collapses every HTTP API onto this \
-     single port. Honoured only by the OpenSession that actually \
-     creates the Node — when attaching to a pre-existing Node \
-     (e.g. another nmossink / nmossrc opened first with the same \
-     node-seed) this property is ignored, just like the rest of \
-     node_config.";
+     (node_config.http_port). 0 (the default) asks nvnmosd to allocate \
+     from NVNMOSD_HTTP_PORT_MIN..NVNMOSD_HTTP_PORT_MAX. Non-zero selects \
+     an explicit port (rejected when unavailable). Honoured only by the \
+     OpenSession that actually creates the Node — when attaching to a \
+     pre-existing Node (e.g. another nmossink / nmossrc opened first with \
+     the same node-seed) this property is ignored. The effective port is \
+     returned in OpenSessionResponse.http_port.";
 
 pub(crate) const HOST_NAME_BLURB: &str =
     "NMOS Node host name (`node_config.host_name`). Empty (the \
@@ -816,11 +815,12 @@ pub(crate) fn validate_and_open(
     };
     gst::info!(
         cat,
-        "session opened: handle={} node_id={} created_node={} \
+        "session opened: handle={} node_id={} created_node={} http_port={} \
          (node_seed={}, side={:?}, name={}, transport={:?}); {}; {}",
         new_session.session_handle,
         new_session.node_id,
         new_session.created_node,
+        new_session.http_port,
         settings.node_seed,
         side,
         name,
