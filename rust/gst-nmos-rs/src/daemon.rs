@@ -9,12 +9,9 @@
 //! at NULL→READY and torn down at READY→NULL by the element's
 //! `change_state` override.
 //!
-//! When [`Session::open`] is called with a non-empty `transport_file`
-//! it also drives `AddSender` / `AddReceiver` (selected by `side`) so
-//! the resource is published in IS-04 immediately. With no
-//! `transport_file` the session is opened but no resource is added
-//! yet — deferred AddSender at READY→PAUSED synthesises the
-//! transport file from upstream peer caps and element properties.
+//! [`Session::open`] calls `OpenSession`, then `SubscribeActivations`
+//! (awaited on the opening task), then optionally `AddSender` /
+//! `AddReceiver` — matching the daemon's required ordering.
 //!
 //! Each `ActivationEvent` arriving on the subscription is routed to
 //! the element-supplied [`ActivationHandler`] (see [`Session::open`]).
@@ -33,7 +30,7 @@ use std::time::Duration;
 use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
-    AckActivationRequest, AddReceiverRequest, AddSenderRequest, CloseSessionRequest,
+    AckActivationRequest, ActivationEvent, AddReceiverRequest, AddSenderRequest, CloseSessionRequest,
     OpenSessionRequest, Side as ProtoSide, SubscribeActivationsRequest, SyncResourceStateRequest,
     Transport as ProtoTransport,
 };
@@ -190,8 +187,32 @@ impl Session {
         let node_id = resp.node_id.clone();
         let created_node = resp.created_node;
 
-        let activation_task =
-            spawn_activation_task(client.clone(), session_handle.clone(), activation_handler);
+        // nvnmosd requires SubscribeActivations before AddSender /
+        // AddReceiver; establish the stream on this task before any add.
+        let mut subscribe_client = client.clone();
+        let stream = match subscribe_client
+            .subscribe_activations(SubscribeActivationsRequest {
+                session_handle: session_handle.clone(),
+            })
+            .await
+        {
+            Ok(resp) => resp.into_inner(),
+            Err(e) => {
+                let _ = client
+                    .close_session(CloseSessionRequest {
+                        session_handle: session_handle.clone(),
+                    })
+                    .await;
+                return Err(e.into());
+            }
+        };
+
+        let activation_task = spawn_activation_task(
+            client.clone(),
+            session_handle.clone(),
+            stream,
+            activation_handler,
+        );
 
         let resource = match transport_file {
             Some(file) => match add_resource(
@@ -397,26 +418,10 @@ async fn connect_uds(uds_path: PathBuf) -> Result<Channel, tonic::transport::Err
 fn spawn_activation_task(
     mut client: NvnmosDaemonClient<Channel>,
     session_handle: String,
+    mut stream: tonic::Streaming<ActivationEvent>,
     handler: ActivationHandler,
 ) -> JoinHandle<()> {
     SHARED_RUNTIME.spawn(async move {
-        let sub = client
-            .subscribe_activations(SubscribeActivationsRequest {
-                session_handle: session_handle.clone(),
-            })
-            .await;
-
-        let mut stream = match sub {
-            Ok(s) => s.into_inner(),
-            Err(status) => {
-                gst::warning!(
-                    CAT,
-                    "SubscribeActivations failed for session {session_handle}: {status}"
-                );
-                return;
-            }
-        };
-
         loop {
             match stream.message().await {
                 Ok(Some(ev)) => {
