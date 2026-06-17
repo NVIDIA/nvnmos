@@ -185,3 +185,17 @@ bootstrap_mxl_domain() {
     printf '{"id":"%s","label":"gst-nmos-rs example domain"}\n' "$DEMO_MXL_DOMAIN_ID" \
         >"$def"
 }
+
+# Substitute @NIC_IP@, @MXL_DOMAIN_ID@, and @LABEL@ in example-pipeline fixtures.
+render_transport_fixture() {
+    local template=$1
+    local output=$2
+    local label=${3-}
+    local escaped_label
+    # Prepare label for sed substitution (escape slashes and ampersands).
+    escaped_label=$(printf '%s' "$label" | sed 's/[\/&]/\\&/g')
+    sed -e "s/@NIC_IP@/${DEMO_NIC_IP}/g" \
+        -e "s/@MXL_DOMAIN_ID@/${DEMO_MXL_DOMAIN_ID}/g" \
+        -e "s/@LABEL@/${escaped_label}/g" \
+        "$template" >"$output"
+}

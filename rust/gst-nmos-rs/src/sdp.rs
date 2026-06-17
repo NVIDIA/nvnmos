@@ -715,6 +715,15 @@ fn session_attribute_value<'a>(msg: &'a SDPMessage, key: &str) -> Option<&'a str
     })
 }
 
+/// Session-level `a=x-nvnmos-name` from configuring SDP text.
+pub(crate) fn resource_name_from_transport(text: &str) -> Result<Option<String>, SdpError> {
+    let msg = SDPMessage::parse_buffer(text.as_bytes())
+        .map_err(|e| SdpError::Parse(e.to_string()))?;
+    Ok(session_attribute_value(&msg, "x-nvnmos-name")
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned))
+}
+
 /// Build an SDP transport-file text from a [`UdpMedia`] plus the
 /// caller-supplied [`SdpSession`] session-level descriptors.
 ///
@@ -2501,6 +2510,28 @@ mod tests {
         let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace("a=x-nvnmos-iface-ip:192.0.2.11\r\n", "");
         let media = parse_sdp(&sdp).expect("parse");
         assert_eq!(media.primary.interface_ip, None);
+    }
+
+    #[test]
+    fn resource_name_from_transport_reads_session_attribute() {
+        init_gst();
+        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace(
+            "t=0 0\r\n",
+            "t=0 0\r\na=x-nvnmos-name:cam-a\r\n",
+        );
+        assert_eq!(
+            resource_name_from_transport(&sdp).expect("parse"),
+            Some("cam-a".to_owned()),
+        );
+    }
+
+    #[test]
+    fn resource_name_from_transport_none_when_attribute_absent() {
+        init_gst();
+        assert_eq!(
+            resource_name_from_transport(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse"),
+            None,
+        );
     }
 
     #[test]

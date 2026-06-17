@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Minimal RTP/UDP sender for controller-driven IS-05 activation.
+# Minimal properties-driven RTP/UDP sender for controller-driven IS-05 activation.
 #
-# AddSender at NULL→READY with configuring SDP from `caps` and
-# `source-ip` only.
+# AddSender at NULL→READY with configuring SDP synthesised from `caps`,
+# `source-ip`, and `sender-name`.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 require_nvnmosd

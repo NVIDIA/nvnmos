@@ -1,0 +1,21 @@
+{
+  "format": "urn:x-nmos:format:video",
+  "label": "@LABEL@",
+  "description": "",
+  "media_type": "video/v210",
+  "grain_rate": {"numerator": 25, "denominator": 1},
+  "frame_width": 1920,
+  "frame_height": 1080,
+  "interlace_mode": "progressive",
+  "colorspace": "BT709",
+  "components": [
+    {"name": "Y", "width": 1920, "height": 1080, "bit_depth": 10},
+    {"name": "Cb", "width": 960, "height": 1080, "bit_depth": 10},
+    {"name": "Cr", "width": 960, "height": 1080, "bit_depth": 10}
+  ],
+  "tags": {
+    "urn:x-nmos:tag:grouphint/v1.0": ["video1:Video"],
+    "urn:x-nvnmos:tag:name": ["video1"],
+    "urn:x-nvnmos:tag:mxl-domain-id": ["@MXL_DOMAIN_ID@"]
+  }
+}

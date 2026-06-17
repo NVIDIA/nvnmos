@@ -201,6 +201,22 @@ pub(crate) fn read_flow_def_meta(text: &str) -> Result<FlowDefMeta, FlowDefError
     Ok(FlowDefMeta { id, format })
 }
 
+const NAME_TAG: &str = "urn:x-nvnmos:tag:name";
+
+/// `tags["urn:x-nvnmos:tag:name"]` from configuring flow_def JSON.
+pub(crate) fn resource_name_from_transport(text: &str) -> Result<Option<String>, FlowDefError> {
+    let raw: serde_json::Value =
+        serde_json::from_str(text).map_err(|source| FlowDefError::Parse { source })?;
+    Ok(raw
+        .get("tags")
+        .and_then(|tags| tags.get(NAME_TAG))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned))
+}
+
 /// Combine the user's `mxl-flow-id` property and the caps-derived
 /// [`FlowFormat`] with `id` / `format` read from the transport file.
 /// See the module docs for the truth table. `property_format` is
@@ -791,6 +807,25 @@ mod tests {
         let m = read_flow_def_meta(&video_flow_def(UUID_A)).unwrap();
         assert_eq!(m.id, UUID_A);
         assert_eq!(m.format, FlowFormat::Video);
+    }
+
+    #[test]
+    fn resource_name_from_transport_reads_name_tag() {
+        let json = format!(
+            r#"{{"id":"{UUID_A}","format":"urn:x-nmos:format:video","tags":{{"urn:x-nvnmos:tag:name":["cam-a"]}}}}"#
+        );
+        assert_eq!(
+            resource_name_from_transport(&json).expect("parse"),
+            Some("cam-a".to_owned()),
+        );
+    }
+
+    #[test]
+    fn resource_name_from_transport_none_when_tag_absent() {
+        assert_eq!(
+            resource_name_from_transport(&video_flow_def(UUID_A)).expect("parse"),
+            None,
+        );
     }
 
     #[test]

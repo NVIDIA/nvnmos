@@ -13,6 +13,14 @@ use super::types::Side;
 use crate::sdp::{self, DualLegPassthroughPolicy, SdpOverrides};
 use crate::types::{CapsMode, Transport};
 
+/// Read the NMOS resource name from an SDP transport file.
+///
+/// Used when the element already has a `transport-file` at NULL→READY.
+/// Caps-only synthesis and deferred AddSender still require the name property.
+pub(super) fn resource_name_from_transport_file(text: &str) -> Result<Option<String>, sdp::SdpError> {
+    sdp::resource_name_from_transport(text)
+}
+
 /// Which factory family to use for the UDP socket and RTP
 /// (de)payloader elements.
 ///

@@ -133,7 +133,8 @@ pub(crate) const SENDER_NAME_BLURB: &str =
      `x-nvnmos-name` SDP attribute or the `urn:x-nvnmos:tag:name` \
      flow-def tag in the transport file). Unique across Senders on the \
      Node; a Receiver on the same Node may share the same name (the \
-     daemon scopes names by side). Overrides the transport file's value \
+     daemon scopes names by side). Required unless the name is already \
+     carried in `transport-file*`. Overrides the transport file's value \
      when both are supplied.";
 
 pub(crate) const RECEIVER_NAME_BLURB: &str =
@@ -141,7 +142,8 @@ pub(crate) const RECEIVER_NAME_BLURB: &str =
      `x-nvnmos-name` SDP attribute or the `urn:x-nvnmos:tag:name` \
      flow-def tag in the transport file). Unique across Receivers on the \
      Node; a Sender on the same Node may share the same name (the \
-     daemon scopes names by side). Overrides the transport file's value \
+     daemon scopes names by side). Required unless the name is already \
+     carried in `transport-file*`. Overrides the transport file's value \
      when both are supplied.";
 
 pub(crate) const LABEL_BLURB_SENDER: &str =
@@ -687,6 +689,39 @@ fn udp_inner_summary(
     }
 }
 
+/// NMOS resource `name` for AddSender / AddReceiver: property when set,
+/// else read from `transport-file` when one is supplied (caps-only and
+/// deferred AddSender synthesis still require the property).
+pub(crate) fn resolve_resource_name(
+    element: &str,
+    settings: &CommonSettings,
+    transport_file: Option<&str>,
+) -> Result<String, anyhow::Error> {
+    if !settings.name.is_empty() {
+        return Ok(settings.name.clone());
+    }
+    let prop = settings.side.name_property();
+    let Some(text) = transport_file.filter(|t| !t.is_empty()) else {
+        bail!(
+            "{element}: `{prop}` is required (set the property or carry the name \
+             in `transport-file` as `a=x-nvnmos-name` or `urn:x-nvnmos:tag:name`)"
+        );
+    };
+    let from_file = match settings.transport {
+        Transport::Mxl => mxl::resource_name_from_transport_file(text).map_err(anyhow::Error::from)?,
+        Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => {
+            udp::resource_name_from_transport_file(text).map_err(anyhow::Error::from)?
+        }
+    };
+    match from_file {
+        Some(name) => Ok(name),
+        None => bail!(
+            "{element}: `{prop}` is unset and `transport-file` does not carry a name \
+             (`a=x-nvnmos-name` for SDP, `urn:x-nvnmos:tag:name` for flow_def)"
+        ),
+    }
+}
+
 /// Validate the settings snapshot and open a session via the shared
 /// tokio runtime. On success the session is stored under `session`
 /// and the returned [`InnerConfig`] tells the element how to wire its
@@ -701,12 +736,6 @@ pub(crate) fn validate_and_open(
 ) -> Result<InnerConfig, anyhow::Error> {
     if settings.node_seed.is_empty() {
         bail!("{element}: `node-seed` is required");
-    }
-    if settings.name.is_empty() {
-        bail!(
-            "{element}: `{}` is required",
-            settings.side.name_property()
-        );
     }
 
     let resolved_transport_file = resolve_transport_file(element, settings)?;
@@ -738,7 +767,7 @@ pub(crate) fn validate_and_open(
 
     let transport = transport_to_proto(settings.transport);
     let side = settings.side;
-    let name = settings.name.clone();
+    let name = resolve_resource_name(element, settings, transport_file.as_deref())?;
 
     let new_session = SHARED_RUNTIME
         .block_on(async {
@@ -794,7 +823,7 @@ pub(crate) fn validate_and_open(
         new_session.created_node,
         settings.node_seed,
         side,
-        settings.name,
+        name,
         settings.transport,
         resource_summary,
         inner_summary,
@@ -981,7 +1010,7 @@ fn finish_deferred_add_sender(
 ) -> Result<InnerConfig, anyhow::Error> {
     let transport = transport_to_proto(settings.transport);
     let side = settings.side;
-    let name = settings.name.clone();
+    let name = resolve_resource_name(element, settings, Some(transport_file))?;
     // Take the Session out of the std::Mutex before doing async work
     // (clippy's `await_holding_lock` lint, same pattern `close()` uses).
     // Put it back before checking the RPC result so READY→NULL always
@@ -1691,6 +1720,83 @@ mod tests {
             assert!(
                 err.to_string().contains("interface-ip"),
                 "expected interface-ip requirement: {err:#}"
+            );
+        }
+    }
+
+    mod resolve_resource_name {
+        use super::*;
+
+        const SDP_WITH_NAME: &str = concat!(
+            "v=0\r\n",
+            "o=- 1 0 IN IP4 192.0.2.10\r\n",
+            "s=test\r\n",
+            "t=0 0\r\n",
+            "a=x-nvnmos-name:from-file\r\n",
+            "m=video 5004 RTP/AVP 96\r\n",
+            "c=IN IP4 239.1.1.1/64\r\n",
+            "a=rtpmap:96 raw/90000\r\n",
+        );
+
+        const FLOW_DEF_WITH_NAME: &str = r#"{
+            "id":"00000000-0000-0000-0000-000000000001",
+            "format":"urn:x-nmos:format:video",
+            "tags":{"urn:x-nvnmos:tag:name":["from-file"]}
+        }"#;
+
+        #[test]
+        fn property_wins_when_set() {
+            let mut s = settings(Side::Sender);
+            s.name = "from-property".to_owned();
+            let name = super::resolve_resource_name("nmossink", &s, Some(SDP_WITH_NAME))
+                .expect("property name");
+            assert_eq!(name, "from-property");
+        }
+
+        #[test]
+        fn rtp_reads_name_from_transport_file() {
+            cat();
+            let mut s = settings(Side::Receiver);
+            s.transport = Transport::Udp;
+            s.name.clear();
+            let name = super::resolve_resource_name("nmossrc", &s, Some(SDP_WITH_NAME))
+                .expect("SDP name");
+            assert_eq!(name, "from-file");
+        }
+
+        #[test]
+        fn mxl_reads_name_from_transport_file() {
+            let mut s = settings(Side::Sender);
+            s.name.clear();
+            let name =
+                super::resolve_resource_name("nmossink", &s, Some(FLOW_DEF_WITH_NAME)).expect(
+                    "flow_def name",
+                );
+            assert_eq!(name, "from-file");
+        }
+
+        #[test]
+        fn requires_property_when_no_transport_file() {
+            let mut s = settings(Side::Sender);
+            s.name.clear();
+            let err = super::resolve_resource_name("nmossink", &s, None).unwrap_err();
+            assert!(
+                err.to_string().contains("sender-name"),
+                "expected sender-name requirement: {err:#}"
+            );
+        }
+
+        #[test]
+        fn rejects_transport_file_without_name() {
+            cat();
+            let mut s = settings(Side::Receiver);
+            s.transport = Transport::Udp;
+            s.name.clear();
+            let sdp = "v=0\r\no=- 1 0 IN IP4 192.0.2.10\r\ns=test\r\nt=0 0\r\n";
+            let err = super::resolve_resource_name("nmossrc", &s, Some(sdp)).unwrap_err();
+            assert!(
+                err.to_string().contains("does not carry a name"),
+                "expected missing-name error: {err:#}"
             );
         }
     }
