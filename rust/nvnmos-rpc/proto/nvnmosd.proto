@@ -63,6 +63,16 @@ service NvnmosDaemon {
   // Tears down the backing Node if the session was the last attached
   // *and* the Node is session-refcounted (i.e. was not created by
   // `AddNode`).
+  //
+  // The daemon may also close a session implicitly when session GC is
+  // enabled (`NVNMOSD_SESSION_GC`, on by default): if
+  // `SubscribeActivations` is not called within
+  // `NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC` (default 60) of
+  // `OpenSession`, or not called again within
+  // `NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC` (default 5) after the
+  // previous activation stream ends. Implicit close uses the same
+  // teardown as this RPC; subsequent RPCs with the old session handle
+  // return `NOT_FOUND`.
   rpc CloseSession(CloseSessionRequest) returns (Empty);
 
   // -------- Resource lifecycle --------
@@ -86,6 +96,9 @@ service NvnmosDaemon {
   // NMOS `/senders/<id>` or `/receivers/<id>` UUID is returned in
   // `resource_id` for the client's convenience (e.g. cross-referencing
   // with controller logs).
+  //
+  // Requires an active `SubscribeActivations` stream on the session;
+  // otherwise `FAILED_PRECONDITION`.
 
   rpc AddSender(AddSenderRequest) returns (AddResourceResponse);
   rpc AddReceiver(AddReceiverRequest) returns (AddResourceResponse);
@@ -99,6 +112,11 @@ service NvnmosDaemon {
   // resources; the client applies (or refuses) it locally and replies
   // with `AckActivation`. The IS-05 controller's request remains
   // pending until the ack arrives.
+  //
+  // Must be called promptly after `OpenSession` (before `AddSender` /
+  // `AddReceiver`) and again within the resubscribe timeout after any
+  // prior activation stream ends. See `CloseSession` for the implicit
+  // teardown policy when these deadlines are missed.
   rpc SubscribeActivations(SubscribeActivationsRequest) returns (stream ActivationEvent);
 
   // Required after each `ActivationEvent`. The success/failure outcome

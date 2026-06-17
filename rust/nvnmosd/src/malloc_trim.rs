@@ -8,39 +8,48 @@
 
 use std::sync::OnceLock;
 
-const ENABLE_TOKENS: &[&str] = &["1", "true", "TRUE", "yes", "YES", "on", "ON"];
-const DISABLE_TOKENS: &[&str] = &["0", "false", "FALSE", "off", "OFF", "no", "NO"];
-
-/// How an env var is interpreted when unset vs when set to a known token.
-enum EnvDefault {
-    /// Unset → enabled; known disable tokens → disabled; anything else → enabled.
-    OptOut,
-    /// Unset → disabled; known enable tokens → enabled; anything else → disabled.
-    OptIn,
-}
-
-fn read_env_bool(name: &str, default: EnvDefault) -> bool {
-    match std::env::var(name) {
-        Ok(value) => {
-            let value = value.trim();
-            match default {
-                EnvDefault::OptOut => !DISABLE_TOKENS.contains(&value),
-                EnvDefault::OptIn => ENABLE_TOKENS.contains(&value),
-            }
-        }
-        Err(_) => matches!(default, EnvDefault::OptOut),
-    }
-}
+use crate::env_config::{self, EnvDefault};
+use crate::state::{CloseOutcome, State};
 
 /// True unless `NVNMOSD_MALLOC_TRIM` is set to a disabling value (`0`, `false`, `off`, `no`).
 pub fn trim_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| read_env_bool("NVNMOSD_MALLOC_TRIM", EnvDefault::OptOut))
+    *ENABLED.get_or_init(|| env_config::read_env_bool("NVNMOSD_MALLOC_TRIM", EnvDefault::OptOut))
 }
 
 fn info_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| read_env_bool("NVNMOSD_MALLOC_INFO", EnvDefault::OptIn))
+    *ENABLED.get_or_init(|| env_config::read_env_bool("NVNMOSD_MALLOC_INFO", EnvDefault::OptIn))
+}
+
+/// After [`State::close_session`] (explicit RPC or session GC).
+pub fn maybe_after_close_session(state: &State, outcome: &CloseOutcome) {
+    maybe_trim(
+        state,
+        &outcome.node_seed,
+        "close_session",
+        outcome.node_destroyed,
+    );
+}
+
+/// After [`State::remove_resource`].
+pub fn maybe_after_remove_resource(state: &State, node_seed: &str) {
+    maybe_trim(state, node_seed, "remove_resource", false);
+}
+
+/// After [`State::remove_node`].
+pub fn maybe_after_remove_node(state: &State, node_seed: &str) {
+    maybe_trim(state, node_seed, "remove_node", true);
+}
+
+fn maybe_trim(state: &State, node_seed: &str, via: &'static str, node_removed: bool) {
+    if !trim_enabled() {
+        return;
+    }
+    let should_trim = node_removed || state.resource_count_for_node(node_seed) == 0;
+    if should_trim {
+        run(via, node_seed);
+    }
 }
 
 /// Run `malloc_trim` when enabled. `via` names the RPC that triggered the check

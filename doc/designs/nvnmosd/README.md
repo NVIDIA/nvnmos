@@ -214,6 +214,28 @@ When trim is enabled, the daemon calls `malloc_trim` after `RemoveResource`, `Cl
 
 `malloc_trim` can briefly contend on glibc allocator locks (other threads may hitch) but does not hold the daemon mutex.
 
+#### Session liveness (implicit `CloseSession`)
+
+Abandoned sessions (client crash, lost gRPC connection, forgot to call
+`CloseSession`) would otherwise hold sender/receiver names and node refcounts
+indefinitely. When session GC is enabled, the daemon runs the same teardown as
+an explicit `CloseSession` if activation subscription deadlines are missed.
+Implementation lives in
+[`rust/nvnmosd/src/session_gc.rs`](../../../rust/nvnmosd/src/session_gc.rs).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NVNMOSD_SESSION_GC` | on (unset = enabled) | Set to `0`, `false`, `off`, or `no` to disable implicit `CloseSession`. |
+| `NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC` | 60 | After `OpenSession`, the client must call `SubscribeActivations` within this many **seconds** (before `AddSender` / `AddReceiver`). |
+| `NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC` | 5 | After the activation subscription stream ends, the client must call `SubscribeActivations` again within this many **seconds**. |
+
+When GC is enabled, `AddSender` and `AddReceiver` return `FAILED_PRECONDITION`
+if the session has no live `SubscribeActivations` stream. After an implicit
+close, RPCs with the old session handle return `NOT_FOUND`.
+
+The resubscribe timeout is intentionally short so crashed clients release
+resource names quickly; it is independent of NMOS Registry GC intervals.
+
 ## Element design
 
 ### Pad config
@@ -484,7 +506,7 @@ A `timestamp-mode` property (passthrough vs. regenerated wire timestamps) was sk
 
 - **Connection API responsiveness**: slow elements stall PATCH responses. Mitigation: tight default `AckActivation` timeout; document the failure mode.
 - **Daemon discovery**: `daemon-uri` property with a sensible default. Document; don't auto-spawn.
-- **Daemon reconnect / session liveness**: clients must call `CloseSession` on teardown; there is no GC today. Aspirational: durable `session_handle` across client reconnect and daemon restart with TTL.
+- **Daemon reconnect / session liveness**: clients should call `CloseSession` on clean teardown; session GC (see above) closes orphaned sessions when subscription deadlines are missed (`NVNMOSD_SESSION_GC`, on by default). Aspirational: durable `session_handle` across client reconnect and daemon restart with TTL.
 - **Inner-sink state under gating**: the originally-planned `output-selector` pattern removes the inner sink from the data path on deactivation. We still need to confirm per-transport that `nvdsudpsink`/`mxlsink` cleanly handle being de-pathed at runtime; if either disagrees, fall back to keeping it on the path with `fakesink sync=true async=false` *downstream* of the inner sink instead of *replacing* it (slightly more expensive, more conservative). (Phase 1 update: the as-built mechanism tears down and rebuilds the inner sink across activations rather than de-pathing it; this has been validated against `mxlsink`. Phase 2 must still validate the same against `nvdsudpsink`. See [*Phase 1 as-built: anchor + block-probe*](#phase-1-as-built-anchor--block-probe).)
 - **Cross-platform paths**: UDS on Linux/macOS, named pipe on Windows, TCP fallback. gRPC supports all three.
 - **NvNmos C-API thread safety**: confirmed thread-safe — every state mutation in `nvnmos_impl.cpp` takes `model.write_lock()` before touching the nmos-cpp model. The daemon can call NvNmos from any worker thread; no daemon-side serialisation needed.
