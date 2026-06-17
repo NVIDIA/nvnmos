@@ -5,7 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvnmos Rust Workspace
 
-Rust components for the new GStreamer NMOS plugin family described in
+Rust components for the NMOS daemon and GStreamer plugin family. Daemon
+operator docs: [`nvnmosd/README.md`](nvnmosd/README.md). Full architecture:
 [`doc/designs/nvnmosd/README.md`](../doc/designs/nvnmosd/README.md).
 
 ## Crates
@@ -15,14 +16,10 @@ Rust components for the new GStreamer NMOS plugin family described in
 | `nvnmos-sys`       | library     | `bindgen`-generated FFI to the C `libnvnmos` API in `../src/nvnmos.h`. |
 | `nvnmos`           | library     | Safe Rust wrapper over `nvnmos-sys`: RAII `NodeServer`, `Result` errors, deterministic id accessors. |
 | `nvnmos-rpc`       | library     | gRPC protocol crate (`nvnmosd.proto` + `tonic`-generated stubs).     |
-| `nvnmosd`          | binary      | The NMOS daemon. Wraps `nvnmos-sys`, serves `nvnmos-rpc`.            |
+| `nvnmosd`          | binary      | NMOS daemon — see [`nvnmosd/README.md`](nvnmosd/README.md).         |
 | `nvnmosd-example`  | binary      | Example/regression client modelled on the C `nvnmos-example`.        |
 | `nvnmosd-bench`    | binary      | Scale smoke / benchmark client for `nvnmosd`.                        |
-| `gst-nmos-rs`      | GStreamer plugin (cdylib) | `nmos` plugin (`nmossrc` / `nmossink`); session lifecycle, inner `mxlsink`/`mxlsrc`, IS-05 activation handling, deferred `nmossink` AddSender (peer-query at READY→PAUSED), `nmossrc` essence-caps advertisement, and property-override-vs-cross-check semantics are all wired. See [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md). |
-
-See `gst-nmos-rs`'s own
-[`gst-nmos-rs/README.md`](gst-nmos-rs/README.md) for the per-element
-property matrix, load instructions, and status.
+| `gst-nmos-rs`      | GStreamer plugin (cdylib) | `nmos` plugin — `nmossrc` / `nmossink` elements. See [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md). |
 
 ## Container Image
 

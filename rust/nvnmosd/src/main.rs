@@ -11,7 +11,8 @@
 //! `AckActivation`) all drive real [`nvnmos::NodeServer`]s with
 //! session-based ownership.
 //!
-//! See `doc/designs/nvnmosd/README.md` for the full design.
+//! See `rust/nvnmosd/README.md` for operator docs and
+//! `doc/designs/nvnmosd/README.md` for the full design.
 
 // `tonic::Status` is intentionally large (it carries gRPC metadata) so every
 // `Result<T, Status>` trips `result_large_err`. The alternative is to box
