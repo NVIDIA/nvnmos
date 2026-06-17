@@ -605,9 +605,11 @@ impl NmosSrc {
                             chain.bin
                         }
                     }
-                    TransportConfig::NvDsUdp { media, .. } => {
+                    TransportConfig::NvDsUdp { media, transport_file, .. } => {
                         {
-                            let chain = inner::build_nvdsudpsrc(media, &media.raw_caps)?;
+                            let sdp = transport_file.as_deref().unwrap_or("");
+                            let chain =
+                                inner::build_nvdsudpsrc(media, &media.raw_caps, sdp)?;
                             let settings = self.settings.lock().unwrap();
                             inner::apply_nvdsudp_src_inner_properties(
                                 &CAT,
@@ -877,9 +879,10 @@ impl NmosSrc {
                     }
                 }
             }
-            InnerConfig::Real(TransportConfig::NvDsUdp { media, .. }) => {
+            InnerConfig::Real(TransportConfig::NvDsUdp { media, transport_file, .. }) => {
                 let settings = self.settings.lock().unwrap();
-                match inner::build_nvdsudpsrc(media, &media.raw_caps) {
+                let sdp = transport_file.as_deref().unwrap_or("");
+                match inner::build_nvdsudpsrc(media, &media.raw_caps, sdp) {
                     Ok(chain) => {
                         inner::apply_nvdsudp_src_inner_properties(
                             &CAT,

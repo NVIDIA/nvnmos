@@ -769,10 +769,10 @@ pub(crate) fn build_mxlsrc(
 ///
 /// `bind-port` is set when `primary.source_port` is `Some` so
 /// the IS-04 / IS-05 advertised source port matches the wire.
-/// `bind-address` is set when `primary.interface_ip` is `Some` so
-/// unicast send routing picks the right NIC. For multicast
-/// destinations [`multicast_iface_name`] additionally resolves
-/// `interface_ip` to its kernel interface name and pins it on
+/// `bind-address` is set when [`UdpLeg::sender_interface_ip`] is
+/// `Some` so unicast send routing picks the right NIC. For multicast
+/// destinations [`multicast_iface_name`] additionally resolves that
+/// IP to its kernel interface name and pins it on
 /// `udpsink.multicast-iface` — `bind-address` alone does *not*
 /// constrain Linux multicast egress (`IP_MULTICAST_IF` does), so
 /// without this set on a multi-NIC host the kernel's default
@@ -858,12 +858,12 @@ pub(crate) fn build_udpsink(
     if let Some(port) = media.primary.source_port {
         udpsink.set_property("bind-port", i32::from(port));
     }
-    if let Some(addr) = &media.primary.interface_ip {
+    if let Some(addr) = media.primary.sender_interface_ip() {
         udpsink.set_property("bind-address", addr);
     }
     if let Some(iface) = multicast_iface_name(
         &media.primary.destination_ip,
-        media.primary.interface_ip.as_deref(),
+        media.primary.sender_interface_ip(),
     ) {
         udpsink.set_property("multicast-iface", &iface);
     }
@@ -1168,7 +1168,7 @@ pub(crate) fn build_udpsrc(
 
     if let Some(iface) = multicast_iface_name(
         &media.primary.destination_ip,
-        media.primary.interface_ip.as_deref(),
+        media.primary.receiver_interface_ip(),
     ) {
         udpsrc.set_property("multicast-iface", &iface);
     }
@@ -1273,10 +1273,23 @@ fn host_port(leg: &UdpLeg) -> String {
     format!("{}:{}", leg.destination_ip, leg.destination_port)
 }
 
-fn comma_separated_iface_ips(legs: &[&UdpLeg]) -> Option<String> {
+/// ST 2022-7 `nvdsudpsink.local-iface-ip`: one entry per leg.
+fn comma_separated_sender_interface_ips(legs: &[&UdpLeg]) -> Option<String> {
     let ips: Vec<&str> = legs
         .iter()
-        .filter_map(|leg| leg.interface_ip.as_deref())
+        .filter_map(|leg| leg.sender_interface_ip())
+        .collect();
+    if ips.len() != legs.len() {
+        return None;
+    }
+    Some(ips.join(","))
+}
+
+/// ST 2022-7 `nvdsudpsrc.local-iface-ip`: one entry per leg.
+fn comma_separated_receiver_interface_ips(legs: &[&UdpLeg]) -> Option<String> {
+    let ips: Vec<&str> = legs
+        .iter()
+        .filter_map(|leg| leg.receiver_interface_ip())
         .collect();
     if ips.len() != legs.len() {
         return None;
@@ -1287,7 +1300,7 @@ fn comma_separated_iface_ips(legs: &[&UdpLeg]) -> Option<String> {
 /// Rivermax wildcard for “any source” on an input flow (`rmx_input_set_flow_remote_addr`).
 const NVDSUDP_SOURCE_ANY: &str = "0.0.0.0";
 
-/// `nvdsudpsrc` `source-address`: one comma entry per stream; `0.0.0.0` when leg has no SSM.
+/// `nvdsudpsrc` `source-address`: one entry per stream; `0.0.0.0` when leg has no SSM.
 fn comma_separated_source_ips(legs: &[&UdpLeg]) -> Option<String> {
     if legs.is_empty() {
         return None;
@@ -1355,33 +1368,25 @@ pub(crate) fn build_nvdsudpsink(
         })?;
 
     let iface_ips = match &media.secondary {
-        Some(secondary) => comma_separated_iface_ips(&[&media.primary, secondary]),
-        None => media.primary.interface_ip.as_deref().map(str::to_owned),
+        Some(secondary) => comma_separated_sender_interface_ips(&[&media.primary, secondary]),
+        None => media.primary.sender_interface_ip().map(str::to_owned),
     };
     if let Some(iface) = iface_ips {
         sink.set_property("local-iface-ip", &iface);
     } else {
         gst::warning!(
             nvdsudp_log_cat(),
-            "build_nvdsudpsink: no interface IP on UdpLeg — configuring SDP should \
-             include a=x-nvnmos-iface-ip or a=source-filter for senders",
+            "build_nvdsudpsink: no sender interface IP on UdpLeg — configuring SDP should \
+             include a=x-nvnmos-iface-ip or a=source-filter with a local include source-address",
         );
     }
 
-    if matches!(
-        crate::nvdsudp::ts_refclk::ptp_src_from_sdp(sdp_text),
-        crate::nvdsudp::ts_refclk::PtpSrcResolution::UseInterfaceIp,
-    ) {
-        if let Some(iface) = &media.primary.interface_ip {
-            sink.set_property("ptp-src", iface);
-        } else {
-            gst::warning!(
-                nvdsudp_log_cat(),
-                "build_nvdsudpsink: SDP declares PTP ts-refclk but no interface IP \
-                 is available for ptp-src",
-            );
-        }
-    }
+    set_nvdsudp_ptp_src_from_sdp(
+        &sink,
+        "build_nvdsudpsink",
+        sdp_text,
+        media.primary.sender_interface_ip(),
+    );
 
     match pkt {
         Packetization::Video(v) => {
@@ -1404,12 +1409,38 @@ pub(crate) fn build_nvdsudpsink(
     })
 }
 
+/// When the effective SDP declares PTP via `a=ts-refclk:ptp=…`, bind
+/// Rivermax hardware timestamping to the join/egress NIC (`ptp-src`).
+fn set_nvdsudp_ptp_src_from_sdp(
+    element: &gst::Element,
+    context: &'static str,
+    sdp_text: &str,
+    interface_ip: Option<&str>,
+) {
+    if !matches!(
+        crate::nvdsudp::ts_refclk::ptp_src_from_sdp(sdp_text),
+        crate::nvdsudp::ts_refclk::PtpSrcResolution::UseInterfaceIp,
+    ) {
+        return;
+    }
+    if let Some(iface) = interface_ip {
+        element.set_property("ptp-src", iface);
+    } else {
+        gst::warning!(
+            nvdsudp_log_cat(),
+            "{context}: SDP declares PTP ts-refclk but no interface IP \
+             is available for ptp-src",
+        );
+    }
+}
+
 /// Build the inner DeepStream Rivermax source for `nmossrc` when
 /// `transport=nvdsudp`. Mode 3: built-in ST 2110-20/30/40 depacketization.
 /// No external depayloader.
 pub(crate) fn build_nvdsudpsrc(
     media: &UdpMedia,
     caps: &gst::Caps,
+    sdp_text: &str,
 ) -> Result<NvDsUdpSrcChain, anyhow::Error> {
     require_nvdsudp_factory("nvdsudpsrc")?;
     let pkt = packetization::from_media(media.format, &media.raw_caps, &media.rtp_caps)?;
@@ -1434,16 +1465,16 @@ pub(crate) fn build_nvdsudpsrc(
     };
 
     let iface_ips = match &media.secondary {
-        Some(secondary) => comma_separated_iface_ips(&[&media.primary, secondary]),
-        None => media.primary.interface_ip.as_deref().map(str::to_owned),
+        Some(secondary) => comma_separated_receiver_interface_ips(&[&media.primary, secondary]),
+        None => media.primary.receiver_interface_ip().map(str::to_owned),
     };
     if let Some(iface) = iface_ips {
         src.set_property("local-iface-ip", &iface);
     } else {
         gst::warning!(
             nvdsudp_log_cat(),
-            "build_nvdsudpsrc: no interface IP on UdpLeg — configuring SDP should \
-             include a=x-nvnmos-iface-ip for receivers",
+            "build_nvdsudpsrc: no receiver interface IP on UdpLeg — configuring SDP should \
+             include a=x-nvnmos-iface-ip",
         );
     }
     let source_legs = match &media.secondary {
@@ -1453,6 +1484,13 @@ pub(crate) fn build_nvdsudpsrc(
     if let Some(source) = comma_separated_source_ips(&source_legs) {
         src.set_property("source-address", &source);
     }
+
+    set_nvdsudp_ptp_src_from_sdp(
+        &src,
+        "build_nvdsudpsrc",
+        sdp_text,
+        media.primary.receiver_interface_ip(),
+    );
 
     match pkt {
         Packetization::Video(v) => {
@@ -2370,9 +2408,69 @@ mod tests {
             return;
         }
         let caps = anc_smpte291_media().raw_caps.clone();
-        let chain = build_nvdsudpsrc(&anc_smpte291_media(), &caps)
+        let chain = build_nvdsudpsrc(&anc_smpte291_media(), &caps, ANC_NVDSUDP_SDP)
             .expect("ANC nvdsudpsrc chain");
         assert_eq!(chain.transport.property::<u32>("header-size"), 20);
+    }
+
+    #[test]
+    fn build_nvdsudpsrc_ptp_sdp_sets_ptp_src_when_iface_present() {
+        if !nvdsudp_available() {
+            return;
+        }
+        let mut media = anc_smpte291_media();
+        media.primary.interface_ip = Some("192.0.2.11".to_owned());
+        let sdp = format!(
+            "{ANC_NVDSUDP_SDP}a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n",
+        );
+        let chain = build_nvdsudpsrc(&media, &media.raw_caps, &sdp).expect("nvdsudpsrc chain");
+        assert_eq!(
+            chain.transport.property::<String>("ptp-src"),
+            "192.0.2.11",
+            "PTP ts-refclk in SDP must drive ptp-src on nvdsudpsrc",
+        );
+    }
+
+    #[test]
+    fn build_nvdsudpsink_ptp_sdp_uses_source_filter_when_iface_ip_absent() {
+        if !nvdsudp_available() {
+            return;
+        }
+        let mut media = anc_smpte291_media();
+        media.primary.source_ip = Some("192.0.2.11".to_owned());
+        assert!(media.primary.interface_ip.is_none());
+        let sdp = format!(
+            "{ANC_NVDSUDP_SDP}a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n",
+        );
+        let chain = build_nvdsudpsink(&media, &sdp).expect("nvdsudpsink chain");
+        assert_eq!(
+            chain.transport.property::<String>("local-iface-ip"),
+            "192.0.2.11",
+            "sender SSM source-filter source must drive local-iface-ip when x-nvnmos-iface-ip absent",
+        );
+        assert_eq!(
+            chain.transport.property::<String>("ptp-src"),
+            "192.0.2.11",
+        );
+    }
+
+    #[test]
+    fn build_nvdsudpsrc_ptp_sdp_omits_ptp_src_without_interface_ip() {
+        if !nvdsudp_available() {
+            return;
+        }
+        let mut media = anc_smpte291_media();
+        // SSM sender pin — must not substitute for receiver interface IP.
+        media.primary.source_ip = Some("192.0.2.30".to_owned());
+        assert!(media.primary.receiver_interface_ip().is_none());
+        let sdp = format!(
+            "{ANC_NVDSUDP_SDP}a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n",
+        );
+        let chain = build_nvdsudpsrc(&media, &media.raw_caps, &sdp).expect("nvdsudpsrc chain");
+        assert!(
+            chain.transport.property::<Option<String>>("ptp-src").is_none(),
+            "receiver ptp-src must require a=x-nvnmos-iface-ip, not source-filter source",
+        );
     }
 
     #[test]
