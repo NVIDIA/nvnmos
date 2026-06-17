@@ -94,20 +94,29 @@ pub(crate) struct UdpLeg {
     pub(crate) destination_ip: String,
     /// Sender's `udpsink.port` / receiver's `udpsrc.port`.
     pub(crate) destination_port: u16,
-    /// Local interface IP. Nvds elements take this directly as
-    /// `local-iface-ip`; for `udpsrc` / `udpsink` we resolve to an
-    /// interface name and forward as `multicast-iface`.
+    /// Local NIC from `a=x-nvnmos-iface-ip`. For chain wiring use
+    /// [`Self::receiver_interface_ip`] or [`Self::sender_interface_ip`]
+    /// — do not read this field directly except for SDP round-trip.
     pub(crate) interface_ip: Option<String>,
-    /// SSM source-IP filter. Receiver-only. NMOS-RTP
-    /// `transport_params[i].source_ip` is a single string by
-    /// design — the SDP `a=source-filter:` line supports list /
-    /// exclude semantics but NMOS constrains itself to one
-    /// include-mode source per leg. We forward this directly to
-    /// `nvdsudpsrc.source-address`; on the gst-plugins-good
-    /// `udpsrc` path it's advertised in NMOS but not currently
-    /// enforced at the socket (no native source-filter property).
+    /// SSM `a=source-filter:` include source-address.
     pub(crate) source_ip: Option<String>,
     /// Sender source port. Forwarded as `udpsink.bind-port`.
     /// Sender-only.
     pub(crate) source_port: Option<u16>,
+}
+
+impl UdpLeg {
+    /// Receiver local NIC: `a=x-nvnmos-iface-ip` only.
+    /// Used to populate `udpsrc` `multicast-iface` (via `iface_name_for_ip`).
+    /// Used to populate `nvdsudpsrc` `local-iface-ip` and `ptp-src`.
+    pub(crate) fn receiver_interface_ip(&self) -> Option<&str> {
+        self.interface_ip.as_deref()
+    }
+
+    /// Sender local NIC: `a=x-nvnmos-iface-ip`, else SSM source-filter source.
+    /// Used to populate `udpsink` `bind-address` and `multicast-iface` (via `iface_name_for_ip`).
+    /// Used to populate `nvdsudpsink` `local-iface-ip` and `ptp-src`.
+    pub(crate) fn sender_interface_ip(&self) -> Option<&str> {
+        self.interface_ip.as_deref().or(self.source_ip.as_deref())
+    }
 }
