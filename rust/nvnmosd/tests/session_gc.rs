@@ -209,7 +209,10 @@ async fn open_session(client: &mut NvnmosDaemonClient<Channel>, seed: &str) -> S
         .open_session(OpenSessionRequest {
             node_config: Some(NodeConfig {
                 seed: seed.to_string(),
-                http_port: 18_010,
+                // Let the daemon allocate from NVNMOSD_HTTP_PORT_MIN..MAX.
+                // A fixed port races when these tests run in parallel (default
+                // `cargo test` uses multiple threads).
+                http_port: 0,
                 ..Default::default()
             }),
         })
