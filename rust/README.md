@@ -5,9 +5,154 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvnmos Rust Workspace
 
-Rust components for the NMOS daemon and GStreamer plugin family. Daemon
-operator docs: [`nvnmosd/README.md`](nvnmosd/README.md). Full architecture:
-[`doc/designs/nvnmosd/README.md`](../doc/designs/nvnmosd/README.md).
+Rust components for the NMOS daemon and GStreamer plugin family.
+
+| Doc | Contents |
+| --- | --- |
+| **This file — Quick start** | Build, run `nvnmosd`, try two example GStreamer pipelines |
+| [`nvnmosd/README.md`](nvnmosd/README.md) | Daemon operator reference (env vars, gRPC contract) |
+| [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md) | `nmossrc` / `nmossink` property reference |
+| [`gst-nmos-rs/pipeline-examples.md`](gst-nmos-rs/pipeline-examples.md) | Full pipeline catalog (MXL, flipper, demo script, …) |
+| [`doc/designs/nvnmosd/README.md`](../doc/designs/nvnmosd/README.md) | Architecture and design history |
+
+## Quick Start
+
+Three terminals on Linux: build once, start the daemon, then run a sender and
+receiver. The example scripts use RTP/UDP (`transport=udp`, ST 2110-style
+multicast) with `auto-activate=true`, so video starts without an NMOS
+Controller or IS-05 PATCH step.
+
+Tested on **Ubuntu 24.04** (same as CI).
+
+### Prerequisites
+
+**System packages** — C++ compiler, CMake, Python, libclang (`bindgen` for
+`nvnmos-sys`), and GStreamer headers plus runtime plugins for the example
+pipelines:
+
+```sh
+sudo apt-get update
+sudo apt-get install --no-install-recommends -y \
+  build-essential cmake python3 python3-venv \
+  clang \
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+```
+
+CMake must be **3.17+**. Ubuntu 24.04's `cmake` package is sufficient; on older
+distros use `pip install cmake~=3.17` inside the venv below (see
+[`README.md`](../README.md#cmake)).
+
+**Conan** — resolves and builds C++ dependencies for `libnvnmos`. Use a
+Python venv at the **repository root** so Conan stays off the system Python
+([`README.md`](../README.md#python-virtual-environment)):
+
+```sh
+# repository root
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install conan~=2.2
+conan profile detect    # creates ~/.conan2/profiles/default
+```
+
+Keep the venv activated while running `conan install` in the next section.
+
+**Rust** — install [rustup](https://rustup.rs/) if `cargo` is not on your
+`PATH`. Building inside `rust/` picks up [`rust-toolchain.toml`](rust-toolchain.toml).
+
+### Build `libnvnmos.so`
+
+From the **repository root** (full detail in the top-level
+[`README.md`](../README.md#building-the-nvnmos-library)):
+
+```sh
+conan install src \
+  --settings:all build_type=Release \
+  --build=missing \
+  --output-folder=src/conan \
+  --lockfile=src/conan.lock
+
+cmake -B build \
+  -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
+  -DCMAKE_BUILD_TYPE=Release \
+  src
+
+cmake --build build --parallel
+```
+
+Point the Rust build at the shared library:
+
+```sh
+export NVNMOS_LIB_DIR=$PWD/build
+export LD_LIBRARY_PATH=$NVNMOS_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+```
+
+### Build `nvnmosd` and the GStreamer plugin
+
+```sh
+cd rust
+cargo build -p nvnmosd -p gst-nmos-rs
+export GST_PLUGIN_PATH=$PWD/target/debug
+```
+
+### Start the daemon (terminal 1)
+
+```sh
+export NVNMOS_LIB_DIR=/path/to/nvnmos/build
+export LD_LIBRARY_PATH=$NVNMOS_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+
+cd rust
+cargo run --bin nvnmosd
+```
+
+### Run the sender pipeline (terminal 2)
+
+After the daemon is running, set the same library and plugin paths as above, then start the sender:
+
+```sh
+export NVNMOS_LIB_DIR=/path/to/nvnmos/build
+export LD_LIBRARY_PATH=$NVNMOS_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export GST_PLUGIN_PATH=/path/to/nvnmos/rust/target/debug
+
+cd rust/gst-nmos-rs
+# Optional: pick the NIC that carries multicast (defaults to first non-loopback).
+# export DEMO_NIC_IP=203.0.113.1
+./scripts/example-pipelines/1080p25-sender-udp.sh
+```
+
+This runs `videotestsrc` → `nmossink` (with `transport=udp`), registers an NMOS Sender, and publishes
+1080p25 test video to the default multicast group (see [`scripts/env.sh`](gst-nmos-rs/scripts/env.sh)).
+
+### Run the receiver pipeline (terminal 3)
+
+Start the sender first, then (same env vars as terminal 2):
+
+```sh
+export NVNMOS_LIB_DIR=/path/to/nvnmos/build
+export LD_LIBRARY_PATH=$NVNMOS_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export GST_PLUGIN_PATH=/path/to/nvnmos/rust/target/debug
+
+cd rust/gst-nmos-rs
+./scripts/example-pipelines/1080p25-receiver-udp.sh
+```
+
+This runs `nmossrc` (`transport=udp`) → `videoconvert` → `autovideosink`, subscribing to the
+same multicast group. You should see SMPTE color bars when both pipelines are playing.
+
+**Troubleshooting:** example scripts call `require_nvnmosd` and exit if
+`/tmp/nvnmosd.sock` is not listening (default daemon socket; override with
+`--uds` or `NVNMOSD_UDS` — see [`nvnmosd/README.md`](nvnmosd/README.md)).
+Use `RUST_LOG=info` on the daemon for verbose logs. Headless hosts: set
+`DEMO_VIDEO_SINK=fakesink` before the receiver script.
+
+**Next steps:** The interactive lab with IS-05 menu actions is
+[`gst-nmos-rs/scripts/gst-nmos-rs-demo.sh`](gst-nmos-rs/scripts/gst-nmos-rs-demo.sh).
+For MXL (`transport=mxl`), build the [MXL SDK](https://github.com/dmf-mxl/mxl)
+first, then see [`pipeline-examples.md`](gst-nmos-rs/pipeline-examples.md) for
+example pipelines. For compliant ST 2110 (`transport=nvdsudp`)
+using DeepStream and Rivermax SDK, see
+[`gst-nmos-rs/README.md`](gst-nmos-rs/README.md#transportnvdsudp-deepstream-rivermax).
 
 ## Crates
 
@@ -31,18 +176,16 @@ For a combined image with `nvnmosd` + `gst-nmos-rs` + plugins for `transport=mxl
 
 The workspace **MSRV** is **Rust 1.85** (`rust-version` in [`Cargo.toml`](Cargo.toml)). Development, CI, and container builds pin **1.92** in [`rust-toolchain.toml`](rust-toolchain.toml) — the minimum needed for gst-plugins-rs `0.15.2` in [`docker/gst-nmos-rs`](../docker/gst-nmos-rs/).
 
-`nvnmos-sys` links against a pre-built `libnvnmos.so`. The Rust crate does **not** build the C library itself (today); use the existing CMake/Conan workflow under `../src/` to produce `libnvnmos.so` first, then point the Rust build at it:
+`nvnmos-sys` links against a pre-built `libnvnmos.so`. The Rust crate does **not** build the C library itself; use the CMake/Conan flow under `../src/` ([Quick start — Build `libnvnmos.so`](#build-libnvnmosso)), then:
 
 ```sh
-# 1. Build libnvnmos.so via the existing CMake/Conan flow (one of the build*/ trees).
-# 2. Then:
-export NVNMOS_LIB_DIR=/absolute/path/to/build/tree     # contains libnvnmos.so
+export NVNMOS_LIB_DIR=/absolute/path/to/build     # contains libnvnmos.so
 cargo build --workspace
 ```
 
-`NVNMOS_LIB_DIR` is optional — when unset, the linker searches the standard system paths (`/usr/local/lib`, `/usr/lib`, etc.), so an installed `libnvnmos` works without the env var.
+`NVNMOS_LIB_DIR` is optional when `libnvnmos.so` is installed on the system linker path.
 
-`NVNMOS_INCLUDE_DIR` defaults to `../src/` (where `nvnmos.h` lives in-tree). Override only if you want to bindgen against a different header location.
+`NVNMOS_INCLUDE_DIR` defaults to `../src/` (where `nvnmos.h` lives in-tree). Override only to bindgen against a different header location.
 
 `protoc` is vendored via [`protobuf-src`](https://crates.io/crates/protobuf-src) — no system `protoc` is required.
 
@@ -62,8 +205,11 @@ Results land in `rust/nvnmosd-bench/results/` (gitignored).
 
 ## Running the Smoke Test
 
+RPC-only regression client — no GStreamer. For a full media walk-through, use
+[Quick start](#quick-start) instead.
+
 ```sh
-# Terminal 1: daemon
+# Terminal 1: daemon (with NVNMOS_LIB_DIR / LD_LIBRARY_PATH set)
 cargo run --bin nvnmosd
 
 # Terminal 2: example client
