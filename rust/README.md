@@ -99,15 +99,22 @@ export GST_PLUGIN_PATH=$PWD/target/debug
 ### Start the daemon (terminal 1)
 
 ```sh
+export NVNMOS_LIB_DIR=/path/to/nvnmos/build
+export LD_LIBRARY_PATH=$NVNMOS_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+
 cd rust
 cargo run --bin nvnmosd
 ```
 
 ### Run the sender pipeline (terminal 2)
 
-After the daemon is running, start the sender pipeline:
+After the daemon is running, set the same library and plugin paths as above, then start the sender:
 
 ```sh
+export NVNMOS_LIB_DIR=/path/to/nvnmos/build
+export LD_LIBRARY_PATH=$NVNMOS_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export GST_PLUGIN_PATH=/path/to/nvnmos/rust/target/debug
+
 cd rust/gst-nmos-rs
 # Optional: pick the NIC that carries multicast (defaults to first non-loopback).
 # export DEMO_NIC_IP=203.0.113.1
@@ -119,9 +126,13 @@ This runs `videotestsrc` → `nmossink` (with `transport=udp`), registers an NMO
 
 ### Run the receiver pipeline (terminal 3)
 
-Start the sender first, then:
+Start the sender first, then (same env vars as terminal 2):
 
 ```sh
+export NVNMOS_LIB_DIR=/path/to/nvnmos/build
+export LD_LIBRARY_PATH=$NVNMOS_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export GST_PLUGIN_PATH=/path/to/nvnmos/rust/target/debug
+
 cd rust/gst-nmos-rs
 ./scripts/example-pipelines/1080p25-receiver-udp.sh
 ```
