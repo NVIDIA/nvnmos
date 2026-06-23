@@ -45,6 +45,7 @@
 #include "nmos/api_utils.h"
 #include "nmos/capabilities.h"
 #include "nmos/channels.h"
+#include "nmos/channelmapping_resources.h"
 #include "nmos/clock_name.h"
 #include "nmos/clock_ref_type.h"
 #include "nmos/colorspace.h"
@@ -54,6 +55,7 @@
 #include "nmos/interlace_mode.h"
 #include "nmos/is04_versions.h"
 #include "nmos/is05_versions.h"
+#include "nmos/is08_versions.h"
 #include "nmos/media_type.h"
 #include "nmos/model.h"
 #include "nmos/node_interfaces.h"
@@ -91,7 +93,7 @@ namespace nvnmos
 
         // like nmos::make_session_description for 'internal' use
         // with support for the custom SDP attributes in nvnmos::attributes for senders as well as receivers
-        web::json::value make_session_description(const nmos::type& type, const utility::string_t& name, const utility::string_t& group_hint, const utility::string_t& session_info, const nmos::sdp_parameters& sdp_params, const web::json::value& transport_params, bool caps);
+        web::json::value make_session_description(const nmos::type& type, const nvnmos::name& name, const utility::string_t& group_hint, const utility::string_t& session_info, const nmos::sdp_parameters& sdp_params, const web::json::value& transport_params, bool caps);
 
         // like nmos::get_session_description_sdp_parameters
         // with support for multiple ts-refclk attributes in each media description
@@ -102,7 +104,7 @@ namespace nvnmos
         web::json::value get_session_description_transport_params(const nmos::type& type, const web::json::value& session_description);
 
         // get the (required) NvNmos resource name from the `x-nvnmos-name` custom attribute (not the SDP `s=` session-name line); throws std::invalid_argument if absent or empty
-        utility::string_t get_session_description_resource_name(const web::json::value& session_description);
+        nvnmos::name get_session_description_resource_name(const web::json::value& session_description);
 
         // get the optional group hint from the custom attribute
         utility::string_t get_session_description_group_hint(const web::json::value& session_description);
@@ -145,9 +147,9 @@ namespace nvnmos
         std::pair<utility::string_t, utility::string_t> make_resource_api_urls(const nmos::settings& settings, const nmos::id& id, const nmos::type& type);
 
         // set the name for the sender or receiver as a resource tag
-        void set_name(nmos::resource& resource, const utility::string_t& name);
+        void set_name(nmos::resource& resource, const nvnmos::name& name);
         // get the name for the sender or receiver from a resource tag
-        utility::string_t get_name(const nmos::resource& resource);
+        nvnmos::name get_name(const nmos::resource& resource);
 
         // set the group hint for the sender or receiver as a resource tag
         void set_group_hint(nmos::resource& resource, const utility::string_t& group_hint);
@@ -187,7 +189,7 @@ namespace nvnmos
         utility::string_t get_mxl_flow_def_tag(const web::json::value& flow_def, const web::json::field_as_value_or& tag_field);
         // extract the (required) name from the urn:x-nvnmos:tag:name tag;
         // throws std::invalid_argument if absent or empty
-        utility::string_t get_mxl_flow_def_name(const web::json::value& flow_def);
+        nvnmos::name get_mxl_flow_def_name(const web::json::value& flow_def);
         // extract an optional group hint from the urn:x-nmos:tag:grouphint/v1.0 tag (or empty)
         utility::string_t get_mxl_flow_def_group_hint(const web::json::value& flow_def);
         // returns true if the urn:x-nvnmos:tag:caps tag asks for a fully-flexible
@@ -227,17 +229,24 @@ namespace nvnmos
 
         // device
         {
-            auto device = nmos::make_device(device_id, node_id, {}, {}, settings);
+            // omit IS-08 controls until the first channel mapping
+            nmos::settings device_settings = settings;
+            if (0 <= nmos::fields::channelmapping_port(settings))
+            {
+                device_settings[nmos::fields::channelmapping_port] = -1;
+            }
+            auto device = nmos::make_device(device_id, node_id, {}, {}, device_settings);
             device.data[nmos::fields::label] = value::string(nvnmos::fields::device_label(settings));
             device.data[nmos::fields::description] = value::string(nvnmos::fields::device_description(settings));
             device.data[nmos::fields::tags] = nvnmos::fields::device_tags(settings);
             if (!nmos::insert_resource(node_resources, std::move(device)).second) throw node_implementation_exception();
         }
 
-        // insert empty clock, sender, receiver and interface_binding configs
+        // insert empty clock, sender, receiver, channelmapping and interface_binding configs
         settings[nvnmos::fields::clocks] = value::object();
         settings[nvnmos::fields::senders] = value::object();
         settings[nvnmos::fields::receivers] = value::object();
+        settings[nvnmos::fields::channelmappings] = value::object();
         settings[nvnmos::fields::interface_bindings] = value::object();
     }
 
@@ -850,7 +859,7 @@ namespace nvnmos
         nvnmos::fields::receivers(settings)[receiver_id] = impl::make_transport_settings(nmos::transports::mxl, utility::s2us(flow_def_));
     }
 
-    void node_implementation_remove_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const nmos::type& type, const utility::string_t& name, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
+    void node_implementation_remove_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const nmos::type& type, const nvnmos::name& name, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
     {
         using web::json::value;
         using web::json::value_of;
@@ -984,7 +993,7 @@ namespace nvnmos
     }
 
     // This removes sources/flows/senders from the model corresponding to the specified name.
-    void node_implementation_remove_sender(nmos::node_model& model, const utility::string_t& sender_name, slog::base_gate& gate)
+    void node_implementation_remove_sender(nmos::node_model& model, const nvnmos::name& sender_name, slog::base_gate& gate)
     {
         auto lock = model.write_lock(); // in order to update the resources
 
@@ -996,7 +1005,7 @@ namespace nvnmos
     }
 
     // This removes the receiver from the model corresponding to the specified name.
-    void node_implementation_remove_receiver(nmos::node_model& model, const utility::string_t& receiver_name, slog::base_gate& gate)
+    void node_implementation_remove_receiver(nmos::node_model& model, const nvnmos::name& receiver_name, slog::base_gate& gate)
     {
         auto lock = model.write_lock(); // in order to update the resources
 
@@ -1298,7 +1307,7 @@ namespace nvnmos
                     auto merged_sdp = impl::make_session_description(id_type.second, name, group_hint, session_info, sdp_params, transport_params, caps);
                     const auto sdp_data = sdp::make_session_description(merged_sdp);
 
-                    connection_activated(id_type.second, utility::us2s(name), sdp_data);
+                    connection_activated(id_type.second, name, sdp_data);
                 }
                 else if (is_mxl)
                 {
@@ -1312,7 +1321,7 @@ namespace nvnmos
                     // concrete flow id, so translate this to a deactivation callback.
                     if (mxl_flow_id_or_null.is_null())
                     {
-                        connection_activated(id_type.second, utility::us2s(name), {});
+                        connection_activated(id_type.second, name, {});
                         return;
                     }
 
@@ -1326,13 +1335,13 @@ namespace nvnmos
                     auto config_flow_def = web::json::value::parse(config_flow_def_data);
                     const auto flow_def_data = impl::make_mxl_flow_def(std::move(config_flow_def), mxl_domain_id, mxl_flow_id);
 
-                    connection_activated(id_type.second, utility::us2s(name), flow_def_data);
+                    connection_activated(id_type.second, name, flow_def_data);
                 }
             }
             else
             {
                 // deactivate sender or receiver
-                connection_activated(id_type.second, utility::us2s(name), {});
+                connection_activated(id_type.second, name, {});
             }
         };
     }
@@ -1465,7 +1474,7 @@ namespace nvnmos
         });
     }
 
-    void node_implementation_activate_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const nmos::type& type, const utility::string_t& name, const std::string& transport_file, nmos::settings& settings, slog::base_gate& gate)
+    void node_implementation_activate_connection_(nmos::resources& node_resources, nmos::resources& connection_resources, const nmos::type& type, const nvnmos::name& name, const std::string& transport_file, nmos::settings& settings, slog::base_gate& gate)
     {
         // find the sender or receiver with the specified name; a Sender and a
         // Receiver are permitted to share a name, so we pick by `type`.
@@ -1505,9 +1514,10 @@ namespace nvnmos
     }
 
     // This updates the transport parameters and transport file for the specified sender or receiver based on the specified transport file.
-    // `type` selects between a sender and a receiver with the same name on the Node.
+    // `type` selects between a sender and a receiver with the same `name` on the Node.
     // For now, the transport file is not validated against the existing sender or receiver capabilities and constraints.
-    void node_implementation_activate_connection(nmos::node_model& model, const nmos::type& type, const utility::string_t& name, const std::string& transport_file, slog::base_gate& gate)
+    // Does not invoke the application's connection activation callback.
+    void node_implementation_activate_connection(nmos::node_model& model, const nmos::type& type, const nvnmos::name& name, const std::string& transport_file, slog::base_gate& gate)
     {
         auto lock = model.write_lock(); // in order to update the resources
 
@@ -1520,7 +1530,7 @@ namespace nvnmos
     {
         // like nmos::make_session_description for 'internal' use
         // with support for the custom SDP attributes in nvnmos::attributes for senders as well as receivers
-        web::json::value make_session_description(const nmos::type& type, const utility::string_t& name, const utility::string_t& group_hint, const utility::string_t& session_info, const nmos::sdp_parameters& sdp_params, const web::json::value& transport_params, bool caps)
+        web::json::value make_session_description(const nmos::type& type, const nvnmos::name& name, const utility::string_t& group_hint, const utility::string_t& session_info, const nmos::sdp_parameters& sdp_params, const web::json::value& transport_params, bool caps)
         {
             using web::json::value;
 
@@ -1704,7 +1714,7 @@ namespace nvnmos
         }
 
         // get the (required) NvNmos resource name from the `x-nvnmos-name` custom attribute (not the SDP `s=` session-name line); throws std::invalid_argument if absent or empty
-        utility::string_t get_session_description_resource_name(const web::json::value& session_description)
+        nvnmos::name get_session_description_resource_name(const web::json::value& session_description)
         {
             const auto& session_attributes = sdp::fields::attributes(session_description);
             {
@@ -1963,7 +1973,7 @@ namespace nvnmos
         }
 
         // generate repeatable ids for the node's resources
-        nmos::id make_id(const nmos::id& seed_id, const nmos::type& type, const utility::string_t& name)
+        nmos::id make_id(const nmos::id& seed_id, const nmos::type& type, const nvnmos::name& name)
         {
             return nmos::make_repeatable_id(seed_id, U("/x-nmos/node/") + type.name + U('/') + name);
         }
@@ -2010,7 +2020,7 @@ namespace nvnmos
         }
 
         // set the name for the sender or receiver as a resource tag
-        void set_name(nmos::resource& resource, const utility::string_t& name)
+        void set_name(nmos::resource& resource, const nvnmos::name& name)
         {
             using web::json::value_of;
 
@@ -2018,7 +2028,7 @@ namespace nvnmos
         }
 
         // get the name for the sender or receiver from a resource tag
-        utility::string_t get_name(const nmos::resource& resource)
+        nvnmos::name get_name(const nmos::resource& resource)
         {
             const auto& names = nvnmos::fields::name(resource.data.at(nmos::fields::tags)).as_array();
             return !web::json::empty(names)
@@ -2224,7 +2234,7 @@ namespace nvnmos
 
         // extract the (required) name from the urn:x-nvnmos:tag:name tag;
         // throws std::invalid_argument if absent or empty
-        utility::string_t get_mxl_flow_def_name(const web::json::value& flow_def)
+        nvnmos::name get_mxl_flow_def_name(const web::json::value& flow_def)
         {
             const auto value = get_mxl_flow_def_tag(flow_def, nvnmos::fields::name);
             if (value.empty()) throw std::invalid_argument("Missing or empty urn:x-nvnmos:tag:name tag in MXL flow definition");
@@ -2279,10 +2289,354 @@ namespace nvnmos
 
             return utility::us2s(flow_def.serialize());
         }
+
+        bool has_channelmapping_control(const web::json::value& controls)
+        {
+            for (const auto& entry : controls.as_array())
+            {
+                if (boost::starts_with(nmos::fields::type(entry), U("urn:x-nmos:control:cm-ctrl/"))) return true;
+            }
+            return false;
+        }
+
+        void add_channelmapping_controls(web::json::value& controls, const nmos::settings& settings)
+        {
+            // see nmos::make_device
+            const auto hosts = nmos::get_hosts(settings);
+            for (const auto& version : nmos::is08_versions::from_settings(settings))
+            {
+                auto channelmapping_uri = web::uri_builder()
+                    .set_scheme(nmos::http_scheme(settings))
+                    .set_port(nmos::fields::channelmapping_port(settings))
+                    .set_path(U("/x-nmos/channelmapping/") + nmos::make_api_version(version));
+                const auto type = U("urn:x-nmos:control:cm-ctrl/") + nmos::make_api_version(version);
+
+                for (const auto& host : hosts)
+                {
+                    web::json::push_back(controls, web::json::value_of({
+                        { U("href"), channelmapping_uri.set_host(host).to_uri().to_string() },
+                        { nmos::fields::type, type },
+                        { U("authorization"), nmos::experimental::fields::server_authorization(settings) }
+                    }));
+                }
+            }
+        }
+
+        void remove_channelmapping_controls(web::json::value& controls)
+        {
+            auto filtered = web::json::value::array();
+            for (const auto& entry : controls.as_array())
+            {
+                if (boost::starts_with(nmos::fields::type(entry), U("urn:x-nmos:control:cm-ctrl/"))) continue;
+                web::json::push_back(filtered, entry);
+            }
+            controls = std::move(filtered);
+        }
+
+        bool channelmapping_ids_contains(const web::json::value& channelmapping_ids, const nmos::channelmapping_id& channelmapping_id)
+        {
+            for (const auto& id : channelmapping_ids.as_array())
+            {
+                if (id.as_string() == channelmapping_id) return true;
+            }
+            return false;
+        }
+
+        bool channelmapping_ids_contains(const web::json::value& mappings, const web::json::field_as_value& ids_field, const nmos::channelmapping_id& channelmapping_id)
+        {
+            for (const auto& entry : mappings.as_object())
+            {
+                if (channelmapping_ids_contains(ids_field(entry.second), channelmapping_id)) return true;
+            }
+            return false;
+        }
+
+        nvnmos::name name_for_output(const web::json::value& mappings, const nmos::channelmapping_id& output_id)
+        {
+            for (const auto& entry : mappings.as_object())
+            {
+                if (channelmapping_ids_contains(nvnmos::fields::channelmapping_outputs(entry.second), output_id))
+                {
+                    return entry.first;
+                }
+            }
+            return {};
+        }
+
+        channelmapping_active_map parse_active_map_from_output(const nmos::resource& output)
+        {
+            const auto channel_count = nmos::fields::channels(nmos::fields::endpoint_io(output.data)).size();
+            channelmapping_active_map entries(channel_count);
+
+            const auto& map = nmos::fields::map(nmos::fields::endpoint_active(output.data));
+            for (size_t index = 0; index < channel_count; ++index)
+            {
+                const web::json::field_as_value output_channel_field{ utility::ostringstreamed(index) };
+                if (!map.has_field(output_channel_field)) continue; // hm, unexpected, throw?
+
+                const auto& output_channel = output_channel_field(map);
+                const auto& input_or_null = nmos::fields::input(output_channel);
+                const auto& channel_index_or_null = nmos::fields::channel_index(output_channel);
+                if (input_or_null.is_null() || channel_index_or_null.is_null()) continue;
+
+                entries[index] = std::make_pair(input_or_null.as_string(), web::json::as<uint32_t>(channel_index_or_null));
+            }
+            return entries;
+        }
+
+        void maybe_add_device_channelmapping_control(nmos::node_model& model, slog::base_gate& gate)
+        {
+            if (model.channelmapping_resources.empty()) return;
+
+            const auto seed_id = nmos::experimental::fields::seed_id(model.settings);
+            const auto device_id = impl::make_id(seed_id, nmos::types::device);
+
+            const auto device = nmos::find_resource(model.node_resources, { device_id, nmos::types::device });
+            if (model.node_resources.end() == device) throw node_implementation_exception();
+            if (has_channelmapping_control(device->data.at(U("controls")))) return;
+
+            nmos::modify_resource(model.node_resources, device_id, [&](nmos::resource& device)
+            {
+                add_channelmapping_controls(device.data.at(U("controls")), model.settings);
+                nmos::set_resource_version(device, nmos::tai_now());
+            });
+
+            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Added IS-08 Channel Mapping API to device controls";
+        }
+
+        void maybe_remove_device_channelmapping_control(nmos::node_model& model, slog::base_gate& gate)
+        {
+            if (!model.channelmapping_resources.empty()) return;
+
+            const auto seed_id = nmos::experimental::fields::seed_id(model.settings);
+            const auto device_id = impl::make_id(seed_id, nmos::types::device);
+
+            const auto device = nmos::find_resource(model.node_resources, { device_id, nmos::types::device });
+            if (model.node_resources.end() == device) throw node_implementation_exception();
+            if (!has_channelmapping_control(device->data.at(U("controls")))) return;
+
+            nmos::modify_resource(model.node_resources, device_id, [&](nmos::resource& device)
+            {
+                remove_channelmapping_controls(device.data.at(U("controls")));
+                nmos::set_resource_version(device, nmos::tai_now());
+            });
+
+            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Removed IS-08 Channel Mapping API from device controls";
+        }
+    }
+
+    // This constructs and inserts IS-08 input/output resources into the model, based on the specified channel mapping configuration.
+    void node_implementation_add_channelmapping_(nmos::node_model& model, const nvnmos::name& name, const channelmapping_config& mapping, slog::base_gate& gate)
+    {
+        using web::json::value;
+        using web::json::value_of;
+
+        if (name.empty()) throw node_implementation_exception();
+        if (mapping.inputs.empty() && mapping.outputs.empty()) throw node_implementation_exception();
+
+        auto& channelmappings = nvnmos::fields::channelmappings(model.settings);
+        if (channelmappings.has_field(name)) throw node_implementation_exception();
+
+        const auto seed_id = nmos::experimental::fields::seed_id(model.settings);
+
+        std::vector<utility::string_t> input_ids;
+        std::vector<utility::string_t> output_ids;
+        input_ids.reserve(mapping.inputs.size());
+        output_ids.reserve(mapping.outputs.size());
+
+        for (const auto& input : mapping.inputs)
+        {
+            const auto& id = input.id;
+            if (id.empty()) throw node_implementation_exception();
+            if (impl::channelmapping_ids_contains(channelmappings, nvnmos::fields::channelmapping_inputs, id)) throw node_implementation_exception();
+            if (input.channel_labels.empty()) throw node_implementation_exception();
+
+            const auto parent_id = !input.parent_name.empty() ? impl::make_id(seed_id, input.parent_type, input.parent_name) : nmos::id{};
+            const auto parent = std::make_pair(parent_id, parent_id.empty() ? nmos::type{} : input.parent_type);
+            const auto reordering = 0 != input.block_size ? input.reordering : true;
+            const auto block_size = 0 != input.block_size ? input.block_size : 1u;
+
+            auto resource = nmos::make_channelmapping_input(id, input.name, input.description, parent, input.channel_labels, reordering, block_size);
+
+            if (!nmos::insert_resource(model.channelmapping_resources, std::move(resource)).second) throw node_implementation_exception();
+            input_ids.push_back(id);
+        }
+
+        for (const auto& output : mapping.outputs)
+        {
+            const auto& id = output.id;
+            if (id.empty()) throw node_implementation_exception();
+            if (impl::channelmapping_ids_contains(channelmappings, nvnmos::fields::channelmapping_outputs, id)) throw node_implementation_exception();
+            if (output.channel_labels.empty()) throw node_implementation_exception();
+
+            const auto source_id = !output.sender_name.empty() ? impl::make_id(seed_id, nmos::types::source, output.sender_name) : nmos::id{};
+
+            auto resource = nmos::make_channelmapping_output(id, output.name, output.description, source_id, output.channel_labels, output.routable_inputs);
+
+            if (!nmos::insert_resource(model.channelmapping_resources, std::move(resource)).second) throw node_implementation_exception();
+            output_ids.push_back(id);
+        }
+
+        channelmappings[name] = value_of({
+            { nvnmos::fields::channelmapping_inputs, web::json::value_from_elements(input_ids) },
+            { nvnmos::fields::channelmapping_outputs, web::json::value_from_elements(output_ids) }
+        });
+
+        impl::maybe_add_device_channelmapping_control(model, gate);
+
+        slog::log<slog::severities::info>(gate, SLOG_FLF)
+            << "Added channel mapping " << name << " with " << input_ids.size() << " inputs and " << output_ids.size() << " outputs";
+    }
+
+    // This removes IS-08 input/output resources from the model corresponding to the specified name.
+    void node_implementation_remove_channelmapping_(nmos::node_model& model, const nvnmos::name& name, slog::base_gate& gate)
+    {
+        using web::json::value;
+
+        auto& channelmappings = nvnmos::fields::channelmappings(model.settings);
+        if (!channelmappings.has_field(name)) throw node_implementation_exception();
+
+        const auto& config = channelmappings.at(name);
+
+        const auto erase_ids = [&](const web::json::value& ids, const nmos::type& type)
+        {
+            for (const auto& id : ids.as_array())
+            {
+                const auto resource_id = nmos::make_channelmapping_resource_id({ id.as_string(), type });
+                nmos::erase_resource(model.channelmapping_resources, resource_id);
+            }
+        };
+
+        erase_ids(nvnmos::fields::channelmapping_inputs(config), nmos::types::input);
+        erase_ids(nvnmos::fields::channelmapping_outputs(config), nmos::types::output);
+        channelmappings.erase(name);
+
+        impl::maybe_remove_device_channelmapping_control(model, gate);
+
+        slog::log<slog::severities::info>(gate, SLOG_FLF) << "Removed channel mapping " << name;
+    }
+
+    // This updates the published active map for the specified output in the channel mapping, based on the specified active map.
+    // `output_id` is the IS-08 output id. `active_map` length must equal that output's channel count; index i is output channel i.
+    // Does not invoke the application's channel mapping activation callback.
+    void node_implementation_activate_channelmapping_(nmos::node_model& model, const nvnmos::name& name, const nmos::channelmapping_id& output_id, const channelmapping_active_map& active_map, slog::base_gate& gate)
+    {
+        const auto& channelmappings = nvnmos::fields::channelmappings(model.settings);
+        if (!channelmappings.has_field(name))
+        {
+            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Could not find channel mapping with name: " << name;
+            throw node_implementation_exception();
+        }
+
+        const auto& config = channelmappings.at(name);
+        const auto& output_ids = nvnmos::fields::channelmapping_outputs(config);
+        if (!impl::channelmapping_ids_contains(output_ids, output_id))
+        {
+            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Output " << output_id << " is not in channel mapping " << name;
+            throw node_implementation_exception();
+        }
+
+        const auto resource_id = nmos::make_channelmapping_resource_id({ output_id, nmos::types::output });
+        const auto output = nmos::find_resource(model.channelmapping_resources, { resource_id, nmos::types::output });
+        if (model.channelmapping_resources.end() == output)
+        {
+            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Could not find channel mapping output resource: " << output_id;
+            throw node_implementation_exception();
+        }
+
+        const auto channel_count = nmos::fields::channels(nmos::fields::endpoint_io(output->data)).size();
+        if (active_map.size() != channel_count)
+        {
+            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Active map length " << active_map.size() << " does not match output " << output_id << " channel count " << channel_count;
+            throw node_implementation_exception();
+        }
+
+        const auto map_value = nmos::make_channelmapping_active_map(active_map);
+        const auto activation_time = nmos::tai_now();
+
+        nmos::modify_resource(model.channelmapping_resources, resource_id, [&](nmos::resource& resource)
+        {
+            nmos::fields::endpoint_active(resource.data)[nmos::fields::map] = map_value;
+        });
+
+        // Update the IS-04 source's version even though this is an out-of-band update (IS-08 §3.1)
+
+        const auto& source_id_or_null = nmos::fields::endpoint_io(output->data).at(nmos::fields::source_id);
+        if (!source_id_or_null.is_null())
+        {
+            nmos::modify_resource(model.node_resources, source_id_or_null.as_string(), [&](nmos::resource& source)
+            {
+                nmos::set_resource_version(source, activation_time);
+            });
+        }
+
+        // Update the IS-04 device's version
+
+        // hmm, we bump device version for every output activation, rather than once per batch...
+
+        const auto seed_id = nmos::experimental::fields::seed_id(model.settings);
+        const auto device_id = impl::make_id(seed_id, nmos::types::device);
+        nmos::modify_resource(model.node_resources, device_id, [&](nmos::resource& device)
+        {
+            nmos::set_resource_version(device, activation_time);
+        });
+
+        slog::log<slog::severities::info>(gate, SLOG_FLF)
+            << "Published channelmapping active map for channel mapping " << name << " output " << output_id;
+    }
+
+    // This constructs and inserts IS-08 input/output resources into the model, based on the specified channel mapping configuration.
+    void node_implementation_add_channelmapping(nmos::node_model& model, const nvnmos::name& name, const channelmapping_config& mapping, slog::base_gate& gate)
+    {
+        auto lock = model.write_lock();
+        node_implementation_add_channelmapping_(model, name, mapping, gate);
+        model.notify();
+    }
+
+    // This removes IS-08 input/output resources from the model corresponding to the specified name.
+    void node_implementation_remove_channelmapping(nmos::node_model& model, const nvnmos::name& name, slog::base_gate& gate)
+    {
+        auto lock = model.write_lock();
+        node_implementation_remove_channelmapping_(model, name, gate);
+        model.notify();
+    }
+
+    // This updates the published active map for the specified output in the channel mapping, based on the specified active map.
+    // `output_id` is the IS-08 output id. `active_map` length must equal that output's channel count; index i is output channel i.
+    // Does not invoke the application's channel mapping activation callback.
+    void node_implementation_activate_channelmapping(nmos::node_model& model, const nvnmos::name& name, const nmos::channelmapping_id& output_id, const channelmapping_active_map& active_map, slog::base_gate& gate)
+    {
+        auto lock = model.write_lock();
+        node_implementation_activate_channelmapping_(model, name, output_id, active_map, gate);
+        model.notify();
+    }
+
+    nmos::channelmapping_activation_handler make_node_implementation_channelmapping_activation_handler(channelmapping_activation_handler channelmapping_activated, nmos::settings& settings, slog::base_gate& gate)
+    {
+        return [&settings, channelmapping_activated, &gate](const nmos::resource& channelmapping_output)
+        {
+            const auto output_id = nmos::fields::channelmapping_id(channelmapping_output.data);
+            const auto name = impl::name_for_output(nvnmos::fields::channelmappings(settings), output_id);
+            if (name.empty())
+            {
+                slog::log<slog::severities::warning>(gate, SLOG_FLF) << "Channel mapping activation for unknown output: " << output_id;
+                return;
+            }
+
+            const auto parsed = impl::parse_active_map_from_output(channelmapping_output);
+            const bool success = channelmapping_activated
+                ? channelmapping_activated(name, output_id, parsed)
+                : true;
+            if (!success)
+            {
+                slog::log<slog::severities::warning>(gate, SLOG_FLF)
+                    << "Channel mapping activation failed for " << name << " output " << output_id;
+            }
+        };
     }
 
     // This constructs all the callbacks used to integrate the application into the server instance for the NMOS Node.
-    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, slog::base_gate& gate)
+    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, channelmapping_activation_handler channelmapping_activated, slog::base_gate& gate)
     {
         return nmos::experimental::node_implementation()
             .on_load_server_certificates(nmos::make_load_server_certificates_handler(model.settings, gate))
@@ -2294,6 +2648,7 @@ namespace nvnmos
             .on_validate_connection_resource_patch(make_node_implementation_patch_validator()) // may be omitted if not required
             .on_resolve_auto(make_node_implementation_auto_resolver(model.settings))
             .on_set_transportfile(make_node_implementation_transportfile_setter(model.node_resources, model.settings))
-            .on_connection_activated(make_node_implementation_connection_activation_handler(std::move(connection_activated), model.settings, gate));
+            .on_connection_activated(make_node_implementation_connection_activation_handler(std::move(connection_activated), model.settings, gate))
+            .on_channelmapping_activated(make_node_implementation_channelmapping_activation_handler(std::move(channelmapping_activated), model.settings, gate));
     }
 }

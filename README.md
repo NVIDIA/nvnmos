@@ -112,17 +112,19 @@ Existing application code needs to be updated as itemised below - mostly possibl
 
 ### New ID-Accessors
 
-The NMOS resource UUIDs are deterministic pure functions of `(seed, side, name)`. Three pure accessors compute them without a server:
+The NMOS resource UUIDs are deterministic pure functions of `(seed, side, name)`. Pure accessors compute them without a server:
 
 - `nmos_make_node_id(seed, out, out_len)`
 - `nmos_make_sender_id(seed, sender_name, out, out_len)`
 - `nmos_make_receiver_id(seed, receiver_name, out, out_len)`
+- `nmos_make_source_id(seed, source_name, out, out_len)`
 
-Three live accessors look them up on a running server:
+Live accessors look them up on a running server:
 
 - `nmos_get_node_id(server, out, out_len)`
 - `nmos_get_sender_id(server, sender_name, out, out_len)`
 - `nmos_get_receiver_id(server, receiver_name, out, out_len)`
+- `nmos_get_source_id(server, source_name, out, out_len)`
 
 All write a null-terminated UUID into a buffer of at least `NVNMOS_ID_LEN` bytes (37, including the terminator). Each returns `bool`.
 
