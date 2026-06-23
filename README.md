@@ -31,6 +31,11 @@ The NvNmos library supports the following specifications, using the [Sony nmos-c
 - Session Description Protocol conforming to SMPTE ST 2110-20, -22, -30, -40, and ST 2022-7
 - MXL flow definition JSON as consumed by the [MXL SDK](https://github.com/dmf-mxl/mxl)
 
+## Contributing
+
+- How to contribute: [CONTRIBUTING.md](https://github.com/NVIDIA/nvnmos/blob/main/CONTRIBUTING.md)
+- How to report a vulnerability: [SECURITY.md](https://github.com/NVIDIA/nvnmos/blob/main/SECURITY.md)
+
 ## Supported Platforms
 
 The library is intended to be portable to different environments.
