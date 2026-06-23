@@ -14,6 +14,8 @@ Rust components for the NMOS daemon and GStreamer plugin family.
 | [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md) | `nmossrc` / `nmossink` property reference |
 | [`gst-nmos-rs/pipeline-examples.md`](gst-nmos-rs/pipeline-examples.md) | Full pipeline catalog (MXL, flipper, demo script, …) |
 | [`doc/designs/nvnmosd/README.md`](../doc/designs/nvnmosd/README.md) | Architecture and design history |
+| [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Contribution guidelines (sign-off, DCO) |
+| [`SECURITY.md`](../SECURITY.md) | Security vulnerability reporting |
 
 ## Quick Start
 
