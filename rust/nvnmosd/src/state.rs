@@ -49,11 +49,15 @@ use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use nvnmos::{
-    AssetConfig, NetworkServicesConfig, NodeConfig, NodeServer, ReceiverConfig,
+    ChannelMappingActiveMapEntry, AssetConfig, ChannelMappingConfig, ChannelMappingInput, ChannelMappingOutput,
+    ChannelMappingParentType, NetworkServicesConfig, NodeConfig, NodeServer, ReceiverConfig,
     SenderConfig, Side as WrapperSide, Transport,
 };
 use nvnmos_rpc::v1::{
-    ActivationEvent, AssetConfig as ProtoAssetConfig,
+    ActivationEvent, ActiveMapEntry as ProtoActiveMapEntry, AssetConfig as ProtoAssetConfig,
+    ChannelMappingActivationEvent, ChannelMappingInput as ProtoChannelMappingInput,
+    ChannelMappingOutput as ProtoChannelMappingOutput,
+    ChannelMappingParentType as ProtoChannelMappingParentType,
     NetworkServicesConfig as ProtoNetworkServicesConfig, NodeConfig as ProtoNodeConfig,
     Side as ProtoSide, Transport as ProtoTransport,
 };
@@ -256,6 +260,8 @@ struct SessionEntry {
     /// [`State::close_session`] for O(1)-per-resource cleanup without
     /// scanning the global [`State::resources`] map.
     resources: HashSet<String>,
+    /// `channelmapping_handle`s owned by this session.
+    channelmappings: HashSet<String>,
 }
 
 /// Outcome of [`State::open_session`], for the caller's log line.
@@ -369,6 +375,52 @@ struct PendingActivation {
     ack_tx: std_mpsc::SyncSender<AckOutcome>,
 }
 
+struct ChannelMappingEntry {
+    name: String,
+    node_seed: String,
+    session_handle: String,
+    output_ids: HashSet<String>,
+}
+
+struct ChannelMappingActivationSubscriber {
+    tx: tokio_mpsc::Sender<Result<ChannelMappingActivationEvent, Status>>,
+}
+
+struct PendingChannelMappingActivation {
+    session_handle: String,
+    ack_tx: std_mpsc::SyncSender<AckOutcome>,
+}
+
+#[derive(Debug)]
+pub struct AddChannelMappingOutcome {
+    pub channelmapping_handle: String,
+    pub input_ids: Vec<String>,
+    pub output_ids: Vec<String>,
+    pub node_seed: String,
+}
+
+#[derive(Debug)]
+pub struct RemoveChannelMappingOutcome {
+    pub node_seed: String,
+    pub name: String,
+}
+
+#[derive(Debug)]
+pub struct SyncChannelMappingStateOutcome {
+    pub node_seed: String,
+    pub name: String,
+}
+
+pub enum ChannelMappingActivationDispatch {
+    Routed {
+        activation_handle: String,
+        ack_rx: std_mpsc::Receiver<AckOutcome>,
+    },
+    NoChannelMapping,
+    NoSubscriber,
+    SubscriberBusy,
+}
+
 /// Result of [`State::dispatch_activation`], returned to the activation
 /// router on the libnvnmos worker thread. Successful routing yields a
 /// receiver the router blocks on; every other variant maps to an
@@ -413,11 +465,20 @@ pub struct State {
     /// Activations currently waiting on `AckActivation`, keyed by
     /// daemon-allocated `activation_handle`.
     pending_activations: HashMap<String, PendingActivation>,
+    channelmappings: HashMap<String, ChannelMappingEntry>,
+    channelmappings_by_name: HashMap<(String, String), String>,
+    /// `(node_seed, output_id) → channelmapping_handle` — activation dispatch
+    /// index (parallel to IS-05 `by_name → resource_handle`).
+    outputs_by_id: HashMap<(String, String), String>,
+    channelmapping_subscriptions: HashMap<String, ChannelMappingActivationSubscriber>,
+    pending_channelmapping_activations: HashMap<String, PendingChannelMappingActivation>,
     /// `http_port` → `node_seed` for Nodes currently owned by the daemon.
     http_ports: HashMap<u16, String>,
     next_session_id: AtomicU64,
     next_resource_id: AtomicU64,
     next_activation_id: AtomicU64,
+    next_channelmapping_id: AtomicU64,
+    next_channelmapping_activation_id: AtomicU64,
 }
 
 impl State {
@@ -429,10 +490,17 @@ impl State {
             by_name: HashMap::new(),
             subscriptions: HashMap::new(),
             pending_activations: HashMap::new(),
+            channelmappings: HashMap::new(),
+            channelmappings_by_name: HashMap::new(),
+            outputs_by_id: HashMap::new(),
+            channelmapping_subscriptions: HashMap::new(),
+            pending_channelmapping_activations: HashMap::new(),
             http_ports: HashMap::new(),
             next_session_id: AtomicU64::new(0),
             next_resource_id: AtomicU64::new(0),
             next_activation_id: AtomicU64::new(0),
+            next_channelmapping_id: AtomicU64::new(0),
+            next_channelmapping_activation_id: AtomicU64::new(0),
         }
     }
 
@@ -504,6 +572,7 @@ impl State {
             SessionEntry {
                 node_seed: seed,
                 resources: HashSet::new(),
+                channelmappings: HashSet::new(),
             },
         );
         Ok(OpenOutcome {
@@ -592,6 +661,37 @@ impl State {
                      continuing"
                 );
             }
+        }
+
+        for channelmapping_handle in session.channelmappings {
+            if let Some(entry) = self.channelmappings.remove(&channelmapping_handle) {
+                self.channelmappings_by_name
+                    .remove(&(entry.node_seed.clone(), entry.name.clone()));
+                for output_id in &entry.output_ids {
+                    self.outputs_by_id
+                        .remove(&(entry.node_seed.clone(), output_id.clone()));
+                }
+                if let Err(e) = node.server.remove_channelmapping(&entry.name) {
+                    tracing::warn!(
+                        %channelmapping_handle,
+                        session_handle,
+                        name = %entry.name,
+                        error = %e,
+                        "close_session: libnvnmos remove_channelmapping failed; continuing"
+                    );
+                }
+            }
+        }
+
+        self.channelmapping_subscriptions.remove(session_handle);
+        let aborted_cm: Vec<String> = self
+            .pending_channelmapping_activations
+            .iter()
+            .filter(|(_, p)| p.session_handle == session_handle)
+            .map(|(h, _)| h.clone())
+            .collect();
+        for handle in aborted_cm {
+            self.pending_channelmapping_activations.remove(&handle);
         }
 
         let entry = self
@@ -1017,6 +1117,13 @@ impl State {
         Ok(())
     }
 
+    /// True when `session_handle` has a live activation subscription
+    /// (IS-05 and/or IS-08).
+    pub fn has_any_activation_subscription(&self, session_handle: &str) -> bool {
+        self.has_active_subscription(session_handle)
+            || self.has_active_channelmapping_subscription(session_handle)
+    }
+
     /// True when `session_handle` has a `SubscribeActivations` slot whose
     /// receiver is still connected.
     pub fn has_active_subscription(&self, session_handle: &str) -> bool {
@@ -1036,13 +1143,24 @@ impl State {
         }
     }
 
+    /// Remove a channel-mapping subscription entry whose receiver has been dropped.
+    pub fn reap_closed_channelmapping_subscription(&mut self, session_handle: &str) {
+        if self
+            .channelmapping_subscriptions
+            .get(session_handle)
+            .is_some_and(|s| s.tx.is_closed())
+        {
+            self.channelmapping_subscriptions.remove(session_handle);
+        }
+    }
+
     /// Called when a `SubscribeActivations` server stream is dropped.
     /// Returns `true` when the session still exists and has no live
     /// subscription (caller should arm the resubscribe watchdog).
     pub fn on_subscription_stream_ended(&mut self, session_handle: &str) -> bool {
         self.reap_closed_subscription(session_handle);
         self.sessions.contains_key(session_handle)
-            && !self.has_active_subscription(session_handle)
+            && !self.has_any_activation_subscription(session_handle)
     }
 
     /// Whether `session_handle` is still open.
@@ -1265,6 +1383,385 @@ impl State {
     pub(super) fn assign_http_port_for_test(&mut self, port: u16, seed: &str) {
         self.http_ports.insert(port, seed.to_string());
     }
+
+    fn allocate_channelmapping_handle(&self) -> String {
+        let n = self
+            .next_channelmapping_id
+            .fetch_add(1, Ordering::Relaxed);
+        format!("cm-{n}")
+    }
+
+    fn allocate_channelmapping_activation_handle(&self) -> String {
+        let n = self
+            .next_channelmapping_activation_id
+            .fetch_add(1, Ordering::Relaxed);
+        format!("cm-act-{n}")
+    }
+
+    pub fn has_active_channelmapping_subscription(&self, session_handle: &str) -> bool {
+        self.channelmapping_subscriptions
+            .get(session_handle)
+            .is_some_and(|s| !s.tx.is_closed())
+    }
+
+    pub fn subscribe_channelmapping_activations(
+        &mut self,
+        session_handle: &str,
+        tx: tokio_mpsc::Sender<Result<ChannelMappingActivationEvent, Status>>,
+    ) -> Result<(), Status> {
+        if !self.sessions.contains_key(session_handle) {
+            return Err(Status::not_found(format!(
+                "session_handle {session_handle:?} is not known to this daemon"
+            )));
+        }
+        if let Some(existing) = self.channelmapping_subscriptions.get(session_handle) {
+            if !existing.tx.is_closed() {
+                return Err(Status::already_exists(format!(
+                    "session {session_handle:?} already has an active \
+                     SubscribeChannelMappingActivations stream"
+                )));
+            }
+        }
+        self.channelmapping_subscriptions.insert(
+            session_handle.to_string(),
+            ChannelMappingActivationSubscriber { tx },
+        );
+        Ok(())
+    }
+
+    pub fn on_channelmapping_subscription_stream_ended(&mut self, session_handle: &str) -> bool {
+        if self
+            .channelmapping_subscriptions
+            .get(session_handle)
+            .is_some_and(|s| s.tx.is_closed())
+        {
+            self.channelmapping_subscriptions.remove(session_handle);
+        }
+        self.sessions.contains_key(session_handle)
+            && !self.has_any_activation_subscription(session_handle)
+    }
+
+    /// Add a channel mapping. Parallel to [`State::add_resource`].
+    ///
+    /// The validation flow:
+    ///
+    /// 1. Pre-check in daemon state — refuses a duplicate channel mapping
+    ///    `name` on the same Node before any FFI happens.
+    /// 2. Assign default IS-08 ids when proto `id` is empty (nvnmosd
+    ///    policy). `routable_inputs` is forwarded like libnvnmos C
+    ///    (empty → unrestricted caps).
+    /// 3. `add_channelmapping` into libnvnmos. Geometry, duplicate ids,
+    ///    labels, and parent/sender linkage are validated there.
+    pub fn add_channelmapping(
+        &mut self,
+        session_handle: &str,
+        name: &str,
+        inputs: &[ProtoChannelMappingInput],
+        outputs: &[ProtoChannelMappingOutput],
+    ) -> Result<AddChannelMappingOutcome, Status> {
+        if name.is_empty() {
+            return Err(Status::invalid_argument("name must be non-empty"));
+        }
+
+        self.reap_closed_channelmapping_subscription(session_handle);
+        if !self.has_active_channelmapping_subscription(session_handle) {
+            return Err(Status::failed_precondition(
+                "SubscribeChannelMappingActivations required before AddChannelMapping",
+            ));
+        }
+
+        let session = self.sessions.get(session_handle).ok_or_else(|| {
+            Status::not_found(format!(
+                "session_handle {session_handle:?} is not known to this daemon"
+            ))
+        })?;
+        let node_seed = session.node_seed.clone();
+        if self
+            .channelmappings_by_name
+            .contains_key(&(node_seed.clone(), name.to_string()))
+        {
+            return Err(Status::already_exists(format!(
+                "channel mapping name {name:?} already exists on node_seed \
+                 {node_seed:?}"
+            )));
+        }
+
+        let first_on_node = !self
+            .channelmappings
+            .values()
+            .any(|entry| entry.node_seed == node_seed);
+
+        let effective_input_ids =
+            effective_channelmapping_input_ids(name, inputs, first_on_node);
+        let effective_output_ids =
+            effective_channelmapping_output_ids(name, outputs, first_on_node);
+        let mapping = build_channel_mapping(
+            inputs,
+            outputs,
+            &effective_input_ids,
+            &effective_output_ids,
+        );
+
+        let node = self.nodes.get(&node_seed).ok_or_else(|| {
+            Status::internal(format!(
+                "session {session_handle:?} referenced seed {node_seed:?} but no Node entry \
+                 exists"
+            ))
+        })?;
+
+        node.server.add_channelmapping(name, &mapping).map_err(|e| {
+            Status::invalid_argument(format!(
+                "libnvnmos add_channelmapping failed (duplicate or invalid geometry): {e}"
+            ))
+        })?;
+
+        let channelmapping_handle = self.allocate_channelmapping_handle();
+        let output_id_set: HashSet<String> = effective_output_ids.iter().cloned().collect();
+        for id in &effective_output_ids {
+            self.outputs_by_id.insert(
+                (node_seed.clone(), id.clone()),
+                channelmapping_handle.clone(),
+            );
+        }
+
+        self.channelmappings.insert(
+            channelmapping_handle.clone(),
+            ChannelMappingEntry {
+                name: name.to_string(),
+                node_seed: node_seed.clone(),
+                session_handle: session_handle.to_string(),
+                output_ids: output_id_set,
+            },
+        );
+        self.channelmappings_by_name.insert(
+            (node_seed.clone(), name.to_string()),
+            channelmapping_handle.clone(),
+        );
+        self.sessions
+            .get_mut(session_handle)
+            .expect("session existed at start")
+            .channelmappings
+            .insert(channelmapping_handle.clone());
+
+        Ok(AddChannelMappingOutcome {
+            channelmapping_handle,
+            input_ids: effective_input_ids,
+            output_ids: effective_output_ids,
+            node_seed,
+        })
+    }
+
+    pub fn remove_channelmapping(
+        &mut self,
+        session_handle: &str,
+        channelmapping_handle: &str,
+    ) -> Result<RemoveChannelMappingOutcome, Status> {
+        let session = self.sessions.get(session_handle).ok_or_else(|| {
+            Status::not_found(format!(
+                "session_handle {session_handle:?} is not known to this daemon"
+            ))
+        })?;
+        if !session.channelmappings.contains(channelmapping_handle) {
+            return Err(Status::not_found(format!(
+                "session {session_handle:?} does not own channelmapping_handle \
+                 {channelmapping_handle:?}"
+            )));
+        }
+
+        let entry = self
+            .channelmappings
+            .remove(channelmapping_handle)
+            .ok_or_else(|| {
+                Status::internal(format!(
+                    "session {session_handle:?} owns channelmapping_handle \
+                     {channelmapping_handle:?} but no entry exists"
+                ))
+            })?;
+        self.channelmappings_by_name
+            .remove(&(entry.node_seed.clone(), entry.name.clone()));
+        for output_id in &entry.output_ids {
+            self.outputs_by_id
+                .remove(&(entry.node_seed.clone(), output_id.clone()));
+        }
+        self.sessions
+            .get_mut(session_handle)
+            .expect("checked above")
+            .channelmappings
+            .remove(channelmapping_handle);
+
+        if let Some(node) = self.nodes.get(&entry.node_seed) {
+            if let Err(e) = node.server.remove_channelmapping(&entry.name) {
+                tracing::warn!(
+                    channelmapping_handle,
+                    name = %entry.name,
+                    error = %e,
+                    "remove_channelmapping: libnvnmos remove failed; daemon state already cleared"
+                );
+            }
+        }
+
+        Ok(RemoveChannelMappingOutcome {
+            node_seed: entry.node_seed,
+            name: entry.name,
+        })
+    }
+
+    pub fn sync_channelmapping_state(
+        &mut self,
+        session_handle: &str,
+        channelmapping_handle: &str,
+        output_id: &str,
+        active_map: &[ProtoActiveMapEntry],
+    ) -> Result<SyncChannelMappingStateOutcome, Status> {
+        let session = self.sessions.get(session_handle).ok_or_else(|| {
+            Status::not_found(format!(
+                "session_handle {session_handle:?} is not known to this daemon"
+            ))
+        })?;
+        if !session.channelmappings.contains(channelmapping_handle) {
+            return Err(Status::not_found(format!(
+                "session {session_handle:?} does not own channelmapping_handle \
+                 {channelmapping_handle:?}"
+            )));
+        }
+
+        let entry = self.channelmappings.get(channelmapping_handle).ok_or_else(|| {
+            Status::internal(format!(
+                "session {session_handle:?} owns channelmapping_handle \
+                 {channelmapping_handle:?} but no entry exists"
+            ))
+        })?;
+        let node = self.nodes.get(&entry.node_seed).ok_or_else(|| {
+            Status::internal(format!(
+                "channelmapping {channelmapping_handle:?} references seed {:?} but no Node \
+                 entry exists",
+                entry.node_seed,
+            ))
+        })?;
+
+        let mapped = active_map_from_proto(active_map);
+
+        node.server
+            .activate_channelmapping(&entry.name, output_id, &mapped)
+            .map_err(|e| {
+                Status::invalid_argument(format!(
+                    "libnvnmos nmos_channelmapping_activate failed: {e}"
+                ))
+            })?;
+
+        Ok(SyncChannelMappingStateOutcome {
+            node_seed: entry.node_seed.clone(),
+            name: entry.name.clone(),
+        })
+    }
+
+    pub fn dispatch_channelmapping_activation(
+        &mut self,
+        node_seed: &str,
+        output_id: &str,
+        active_map: Vec<ProtoActiveMapEntry>,
+    ) -> ChannelMappingActivationDispatch {
+        let channelmapping_handle = match self
+            .outputs_by_id
+            .get(&(node_seed.to_string(), output_id.to_string()))
+        {
+            Some(h) => h.clone(),
+            None => return ChannelMappingActivationDispatch::NoChannelMapping,
+        };
+        let entry = match self.channelmappings.get(&channelmapping_handle) {
+            Some(e) => e,
+            None => return ChannelMappingActivationDispatch::NoChannelMapping,
+        };
+        let session_handle = entry.session_handle.clone();
+
+        if self
+            .channelmapping_subscriptions
+            .get(&session_handle)
+            .is_some_and(|s| s.tx.is_closed())
+        {
+            self.channelmapping_subscriptions.remove(&session_handle);
+        }
+
+        let tx = match self.channelmapping_subscriptions.get(&session_handle) {
+            Some(s) => s.tx.clone(),
+            None => return ChannelMappingActivationDispatch::NoSubscriber,
+        };
+
+        let activation_handle = self.allocate_channelmapping_activation_handle();
+        let (ack_tx, ack_rx) = std_mpsc::sync_channel::<AckOutcome>(1);
+        let event = ChannelMappingActivationEvent {
+            channelmapping_handle,
+            activation_handle: activation_handle.clone(),
+            output_id: output_id.to_string(),
+            active_map,
+        };
+
+        match tx.try_send(Ok(event)) {
+            Ok(()) => {}
+            Err(tokio_mpsc::error::TrySendError::Full(_)) => {
+                return ChannelMappingActivationDispatch::SubscriberBusy;
+            }
+            Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
+                self.channelmapping_subscriptions.remove(&session_handle);
+                return ChannelMappingActivationDispatch::NoSubscriber;
+            }
+        }
+
+        self.pending_channelmapping_activations.insert(
+            activation_handle.clone(),
+            PendingChannelMappingActivation {
+                session_handle,
+                ack_tx,
+            },
+        );
+
+        ChannelMappingActivationDispatch::Routed {
+            activation_handle,
+            ack_rx,
+        }
+    }
+
+    pub fn complete_channelmapping_activation(
+        &mut self,
+        session_handle: &str,
+        activation_handle: &str,
+        outcome: AckOutcome,
+    ) -> Result<(), Status> {
+        if !self.sessions.contains_key(session_handle) {
+            return Err(Status::not_found(format!(
+                "session_handle {session_handle:?} is not known to this daemon"
+            )));
+        }
+        let owns = self
+            .pending_channelmapping_activations
+            .get(activation_handle)
+            .is_some_and(|p| p.session_handle == session_handle);
+        if !owns {
+            return Err(Status::not_found(format!(
+                "activation_handle {activation_handle:?} is not pending on \
+                 session {session_handle:?}"
+            )));
+        }
+        let pending = self
+            .pending_channelmapping_activations
+            .remove(activation_handle)
+            .expect("checked above");
+
+        if pending.ack_tx.send(outcome).is_err() {
+            tracing::warn!(
+                activation_handle,
+                session_handle,
+                "AckChannelMappingActivation: activation router already gave up; \
+                 ack discarded",
+            );
+        }
+        Ok(())
+    }
+
+    pub fn cleanup_pending_channelmapping_activation(&mut self, activation_handle: &str) {
+        self.pending_channelmapping_activations
+            .remove(activation_handle);
+    }
 }
 
 fn require_non_empty_seed(seed: &str) -> Result<(), Status> {
@@ -1273,6 +1770,133 @@ fn require_non_empty_seed(seed: &str) -> Result<(), Status> {
     } else {
         Ok(())
     }
+}
+
+fn default_channelmapping_input_id(name: &str, index: usize, first_on_node: bool) -> String {
+    if first_on_node {
+        format!("input{index}")
+    } else {
+        format!("{name}_input{index}")
+    }
+}
+
+fn default_channelmapping_output_id(name: &str, index: usize, first_on_node: bool) -> String {
+    if first_on_node {
+        format!("output{index}")
+    } else {
+        format!("{name}_output{index}")
+    }
+}
+
+fn effective_channelmapping_input_ids(
+    name: &str,
+    inputs: &[ProtoChannelMappingInput],
+    first_on_node: bool,
+) -> Vec<String> {
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            if input.id.is_empty() {
+                default_channelmapping_input_id(name, index, first_on_node)
+            } else {
+                input.id.clone()
+            }
+        })
+        .collect()
+}
+
+fn effective_channelmapping_output_ids(
+    name: &str,
+    outputs: &[ProtoChannelMappingOutput],
+    first_on_node: bool,
+) -> Vec<String> {
+    outputs
+        .iter()
+        .enumerate()
+        .map(|(index, output)| {
+            if output.id.is_empty() {
+                default_channelmapping_output_id(name, index, first_on_node)
+            } else {
+                output.id.clone()
+            }
+        })
+        .collect()
+}
+
+fn channelmapping_parent_type(raw: i32) -> ChannelMappingParentType {
+    if raw == ProtoChannelMappingParentType::Source as i32 {
+        ChannelMappingParentType::Source
+    } else {
+        ChannelMappingParentType::Receiver
+    }
+}
+
+fn build_channel_mapping(
+    inputs: &[ProtoChannelMappingInput],
+    outputs: &[ProtoChannelMappingOutput],
+    effective_input_ids: &[String],
+    effective_output_ids: &[String],
+) -> ChannelMappingConfig {
+    let mapped_inputs = inputs
+        .iter()
+        .zip(effective_input_ids.iter())
+        .map(|(input, id)| ChannelMappingInput {
+            id: id.clone(),
+            name: input.name.clone(),
+            description: input.description.clone(),
+            channel_labels: input.channel_labels.clone(),
+            parent_name: input.parent_name.clone(),
+            parent_type: channelmapping_parent_type(input.parent_type),
+            reordering: input.reordering,
+            block_size: input.block_size,
+        })
+        .collect();
+
+    let mapped_outputs = outputs
+        .iter()
+        .zip(effective_output_ids.iter())
+        .map(|(output, id)| {
+            let routable_inputs = if output.routable_inputs.is_empty() {
+                None
+            } else {
+                Some(output.routable_inputs.clone())
+            };
+            ChannelMappingOutput {
+                id: id.clone(),
+                name: output.name.clone(),
+                description: output.description.clone(),
+                channel_labels: output.channel_labels.clone(),
+                sender_name: output.sender_name.clone(),
+                routable_inputs,
+            }
+        })
+        .collect();
+
+    ChannelMappingConfig {
+        inputs: mapped_inputs,
+        outputs: mapped_outputs,
+    }
+}
+
+pub fn active_map_from_proto(entries: &[ProtoActiveMapEntry]) -> Vec<ChannelMappingActiveMapEntry> {
+    entries
+        .iter()
+        .map(|entry| ChannelMappingActiveMapEntry {
+            input_id: entry.input_id.clone(),
+            input_channel: entry.input_channel,
+        })
+        .collect()
+}
+
+pub fn active_map_to_proto(entries: &[ChannelMappingActiveMapEntry]) -> Vec<ProtoActiveMapEntry> {
+    entries
+        .iter()
+        .map(|entry| ProtoActiveMapEntry {
+            input_id: entry.input_id.clone(),
+            input_channel: entry.input_channel,
+        })
+        .collect()
 }
 
 /// Translate a proto [`ProtoTransport`] into the wrapper's [`Transport`].

@@ -27,10 +27,12 @@ Control-plane limitations must not leak downward. NvNmos and nvnmosd support arb
 | Layer | IS-04 parent / source linkage | `name` |
 |-------|------------------------------|-----------------|
 | **libnvnmos (C)** | Caller-chosen **`parent_name`** / **`sender_name`** → IS-04 UUIDs from Node **seed** (deterministic identity; same scheme as senders/receivers). Requires explicit non-empty IS-08 input/output **slugs** and channel-mapping **`name`**. | `name` (settings key; not an IS-08 REST resource id) |
-| **nvnmosd (gRPC)** | Forwards names unchanged. Assigns default IS-08 **slugs** when proto **`id`** is empty (`input0`, `{name}_input0`, …); default **`routable_inputs`** to this request's input slugs; returns effective values in the add response. | `name` in request |
-| **gst-nmos-rs** | Pad props `receiver-name`, `sender-name` → forwarded as proto names | `channelmapping-name` |
+| **nvnmosd (gRPC)** | Forwards names unchanged. Assigns default IS-08 **slugs** when proto **`id`** is empty (`input0`, `{name}_input0`, …); forwards **`routable_inputs`** like libnvnmos (empty → IS-08 `null`); returns effective ids in the add response. | `name` in request |
+| **gst-nmos-rs** | Pad props `receiver-name`, `sender-name` → forwarded as proto names. Optional **`restrict-routable-inputs`** populates output `routable_inputs` from this add's input ids (§3.5). | `channelmapping-name` |
 
-**Why UUID derivation is libnvnmos but slug defaulting is nvnmosd:** `parent_name` / `sender_name` → IS-04 UUID is **deterministic identity** from `(Node seed, name)` — the same class of computation libnvnmos already performs for senders/receivers, and direct C callers need it without a daemon. Empty IS-08 **slug** defaulting is different: a **client convenience** for gRPC/GStreamer (omit pad `input-id`, get `input0` back in the response). Direct C callers supply explicit slugs, analogous to embedding a name in a transport file rather than expecting libnvnmos to invent one.
+**Why UUID derivation is libnvnmos but slug defaulting is nvnmosd:** `parent_name` / `sender_name` → IS-04 UUID is **deterministic identity** from `(Node seed, name)` — the same class of computation libnvnmos already performs for senders/receivers, and direct C callers need it without a daemon. Empty IS-08 **slug** defaulting is different: a **gRPC convenience** for GStreamer (omit pad `input-id`, get `input0` back in the response). Direct C callers supply explicit slugs, analogous to embedding a name in a transport file rather than expecting libnvnmos to invent one.
+
+**`routable_inputs` is not defaulted in nvnmosd:** proto mirrors libnvnmos / nmos-cpp — empty or omitted → IS-08 caps **`routable_inputs: null`** (unrestricted). Restricting an Output to Input ids from the same add is an **element policy** (`restrict-routable-inputs`, §3.5), not daemon magic.
 
 libnvnmos performs name→UUID translation using the Node seed already held in `node_model.settings`. **`AddReceiver` / `AddSender` need not have run first** — deterministic ids may reference IS-04 resources not yet registered (same as senders/receivers).
 
@@ -160,6 +162,7 @@ gst-launch-1.0 \
 | `node-seed` | NvNmos Node seed; sessions sharing this seed share a Node |
 | `http-port`, `host-name`, `domain`, `registration-url`, `system-url` | Forwarded in `OpenSession.node_config` when this session **creates** the Node; ignored when attaching to an existing Node |
 | `channelmapping-name` | Caller-chosen channel mapping name; **not** an IS-08 REST resource id |
+| `restrict-routable-inputs` | bool, default **`false`**. When **`true`**, set each Output's proto **`routable_inputs`** to the effective Input ids in this request (pad **`input-id`**, or §6.10 slug defaulting applied locally when empty). When **`false`**, leave **`routable_inputs`** empty → IS-08 **`null`** (unrestricted). Prefer **`false`** when this element is the only channel-mapping contributor on the Node; use **`true`** on multi-channel-mapping Nodes (§6.10). **Not implemented in gst-nmos-rs yet.** |
 
 No `transport` / `transport-file` on this element.
 
@@ -519,28 +522,28 @@ enum ChannelMappingParentType {
 }
 
 message ChannelMappingInput {
-  string id = 1;                       // IS-08 slug; empty → nvnmosd default (§6.10)
+  string id = 1;                       // IS-08 input id; empty → nvnmosd default (§6.10)
   string name = 2;                     // IS-08 /properties name (not AddChannelMappingRequest.name)
-  string description = 3;              // IS-08 /properties description
+  string description = 3;
   repeated string channel_labels = 4;
-  string parent_name = 5;              // empty → no /parent
-  ChannelMappingParentType parent_type = 6;  // receiver vs source; ignored if parent_name empty
-  bool reordering = 7;                 // default true when unset
-  uint32 block_size = 8;               // default 1 when unset
+  string parent_name = 5;              // empty → null /parent; else caller-chosen receiver or source name
+  ChannelMappingParentType parent_type = 6;  // receiver vs source when parent_name set; ignored when parent_name empty
+  bool reordering = 7;                 // used when block_size != 0; libnvnmos default true when block_size is 0
+  uint32 block_size = 8;               // libnvnmos default 1 when 0
 }
 
 message ChannelMappingOutput {
-  string id = 1;                       // IS-08 slug; empty → nvnmosd default (§6.10)
-  string name = 2;                     // IS-08 /properties name
+  string id = 1;                       // IS-08 output id; empty → nvnmosd default (§6.10)
+  string name = 2;                     // IS-08 /properties name (not AddChannelMappingRequest.name)
   string description = 3;
   repeated string channel_labels = 4;
-  string sender_name = 5;              // empty → null /sourceid
-  repeated string routable_inputs = 6; // empty → same-request input slugs (§6.2)
+  string sender_name = 5;              // empty → null /sourceid; else caller-chosen sender name
+  repeated string routable_inputs = 6; // empty → IS-08 null (unrestricted); "" → null in array
 }
 
 message ActiveMapEntry {
-  optional string input_id = 1;
-  optional uint32 input_channel = 2;
+  optional string input_id = 1;        // absent → unrouted (C NULL); not empty string
+  optional uint32 input_channel = 2;   // absent when unrouted; channel index when routed
 }
 
 message SyncChannelMappingStateRequest {
@@ -588,7 +591,7 @@ nvnmosd **forwards names unchanged**; libnvnmos derives IS-04 UUIDs from the Nod
 
 Registration lookup is **not** required — ids are deterministic. Controllers may see `/parent` or `/sourceid` before the endpoint appears in IS-04.
 
-**`routable_inputs` default:** when omitted or empty on an Output, daemon sets **`routable_inputs` = all Input ids in the same `AddChannelMappingRequest`** (session-scoped routing). Explicit list required only for cross-channel-mapping routing (§6.10).
+**`routable_inputs` (proto / libnvnmos / IS-08):** mirrors nmos-cpp. Empty or omitted on **`ChannelMappingOutput`** → nvnmosd passes **`None`** to libnvnmos → caps publish **`"routable_inputs": null`** (unrestricted). Non-empty list → restricted array; **`""`** entry → **`null`** in the array (unrouted outputs permitted). Same as C **`routable_inputs` NULL / zero length**. gst-nmos-rs **`restrict-routable-inputs`** (§3.5) is the optional same-request restriction — **not** nvnmosd defaulting.
 
 **`NvNmosChannelMappingConfig`:** the `{inputs[], outputs[]}` bundle passed to `add_nmos_channelmapping_to_node_server` — channel mapping I/O geometry, not a single IS-08 REST resource.
 
@@ -682,18 +685,23 @@ Do **not** call `nmos_channelmapping_activate` on this path.
 
 ### 6.7 Validation and errors
 
+Same split as senders/receivers: **nvnmosd** owns session/handle policy and gRPC conveniences; **libnvnmos** owns geometry and IS-08 model rules.
+
 | Layer | Validates |
 |-------|-----------|
 | **nmos-cpp** (activation POST) | JSON schema; caps; routable_inputs; merged map → HTTP 400/423 |
-| **nvnmosd** (`AddChannelMapping`) | Non-empty ids; `channel_labels` length; **per-kind unique** input ids and output ids on Node; parent_name/type consistency |
-| **nvnmosd** (`SyncChannelMappingState`) | Active map references fixed I/O; indexes in range |
+| **nvnmosd** (`AddChannelMapping`) | Non-empty caller-chosen `name`; subscribe-before-add; duplicate channel mapping **name** on Node; empty-id defaulting; **`routable_inputs` forwarded unchanged** (empty → unrestricted) |
+| **libnvnmos** (`add_nmos_channelmapping_*`) | Non-empty ids; `channel_labels`; per-kind unique ids on Node; parent/sender linkage; geometry |
+| **nvnmosd** (`SyncChannelMappingState`) | Session owns `channelmapping_handle` only |
+| **libnvnmos** (`nmos_channelmapping_activate`) | Output id, active map length, routed inputs |
 | **Client** (Ack path) | Data plane can apply per-output active map |
 
 | Condition | tonic code |
 |-----------|------------|
-| Malformed add/sync | `INVALID_ARGUMENT` |
-| Duplicate `name` or IS-08 id (same kind) | `ALREADY_EXISTS` |
-| `add_nmos_channelmapping_*` failure | `INTERNAL` |
+| Malformed add/sync (libnvnmos rejection) | `INVALID_ARGUMENT` |
+| Duplicate channel mapping `name` on Node (nvnmosd pre-check) | `ALREADY_EXISTS` |
+| Duplicate IS-08 id / invalid geometry (libnvnmos) | `INVALID_ARGUMENT` |
+| Subscribe required before add | `FAILED_PRECONDITION` |
 
 ### 6.8 Transport deactivation
 
@@ -703,7 +711,7 @@ IS-05 deactivation does **not** remove IS-08 I/O. Last active map retained; deac
 
 | Task | nmos-cpp | libnvnmos | nvnmosd | gst client |
 |------|----------|-----------|---------|------------|
-| Create Input/Output | insert | `add_nmos_channelmapping_to_node_server` | `AddChannelMapping` | pad props → request |
+| Create Input/Output | insert | `add_nmos_channelmapping_to_node_server` | `AddChannelMapping` | pad props → request; **`restrict-routable-inputs`** → **`routable_inputs`** |
 | Update `/map/active` (data-plane) | modify_resource | `nmos_channelmapping_activate` | `SyncChannelMappingState` | after matrix programming |
 | Notify data plane | callback | wrap + block for ack | stream | `audiomixmatrix` |
 | I/O churn | — | remove + add | `RemoveChannelMapping` + `AddChannelMapping` | rebuild |
@@ -722,7 +730,7 @@ node-seed=studio
 |------|--------|
 | **Slug namespace** | IS-08 input **slugs** unique among inputs and output **slugs** unique among outputs per Node (enforced by nvnmos). The same string may name both an input and an output (IS-08 / nmos-cpp). **First** channel mapping on the Node: default `input0`, `output0`, …; **later** channel mappings: `{name}_input0`, … (§3.4). Explicit pad **`input-id`** / proto **`id`** overrides. |
 | **Ownership** | `(node_seed, name)` → channel mapping; `(node_seed, output_id)` → **session** for activation dispatch. |
-| **`routable_inputs` default** | Restricted to **Input ids from the same `AddChannelMappingRequest`**. Routing across channel mappings requires explicit `routable_inputs` (advanced). |
+| **`routable_inputs`** | **Default:** empty proto → IS-08 **`null`** (unrestricted). **`restrict-routable-inputs=true`** on the element (§3.5) sets each Output's list to **Input ids from the same add**. Cross-channel-mapping routes require an explicit proto list on each Output (advanced). |
 | **Unknown input on activation** | nmos-cpp may accept if `routable_inputs` allows; element **NACKs** if the Input id is not on its sink pads. |
 | **Names before registration** | libnvnmos derives IS-04 ids from `parent_name` / `sender_name` + Node seed without `AddReceiver` / `AddSender` (§6.2). |
 
@@ -876,6 +884,13 @@ Do **not** sync:
 
 Do not publish zero-channel Inputs/Outputs.
 
+When building **`AddChannelMappingRequest`**, leave each Output's **`routable_inputs`** empty unless:
+
+- **`restrict-routable-inputs`** is **`true`** — set every Output's list to the **effective Input ids in this request** (pad **`input-id`** when set, else the same slug defaulting rules as §6.10 applied locally before the RPC), or
+- a pad / element policy requires an explicit cross-mapping or partial list (advanced).
+
+Per-output proto lists may include **`""`** for an IS-08 array **`null`** entry (unrouted permitted within a restricted list).
+
 ### 7.9 `nmosaudiochannelmap` startup example (Option A)
 
 ```text
@@ -913,7 +928,7 @@ Controllers may briefly see **unrouted** outputs between `AddChannelMapping` and
 - Multiple sink and src pads on `nmosaudiochannelmap` (fixed pad set before fixation)
 - Per-pad properties (`sink_%u::…`, `src_%u::…`), optional **`name`** / **`description`**, and `active-map` `GstStructure` for initial `/map/active`
 - Default slugs: first channel mapping `input0`/`output0`; later `{channelmapping-name}_input0` when ids omitted (§6.10)
-- Any-to-any routing where output `routable_inputs` / input caps allow
+- Default **`routable_inputs`:** unrestricted (empty proto → IS-08 **`null`**); optional **`restrict-routable-inputs`** (§3.5)
 - Default identity rules (§3.5.2); omitted `active-map` fields = unrouted; duplicate one input to many outputs
 - Channel counts from negotiated audio caps and/or per-pad `channels` early declare; **channel-count change → Remove + Add + rebuild + active-map sync** (§7.6)
 - Controller activation ACK/NACK **in PLAYING** (active-map changes only; §7.1)
@@ -1001,8 +1016,8 @@ Default `audiomixer` behaviour **sums** aligned channels (T5/T6 without placemen
 - **I/O bundle:** `NvNmosChannelMappingConfig` / `{inputs, outputs}` on add; **`NvNmosChannelMappingActiveMapEntry`** on activate/callback (dense; array index = output channel).
 - **IS-04 linkage:** C API uses resource **names** (`parent_name`, `sender_name`); libnvnmos derives IS-04 UUIDs from the Node seed (§2, §5.2, §6.2). `parent_type` default RECEIVER, ignored when `parent_name` empty.
 - **ID accessors:** `nmos_make_source_id` and `nmos_get_source_id` for IS-04 Source UUID from the caller-chosen sender name (§6.2); listed in README with other `nmos_*_id` helpers.
-- **Multi-channel-mapping Nodes:** multiple `AddChannelMapping` per Node; per-kind unique IS-08 ids; default `routable_inputs` scoped to same request (§6.10).
-- **Element session props:** same as `nmossrc`/`nmossink` + `channelmapping-name` (§3.5).
+- **Multi-channel-mapping Nodes:** multiple `AddChannelMapping` per Node; per-kind unique IS-08 ids; **`routable_inputs`** default unrestricted (`null`); optional element **`restrict-routable-inputs`** (§3.5, §6.10).
+- **Element session props:** same as `nmossrc`/`nmossink` + `channelmapping-name` + **`restrict-routable-inputs`** (§3.5).
 - **Default outputs at create:** unrouted; initial active map via `SyncChannelMappingState` after matrix programming (Option A, §7.9).
 - **Pad API:** per-pad properties; `input-id`/`output-id` (IS-08 slug), `name`/`description` (IS-08 `/properties`), separate from **`channelmapping-name`**; ChildProxy for launch/inspect (§3.5).
 - **IS-08 `/properties`:** exposed on C struct and proto; optional pad props; distinct from `AddChannelMappingRequest.name` (§5.0 terminology table).

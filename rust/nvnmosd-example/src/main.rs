@@ -71,7 +71,18 @@
 //!     subscription on close) ends the activations stream so the
 //!     background ack task exits cleanly.
 //!
-//! See `doc/designs/nvnmosd/README.md` for the full design.
+//! **Channel mapping lifecycle** (`<seed>-channelmapping`):
+//!
+//! 20. `OpenSession` — fresh Node for IS-08 channel mapping.
+//! 21. `SubscribeChannelMappingActivations` — separate stream from
+//!     IS-05; background task auto-acks each event.
+//! 22. `AddChannelMapping` without a prior subscribe must fail
+//!     (`FAILED_PRECONDITION`); then subscribe and add a channel mapping
+//!     with empty I/O ids; assert effective ids `input0` / `output0`.
+//! 23. `SyncChannelMappingState` — dense active map (one entry per output
+//!     channel); out-of-band publish parallel to `SyncResourceState`.
+//! 24. `RemoveChannelMapping` — drop the channel mapping.
+//! 25. `CloseSession` — tear down the Node and join the ack task.
 
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
@@ -82,11 +93,15 @@ use clap::Parser;
 use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
-    AckActivationRequest, ActivationEvent, AddNodeRequest, AddNodeResponse, AddReceiverRequest,
-    AddResourceResponse, AddSenderRequest, AssetConfig, CloseSessionRequest, NodeConfig,
-    OpenSessionRequest, OpenSessionResponse, RemoveNodeRequest, RemoveResourceRequest,
-    Side as ProtoSide, SubscribeActivationsRequest, SyncResourceStateRequest,
-    Transport as ProtoTransport,
+    AckActivationRequest, AckChannelMappingActivationRequest, ActivationEvent, AddChannelMappingRequest,
+    AddChannelMappingResponse, AddNodeRequest, AddNodeResponse, AddReceiverRequest,
+    AddResourceResponse, AddSenderRequest, AssetConfig, ChannelMappingActivationEvent,
+    ChannelMappingInput as ProtoChannelMappingInput, ChannelMappingOutput as ProtoChannelMappingOutput,
+    ChannelMappingParentType as ProtoChannelMappingParentType, CloseSessionRequest, NodeConfig,
+    OpenSessionRequest, OpenSessionResponse, RemoveChannelMappingRequest, RemoveNodeRequest,
+    RemoveResourceRequest, Side as ProtoSide, SubscribeActivationsRequest,
+    SubscribeChannelMappingActivationsRequest, SyncChannelMappingStateRequest,
+    SyncResourceStateRequest, ActiveMapEntry, Transport as ProtoTransport,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
@@ -482,6 +497,126 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
+    // -------- Channel mapping lifecycle --------
+    let cm_seed = format!("{}-channelmapping", args.node_seed);
+
+    let cm = open(
+        &mut client,
+        &cm_seed,
+        args.http_port,
+        "channel mapping session (creates Node)",
+    )
+    .await?;
+    anyhow::ensure!(
+        cm.created_node,
+        "channelmapping-phase OpenSession on a fresh seed should have \
+         created_node=true; got {}",
+        cm.created_node,
+    );
+
+    let channelmapping_name = "studio-map";
+    let cm_input = ProtoChannelMappingInput {
+        name: "Studio In".to_string(),
+        description: String::new(),
+        channel_labels: vec!["L".to_string(), "R".to_string()],
+        parent_type: ProtoChannelMappingParentType::Receiver as i32,
+        ..Default::default()
+    };
+    let cm_output = ProtoChannelMappingOutput {
+        name: "Studio Out".to_string(),
+        description: String::new(),
+        channel_labels: vec!["L".to_string(), "R".to_string()],
+        ..Default::default()
+    };
+
+    let pre_subscribe = client
+        .add_channel_mapping(AddChannelMappingRequest {
+            session_handle: cm.session_handle.clone(),
+            name: channelmapping_name.to_string(),
+            inputs: vec![cm_input.clone()],
+            outputs: vec![cm_output.clone()],
+        })
+        .await;
+    match pre_subscribe {
+        Err(status) if status.code() == Code::FailedPrecondition => {
+            tracing::info!(
+                grpc_message = %status.message(),
+                "AddChannelMapping correctly rejected before SubscribeChannelMappingActivations",
+            );
+        }
+        Err(status) => anyhow::bail!(
+            "AddChannelMapping before subscribe returned code={:?} \
+             (expected FailedPrecondition): {}",
+            status.code(),
+            status.message(),
+        ),
+        Ok(_) => anyhow::bail!("AddChannelMapping before subscribe unexpectedly succeeded"),
+    }
+
+    let (cm_ack_task, _cm_activations_rx) =
+        spawn_auto_ack_channelmapping_task(client.clone(), cm.session_handle.clone()).await?;
+
+    let cm_resp = add_channel_mapping(
+        &mut client,
+        &cm.session_handle,
+        channelmapping_name,
+        &[cm_input],
+        &[cm_output],
+    )
+    .await?;
+    anyhow::ensure!(
+        cm_resp.input_ids == ["input0"],
+        "first channel mapping on Node input id defaulting: expected [input0], got {:?}",
+        cm_resp.input_ids,
+    );
+    anyhow::ensure!(
+        cm_resp.output_ids == ["output0"],
+        "first channel mapping on Node output id defaulting: expected [output0], got {:?}",
+        cm_resp.output_ids,
+    );
+
+    sync_channel_mapping_state(
+        &mut client,
+        &cm.session_handle,
+        &cm_resp.channelmapping_handle,
+        "output0",
+        &[
+            ActiveMapEntry {
+                input_id: Some("input0".to_string()),
+                input_channel: Some(0),
+            },
+            ActiveMapEntry {
+                input_id: None,
+                input_channel: None,
+            },
+        ],
+        "route L→L (R unrouted)",
+    )
+    .await?;
+
+    remove_channel_mapping(
+        &mut client,
+        &cm.session_handle,
+        &cm_resp.channelmapping_handle,
+        "remove studio-map channel mapping",
+    )
+    .await?;
+
+    close(
+        &mut client,
+        &cm.session_handle,
+        "channel mapping close (destroys Node)",
+    )
+    .await?;
+
+    match tokio::time::timeout(Duration::from_secs(5), cm_ack_task).await {
+        Ok(Ok(())) => tracing::info!("channelmapping ack task joined cleanly"),
+        Ok(Err(e)) => tracing::error!(error = %e, "channelmapping ack task panicked"),
+        Err(_) => tracing::warn!(
+            "channelmapping ack task did not exit within 5s of CloseSession; abandoning",
+        ),
+    }
+
     tracing::info!("done");
     Ok(())
 }
@@ -563,6 +698,73 @@ async fn spawn_auto_ack_task(
                         grpc_code = ?status.code(),
                         grpc_message = %status.message(),
                         "activations stream errored",
+                    );
+                    break;
+                }
+            }
+        }
+    });
+    Ok((handle, relay_rx))
+}
+
+async fn spawn_auto_ack_channelmapping_task(
+    mut client: NvnmosDaemonClient<Channel>,
+    session_handle: String,
+) -> anyhow::Result<(
+    tokio::task::JoinHandle<()>,
+    tokio_mpsc::Receiver<ChannelMappingActivationEvent>,
+)> {
+    tracing::info!(session_handle, "SubscribeChannelMappingActivations");
+    let mut stream = client
+        .subscribe_channel_mapping_activations(SubscribeChannelMappingActivationsRequest {
+            session_handle: session_handle.clone(),
+        })
+        .await
+        .context("SubscribeChannelMappingActivations failed")?
+        .into_inner();
+
+    let (relay_tx, relay_rx) = tokio_mpsc::channel::<ChannelMappingActivationEvent>(16);
+
+    let handle = tokio::spawn(async move {
+        loop {
+            match stream.message().await {
+                Ok(Some(event)) => {
+                    tracing::info!(
+                        session_handle,
+                        channelmapping_handle = %event.channelmapping_handle,
+                        activation_handle = %event.activation_handle,
+                        output_id = %event.output_id,
+                        "received channelmapping activation; auto-acking",
+                    );
+                    let ack = client
+                        .ack_channel_mapping_activation(AckChannelMappingActivationRequest {
+                            session_handle: session_handle.clone(),
+                            activation_handle: event.activation_handle.clone(),
+                            success: true,
+                            failure_reason: String::new(),
+                        })
+                        .await;
+                    if let Err(status) = ack {
+                        tracing::error!(
+                            session_handle,
+                            grpc_code = ?status.code(),
+                            grpc_message = %status.message(),
+                            "AckChannelMappingActivation failed",
+                        );
+                        break;
+                    }
+                    let _ = relay_tx.try_send(event);
+                }
+                Ok(None) => {
+                    tracing::info!(session_handle, "channelmapping activations stream ended");
+                    break;
+                }
+                Err(status) => {
+                    tracing::error!(
+                        session_handle,
+                        grpc_code = ?status.code(),
+                        grpc_message = %status.message(),
+                        "channelmapping activations stream errored",
                     );
                     break;
                 }
@@ -756,6 +958,81 @@ async fn sync_resource_state(
         })
         .await
         .with_context(|| format!("SyncResourceState ({label}) failed"))?;
+    Ok(())
+}
+
+async fn add_channel_mapping(
+    client: &mut NvnmosDaemonClient<Channel>,
+    session_handle: &str,
+    name: &str,
+    inputs: &[ProtoChannelMappingInput],
+    outputs: &[ProtoChannelMappingOutput],
+) -> anyhow::Result<AddChannelMappingResponse> {
+    tracing::info!(session_handle, name, "AddChannelMapping");
+    let resp = client
+        .add_channel_mapping(AddChannelMappingRequest {
+            session_handle: session_handle.to_string(),
+            name: name.to_string(),
+            inputs: inputs.to_vec(),
+            outputs: outputs.to_vec(),
+        })
+        .await
+        .context("AddChannelMapping failed")?
+        .into_inner();
+    tracing::info!(
+        channelmapping_handle = %resp.channelmapping_handle,
+        input_ids = ?resp.input_ids,
+        output_ids = ?resp.output_ids,
+        "AddChannelMapping succeeded",
+    );
+    Ok(resp)
+}
+
+async fn remove_channel_mapping(
+    client: &mut NvnmosDaemonClient<Channel>,
+    session_handle: &str,
+    channelmapping_handle: &str,
+    label: &str,
+) -> anyhow::Result<()> {
+    tracing::info!(
+        session_handle,
+        channelmapping_handle,
+        "RemoveChannelMapping ({label})",
+    );
+    client
+        .remove_channel_mapping(RemoveChannelMappingRequest {
+            session_handle: session_handle.to_string(),
+            channelmapping_handle: channelmapping_handle.to_string(),
+        })
+        .await
+        .with_context(|| format!("RemoveChannelMapping ({label}) failed"))?;
+    Ok(())
+}
+
+async fn sync_channel_mapping_state(
+    client: &mut NvnmosDaemonClient<Channel>,
+    session_handle: &str,
+    channelmapping_handle: &str,
+    output_id: &str,
+    active_map: &[ActiveMapEntry],
+    label: &str,
+) -> anyhow::Result<()> {
+    tracing::info!(
+        session_handle,
+        channelmapping_handle,
+        output_id,
+        channels = active_map.len(),
+        "SyncChannelMappingState ({label})",
+    );
+    client
+        .sync_channel_mapping_state(SyncChannelMappingStateRequest {
+            session_handle: session_handle.to_string(),
+            channelmapping_handle: channelmapping_handle.to_string(),
+            output_id: output_id.to_string(),
+            active_map: active_map.to_vec(),
+        })
+        .await
+        .with_context(|| format!("SyncChannelMappingState ({label}) failed"))?;
     Ok(())
 }
 
