@@ -39,7 +39,7 @@ jobs:
           $profile = conan profile path default
           (Get-Content $profile) `
             -replace '^compiler\.cppstd=.*$', 'compiler.cppstd=17' `
-            -replace '^compiler\.version=.*$', 'compiler.version=194' |
+            -replace '^compiler\.version=.*$', 'compiler.version=195' |
             Set-Content $profile
       - name: Install dependencies without lockfile
         id: conan_install
@@ -117,7 +117,7 @@ jobs:
           $profile = conan profile path default
           (Get-Content $profile) `
             -replace '^compiler\.cppstd=.*$', 'compiler.cppstd=17' `
-            -replace '^compiler\.version=.*$', 'compiler.version=194' |
+            -replace '^compiler\.version=.*$', 'compiler.version=195' |
             Set-Content $profile
       - name: Install dependencies without lockfile
         id: conan_install
