@@ -5,9 +5,9 @@
 //!
 //! When `NodeConfig.http_port` is `0`, the daemon scans
 //! [`PortRange`] and picks the first port that is neither registered to
-//! another Node nor bound on the host (bind-only probe without
-//! `SO_REUSEADDR`, matching wildcard listen semantics). Explicit non-zero
-//! ports are validated the same way before create.
+//! another Node nor bound on the host (bind-only probe with
+//! `SO_REUSEADDR`, matching cpprest's Boost.Asio-based HTTP listener).
+//! Explicit non-zero ports are validated the same way before create.
 
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -79,11 +79,20 @@ pub(crate) fn read_http_port_range() -> PortRange {
 }
 
 /// Returns `true` when a TCP bind to `0.0.0.0:port` would succeed right
-/// now. Does not set `SO_REUSEADDR` and does not call `listen()`.
+/// now for a new cpprest `http_listener` (Boost.Asio acceptor with
+/// `SO_REUSEADDR`). Does not call `listen()`.
+///
+/// Without `SO_REUSEADDR`, a bind probe can fail while sockets for that
+/// port are still in `TIME_WAIT` (for example after in-band IS-05 PATCH
+/// connections to the Node's host address), even though libnvnmos can
+/// bind and listen immediately after Node teardown.
 pub(crate) fn is_tcp_port_bindable(port: u16) -> bool {
     let Ok(socket) = Socket::new(Domain::IPV4, Type::STREAM, None) else {
         return false;
     };
+    if socket.set_reuse_address(true).is_err() {
+        return false;
+    }
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
     socket.bind(&addr.into()).is_ok()
 }
