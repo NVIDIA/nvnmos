@@ -643,31 +643,7 @@ impl NmosSrc {
                 }
             }
             InnerConfig::Fake { .. } => {
-                // The constructed-time fake chain is a bare `appsrc`
-                // with no caps (no settings were available yet).
-                // Whenever we have caps to advertise — from the
-                // user-set `caps` property or synthesised from
-                // `transport-file*` — swap it for a caps-aware
-                // `appsrc` so downstream negotiation can complete
-                // and the pipeline can reach PLAYING while the bin
-                // waits for an IS-05 activation. Without a caps
-                // source we leave the bare `appsrc` in place; the
-                // pipeline will then fail caps negotiation on its
-                // way to PLAYING and the user must supply `caps`
-                // (or `transport-file*`).
-                let snapshot = self.settings.lock().unwrap().clone();
-                let caps = fake_caps_from_settings(&snapshot)?;
-                if let Some(caps) = caps {
-                    let fake = inner::build_fake_src(Some(&caps))?;
-                    self.swap_inner(bin, &fake, inner::RebuildChainOpts::default())?;
-                } else {
-                    gst::warning!(
-                        CAT,
-                        "nmossrc fake chain has no caps to advertise; \
-                         downstream caps negotiation will fail until \
-                         `caps` or `transport-file*` is set",
-                    );
-                }
+                self.upgrade_fake_chain_from_settings(bin)?;
             }
         }
         Ok(())
@@ -682,8 +658,7 @@ impl NmosSrc {
         // caps to the fake chain so a subsequent NULL→READY (or
         // simple state-query) doesn't see a regression to ANY.
         let snapshot = self.settings.lock().unwrap().clone();
-        let caps = fake_caps_from_settings(&snapshot).ok().flatten();
-        match inner::build_fake_src(caps.as_ref()) {
+        match build_fake_src_for_settings(&snapshot) {
             Ok(fake) => {
                 if let Err(e) = self.swap_inner(bin_ref, &fake, inner::RebuildChainOpts::default()) {
                     gst::warning!(CAT, "restoring nmossrc fake chain: {e:#}");
@@ -691,6 +666,36 @@ impl NmosSrc {
             }
             Err(e) => gst::warning!(CAT, "rebuilding nmossrc fake chain: {e:#}"),
         }
+    }
+
+    /// Replace the bare constructed-time fake chain with a caps-pinned
+    /// one when `caps` or `transport-file*` supplies essence caps.
+    ///
+    /// The constructed-time fake chain is a bare `appsrc` with no caps
+    /// (no settings were available yet). Whenever we have caps to
+    /// advertise — from the user-set `caps` property or synthesised from
+    /// `transport-file*` — swap it for a caps-aware `appsrc` so downstream
+    /// negotiation can complete and the pipeline can reach PLAYING while
+    /// the bin waits for an IS-05 activation. Without a caps source we
+    /// leave the bare `appsrc` in place; the pipeline will then fail caps
+    /// negotiation on its way to PLAYING and the user must supply `caps`
+    /// (or `transport-file*`).
+    fn upgrade_fake_chain_from_settings(&self, bin: &gst::Bin) -> Result<(), anyhow::Error> {
+        let snapshot = self.settings.lock().unwrap().clone();
+        let caps = fake_caps_from_settings(&snapshot)?;
+        if let Some(caps) = caps {
+            gst::info!(CAT, "nmossrc pinning fake chain to `{caps}`");
+            let fake = inner::build_fake_src(Some(&caps))?;
+            self.swap_inner(bin, &fake, inner::RebuildChainOpts::default())?;
+        } else {
+            gst::warning!(
+                CAT,
+                "nmossrc fake chain has no caps to advertise; \
+                 downstream caps negotiation will fail until \
+                 `caps` or `transport-file*` is set",
+            );
+        }
+        Ok(())
     }
 
     fn swap_inner(
@@ -783,42 +788,47 @@ impl NmosSrc {
     /// internal to the transport; the intermediate fake hop is one
     /// extra `rebuild_chain` cycle and reliably avoids the failure.
     ///
-    /// `drain_downstream` is true only for real→real while PLAYING
-    /// so [`inner::rebuild_chain_with_opts`] may flush downstream of
-    /// the src ghost before blocking the anchor; NULL→READY
-    /// activation leaves it false.
+    /// `drain_downstream` is true for any live inner swap that replaces a
+    /// real chain or activates to one, so [`inner::rebuild_chain_with_opts`]
+    /// can flush sticky caps/events on downstream peers before the anchor
+    /// block probe. NULL→READY activation leaves it false.
     fn execute_activation_plan(&self, plan: &ActivationPlan) -> ActivationOutcome {
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
-        let drain_downstream = self.current_chain_is_real()
+        let from_real = self.current_chain_is_real();
+        let to_real = matches!(plan.inner, InnerConfig::Real(_));
+        let drain_downstream = (from_real || to_real)
             && bin_ref.current_state() == gst::State::Playing;
         let reroute_opts = inner::RebuildChainOpts {
             drain_downstream,
         };
+        let settings = self.settings.lock().unwrap().clone();
 
-        if matches!(plan.inner, InnerConfig::Real(_))
-            && self.current_chain_is_real()
-        {
+        if from_real && to_real {
             gst::debug!(
                 CAT,
                 "nmossrc activation is real\u{2192}real; inserting fake hop \
                  to fully release the old transport state before re-attaching",
             );
-            let snapshot = self.settings.lock().unwrap().clone();
-            let caps = intermediate_fake_src_caps(plan, &snapshot).ok().flatten();
-            match inner::build_fake_src(caps.as_ref()) {
-                Ok(p) => {
-                    if let Err(e) = self.swap_inner(bin_ref, &p, reroute_opts) {
-                        gst::warning!(
-                            CAT,
-                            "nmossrc intermediate fake-chain swap failed: {e:#}",
-                        );
+            match intermediate_fake_src_caps(plan, &settings)
+                .and_then(|caps| inner::build_fake_src(caps.as_ref()))
+            {
+                Ok(fake) => {
+                    if let Err(e) = self.swap_inner(bin_ref, &fake, reroute_opts) {
+                        return ActivationOutcome::Failed {
+                            reason: format!(
+                                "nmossrc: intermediate fake-chain swap failed: {e:#}"
+                            ),
+                        };
                     }
                 }
-                Err(e) => gst::warning!(
-                    CAT,
-                    "nmossrc: building intermediate fake chain: {e:#}",
-                ),
+                Err(e) => {
+                    return ActivationOutcome::Failed {
+                        reason: format!(
+                            "nmossrc: building intermediate fake chain: {e:#}"
+                        ),
+                    };
+                }
             }
         }
 
@@ -905,20 +915,11 @@ impl NmosSrc {
             InnerConfig::Fake { .. } => {
                 // Deactivation, side mismatch, missing config, etc.
                 // The bin may be in PLAYING when this happens, so
-                // we still need caps on the fake chain so
-                // downstream stays negotiated across the swap.
-                let snapshot = self.settings.lock().unwrap().clone();
-                let caps = match fake_caps_from_settings(&snapshot) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return ActivationOutcome::Failed {
-                            reason: format!(
-                                "nmossrc: resolving fake-chain caps for activation: {e:#}"
-                            ),
-                        };
-                    }
-                };
-                match inner::build_fake_src(caps.as_ref()) {
+                // we still need caps on the fake chain so downstream
+                // stays negotiated across the swap.
+                match fake_caps_from_settings(&settings)
+                    .and_then(|caps| inner::build_fake_src(caps.as_ref()))
+                {
                     Ok(e) => e,
                     Err(e) => {
                         return ActivationOutcome::Failed {
@@ -941,9 +942,7 @@ impl NmosSrc {
             // can't negotiate. If caps resolution fails here we
             // fall back to the bare fake chain rather than failing
             // twice.
-            let snapshot = self.settings.lock().unwrap().clone();
-            let fallback_caps = fake_caps_from_settings(&snapshot).ok().flatten();
-            if let Ok(p) = inner::build_fake_src(fallback_caps.as_ref()) {
+            if let Ok(p) = build_fake_src_for_settings(&settings) {
                 if let Err(e2) = self.swap_inner(bin_ref, &p, inner::RebuildChainOpts::default()) {
                     gst::warning!(
                         CAT,
@@ -977,40 +976,9 @@ fn install_initial_fake_chain(bin: &gst::Bin) -> Result<gst::GhostPad, glib::Boo
     Ok(ghost)
 }
 
-/// Transport file → enriched essence caps (for capssetter / fake chain).
-fn caps_from_transport_file(
-    transport: Transport,
-    transport_file: &str,
-) -> Result<Option<gst::Caps>, anyhow::Error> {
-    if transport_file.is_empty() {
-        return Ok(None);
-    }
-    match transport {
-        Transport::Mxl => caps_from_flow_def(Some(transport_file)),
-        Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => {
-            let media = crate::sdp::parse_sdp(transport_file).map_err(|e| {
-                anyhow::anyhow!("caps from SDP transport file: {e}")
-            })?;
-            let caps = crate::essence_caps::caps_from(&media.raw_caps, Some(&media.rtp_caps));
-            gst::info!(CAT, "nmossrc: caps `{caps}` from SDP transport file");
-            Ok(Some(caps))
-        }
-    }
-}
-
-/// Flow-def transport file → enriched essence caps (for capssetter / fake chain).
-fn caps_from_flow_def(
-    transport_file: Option<&str>,
-) -> Result<Option<gst::Caps>, anyhow::Error> {
-    let Some(text) = transport_file.filter(|s| !s.is_empty()) else {
-        return Ok(None);
-    };
-    let raw_caps = crate::flow_def::caps_from(text).map_err(|e| {
-        anyhow::anyhow!("caps from flow-def transport file: {e}")
-    })?;
-    let caps = crate::essence_caps::caps_from(&raw_caps, None);
-    gst::info!(CAT, "nmossrc: caps `{caps}` from transport file");
-    Ok(Some(caps))
+fn build_fake_src_for_settings(settings: &Settings) -> Result<gst::Element, anyhow::Error> {
+    let caps = fake_caps_from_settings(settings).ok().flatten();
+    inner::build_fake_src(caps.as_ref())
 }
 
 /// Caps for the intermediate fake `appsrc` on real→real activations.
@@ -1077,7 +1045,7 @@ fn mxl_capssetter_caps(
         );
         return Ok(None);
     }
-    caps_from_flow_def(transport_file)
+    crate::session::caps_from_flow_def("nmossrc", transport_file)
 }
 
 /// Caps for the optional UDP inner `capssetter`. When the effective
@@ -1119,22 +1087,13 @@ fn udp_capssetter_caps(
 fn fake_caps_from_settings(
     settings: &Settings,
 ) -> Result<Option<gst::Caps>, anyhow::Error> {
-    if let Some(caps) = settings.caps.as_ref() {
-        return Ok(Some(caps.clone()));
-    }
-    if !settings.transport_file.is_empty() {
-        return caps_from_transport_file(settings.transport, &settings.transport_file);
-    }
-    if !settings.transport_file_path.is_empty() {
-        let text = std::fs::read_to_string(&settings.transport_file_path).map_err(|e| {
-            anyhow::anyhow!(
-                "nmossrc: re-reading `transport-file-path` = `{}` for fake-chain caps: {e}",
-                settings.transport_file_path
-            )
-        })?;
-        return caps_from_transport_file(settings.transport, &text);
-    }
-    Ok(None)
+    crate::session::fake_caps_from_settings(
+        "nmossrc",
+        settings.transport,
+        settings.caps.as_ref(),
+        &settings.transport_file,
+        &settings.transport_file_path,
+    )
 }
 
 fn string_or_empty(value: &glib::Value) -> String {

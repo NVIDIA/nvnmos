@@ -466,6 +466,73 @@ impl Default for CommonSettings {
     }
 }
 
+/// Best-available caps for a fake inner chain (appsrc / capsfilter),
+/// resolved in priority order:
+///   1. `caps` property (user-supplied; authoritative).
+///   2. Caps derived from the literal `transport-file`.
+///   3. Caps derived from the file at `transport-file-path`.
+pub(crate) fn fake_caps_from_settings(
+    element: &str,
+    transport: Transport,
+    caps: Option<&gst::Caps>,
+    transport_file: &str,
+    transport_file_path: &str,
+) -> Result<Option<gst::Caps>, anyhow::Error> {
+    if let Some(caps) = caps {
+        return Ok(Some(caps.clone()));
+    }
+    if !transport_file.is_empty() {
+        return caps_from_transport_file(element, transport, transport_file);
+    }
+    if !transport_file_path.is_empty() {
+        let text = std::fs::read_to_string(transport_file_path).map_err(|e| {
+            anyhow::anyhow!(
+                "{element}: re-reading `transport-file-path` = `{transport_file_path}` for fake-chain caps: {e}"
+            )
+        })?;
+        return caps_from_transport_file(element, transport, &text);
+    }
+    Ok(None)
+}
+
+/// MXL `flow_def` transport file → enriched essence caps (capssetter / fake chain).
+pub(crate) fn caps_from_flow_def(
+    element: &str,
+    transport_file: Option<&str>,
+) -> Result<Option<gst::Caps>, anyhow::Error> {
+    let Some(text) = transport_file.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let raw_caps = crate::flow_def::caps_from(text)
+        .map_err(|e| anyhow::anyhow!("caps from flow-def transport file: {e}"))?;
+    let caps = crate::essence_caps::caps_from(&raw_caps, None);
+    gst::info!(gst::CAT_DEFAULT, "{element}: caps `{caps}` from transport file");
+    Ok(Some(caps))
+}
+
+fn caps_from_transport_file(
+    element: &str,
+    transport: Transport,
+    transport_file: &str,
+) -> Result<Option<gst::Caps>, anyhow::Error> {
+    if transport_file.is_empty() {
+        return Ok(None);
+    }
+    match transport {
+        Transport::Mxl => caps_from_flow_def(element, Some(transport_file)),
+        Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => {
+            let media = crate::sdp::parse_sdp(transport_file)
+                .map_err(|e| anyhow::anyhow!("caps from SDP transport file: {e}"))?;
+            let caps = crate::essence_caps::caps_from(&media.raw_caps, Some(&media.rtp_caps));
+            gst::info!(
+                gst::CAT_DEFAULT,
+                "{element}: caps `{caps}` from SDP transport file"
+            );
+            Ok(Some(caps))
+        }
+    }
+}
+
 /// Outcome of resolving `transport_file` / `transport_file_path`.
 /// `Some(text)` means a non-empty literal was supplied (directly or
 /// loaded from the path); `None` means neither was set and no
@@ -925,8 +992,8 @@ fn apply_auto_activate_gate(inner: InnerConfig, auto_activate: bool) -> InnerCon
     inner
 }
 
-/// Fixate upstream peer caps for deferred AddSender.
-fn prepare_deferred_peer_caps(
+/// Fixate upstream peer caps for deferred AddSender and deferred fake-chain pinning.
+pub(crate) fn prepare_deferred_peer_caps(
     element: &str,
     peer_caps: gst::Caps,
 ) -> Result<gst::Caps, anyhow::Error> {
