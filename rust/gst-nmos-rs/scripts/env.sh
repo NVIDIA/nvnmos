@@ -107,31 +107,61 @@ export DEMO_AUDIO_QUEUE_MAX_TIME_MS=${DEMO_AUDIO_QUEUE_MAX_TIME_MS:-50}
 export DEMO_VIDEO_SINK=${DEMO_VIDEO_SINK:-autovideosink}
 export DEMO_AUDIO_SINK=${DEMO_AUDIO_SINK:-autoaudiosink}
 
+# Use leaky=downstream to drop the oldest buffered media rather than
+# back-pressure the nmossrc receiver, so a slow sink never stalls the live
+# source. Each queue is bounded on a single dimension with the other two
+# disabled (0): video by buffer count (whole frames), audio by duration.
+# Otherwise the default multi-limit queue (200 buffers / 10 MB / 1 s)
+# would cap on whichever is hit first, which is the bytes limits for raw
+# video (<2 frames of YCbCr-4:2:2 10-bit 1920x1080) and the buffers limit
+# for audio (25ms for 0.125 ms packet time).
 demo_video_queue() {
     local name=${1:-}
     if [[ -n "$name" ]]; then
         echo queue name="$name" \
+            leaky=downstream \
             "max-size-buffers=$DEMO_VIDEO_QUEUE_MAX_BUFFERS" \
             max-size-bytes=0 max-size-time=0
     else
         echo queue \
+            leaky=downstream \
             "max-size-buffers=$DEMO_VIDEO_QUEUE_MAX_BUFFERS" \
             max-size-bytes=0 max-size-time=0
     fi
 }
 
+# See demo_video_queue.
 demo_audio_queue() {
     local name=${1:-}
     local max_time_ns=$(( DEMO_AUDIO_QUEUE_MAX_TIME_MS * 1000000 ))
     if [[ -n "$name" ]]; then
         echo queue name="$name" \
+            leaky=downstream \
             "max-size-time=$max_time_ns" \
             max-size-buffers=0 max-size-bytes=0
     else
         echo queue \
+            leaky=downstream \
             "max-size-time=$max_time_ns" \
             max-size-buffers=0 max-size-bytes=0
     fi
+}
+
+# Upmix received essence to the map sink channel count. audioconvert +
+# capsfilter sit after nmossrc and before the queue so fake→real swaps do
+# not leave sticky queue caps when channel count matches but depayload
+# layout differs. Channel-mask is not fixated: 8ch depayloaders may emit
+# unpositioned PCM; nmosaudiochannelmap sink caps fixate count only.
+demo_wide_audio_map_input() {
+    local caps=${1:-${AUDIO_CAPS_ALT:-$DEMO_UDP_AUDIO_CAPS_ALT}}
+    printf 'audioconvert ! capsfilter caps="%s"' "$caps"
+}
+
+# Wide nmossrc → nmosaudiochannelmap sink_1: normalize then bounded audio queue.
+demo_wide_receiver_to_map() {
+    local caps=${1:-${AUDIO_CAPS_ALT:-$DEMO_UDP_AUDIO_CAPS_ALT}}
+    local qname=${2:-}
+    printf '%s ! %s' "$(demo_wide_audio_map_input "$caps")" "$(demo_audio_queue "$qname")"
 }
 
 udp_video_buffer_props() {

@@ -50,10 +50,13 @@
 #   Node 3 (processor): two separate gst-launch-1.0 processes sharing
 #                       one node-seed (one Node, two gst processes):
 #                         a) nmossrc → videoflip horizontal → nmossink
-#                         b) nmossrc → volume 0.3            → nmossink
+#                         b) 2× nmossrc → nmosaudiochannelmap → volume
+#                            → 2× nmossink (IS-08: audio-in0/1, -out0/1;
+#                            audio-in1 is a "wide" receiver)
 #                       Both Receivers pull Node 1's flows; both Senders
 #                       publish processed flows that Node 2 can switch to
-#                       via IS-05 PATCH.
+#                       via IS-05 PATCH. Menu 9–12 drive IS-08 /map/active
+#                       on the channel map.
 #
 #   Node 4 (alt producer): second producer with different video frame rate
 #                       and audio channel count — use menu action 4 to
@@ -201,7 +204,7 @@ case "$DEMO_RECEIVER_CAPS_MODE" in
 esac
 
 # Essence caps — local aliases from env.sh (`DEMO_MXL_*` / `DEMO_UDP_*`).
-# Node 4 uses the alternate shapes for wide-receiver tests.
+# *_ALT shapes are used by Node 4 and the wide audio-in1 receiver path.
 case "$DEMO_TRANSPORT" in
     mxl)
         VIDEO_CAPS=$DEMO_MXL_VIDEO_CAPS
@@ -226,8 +229,8 @@ esac
 # `transport_sender_props <flow>` / `transport_receiver_props <flow>`
 # print the transport-specific property fragment for one nmossink /
 # nmossrc invocation. The flow name (one of `video1`, `audio1`,
-# `video4`, `audio4`, `video-out`, `audio-out`) is the script's stable
-# handle for the flows in the demo. On MXL both sides emit the same
+# `video4`, `audio4`, `video-out`, `audio-out0`, `audio-out1`) is the
+# script's stable handle for the flows in the demo.
 # `mxl-domain-id` / `mxl-domain-path` / `mxl-flow-id` triplet, which
 # is enough for the daemon to wire a Sender to its matching Receivers.
 # On UDP the sender side emits `destination-ip` / `destination-port`
@@ -248,7 +251,8 @@ transport_sender_props() {
                 video4)     flow_id=$DEMO_MXL_VIDEO_FLOW_ID4 ;;
                 audio4)     flow_id=$DEMO_MXL_AUDIO_FLOW_ID4 ;;
                 video-out)  flow_id=$DEMO_MXL_VIDEO_FLOW_ID3 ;;
-                audio-out)  flow_id=$DEMO_MXL_AUDIO_FLOW_ID3 ;;
+                audio-out0) flow_id=$DEMO_MXL_AUDIO_FLOW_ID3 ;;
+                audio-out1) flow_id=$DEMO_MXL_AUDIO_FLOW_ID2 ;;
                 *) echo "[error] transport_sender_props: unknown flow $flow" >&2; return 1 ;;
             esac
             printf 'mxl-domain-id=%s mxl-domain-path=%s mxl-flow-id=%s' \
@@ -261,7 +265,8 @@ transport_sender_props() {
                 video4)     group=$DEMO_UDP_VIDEO_MCAST_IP4; port=$DEMO_UDP_VIDEO_MCAST_PORT4 ;;
                 audio4)     group=$DEMO_UDP_AUDIO_MCAST_IP4; port=$DEMO_UDP_AUDIO_MCAST_PORT4 ;;
                 video-out)  group=$DEMO_UDP_VIDEO_MCAST_IP3; port=$DEMO_UDP_VIDEO_MCAST_PORT3 ;;
-                audio-out)  group=$DEMO_UDP_AUDIO_MCAST_IP3; port=$DEMO_UDP_AUDIO_MCAST_PORT3 ;;
+                audio-out0) group=$DEMO_UDP_AUDIO_MCAST_IP3; port=$DEMO_UDP_AUDIO_MCAST_PORT3 ;;
+                audio-out1) group=$DEMO_UDP_AUDIO_MCAST_IP2; port=$DEMO_UDP_AUDIO_MCAST_PORT2 ;;
                 *) echo "[error] transport_sender_props: unknown flow $flow" >&2; return 1 ;;
             esac
             # Sender-side IS-05 endpoint properties: destination = the
@@ -288,7 +293,8 @@ transport_receiver_props() {
                 video4)     group=$DEMO_UDP_VIDEO_MCAST_IP4; port=$DEMO_UDP_VIDEO_MCAST_PORT4 ;;
                 audio4)     group=$DEMO_UDP_AUDIO_MCAST_IP4; port=$DEMO_UDP_AUDIO_MCAST_PORT4 ;;
                 video-out)  group=$DEMO_UDP_VIDEO_MCAST_IP3; port=$DEMO_UDP_VIDEO_MCAST_PORT3 ;;
-                audio-out)  group=$DEMO_UDP_AUDIO_MCAST_IP3; port=$DEMO_UDP_AUDIO_MCAST_PORT3 ;;
+                audio-out0) group=$DEMO_UDP_AUDIO_MCAST_IP3; port=$DEMO_UDP_AUDIO_MCAST_PORT3 ;;
+                audio-out1) group=$DEMO_UDP_AUDIO_MCAST_IP2; port=$DEMO_UDP_AUDIO_MCAST_PORT2 ;;
                 *) echo "[error] transport_receiver_props: unknown flow $flow" >&2; return 1 ;;
             esac
             # Receiver-side IS-05 endpoint properties: multicast-ip =
@@ -364,6 +370,20 @@ HOST=${HOST:-localhost}
 # come back null), even though the resource exists in the model.
 IS04_VERSION=v1.3
 IS05_VERSION=v1.2
+IS08_VERSION=v1.0
+
+# IS-08 channel mapping on Node 3 audio (pad ids + AddChannelMapping name).
+IS08_CHANNELMAPPING_NAME=demo-map
+IS08_INPUT_0=input0
+IS08_INPUT_1=input1
+IS08_OUTPUT_0=output0
+IS08_OUTPUT_1=output1
+IS08_IN0_CH=2
+IS08_IN1_CH=8
+IS08_OUT0_CH=2
+IS08_OUT1_CH=8
+# Cross-route swap: first N channels only (8ch output keeps rest unrouted).
+IS08_SWAP_CH=2
 
 # ---- Bootstrap -----------------------------------------------------
 
@@ -494,6 +514,12 @@ echo "[daemon] ready (pid $DAEMON_PID, listening on $SOCK)"
 export GST_PLUGIN_PATH="$PLUGIN_DIR:$MXL_PLUGIN_DIR${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
 export LD_LIBRARY_PATH="$LIB:$MXL_RT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+if ! command -v gst-inspect-1.0 >/dev/null 2>&1 \
+    || ! gst-inspect-1.0 nmosaudiochannelmap >/dev/null 2>&1; then
+    echo "[error] nmosaudiochannelmap not found (build gst-nmos-rs and set GST_PLUGIN_PATH=$PLUGIN_DIR)" >&2
+    exit 1
+fi
+
 case "$DEMO_TRANSPORT" in
     udp|udp2)
         echo "[udp] video udpsrc buffer-size=$DEMO_UDP_VIDEO_BUFFER_SIZE (video flows only; override with DEMO_UDP_VIDEO_BUFFER_SIZE=...)"
@@ -570,7 +596,7 @@ _rotate_log() {
 # never run, and the flow files stay on disk with stale internal
 # state. A subsequent `launch_*` of the same producer then opens
 # those leaked files via `Instance::createOrOpenDiscreteFlowData`,
-# and the new writer can't produce fresh grains -- which makes every
+# and the new writer can't produce fresh grains which makes every
 # consumer (existing nmossrc, a relaunched Node 2, even a fresh bare
 # mxlsrc) see a frozen flow. SIGKILL after the 2s grace remains a
 # safety net for the case where the pipeline is wedged and
@@ -618,7 +644,7 @@ launch_node1() {
         echo "[node1] already running (pid $NODE1_PID)"
         return 1
     fi
-    echo "[node1] starting producer pipeline (audiotestsrc + videotestsrc -> 2 nmossinks)"
+    echo "[node1] starting producer pipeline (audiotestsrc + videotestsrc → 2 nmossinks)"
     _rotate_log "$LOG_DIR/node1-producer.log"
     pipeline_dots_prepare_launch node1
     GST_DEBUG=${GST_DEBUG:-nmossink:3} \
@@ -663,7 +689,7 @@ launch_node4() {
         echo "[node4] already running (pid $NODE4_PID)"
         return 1
     fi
-    echo "[node4] starting alt producer pipeline (audiotestsrc 880Hz + videotestsrc -> 2 nmossinks)"
+    echo "[node4] starting alt producer pipeline (audiotestsrc 880Hz + videotestsrc → 2 nmossinks)"
     _rotate_log "$LOG_DIR/node4-producer.log"
     pipeline_dots_prepare_launch node4
     GST_DEBUG=${GST_DEBUG:-nmossink:3} \
@@ -704,21 +730,26 @@ launch_node4() {
 # default) on both the Receiver and the Sender in each processor
 # pipeline. The resources register on IS-04 immediately so an external
 # controller can see them, but the data path stays on the placeholder
-# (an `appsrc` configured with the user-supplied `caps`, so downstream
-# negotiation completes and the pipeline can reach PLAYING) until the
-# controller PATCHes both Connection API /staged endpoints (the
-# inbound Receiver to attach to Node 1's flow, the outbound Sender to
-# publish the processed flow). Until then the inner transport chain
-# is not instantiated and no real data-path I/O happens on this side.
-# This shows off NMOS PATCH-driven activation vs. the eager
-# `auto-activate=true` shortcut Node 1 and Node 2 use.
+# until the controller PATCHes Connection API /staged endpoints.
+#
+# The audio processor is an IS-08 matrix: two Receivers feed
+# nmosaudiochannelmap (central audiomixer + per-output audiomixmatrix),
+# then volume on each output branch (0.3 / 0.1) and two Senders. IS-08
+# POST /map/activations/ works before IS-05 wiring; inactive mixer
+# inputs stay silent so one live Receiver is enough to exercise routing.
+#
+# audio-in1 is wide (receiver-caps-mode=wide, caps=$AUDIO_CAPS_ALT) so
+# IS-05 can accept e.g. 2ch or 8ch senders. Map sink_1 is fixed at 8ch
+# (IS08_IN1_CH). demo_wide_receiver_to_map upmixes narrower activations
+# (audioconvert → capsfilter → queue) before map.sink_1; channel-mask is
+# not fixated because 8ch depayloaders may emit unpositioned PCM.
 
 launch_node3_video() {
     if (( NODE3_VIDEO_PID > 0 )) && kill -0 "$NODE3_VIDEO_PID" 2>/dev/null; then
         echo "[node3-video] already running (pid $NODE3_VIDEO_PID)"
         return 1
     fi
-    echo "[node3-video] starting video processor (nmossrc -> queue(${DEMO_VIDEO_QUEUE_MAX_BUFFERS} buffers) -> videoflip -> nmossink)"
+    echo "[node3-video] starting video processor (nmossrc → queue(${DEMO_VIDEO_QUEUE_MAX_BUFFERS} buffers) → videoflip → nmossink)"
     _rotate_log "$LOG_DIR/node3-video.log"
     pipeline_dots_prepare_launch node3-video
     GST_DEBUG=${GST_DEBUG:-nmossrc:3,nmossink:3} \
@@ -756,32 +787,72 @@ launch_node3_audio() {
         echo "[node3-audio] already running (pid $NODE3_AUDIO_PID)"
         return 1
     fi
-    echo "[node3-audio] starting audio processor (nmossrc -> queue(${DEMO_AUDIO_QUEUE_MAX_TIME_MS}ms) -> volume -> nmossink)"
+    echo "[node3-audio] starting audio matrix router (2× nmossrc → map → 2× nmossink; wide audio-in1)"
     _rotate_log "$LOG_DIR/node3-audio.log"
     pipeline_dots_prepare_launch node3-audio
-    GST_DEBUG=${GST_DEBUG:-nmossrc:3,nmossink:3} \
+    GST_DEBUG=${GST_DEBUG:-nmossrc:3,nmossink:3,nmosaudiochannelmap:3} \
         _demo_line_buffered gst-launch-1.0 -e \
+            nmosaudiochannelmap name=map \
+                daemon-uri="unix:$SOCK" \
+                node-seed="$NODE3_SEED" \
+                http-port="$NODE3_PORT" \
+                channelmapping-name="$IS08_CHANNELMAPPING_NAME" \
+                sink_0::input-id="$IS08_INPUT_0" \
+                sink_0::receiver-name=audio-in0 \
+                sink_0::channels="$IS08_IN0_CH" \
+                sink_1::input-id="$IS08_INPUT_1" \
+                sink_1::receiver-name=audio-in1 \
+                sink_1::channels="$IS08_IN1_CH" \
+                src_0::output-id="$IS08_OUTPUT_0" \
+                src_0::sender-name=audio-out0 \
+                src_0::channels="$IS08_OUT0_CH" \
+                src_1::output-id="$IS08_OUTPUT_1" \
+                src_1::sender-name=audio-out1 \
+                src_1::channels="$IS08_OUT1_CH" \
             nmossrc \
                 daemon-uri="unix:$SOCK" \
                 transport="$DEMO_TRANSPORT" \
                 http-port="$NODE3_PORT" \
                 node-seed="$NODE3_SEED" \
-                receiver-name=audio-in \
+                receiver-name=audio-in0 \
                 $(transport_receiver_props audio1) \
                 caps="$AUDIO_CAPS" \
-                label="Node 3 / audio-in" \
+                label="Node 3 / audio-in0 (IS-08 $IS08_INPUT_0)" \
                 auto-activate=false ! \
-            $(demo_audio_queue n3-a-in) ! \
-            audioconvert ! volume volume=0.3 ! audioconvert ! \
+            $(demo_audio_queue n3-a-in) ! map.sink_0 \
+            nmossrc \
+                daemon-uri="unix:$SOCK" \
+                transport="$DEMO_TRANSPORT" \
+                http-port="$NODE3_PORT" \
+                node-seed="$NODE3_SEED" \
+                receiver-name=audio-in1 \
+                receiver-caps-mode=wide \
+                $(transport_receiver_props audio4) \
+                caps="$AUDIO_CAPS_ALT" \
+                label="Node 3 / audio-in1 (IS-08 $IS08_INPUT_1)" \
+                auto-activate=false ! \
+            $(demo_wide_receiver_to_map "$AUDIO_CAPS_ALT" n3-a-in1) ! map.sink_1 \
+            map.src_0 ! volume volume=0.3 ! audioconvert ! \
                 nmossink \
                     daemon-uri="unix:$SOCK" \
                     transport="$DEMO_TRANSPORT" \
                     http-port="$NODE3_PORT" \
                     node-seed="$NODE3_SEED" \
-                    sender-name=audio-out \
-                    $(transport_sender_props audio-out) \
+                    sender-name=audio-out0 \
+                    $(transport_sender_props audio-out0) \
                     caps="$AUDIO_CAPS" \
-                    label="Node 3 / audio-out (volume 0.3 of audio1)" \
+                    label="Node 3 / audio-out0 (IS-08 $IS08_OUTPUT_0)" \
+                    auto-activate=false \
+            map.src_1 ! volume volume=0.1 ! audioconvert ! \
+                nmossink \
+                    daemon-uri="unix:$SOCK" \
+                    transport="$DEMO_TRANSPORT" \
+                    http-port="$NODE3_PORT" \
+                    node-seed="$NODE3_SEED" \
+                    sender-name=audio-out1 \
+                    $(transport_sender_props audio-out1) \
+                    caps="$AUDIO_CAPS_ALT" \
+                    label="Node 3 / audio-out1 (IS-08 $IS08_OUTPUT_1)" \
                     auto-activate=false \
         > "$LOG_DIR/node3-audio.log" 2>&1 &
     NODE3_AUDIO_PID=$!
@@ -801,7 +872,7 @@ launch_node2() {
         echo "[node2] already running (pid $NODE2_PID)"
         return 1
     fi
-    echo "[node2] starting consumer pipeline (nmossrc --> queue(${DEMO_VIDEO_QUEUE_MAX_BUFFERS} buffers) --> ${DEMO_VIDEO_SINK}; nmossrc --> queue(${DEMO_AUDIO_QUEUE_MAX_TIME_MS}ms) --> ${DEMO_AUDIO_SINK})"
+    echo "[node2] starting consumer pipeline (nmossrc → queue(${DEMO_VIDEO_QUEUE_MAX_BUFFERS} buffers) → ${DEMO_VIDEO_SINK}; nmossrc → queue(${DEMO_AUDIO_QUEUE_MAX_TIME_MS}ms) → ${DEMO_AUDIO_SINK})"
     _rotate_log "$LOG_DIR/node2-consumer.log"
     pipeline_dots_prepare_launch node2
     GST_DEBUG=${GST_DEBUG:-nmossrc:3} \
@@ -858,7 +929,7 @@ launch_bare_preview() {
         echo "[preview] already running (pid $BARE_PREVIEW_PID)"
         return 1
     fi
-    echo "[preview] starting bare mxlsrc -> $DEMO_VIDEO_SINK"
+    echo "[preview] starting bare mxlsrc → $DEMO_VIDEO_SINK"
     _rotate_log "$LOG_DIR/bare-preview.log"
     pipeline_dots_prepare_launch bare-preview
     GST_DEBUG=${GST_DEBUG:-mxlsrc:5,basesrc:4} \
@@ -972,9 +1043,11 @@ declare -A EXPECTED=(
     [node2_receiver_video]="receivers|$NODE2_PORT|video2"
     [node2_receiver_audio]="receivers|$NODE2_PORT|audio2"
     [node3_receiver_video]="receivers|$NODE3_PORT|video-in"
-    [node3_receiver_audio]="receivers|$NODE3_PORT|audio-in"
+    [node3_receiver_audio_in0]="receivers|$NODE3_PORT|audio-in0"
+    [node3_receiver_audio_in1]="receivers|$NODE3_PORT|audio-in1"
     [node3_sender_video]="senders|$NODE3_PORT|video-out"
-    [node3_sender_audio]="senders|$NODE3_PORT|audio-out"
+    [node3_sender_audio_out0]="senders|$NODE3_PORT|audio-out0"
+    [node3_sender_audio_out1]="senders|$NODE3_PORT|audio-out1"
 )
 declare -A URLS=()
 collect_urls() {
@@ -1001,7 +1074,7 @@ collect_urls() {
     echo "[warn]   (if Node 2 endpoints are stuck, try \`DEMO_AUDIO_SINK=fakesink DEMO_VIDEO_SINK=fakesink\` to skip the autoaudiosink/autovideosink probe; or bump \`WAIT_TIMEOUT\`)" >&2
     return 1
 }
-echo "[poll] waiting for all 10 IS-04 resources to register (timeout ${WAIT_TIMEOUT}s)..."
+echo "[poll] waiting for all 12 IS-04 resources to register (timeout ${WAIT_TIMEOUT}s)..."
 if ! collect_urls; then
     echo "[poll] FAILED: not all resources registered within ${WAIT_TIMEOUT}s" >&2
     exit 1
@@ -1020,9 +1093,11 @@ URL_NODE4_SENDER_AUDIO=${URLS[node4_sender_audio]:-}
 URL_NODE2_RECEIVER_VIDEO=${URLS[node2_receiver_video]:-}
 URL_NODE2_RECEIVER_AUDIO=${URLS[node2_receiver_audio]:-}
 URL_NODE3_RECEIVER_VIDEO=${URLS[node3_receiver_video]:-}
-URL_NODE3_RECEIVER_AUDIO=${URLS[node3_receiver_audio]:-}
+URL_NODE3_RECEIVER_AUDIO_IN0=${URLS[node3_receiver_audio_in0]:-}
+URL_NODE3_RECEIVER_AUDIO_IN1=${URLS[node3_receiver_audio_in1]:-}
 URL_NODE3_SENDER_VIDEO=${URLS[node3_sender_video]:-}
-URL_NODE3_SENDER_AUDIO=${URLS[node3_sender_audio]:-}
+URL_NODE3_SENDER_AUDIO_OUT0=${URLS[node3_sender_audio_out0]:-}
+URL_NODE3_SENDER_AUDIO_OUT1=${URLS[node3_sender_audio_out1]:-}
 
 # ---- Per-transport heredoc substitutions --------------------------
 #
@@ -1038,7 +1113,8 @@ case "$DEMO_TRANSPORT" in
         LABEL_FLOW_VIDEO4="flow $DEMO_MXL_VIDEO_FLOW_ID4"
         LABEL_FLOW_AUDIO4="flow $DEMO_MXL_AUDIO_FLOW_ID4"
         LABEL_FLOW_VIDEO_OUT="flow $DEMO_MXL_VIDEO_FLOW_ID3"
-        LABEL_FLOW_AUDIO_OUT="flow $DEMO_MXL_AUDIO_FLOW_ID3"
+        LABEL_FLOW_AUDIO_OUT0="flow $DEMO_MXL_AUDIO_FLOW_ID3"
+        LABEL_FLOW_AUDIO_OUT1="flow $DEMO_MXL_AUDIO_FLOW_ID2"
         LABEL_INNER_CHAIN="mxlsink / mxlsrc"
         LABEL_PREWIRED="via mxl-flow-id"
         REROUTE_VIDEO_BODY="{\"transport_params\": [{\"mxl_flow_id\": \"$DEMO_MXL_VIDEO_FLOW_ID3\"}], \"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}}"
@@ -1050,7 +1126,8 @@ case "$DEMO_TRANSPORT" in
         LABEL_FLOW_VIDEO4="dest $DEMO_UDP_VIDEO_MCAST_IP4:$DEMO_UDP_VIDEO_MCAST_PORT4"
         LABEL_FLOW_AUDIO4="dest $DEMO_UDP_AUDIO_MCAST_IP4:$DEMO_UDP_AUDIO_MCAST_PORT4"
         LABEL_FLOW_VIDEO_OUT="dest $DEMO_UDP_VIDEO_MCAST_IP3:$DEMO_UDP_VIDEO_MCAST_PORT3"
-        LABEL_FLOW_AUDIO_OUT="dest $DEMO_UDP_AUDIO_MCAST_IP3:$DEMO_UDP_AUDIO_MCAST_PORT3"
+        LABEL_FLOW_AUDIO_OUT0="dest $DEMO_UDP_AUDIO_MCAST_IP3:$DEMO_UDP_AUDIO_MCAST_PORT3"
+        LABEL_FLOW_AUDIO_OUT1="dest $DEMO_UDP_AUDIO_MCAST_IP2:$DEMO_UDP_AUDIO_MCAST_PORT2"
         if [[ "$DEMO_TRANSPORT" == nvdsudp ]]; then
             LABEL_INNER_CHAIN="nvdsudpsink / nvdsudpsrc (DeepStream Rivermax)"
             LABEL_PREWIRED="via destination multicast group + port (interface $DEMO_NIC_IP)"
@@ -1078,22 +1155,25 @@ gst-nmos-rs four-Node interactive demo  (transport=$DEMO_TRANSPORT)
 
 Topology:
 
-  Node 1 (port $NODE1_PORT, seed $NODE1_SEED)  -- producer
-    audiotestsrc(440Hz)  -> nmossink Sender audio1 ($LABEL_FLOW_AUDIO1)
-    videotestsrc(smpte)  -> nmossink Sender video1 ($LABEL_FLOW_VIDEO1)
+  Node 1 (port $NODE1_PORT, seed $NODE1_SEED): producer
+    audiotestsrc(440Hz)  → nmossink Sender audio1 ($LABEL_FLOW_AUDIO1)
+    videotestsrc(smpte)  → nmossink Sender video1 ($LABEL_FLOW_VIDEO1)
 
-  Node 2 (port $NODE2_PORT, seed $NODE2_SEED)  -- consumer
-    Receiver audio2  -> $DEMO_AUDIO_SINK
-    Receiver video2  -> $DEMO_VIDEO_SINK
+  Node 2 (port $NODE2_PORT, seed $NODE2_SEED): consumer
+    Receiver audio2  → $DEMO_AUDIO_SINK
+    Receiver video2  → $DEMO_VIDEO_SINK
     receiver-caps-mode=$DEMO_RECEIVER_CAPS_MODE on both receivers
 
-  Node 3 (port $NODE3_PORT, seed $NODE3_SEED)  -- processor (two gst processes)
-    Receiver audio-in  --(volume 0.3)-->          Sender audio-out ($LABEL_FLOW_AUDIO_OUT)
-    Receiver video-in  --(videoflip h-flip)-->   Sender video-out ($LABEL_FLOW_VIDEO_OUT)
+  Node 3 (port $NODE3_PORT, seed $NODE3_SEED): processor (two gst processes)
+    Receiver video-in  → videoflip h-flip →   Sender video-out ($LABEL_FLOW_VIDEO_OUT)
+    Receivers audio-in0 + audio-in1 → nmosaudiochannelmap ($IS08_CHANNELMAPPING_NAME)
+      (audio-in0: queue; audio-in1 wide: demo_wide_receiver_to_map) →
+      volume → Senders audio-out0 + audio-out1
+    IS-08 menu 10: identity (all channels); 11: swap (cross-route); 12: unrouted
 
-  Node 4 (port $NODE4_PORT, seed $NODE4_SEED)  -- alternate producer
-    audiotestsrc(880Hz, 8ch) -> nmossink Sender audio4 ($LABEL_FLOW_AUDIO4)
-    videotestsrc(snow)       -> nmossink Sender video4 ($LABEL_FLOW_VIDEO4)
+  Node 4 (port $NODE4_PORT, seed $NODE4_SEED): alternate producer
+    audiotestsrc(880Hz, 8ch) → nmossink Sender audio4 ($LABEL_FLOW_AUDIO4)
+    videotestsrc(snow)       → nmossink Sender video4 ($LABEL_FLOW_VIDEO4)
     (different frame rate + channel count vs Node 1)
 
 Activation state out of the box:
@@ -1139,10 +1219,12 @@ Resources discovered from $DAEMON_LOG
   Node 1 Sender audio1:   $URL_NODE1_SENDER_AUDIO
   Node 2 Receiver video2: $URL_NODE2_RECEIVER_VIDEO
   Node 2 Receiver audio2: $URL_NODE2_RECEIVER_AUDIO
-  Node 3 Receiver video-in: $URL_NODE3_RECEIVER_VIDEO
-  Node 3 Receiver audio-in: $URL_NODE3_RECEIVER_AUDIO
-  Node 3 Sender video-out: $URL_NODE3_SENDER_VIDEO
-  Node 3 Sender audio-out: $URL_NODE3_SENDER_AUDIO
+  Node 3 Receiver video-in:  $URL_NODE3_RECEIVER_VIDEO
+  Node 3 Receiver audio-in0:  $URL_NODE3_RECEIVER_AUDIO_IN0
+  Node 3 Receiver audio-in1:  $URL_NODE3_RECEIVER_AUDIO_IN1
+  Node 3 Sender video-out:    $URL_NODE3_SENDER_VIDEO
+  Node 3 Sender audio-out0:   $URL_NODE3_SENDER_AUDIO_OUT0
+  Node 3 Sender audio-out1:   $URL_NODE3_SENDER_AUDIO_OUT1
   Node 4 Sender video4:   $URL_NODE4_SENDER_VIDEO
   Node 4 Sender audio4:   $URL_NODE4_SENDER_AUDIO
 
@@ -1179,13 +1261,22 @@ Example PATCHes (copy/paste):
     -d '{"master_enable": true, "activation": {"mode": "activate_immediate"}}' \\
     "$URL_NODE3_SENDER_VIDEO/staged"
 
-  # Same for the audio processor:
+  # Same for the audio matrix router (two Receivers + two Senders):
   curl -sS -X PATCH -H 'Content-Type: application/json' \\
     -d '{"master_enable": true, "activation": {"mode": "activate_immediate"}}' \\
-    "$URL_NODE3_RECEIVER_AUDIO/staged"
+    "$URL_NODE3_RECEIVER_AUDIO_IN0/staged"
   curl -sS -X PATCH -H 'Content-Type: application/json' \\
     -d '{"master_enable": true, "activation": {"mode": "activate_immediate"}}' \\
-    "$URL_NODE3_SENDER_AUDIO/staged"
+    "$URL_NODE3_RECEIVER_AUDIO_IN1/staged"
+  curl -sS -X PATCH -H 'Content-Type: application/json' \\
+    -d '{"master_enable": true, "activation": {"mode": "activate_immediate"}}' \\
+    "$URL_NODE3_SENDER_AUDIO_OUT0/staged"
+  curl -sS -X PATCH -H 'Content-Type: application/json' \\
+    -d '{"master_enable": true, "activation": {"mode": "activate_immediate"}}' \\
+    "$URL_NODE3_SENDER_AUDIO_OUT1/staged"
+
+  # ---- IS-08 channel map (Node 3 audio) ----
+  # Use interactive menu 10 (identity), 11 (swapped), or 12 (unrouted).
 
   # ---- Re-route Node 2 to Node 3's processed flows ----
   # Node 2's Receivers default to Node 1's flows. Once Node 3 is
@@ -1222,9 +1313,10 @@ Logs:
   Node 3 audio processor: $LOG_DIR/node3-audio.log
   Node 4 alt producer:    $LOG_DIR/node4-producer.log
 
-Or drive activations via the interactive menu below — it can toggle
-\`master_enable\` on any Sender or Receiver and subscribe a Receiver
-to a particular Sender. Press Ctrl+C at any time to quit.
+Or drive activations via the interactive menu below — IS-05 items 2–4
+toggle `master_enable` and connect Receivers to Senders; IS-08 items
+9–12 route the Node 3 audio channel map.
+Press Ctrl+C at any time to quit.
 ================================================================
 EOF
 
@@ -1253,7 +1345,8 @@ declare -a SENDER_LABELS=(
     "Node 1 / video1"
     "Node 1 / audio1"
     "Node 3 / video-out"
-    "Node 3 / audio-out"
+    "Node 3 / audio-out0"
+    "Node 3 / audio-out1"
     "Node 4 / video4"
     "Node 4 / audio4"
 )
@@ -1261,7 +1354,8 @@ declare -a SENDER_URLS=(
     "$URL_NODE1_SENDER_VIDEO"
     "$URL_NODE1_SENDER_AUDIO"
     "$URL_NODE3_SENDER_VIDEO"
-    "$URL_NODE3_SENDER_AUDIO"
+    "$URL_NODE3_SENDER_AUDIO_OUT0"
+    "$URL_NODE3_SENDER_AUDIO_OUT1"
     "$URL_NODE4_SENDER_VIDEO"
     "$URL_NODE4_SENDER_AUDIO"
 )
@@ -1269,13 +1363,15 @@ declare -a RECEIVER_LABELS=(
     "Node 2 / video2"
     "Node 2 / audio2"
     "Node 3 / video-in"
-    "Node 3 / audio-in"
+    "Node 3 / audio-in0"
+    "Node 3 / audio-in1"
 )
 declare -a RECEIVER_URLS=(
     "$URL_NODE2_RECEIVER_VIDEO"
     "$URL_NODE2_RECEIVER_AUDIO"
     "$URL_NODE3_RECEIVER_VIDEO"
-    "$URL_NODE3_RECEIVER_AUDIO"
+    "$URL_NODE3_RECEIVER_AUDIO_IN0"
+    "$URL_NODE3_RECEIVER_AUDIO_IN1"
 )
 
 # Extract the UUID at the end of a connection-API resource URL like
@@ -1286,7 +1382,7 @@ declare -a RECEIVER_URLS=(
 # extension and silently produces nothing on POSIX sed.
 _id_from_url() { local u=${1%/}; echo "${u##*/}"; }
 
-# Reverse lookup: sender UUID -> friendly label, so receiver state
+# Reverse lookup: sender UUID → friendly label, so receiver state
 # displays read "sender=Node 1 / video1" instead of an opaque UUID.
 declare -A SENDER_ID_TO_NAME=()
 for _i in "${!SENDER_LABELS[@]}"; do
@@ -1365,7 +1461,7 @@ patch_master_enable() {
     # IS-05 activation handler copies /staged onto /active on every
     # activate_immediate, so any fields we omit here are reset to whatever's
     # currently in /staged (typically null when the connection was brought
-    # up out-of-band by nvnmosd's `auto-activate` -> `SyncResourceState`
+    # up out-of-band by nvnmosd's `auto-activate` → `SyncResourceState`
     # path, which only writes /active). Read /active and restate the full
     # transport binding so the toggle preserves transport_params,
     # sender_id/receiver_id and transport_file.
@@ -1732,8 +1828,8 @@ declare -i DIAG_COUNTER=0
 # is a directory separator) or filenames with awkward whitespace.
 _diag_slug() {
     local s=$1
-    s=${s//[[:space:]]/-}    # spaces -> dashes
-    s=${s//\//-}             # slashes -> dashes
+    s=${s//[[:space:]]/-}    # spaces → dashes
+    s=${s//\//-}             # slashes → dashes
     s=$(printf '%s' "$s" | tr -s '-')  # collapse repeated dashes
     s=${s#-}                 # trim leading dash
     s=${s%-}                 # trim trailing dash
@@ -1750,7 +1846,7 @@ diag_snapshot() {
     mkdir -p "$outdir"
 
     echo
-    echo "[diag] snapshot $n-$label -> $outdir"
+    echo "[diag] snapshot $n-$label → $outdir"
 
     # Per-resource /active + /staged dumps. Labels are slugified so
     # they're usable as file paths (the raw labels carry both `/` and
@@ -1774,6 +1870,10 @@ diag_snapshot() {
         curl -sS --max-time "$CURL_MAX_TIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
             "$url/staged" 2>/dev/null > "$outdir/receiver-$slug-staged.json" || true
     done
+
+    curl -sS --max-time "$CURL_MAX_TIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+        "$(is08_api_root)/map/active/" 2>/dev/null \
+        > "$outdir/is08-map-active.json" || true
 
     # Compact stdout summary, sourced from the just-captured /active.
     local body en identity sender_id friendly
@@ -1870,7 +1970,7 @@ diag_snapshot() {
         "$LOG_DIR/bare-preview.log"
         "$DAEMON_LOG"
     )
-    echo "  Log tails (last $TAIL_LINES lines) -> $outdir/*-tail.txt"
+    echo "  Log tails (last $TAIL_LINES lines) → $outdir/*-tail.txt"
     for log in "${logs[@]}"; do
         [[ -f "$log" ]] || continue
         base=${log##*/}
@@ -1986,6 +2086,141 @@ menu_export_pipeline_diagram() {
     pipeline_dots_export_current "$slug" "$pid" || return
 }
 
+# ---- IS-08 Channel Mapping (Node 3 audio matrix) -------------------
+#
+# POST /map/activations/ on the Node 3 Channel Mapping API. These
+# control-plane calls succeed whether or not the nmossrc/nmossink
+# pairs are IS-05-active; the element applies matrix changes on ack.
+# Inactive or unconnected mixer inputs contribute silence (audiomixer
+# placement), so partial IS-05 wiring still produces valid output.
+
+is08_api_root() {
+    echo "http://$HOST:$NODE3_PORT/x-nmos/channelmapping/$IS08_VERSION"
+}
+
+is08_post_activation() {
+    local body=$1
+    local resp status body_out
+    if ! resp=$(curl -sS -X POST -H 'Content-Type: application/json' \
+            --max-time "$CURL_MAX_TIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+            -w $'\n__HTTP_STATUS__:%{http_code}' \
+            -d "$body" "$(is08_api_root)/map/activations/" 2>&1); then
+        echo "[error] POST $(is08_api_root)/map/activations/ failed: $resp"
+        return 1
+    fi
+    status=${resp##*__HTTP_STATUS__:}
+    body_out=${resp%$'\n'__HTTP_STATUS__:*}
+    if [[ "$status" != 2* ]]; then
+        echo "[error] POST map/activations returned HTTP $status:"
+        echo "$body_out" | jq . 2>/dev/null || echo "$body_out"
+        return 1
+    fi
+    echo "[ok] IS-08 activation posted (HTTP $status)"
+    # Mirror the IS-05 connect path: report the authoritative applied
+    # routing from GET /map/active rather than echoing the request.
+    show_is08_state
+}
+
+is08_activation_identity() {
+    jq -nc \
+        --arg i0 "$IS08_INPUT_0" --arg i1 "$IS08_INPUT_1" \
+        --arg o0 "$IS08_OUTPUT_0" --arg o1 "$IS08_OUTPUT_1" \
+        --argjson n0 "$IS08_OUT0_CH" --argjson n1 "$IS08_OUT1_CH" '
+        def route_all($input; $n):
+            reduce range(0; $n) as $c ({}; . + {($c|tostring): {input: $input, channel_index: $c}});
+        {
+            activation: {mode: "activate_immediate"},
+            action: {
+                ($o0): route_all($i0; $n0),
+                ($o1): route_all($i1; $n1)
+            }
+        }'
+}
+
+is08_activation_swapped() {
+    jq -nc \
+        --arg i0 "$IS08_INPUT_0" --arg i1 "$IS08_INPUT_1" \
+        --arg o0 "$IS08_OUTPUT_0" --arg o1 "$IS08_OUTPUT_1" \
+        --argjson out0 "$IS08_OUT0_CH" --argjson out1 "$IS08_OUT1_CH" \
+        --argjson swap "$IS08_SWAP_CH" '
+        def route_prefix($input; $filled; $total):
+            reduce range(0; $total) as $c (
+                {};
+                if $c < $filled then
+                    . + {($c|tostring): {input: $input, channel_index: $c}}
+                else
+                    . + {($c|tostring): {input: null, channel_index: null}}
+                end
+            );
+        {
+            activation: {mode: "activate_immediate"},
+            action: {
+                ($o0): route_prefix($i1; $swap; $out0),
+                ($o1): route_prefix($i0; $swap; $out1)
+            }
+        }'
+}
+
+is08_activation_unrouted() {
+    jq -nc \
+        --arg o0 "$IS08_OUTPUT_0" --arg o1 "$IS08_OUTPUT_1" \
+        --argjson n0 "$IS08_OUT0_CH" --argjson n1 "$IS08_OUT1_CH" '
+        def unrouted($n):
+            reduce range(0; $n) as $c ({}; . + {($c|tostring): {input: null, channel_index: null}});
+        {
+            activation: {mode: "activate_immediate"},
+            action: {
+                ($o0): unrouted($n0),
+                ($o1): unrouted($n1)
+            }
+        }'
+}
+
+show_is08_state() {
+    local url body
+    url="$(is08_api_root)/map/active/"
+    echo
+    echo "IS-08 /map/active (Node 3 / $IS08_CHANNELMAPPING_NAME):"
+    if ! body=$(curl -sS --max-time "$CURL_MAX_TIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+            "$url" 2>&1); then
+        echo "[error] GET $url failed: $body"
+        return 1
+    fi
+    if ! jq -e . >/dev/null 2>&1 <<< "$body"; then
+        echo "$body"
+        return 0
+    fi
+    # Brief view, one line per output, channels in index order:
+    #   <output-id>  <input-id>:<input-ch> ...   ("-:-" = unrouted channel)
+    # Reuses the `inputId:channel` token from the src-pad `active-map` property.
+    jq -r '
+        (.map // {})
+        | to_entries
+        | if length == 0 then "  (no active map)"
+          else
+            sort_by(.key)[]
+            | "  \(.key)  " + (
+                [ .value | to_entries | sort_by(.key | tonumber)[]
+                  | if .value.input == null then "-:-"
+                    else "\(.value.input):\(.value.channel_index)" end
+                ] | join(" ")
+              )
+          end
+    ' <<< "$body"
+}
+
+menu_is08_identity() {
+    is08_post_activation "$(is08_activation_identity)"
+}
+
+menu_is08_swapped() {
+    is08_post_activation "$(is08_activation_swapped)"
+}
+
+menu_is08_unrouted() {
+    is08_post_activation "$(is08_activation_unrouted)"
+}
+
 interactive_loop() {
     if ! command -v jq >/dev/null 2>&1; then
         echo
@@ -2007,7 +2242,11 @@ interactive_loop() {
         echo "  5) Diagnostic snapshot             (/active + /staged + /dev/shm + log tails)"
         echo "  6) Tear down a pipeline            (SIGTERM the gst-launch process)"
         echo "  7) Launch a pipeline               (no-op if already running)"
-        echo "  8) Export pipeline diagram         (current state: DOT -> PNG via SIGHUP)"
+        echo "  8) Export pipeline diagram         (current state: DOT → PNG via SIGHUP)"
+        echo "  9) Show current IS-08 /map/active  (Node 3 audio channel map)"
+        echo " 10) IS-08 identity map              (input0 → output0, input1 → output1)"
+        echo " 11) IS-08 swapped map               (input1 → output0, input0 → output1)"
+        echo " 12) IS-08 unrouted map              (all outputs silent)"
         echo "  q) Quit"
         echo "================================================================"
         if ! read -r -p "> " ans; then
@@ -2023,6 +2262,10 @@ interactive_loop() {
             6) menu_teardown_pipeline ;;
             7) menu_launch_pipeline ;;
             8) menu_export_pipeline_diagram ;;
+            9) show_is08_state ;;
+            10) menu_is08_identity ;;
+            11) menu_is08_swapped ;;
+            12) menu_is08_unrouted ;;
             q|Q) return ;;
             *) echo "Invalid choice." ;;
         esac
