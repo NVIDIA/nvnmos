@@ -104,12 +104,12 @@ pub(crate) struct Session {
     /// `Some((resource_handle, resource_id))` when `Session::open` was
     /// called with a non-empty `transport_file` and the daemon
     /// accepted the `AddSender` / `AddReceiver`. `None` otherwise.
-    resource: Option<RegisteredResource>,
+    resource: Option<AddedResource>,
     client: NvnmosDaemonClient<Channel>,
     activation_task: JoinHandle<()>,
 }
 
-struct RegisteredResource {
+struct AddedResource {
     handle: String,
     id: String,
 }
@@ -125,7 +125,7 @@ pub(crate) enum DaemonError {
     #[error(
         "session already has a resource added; deferred AddSender is a one-shot operation"
     )]
-    AlreadyRegistered,
+    AlreadyAdded,
     #[error(
         "session has no resource added yet; auto-activate sync cannot run before AddSender / AddReceiver"
     )]
@@ -268,7 +268,7 @@ impl Session {
     /// upstream peer caps have negotiated and a configuring transport
     /// file can be synthesised.
     ///
-    /// Errors with [`DaemonError::AlreadyRegistered`] if called on a
+    /// Errors with [`DaemonError::AlreadyAdded`] if called on a
     /// session that already has a resource (caller bug —
     /// deferred-mode AddSender is one-shot).
     pub(crate) async fn add_resource(
@@ -279,7 +279,7 @@ impl Session {
         transport_file: &str,
     ) -> Result<(), DaemonError> {
         if self.resource.is_some() {
-            return Err(DaemonError::AlreadyRegistered);
+            return Err(DaemonError::AlreadyAdded);
         }
         let resource = add_resource(
             &mut self.client,
@@ -364,7 +364,7 @@ async fn add_resource(
     name: &str,
     transport: ProtoTransport,
     transport_file: &str,
-) -> Result<RegisteredResource, DaemonError> {
+) -> Result<AddedResource, DaemonError> {
     let resp = match side {
         Side::Sender => client
             .add_sender(AddSenderRequest {
@@ -385,7 +385,7 @@ async fn add_resource(
             .await?
             .into_inner(),
     };
-    Ok(RegisteredResource {
+    Ok(AddedResource {
         handle: resp.resource_handle,
         id: resp.resource_id,
     })
