@@ -31,7 +31,9 @@ use tokio::sync::oneshot;
 
 use crate::daemon::{ActivationHandler, ActivationOutcome, ActivationRequest, Session};
 use crate::inner;
-use crate::session::{ActivationAck, ActivationPlan, InnerConfig, TransportConfig};
+use crate::session::{
+    ActivationAck, ActivationPlan, CommonSettings, InnerConfig, NodeSettings, TransportConfig,
+};
 use crate::types::{DEFAULT_DAEMON_URI, Transport};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
@@ -890,16 +892,18 @@ fn string_or_empty(value: &glib::Value) -> String {
         .unwrap_or_default()
 }
 
-impl From<Settings> for crate::session::CommonSettings {
+impl From<Settings> for CommonSettings {
     fn from(s: Settings) -> Self {
-        crate::session::CommonSettings {
+        CommonSettings {
             daemon_uri: s.daemon_uri,
-            node_seed: s.node_seed,
-            http_port: s.http_port,
-            host_name: s.host_name,
-            domain: s.domain,
-            registration_url: s.registration_url,
-            system_url: s.system_url,
+            node: NodeSettings {
+                node_seed: s.node_seed,
+                http_port: s.http_port,
+                host_name: s.host_name,
+                domain: s.domain,
+                registration_url: s.registration_url,
+                system_url: s.system_url,
+            },
             transport: s.transport,
             side: crate::session::types::Side::Sender,
             name: s.sender_name,
@@ -982,10 +986,10 @@ mod tests {
             ..Settings::default()
         };
         let cs: CommonSettings = s.into();
-        assert_eq!(cs.host_name, "studio-a");
-        assert_eq!(cs.domain, "local");
-        assert_eq!(cs.registration_url, "http://reg:3210/x-nmos/registration/v1.3");
-        assert_eq!(cs.system_url, "http://sys:10641/x-nmos/system/v1.0");
+        assert_eq!(cs.node.host_name, "studio-a");
+        assert_eq!(cs.node.domain, "local");
+        assert_eq!(cs.node.registration_url, "http://reg:3210/x-nmos/registration/v1.3");
+        assert_eq!(cs.node.system_url, "http://sys:10641/x-nmos/system/v1.0");
     }
 
     #[test]

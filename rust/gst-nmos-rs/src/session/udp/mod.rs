@@ -110,7 +110,7 @@ pub(super) fn sdp_build_input<'a>(
         destination_port: settings.destination_port,
         interface_ip: &settings.interface_ip,
         advertise_caps,
-        node_seed: &settings.node_seed,
+        node_seed: &settings.node.node_seed,
         narrow_traffic_profile: settings.transport == Transport::NvDsUdp,
     }
 }

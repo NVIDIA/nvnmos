@@ -91,7 +91,8 @@ jobs:
 
       # bindgen (nvnmos-sys) needs libclang; gst-nmos-rs links GStreamer 1.x.
       # Unit tests instantiate real elements (udpsrc, rtpvrawdepay, …) from
-      # gst-plugins-base / gst-plugins-good — dev packages alone are not enough.
+      # gst-plugins-base / gst-plugins-good, and nmosaudiochannelmap uses
+      # audiomixmatrix from gst-plugins-bad — dev packages alone are not enough.
       - name: Install Rust system dependencies
         run: |
           sudo apt-get update
@@ -100,7 +101,8 @@ jobs:
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad
 
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:

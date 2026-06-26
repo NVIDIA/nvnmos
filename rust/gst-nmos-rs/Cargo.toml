@@ -19,6 +19,7 @@ crate-type = ["cdylib", "rlib"]
 glib = "0.21.5"
 gstreamer = "0.24.4"
 gstreamer-base = "0.24.4"
+gstreamer-audio = "0.24.4"
 gstreamer-sdp = "0.24.4"
 
 nvnmos-rpc = { path = "../nvnmos-rpc" }

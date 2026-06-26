@@ -138,6 +138,8 @@ use std::sync::LazyLock;
 use gst::glib;
 use gstreamer as gst;
 
+mod channel_mapping_session;
+mod channel_mapping;
 mod daemon;
 mod domain;
 mod essence_caps;
@@ -152,6 +154,7 @@ mod runtime;
 mod sdp;
 mod sdp_passthrough;
 mod session;
+mod nmosaudiochannelmap;
 mod types;
 
 pub(crate) static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
@@ -165,6 +168,7 @@ pub(crate) static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     nmossink::register(plugin)?;
     nmossrc::register(plugin)?;
+    nmosaudiochannelmap::register(plugin)?;
     Ok(())
 }
 

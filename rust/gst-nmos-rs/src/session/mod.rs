@@ -25,7 +25,11 @@ use crate::types::{CapsMode, DEFAULT_DAEMON_URI, FlowFormat, Transport};
 /// timeout — same order of magnitude, no special meaning.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub(crate) mod channel_mapping;
+pub(crate) mod node;
 pub(crate) mod types;
+
+pub(crate) use node::NodeSettings;
 
 use self::types::Side;
 
@@ -134,7 +138,8 @@ pub(crate) const SENDER_NAME_BLURB: &str =
      Node; a Receiver on the same Node may share the same name (the \
      daemon scopes names by side). Required unless the name is already \
      carried in `transport-file*`. Overrides the transport file's value \
-     when both are supplied.";
+     when both are supplied. The Sender's IS-04 id is derived from the \
+     name and the element's `node-seed`.";
 
 pub(crate) const RECEIVER_NAME_BLURB: &str =
     "Name for this Receiver within the Node (becomes the \
@@ -143,7 +148,8 @@ pub(crate) const RECEIVER_NAME_BLURB: &str =
      Node; a Sender on the same Node may share the same name (the \
      daemon scopes names by side). Required unless the name is already \
      carried in `transport-file*`. Overrides the transport file's value \
-     when both are supplied.";
+     when both are supplied. The Receiver's IS-04 id is derived from the \
+     name and the element's `node-seed`.";
 
 pub(crate) const LABEL_BLURB_SENDER: &str =
     "NMOS label for the Sender. Optional. Overrides the transport \
@@ -248,17 +254,7 @@ pub(crate) const AUTO_ACTIVATE_BLURB: &str =
 #[derive(Debug, Clone)]
 pub(crate) struct CommonSettings {
     pub(crate) daemon_uri: String,
-    pub(crate) node_seed: String,
-    /// See [`HTTP_PORT_BLURB`].
-    pub(crate) http_port: u16,
-    /// See [`HOST_NAME_BLURB`].
-    pub(crate) host_name: String,
-    /// See [`DOMAIN_BLURB`].
-    pub(crate) domain: String,
-    /// See [`REGISTRATION_URL_BLURB`].
-    pub(crate) registration_url: String,
-    /// See [`SYSTEM_URL_BLURB`].
-    pub(crate) system_url: String,
+    pub(crate) node: NodeSettings,
     pub(crate) transport: Transport,
     /// Whether this snapshot came from `nmossink` (Sender) or `nmossrc`
     /// (Receiver). Pinned by the element that built the snapshot.
@@ -445,12 +441,7 @@ impl Default for CommonSettings {
     fn default() -> Self {
         Self {
             daemon_uri: DEFAULT_DAEMON_URI.to_owned(),
-            node_seed: String::new(),
-            http_port: 0,
-            host_name: String::new(),
-            domain: String::new(),
-            registration_url: String::new(),
-            system_url: String::new(),
+            node: NodeSettings::default(),
             transport: Transport::default(),
             side: Side::Sender,
             name: String::new(),
@@ -733,7 +724,7 @@ pub(crate) fn validate_and_open(
     session: &Mutex<Option<Session>>,
     activation_handler: ActivationHandler,
 ) -> Result<InnerConfig, anyhow::Error> {
-    if settings.node_seed.is_empty() {
+    if settings.node.node_seed.is_empty() {
         bail!("{element}: `node-seed` is required");
     }
 
@@ -821,7 +812,7 @@ pub(crate) fn validate_and_open(
         new_session.node_id,
         new_session.created_node,
         new_session.http_port,
-        settings.node_seed,
+        settings.node.node_seed,
         side,
         name,
         settings.transport,
@@ -1325,12 +1316,10 @@ mod support {
     pub fn settings(side: Side) -> CommonSettings {
         CommonSettings {
             daemon_uri: "unix:/dev/null".to_owned(),
-            node_seed: NODE_SEED.to_owned(),
-            http_port: 0,
-            host_name: String::new(),
-            domain: String::new(),
-            registration_url: String::new(),
-            system_url: String::new(),
+            node: NodeSettings {
+                node_seed: NODE_SEED.to_owned(),
+                ..NodeSettings::default()
+            },
             transport: Transport::Mxl,
             side,
             name: "test-name".to_owned(),

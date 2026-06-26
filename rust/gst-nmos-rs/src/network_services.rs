@@ -1,17 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! NMOS network-services URL parsing and `NodeConfig` assembly for
-//! `OpenSession`. Mirrors the `parse_nmos_url` / `NvNmosNetworkServicesConfig`
-//! path in `nvds_nmos_bin`.
+//! NMOS network-services URL parsing. Mirrors the `parse_nmos_url` /
+//! `NvNmosNetworkServicesConfig` path in `nvds_nmos_bin`.
 
-use gstreamer as gst;
-use nvnmos_rpc::v1::{NetworkServicesConfig, NodeConfig};
 use regex::Regex;
 use url::{Host, Url};
-
-use crate::session::CommonSettings;
-use crate::CAT;
 
 /// Parsed pieces of an NMOS Registration or System API URL:
 /// `http://host[:port]/x-nmos/{registration,system}/v<X.Y>[/]`.
@@ -72,75 +66,10 @@ fn parse_version_from_path(path: &str, service_type: &str, version: &mut String)
     }
 }
 
-/// Build the `NodeConfig` handed to `OpenSession` from a settings snapshot.
-/// Invalid `registration-url` / `system-url` values are logged and omitted;
-/// other fields are still forwarded.
-pub(crate) fn node_config_from_settings(settings: &CommonSettings) -> NodeConfig {
-    let network_services = build_network_services(settings);
-    NodeConfig {
-        seed: settings.node_seed.clone(),
-        host_name: settings.host_name.clone(),
-        http_port: u32::from(settings.http_port),
-        network_services,
-        ..NodeConfig::default()
-    }
-}
-
-fn build_network_services(settings: &CommonSettings) -> Option<NetworkServicesConfig> {
-    let mut has_network_services = false;
-    let mut network_services = NetworkServicesConfig::default();
-
-    if !settings.domain.is_empty() {
-        network_services.domain = settings.domain.clone();
-        has_network_services = true;
-    }
-
-    if !settings.registration_url.is_empty() {
-        let reg_parts = parse_nmos_url(&settings.registration_url, "registration");
-        if reg_parts.valid {
-            network_services.registration_address = reg_parts.address;
-            network_services.registration_port = reg_parts.port;
-            if !reg_parts.version.is_empty() {
-                network_services.registration_version = reg_parts.version;
-            }
-            has_network_services = true;
-        } else {
-            gst::warning!(
-                CAT,
-                "failed to parse registration-url `{}`; property ignored",
-                settings.registration_url
-            );
-        }
-    }
-
-    if !settings.system_url.is_empty() {
-        let sys_parts = parse_nmos_url(&settings.system_url, "system");
-        if sys_parts.valid {
-            network_services.system_address = sys_parts.address;
-            network_services.system_port = sys_parts.port;
-            if !sys_parts.version.is_empty() {
-                network_services.system_version = sys_parts.version;
-            }
-            has_network_services = true;
-        } else {
-            gst::warning!(
-                CAT,
-                "failed to parse system-url `{}`; property ignored",
-                settings.system_url
-            );
-        }
-    }
-
-    if has_network_services {
-        Some(network_services)
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::node::NodeSettings;
 
     #[test]
     fn parse_registration_url_with_port_and_version() {
@@ -195,13 +124,13 @@ mod tests {
 
     #[test]
     fn node_config_forwards_host_name_and_domain() {
-        let settings = CommonSettings {
+        let node = NodeSettings {
             node_seed: "seed-a".to_owned(),
             host_name: "studio-a".to_owned(),
             domain: "local".to_owned(),
-            ..CommonSettings::default()
+            ..NodeSettings::default()
         };
-        let config = node_config_from_settings(&settings);
+        let config = node.to_node_config();
         assert_eq!(config.seed, "seed-a");
         assert_eq!(config.host_name, "studio-a");
         let ns = config.network_services.expect("domain should populate network_services");
@@ -210,13 +139,13 @@ mod tests {
 
     #[test]
     fn node_config_parses_registration_and_system_urls() {
-        let settings = CommonSettings {
+        let node = NodeSettings {
             node_seed: "seed-b".to_owned(),
             registration_url: "http://reg:3210/x-nmos/registration/v1.3".to_owned(),
             system_url: "http://sys:10641/x-nmos/system/v1.0".to_owned(),
-            ..CommonSettings::default()
+            ..NodeSettings::default()
         };
-        let config = node_config_from_settings(&settings);
+        let config = node.to_node_config();
         let ns = config.network_services.expect("urls should populate network_services");
         assert_eq!(ns.registration_address, "reg");
         assert_eq!(ns.registration_port, 3210);

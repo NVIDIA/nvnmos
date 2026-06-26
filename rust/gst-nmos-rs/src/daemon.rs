@@ -44,7 +44,6 @@ use tower::service_fn;
 use gstreamer as gst;
 
 use crate::CAT;
-use crate::network_services::node_config_from_settings;
 use crate::runtime::SHARED_RUNTIME;
 use crate::session::types::Side;
 use crate::session::CommonSettings;
@@ -153,7 +152,7 @@ impl Session {
     /// Only `unix:/path/to/sock` URIs are supported. `NodeConfig` is
     /// assembled from the element's node-identity properties (`host-name`,
     /// `domain`, `registration-url`, `system-url`, `http-port`) via
-    /// [`node_config_from_settings`]. Those fields are honoured only by
+    /// [`NodeSettings::to_node_config`]. Those fields are honoured only by
     /// the `OpenSession` that actually creates the Node; attaching to
     /// an existing Node (same `node-seed`) ignores them.
     ///
@@ -180,7 +179,7 @@ impl Session {
 
         let resp = client
             .open_session(OpenSessionRequest {
-                node_config: Some(node_config_from_settings(settings)),
+                node_config: Some(settings.node.to_node_config()),
             })
             .await?
             .into_inner();
@@ -391,7 +390,7 @@ async fn add_resource(
     })
 }
 
-fn parse_unix_uri(daemon_uri: &str) -> Result<PathBuf, DaemonError> {
+pub(crate) fn parse_unix_uri(daemon_uri: &str) -> Result<PathBuf, DaemonError> {
     if let Some(path) = daemon_uri.strip_prefix("unix:") {
         Ok(PathBuf::from(path))
     } else {
@@ -404,7 +403,7 @@ fn parse_unix_uri(daemon_uri: &str) -> Result<PathBuf, DaemonError> {
     }
 }
 
-async fn connect_uds(uds_path: PathBuf) -> Result<Channel, tonic::transport::Error> {
+pub(crate) async fn connect_uds(uds_path: PathBuf) -> Result<Channel, tonic::transport::Error> {
     // tonic requires a Uri to drive HTTP/2 authority/scheme; the UDS
     // connector ignores it.
     let endpoint = Endpoint::try_from("http://[::1]:50051")?.connect_timeout(CONNECT_TIMEOUT);
