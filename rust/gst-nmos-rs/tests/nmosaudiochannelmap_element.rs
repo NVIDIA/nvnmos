@@ -3,21 +3,22 @@
 
 //! Integration smoke: `nmosaudiochannelmap` registers and exposes expected properties.
 //!
-//! Set `GST_PLUGIN_PATH` to the directory containing `libgstnmos.so` when running
-//! this test outside the smoke script. Pad request/link behaviour is covered by
-//! `gst-inspect-1.0` in `scripts/is08-channelmap-smoke.sh`.
+//! `common::init()` adds this workspace's `libgstnmos.so` to `GST_PLUGIN_PATH`,
+//! so the test runs against the freshly built plugin; it self-skips only when
+//! that library has not been built.
 
+mod common;
+
+use common::init;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use test_skip::skip;
 
 #[test]
 fn nmosaudiochannelmap_registers_and_inspects() {
-    gst::init().expect("gst::init");
+    init();
     let Some(factory) = gst::ElementFactory::find("nmosaudiochannelmap") else {
-        eprintln!(
-            "skip: nmosaudiochannelmap not in registry — set GST_PLUGIN_PATH to gst-nmos-rs target/debug"
-        );
-        return;
+        skip!("nmosaudiochannelmap not in registry — build libgstnmos.so and set GST_PLUGIN_PATH");
     };
 
     assert_eq!(factory.klass(), "Filter/Audio/Network");

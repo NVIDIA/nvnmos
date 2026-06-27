@@ -3,6 +3,10 @@
 
 //! Shared helpers for gst-nmos-rs integration tests that spawn `nvnmosd`.
 
+// Each integration test binary pulls in this module but uses a different
+// subset, so items unused by a given binary are expected, not dead.
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Once;

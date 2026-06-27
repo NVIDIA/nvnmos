@@ -286,6 +286,7 @@ mod session_integration {
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
+    use test_skip::skip;
 
     fn nvnmosd_bin() -> PathBuf {
         if let Ok(p) = std::env::var("NVNMOSD_BIN") {
@@ -401,8 +402,7 @@ mod session_integration {
     #[test]
     fn channel_mapping_session_add_and_remove() {
         if let Some(why) = skip_reason() {
-            eprintln!("SKIP channel_mapping_session_add_and_remove: {why}");
-            return;
+            skip!(why);
         }
         let socket = tempfile::Builder::new()
             .prefix("nvnmos_is08_sess_")

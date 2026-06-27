@@ -33,9 +33,11 @@
 //!   --test multi_flow_video_data -- --test-threads=1 --nocapture
 //! ```
 
+mod common;
+
+use common::init;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Once;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -45,6 +47,7 @@ use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
+use test_skip::skip;
 
 // Producer cadence — matches gst-mxl-rs. 30000/1001 ≈ 29.97 fps.
 const FRAMERATE_NUM: i32 = 30_000;
@@ -74,14 +77,6 @@ const DOMAIN_ID: &str = "11111111-2222-3333-4444-555555555555";
 // timeout still catches a stuck consumer mid-stream.
 const FIRST_SAMPLE_TIMEOUT_MS: u64 = 5_000;
 const STEADY_SAMPLE_TIMEOUT_MS: u64 = 500;
-
-static REGISTER: Once = Once::new();
-
-fn init() {
-    REGISTER.call_once(|| {
-        gst::init().expect("gst::init");
-    });
-}
 
 /// Element factories the end-to-end test needs, annotated with the plugin each
 /// comes from (and the library that plugin links), so a found factory confirms
@@ -462,6 +457,8 @@ fn build_producer(
                 transport=mxl \
                 node-seed={NODE_SEED} \
                 sender-name={PRODUCER_VIDEO_NAME} \
+                auto-activate=true \
+                mxl-flow-id={VIDEO_FLOW_ID} \
                 mxl-domain-id={DOMAIN_ID} \
                 mxl-domain-path={domain_path} \
                 transport-file-path={video_flow_path} \
@@ -472,6 +469,8 @@ fn build_producer(
                 transport=mxl \
                 node-seed={NODE_SEED} \
                 sender-name={PRODUCER_DATA_NAME} \
+                auto-activate=true \
+                mxl-flow-id={DATA_FLOW_ID} \
                 mxl-domain-id={DOMAIN_ID} \
                 mxl-domain-path={domain_path} \
                 transport-file-path={data_flow_path}"
@@ -505,6 +504,8 @@ fn build_consumer(
              transport=mxl \
              node-seed={NODE_SEED} \
              receiver-name={CONSUMER_VIDEO_NAME} \
+             auto-activate=true \
+             mxl-flow-id={VIDEO_FLOW_ID} \
              mxl-domain-id={DOMAIN_ID} \
              mxl-domain-path={domain_path} \
              transport-file-path={video_flow_path} \
@@ -516,6 +517,8 @@ fn build_consumer(
              transport=mxl \
              node-seed={NODE_SEED} \
              receiver-name={CONSUMER_DATA_NAME} \
+             auto-activate=true \
+             mxl-flow-id={DATA_FLOW_ID} \
              mxl-domain-id={DOMAIN_ID} \
              mxl-domain-path={domain_path} \
              transport-file-path={data_flow_path} \
@@ -769,8 +772,7 @@ fn compare_disjoint_video_data(video: &[SampleTiming], data: &[SampleTiming]) {
 fn v210_with_meta_to_v210_and_st2038_via_nmos() {
     init();
     if let Some(why) = skip_reason() {
-        eprintln!("SKIP v210_with_meta_to_v210_and_st2038_via_nmos: {why}");
-        return;
+        skip!(why);
     }
 
     let domain_guard = TestDomainGuard::new("v210_with_meta");

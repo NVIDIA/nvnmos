@@ -20,6 +20,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use common::{init, nvnmosd_skip_reason, perfect_fifth_hz, require_factories, A4_HZ, DaemonGuard, Tone};
+use test_skip::skip;
 use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_app as gst_app;
@@ -270,8 +271,7 @@ fn run_routing_case(daemon_uri: &str, node_seed: &str, case: &RoutingCase, decla
 fn is08_audio_channelmap_routes_and_swaps_tones() {
     init();
     if let Some(why) = nvnmosd_skip_reason() {
-        eprintln!("SKIP is08_audio_channelmap_routes_and_swaps_tones: {why}");
-        return;
+        skip!(why);
     }
     require_factories(&[
         "nmosaudiochannelmap",
@@ -325,8 +325,7 @@ fn is08_audio_channelmap_routes_and_swaps_tones() {
 fn is08_audio_channelmap_infers_channels_from_peer_caps() {
     init();
     if let Some(why) = nvnmosd_skip_reason() {
-        eprintln!("SKIP is08_audio_channelmap_infers_channels_from_peer_caps: {why}");
-        return;
+        skip!(why);
     }
     require_factories(&[
         "nmosaudiochannelmap",

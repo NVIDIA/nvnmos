@@ -557,6 +557,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "test-skip",
  "thiserror",
  "tokio",
  "tokio-stream",
@@ -1770,6 +1771,10 @@ dependencies = [
  "rustix",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "test-skip"
+version = "0.1.0"
 
 [[package]]
 name = "thiserror"

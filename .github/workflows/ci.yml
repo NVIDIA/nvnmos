@@ -132,7 +132,30 @@ jobs:
         env:
           NVNMOS_LIB_DIR: ${{ github.workspace }}/build
           LD_LIBRARY_PATH: ${{ github.workspace }}/build
-        run: cargo test --workspace --locked --no-fail-fast
+        shell: bash
+        # --show-output surfaces the `test <name> ... skipped, <reason>` lines
+        # that test-skip's `skip!` prints (libtest captures them otherwise and
+        # counts the test as passed). Aggregate them into a result line and a
+        # GitHub notice / job summary so self-skips are visible at a glance.
+        run: |
+          set +e
+          cargo test --workspace --locked --no-fail-fast -- --show-output 2>&1 | tee test.log
+          status=${PIPESTATUS[0]}
+          set -e
+          skipped=$(grep -E '^test .* \.\.\. skipped,' test.log || true)
+          count=$(grep -cE '^test .* \.\.\. skipped,' test.log || true)
+          echo "test result: ${count} skipped"
+          if [ "${count}" -gt 0 ]; then
+            echo "::notice title=Runtime tests skipped::${count} test(s) self-skipped; see job summary"
+            {
+              echo "### Runtime tests skipped (${count})"
+              echo
+              echo '```text'
+              printf '%s\n' "${skipped}"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "${status}"
   docker:
     runs-on: ubuntu-24.04
     steps:
