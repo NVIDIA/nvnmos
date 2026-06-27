@@ -359,11 +359,12 @@ Two `nmossink` elements sharing `node-seed`, distinct
 ```
 
 The rigorous **video + ANC** (`meta/x-st-2038`) integration test with
-real buffer validation is [`tests/multi_flow_video_data.rs`](tests/multi_flow_video_data.rs)
-(`#[ignore]` — needs full MXL toolchain). Opt-in:
+real buffer validation is [`tests/multi_flow_video_data.rs`](tests/multi_flow_video_data.rs).
+It self-gates: it runs when the full MXL toolchain is present and otherwise prints
+a skip reason (see the file-level docs for the toolchain it needs). Run it with:
 
 ```sh
-cargo test -p gst-nmos-rs --test multi_flow_video_data -- --ignored --test-threads=1
+cargo test -p gst-nmos-rs --test multi_flow_video_data -- --test-threads=1
 ```
 
 ## `transport=nvdsudp` (DeepStream Rivermax)

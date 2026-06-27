@@ -122,8 +122,11 @@ jobs:
           NVNMOS_LIB_DIR: ${{ github.workspace }}/build
         run: cargo clippy --workspace --locked --all-targets -- -D warnings
 
-      # The multi-flow integration test that needs `/dev/shm` and a real
-      # MXL setup is `#[ignore]`d and skipped by default.
+      # The daemon-backed integration tests self-gate: they run here because
+      # nvnmosd + libnvnmos.so are present. The multi-flow test additionally
+      # needs the MXL toolchain (libmxl.so + gst-mxl-rs's libgstmxl.so), which
+      # this job does not build yet, so it self-skips. TODO: add the MXL
+      # toolchain to CI so v210_with_meta_to_v210_and_st2038_via_nmos runs.
       - name: Cargo test (workspace)
         working-directory: rust
         env:

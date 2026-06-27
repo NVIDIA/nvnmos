@@ -12,7 +12,10 @@
 //! The producer/consumer pipeline shapes, frame-index stamping, and
 //! disjoint per-`frame_idx` validation are unchanged.
 //!
-//! The test is `#[ignore]` because it requires the full real-MXL toolchain:
+//! The test self-gates: it runs automatically when the full MXL toolchain
+//! is present and otherwise prints a skip reason and returns (so a checkout
+//! without MXL — e.g. CI today — neither fails nor is silently `#[ignore]`d).
+//! It needs:
 //! * `nvnmosd` built against `libnvnmos.so` (set `NVNMOSD_BIN` or have
 //!   `<workspace>/rust/target/{debug,release}/nvnmosd` present);
 //! * `libgstnmos.so` + gst-mxl-rs's `libgstmxl.so` reachable via
@@ -27,7 +30,7 @@
 //! GST_PLUGIN_PATH=$TARGET_DIR/debug:$MXL_PLUGIN_DIR \
 //! LD_LIBRARY_PATH=$NVNMOS_LIB_DIR/lib:$MXL_RT_LIB_DIR \
 //! cargo test --manifest-path rust/Cargo.toml -p gst-nmos-rs \
-//!   --test multi_flow_video_data -- --ignored --test-threads=1 --nocapture
+//!   --test multi_flow_video_data -- --test-threads=1 --nocapture
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -80,18 +83,55 @@ fn init() {
     });
 }
 
-fn require_factories(names: &[&str]) {
-    let missing: Vec<&str> = names
+/// Element factories the end-to-end test needs, annotated with the plugin each
+/// comes from (and the library that plugin links), so a found factory confirms
+/// that plugin and its lib dependency are loaded:
+/// * `appsrc` / `appsink` / `queue` — core GStreamer;
+/// * `st2038extractor` — gst-plugins-rs `libgstrsclosedcaption.so`;
+/// * `nmossink` / `nmossrc` — this workspace's `libgstnmos.so` (links `libnvnmos.so`);
+/// * `mxlsrc` / `mxlsink` — gst-mxl-rs's `libgstmxl.so` (links `libmxl.so`); not
+///   created directly here but built internally by `nmossink`/`nmossrc` at runtime.
+const REQUIRED_FACTORIES: &[&str] = &[
+    "appsrc",
+    "appsink",
+    "queue",
+    "st2038extractor",
+    "nmossink",
+    "nmossrc",
+    "mxlsrc",
+    "mxlsink",
+];
+
+/// Reason the MXL-backed end-to-end test cannot run, or `None` when every
+/// prerequisite is present. Mirrors the self-gating of the other daemon-backed
+/// integration tests: an environment without the MXL toolchain (e.g. CI today)
+/// skips rather than fails. Assumes `gst::init()` has run, for the factory probe.
+fn skip_reason() -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return Some("MXL domains use /dev/shm (Linux only)".into());
+    }
+    if !Path::new("/dev/shm").is_dir() {
+        return Some("/dev/shm is not available".into());
+    }
+    let bin = nvnmosd_bin();
+    if !bin.exists() {
+        return Some(format!("nvnmosd not built at `{}`", bin.display()));
+    }
+    if libnvnmos_dir().is_none() {
+        return Some("libnvnmos.so not found via LD_LIBRARY_PATH or NVNMOS_LIB_DIR".into());
+    }
+    let missing: Vec<&str> = REQUIRED_FACTORIES
         .iter()
         .filter(|n| gst::ElementFactory::find(n).is_none())
         .copied()
         .collect();
-    assert!(
-        missing.is_empty(),
-        "missing element factories: {missing:?}; set `GST_PLUGIN_PATH` to include both \
-         `libgstnmos.so` (built in this workspace's `target/debug` or `target/release`) \
-         and gst-mxl-rs's `libgstmxl.so` (sibling repo)",
-    );
+    if !missing.is_empty() {
+        return Some(format!(
+            "missing GStreamer factories {missing:?}; set `GST_PLUGIN_PATH` to `libgstnmos.so` \
+             + gst-mxl-rs's `libgstmxl.so`, and `LD_LIBRARY_PATH` to `libnvnmos.so` + `libmxl.so`"
+        ));
+    }
+    None
 }
 
 /// Locate the `nvnmosd` binary. Prefer the `NVNMOSD_BIN` env var
@@ -118,6 +158,17 @@ fn nvnmosd_bin() -> PathBuf {
     PathBuf::from(target_dir).join("release").join("nvnmosd")
 }
 
+fn libnvnmos_dir() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(paths) = std::env::var("LD_LIBRARY_PATH") {
+        dirs.extend(paths.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
+    }
+    if let Ok(dir) = std::env::var("NVNMOS_LIB_DIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+    dirs.into_iter().find(|d| d.join("libnvnmos.so").exists())
+}
+
 /// Spawns `nvnmosd` as a child process and kills it on drop. Polls
 /// the UDS socket for up to 5s so the test only proceeds once the
 /// gRPC service is actually accepting connections.
@@ -137,12 +188,25 @@ impl DaemonGuard {
         );
 
         let _ = std::fs::remove_file(&socket);
-        let mut child = Command::new(&bin)
+        let mut command = Command::new(&bin);
+        command
             .arg("--uds")
             .arg(&socket)
             .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        // nvnmosd links libnvnmos.so; surface NVNMOS_LIB_DIR to the loader even
+        // when the caller set only it (not LD_LIBRARY_PATH).
+        if let Ok(lib_dir) = std::env::var("NVNMOS_LIB_DIR") {
+            let existing = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+            let value = if existing.is_empty() {
+                lib_dir
+            } else {
+                format!("{lib_dir}:{existing}")
+            };
+            command.env("LD_LIBRARY_PATH", value);
+        }
+        let mut child = command
             .spawn()
             .unwrap_or_else(|e| panic!("spawn `{}`: {e}", bin.display()));
 
@@ -702,20 +766,12 @@ fn compare_disjoint_video_data(video: &[SampleTiming], data: &[SampleTiming]) {
 /// and that the per-frame PTS gap between the two flows stays
 /// constant across the steady-state window.
 #[test]
-#[ignore = "needs `/dev/shm` (Linux only), built `nvnmosd`, and `libgstnmos.so` + \
-           gst-mxl-rs's `libgstmxl.so` + `libnvnmos.so` + `libmxl.so` reachable via \
-           `GST_PLUGIN_PATH` / `LD_LIBRARY_PATH`. See file-level docs for the \
-           full opt-in invocation."]
 fn v210_with_meta_to_v210_and_st2038_via_nmos() {
     init();
-    require_factories(&[
-        "appsrc",
-        "appsink",
-        "queue",
-        "st2038extractor",
-        "nmossink",
-        "nmossrc",
-    ]);
+    if let Some(why) = skip_reason() {
+        eprintln!("SKIP v210_with_meta_to_v210_and_st2038_via_nmos: {why}");
+        return;
+    }
 
     let domain_guard = TestDomainGuard::new("v210_with_meta");
     let domain_path = domain_guard.path().to_owned();
