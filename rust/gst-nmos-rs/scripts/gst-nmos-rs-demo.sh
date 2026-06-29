@@ -230,12 +230,12 @@ esac
 # print the transport-specific property fragment for one nmossink /
 # nmossrc invocation. The flow name (one of `video1`, `audio1`,
 # `video4`, `audio4`, `video-out`, `audio-out0`, `audio-out1`) is the
-# script's stable handle for the flows in the demo.
-# `mxl-domain-id` / `mxl-domain-path` / `mxl-flow-id` triplet, which
-# is enough for the daemon to wire a Sender to its matching Receivers.
-# On UDP the sender side emits `destination-ip` / `destination-port`
-# / `source-ip`, the receiver side emits `multicast-ip` /
-# `destination-port` / `interface-ip` / `source-ip`.
+# script's stable handle for the flows in the demo. On MXL, both sides
+# emit the `mxl-domain-id` / `mxl-domain-path` / `mxl-flow-id` triplet,
+# which is enough for the daemon to connect a Sender to its matching
+# Receivers. On UDP, the sender side emits `destination-ip` /
+# `destination-port` / `source-ip`, and the receiver side emits
+# `multicast-ip` / `destination-port` / `interface-ip` / `source-ip`.
 #
 # Output is one space-separated string. The caller inlines it via
 # unquoted command substitution so bash word-splits it into individual
@@ -728,12 +728,13 @@ launch_node4() {
 #
 # Node 3 is the controller-driven processor: auto-activate=false (the
 # default) on both the Receiver and the Sender in each processor
-# pipeline. The resources register on IS-04 immediately so an external
+# pipeline. The resources appear on IS-04 immediately so an external
 # controller can see them, but the data path stays on the placeholder
 # until the controller PATCHes Connection API /staged endpoints.
 #
 # The audio processor is an IS-08 matrix: two Receivers feed
-# nmosaudiochannelmap (central audiomixer + per-output audiomixmatrix),
+# nmosaudiochannelmap (one audiomixer to concatenate the inputs + one
+# audiomixmatrix per output to implement the routing matrix),
 # then volume on each output branch (0.3 / 0.1) and two Senders. IS-08
 # POST /map/activations/ works before IS-05 wiring; inactive mixer
 # inputs stay silent so one live Receiver is enough to exercise routing.
@@ -971,7 +972,7 @@ sleep 1
 
 # ---- Discover resource UUIDs via the IS-04 Node API ---------------
 #
-# Two parallel nmossinks / nmossrcs in one pipeline register in
+# Two parallel nmossinks / nmossrcs in one pipeline are added in
 # non-deterministic order, so we don't rely on daemon-log line order.
 # Instead query each Node's IS-04 senders/receivers endpoints and
 # match by `tags["urn:x-nvnmos:tag:name"]` (which gst-nmos-rs sets
@@ -1027,7 +1028,7 @@ resource_url() {
 #     GStreamer's bin state-change is synchronous, this delay
 #     gates every other element in Node 2's pipeline — including
 #     both `nmossrc`s — so neither the audio nor the video
-#     receiver registers with the daemon until ~60 s in.
+#     receiver are added to the daemon until ~60 s in.
 #   * On MXL, `mxlsrc` opening Node 1's /dev/shm flow files and
 #     blocking until they exist — fine in practice (Node 1 is started
 #     first + `sleep 2`), but can add a few seconds under load.
@@ -1074,9 +1075,9 @@ collect_urls() {
     echo "[warn]   (if Node 2 endpoints are stuck, try \`DEMO_AUDIO_SINK=fakesink DEMO_VIDEO_SINK=fakesink\` to skip the autoaudiosink/autovideosink probe; or bump \`WAIT_TIMEOUT\`)" >&2
     return 1
 }
-echo "[poll] waiting for all 12 IS-04 resources to register (timeout ${WAIT_TIMEOUT}s)..."
+echo "[poll] waiting for all IS-04 resources to appear (timeout ${WAIT_TIMEOUT}s)..."
 if ! collect_urls; then
-    echo "[poll] FAILED: not all resources registered within ${WAIT_TIMEOUT}s" >&2
+    echo "[poll] FAILED: not all resources appeared within ${WAIT_TIMEOUT}s" >&2
     exit 1
 fi
 echo "[poll] all resources visible"
@@ -1228,7 +1229,7 @@ Resources discovered from $DAEMON_LOG
   Node 4 Sender video4:   $URL_NODE4_SENDER_VIDEO
   Node 4 Sender audio4:   $URL_NODE4_SENDER_AUDIO
 
-If any URL above is blank, the daemon did not register that resource
+If any URL above is blank, the daemon did not publish that resource
 within WAIT_TIMEOUT=${WAIT_TIMEOUT}s (each IS-04 GET also capped at
 CURL_MAX_TIME=${CURL_MAX_TIME}s). Re-run
 \`grep -E "Created (sender|receiver):" $DAEMON_LOG\` to confirm,
@@ -2061,7 +2062,7 @@ menu_launch_pipeline() {
         bare_preview) launch_bare_preview  && launched=1 ;;
     esac
     (( launched )) && \
-        echo "[hint] give the pipeline ~1-2s to re-register on IS-04 / open MXL flow"
+        echo "[hint] give the pipeline ~1-2s to re-appear on IS-04 and start the flow"
 }
 
 # Export a pipeline diagram (Graphviz PNG) for the pipeline's *current* state.

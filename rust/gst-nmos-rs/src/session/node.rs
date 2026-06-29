@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Shared Node identity / network-services settings for `OpenSession` and
-//! `AddNode` (`NodeConfig` on the wire).
+//! `AddNode` (the `NodeConfig` protobuf message).
 
 use gstreamer as gst;
 use nvnmos_rpc::v1::{NetworkServicesConfig, NodeConfig};

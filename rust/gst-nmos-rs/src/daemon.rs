@@ -304,7 +304,7 @@ impl Session {
     ///
     /// `transport_file: Some(_)` means "(re)activate with this
     /// transport file"; `transport_file: None` means "deactivate".
-    /// This is the same wire shape as `SubscribeActivations`'s
+    /// This is the same message shape as `SubscribeActivations`'s
     /// `ActivationEvent` carries, but the daemon does *not* fire a
     /// callback back to subscribers (the element initiating the sync
     /// already knows; other subscribers learn via IS-04 / IS-05

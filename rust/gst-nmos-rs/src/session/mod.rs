@@ -33,7 +33,7 @@ pub(crate) use node::NodeSettings;
 
 use self::types::Side;
 
-/// Translate the GObject `Transport` enum to the wire enum.
+/// Translate the GObject `Transport` enum to the protobuf enum.
 ///
 /// `Mxl` carries data via the MXL Domain. `Udp` and `Udp2` reach
 /// this helper once `validate_and_open` resolves an SDP into a
@@ -314,7 +314,7 @@ pub(crate) struct CommonSettings {
     pub(crate) caps: Option<gst::Caps>,
     /// Per-transport overrides (`application/x-rtp,…` shape for the
     /// RTP transports; typically empty / unused for `mxl`). Carries
-    /// the parameters that the user wants to override on the wire —
+    /// the parameters that the user wants to override in the SDP —
     /// principally RTP `payload`, audio `clock-rate`, and
     /// `a-ptime` (in milliseconds) — per the
     /// override-vs-cross-check rule agreed for startup-time SDP
@@ -356,7 +356,7 @@ pub(crate) struct CommonSettings {
     ///   the configuring SDP as both the `a=source-filter:`
     ///   include-source (RFC 4607 SSM convention) and the
     ///   `a=x-nvnmos-iface-ip:` attribute, so a single property
-    ///   value drives both wire slots.
+    ///   value drives both SDP attributes.
     /// * Receiver (`side == Receiver`): SSM include-source — the
     ///   remote sender's IP. Emitted in the configuring SDP as the
     ///   `a=source-filter:` include-source.
@@ -781,7 +781,7 @@ pub(crate) fn resolve_resource_name(
 
 /// Validate the settings snapshot and open a session via the shared
 /// tokio runtime. On success the session is stored under `session`
-/// and the returned [`InnerConfig`] tells the element how to wire its
+/// and the returned [`InnerConfig`] tells the element how to build its
 /// data path. `activation_handler` is forwarded to
 /// [`Session::open`] to receive `ActivationEvent`s.
 pub(crate) fn validate_and_open(

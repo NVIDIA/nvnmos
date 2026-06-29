@@ -69,7 +69,8 @@ struct Settings {
     transport_caps: Option<gst::Caps>,
     /// IS-05 sender transport_params `source_ip` — local egress
     /// NIC IP. See [`crate::session::CommonSettings::source_ip`]
-    /// for the per-side wire semantics; empty string = unset.
+    /// for the per-side transport-parameter semantics. Empty
+    /// string = unset.
     source_ip: String,
     /// IS-05 sender transport_params `source_port` — local egress
     /// port. 0 = unset.

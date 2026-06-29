@@ -62,7 +62,7 @@ pub(super) fn receiver_connection_address(settings: &CommonSettings) -> &str {
 }
 
 /// Minimum IS-05 endpoint properties required to synthesise a configuring
-/// SDP for AddSender / AddReceiver. Wire destinations may be omitted.
+/// SDP for AddSender / AddReceiver. Destination addresses may be omitted.
 pub(super) fn validate_rtp_configuring_minimum(
     element: &str,
     settings: &CommonSettings,
@@ -1647,7 +1647,7 @@ mod tests {
         /// `transport-caps`. Pins that the pt + clock-rate +
         /// ptime path all the way from `Settings.transport_caps`
         /// → `property_overrides_udp` → `sdp::passthrough_with_overrides`
-        /// actually changes the wire SDP.
+        /// actually changes the output SDP.
         #[test]
         fn resolve_inner_config_udp_applies_transport_caps_audio_overrides() {
             // 48 kHz L24 stereo, pt=97, ptime=0.125. The

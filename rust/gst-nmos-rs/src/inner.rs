@@ -833,7 +833,7 @@ pub(crate) fn build_mxlsrc(
 /// `transport-properties`.
 ///
 /// `bind-port` is set when `primary.source_port` is `Some` so
-/// the IS-04 / IS-05 advertised source port matches the wire.
+/// the IS-04 / IS-05 advertised source port matches what we send.
 /// `bind-address` is set when [`UdpLeg::sender_interface_ip`] is
 /// `Some` so unicast send routing picks the right NIC. For multicast
 /// destinations [`multicast_iface_name`] additionally resolves that
@@ -855,15 +855,15 @@ pub(crate) fn build_mxlsrc(
 /// defaults despite the SDP saying otherwise (`framerate=0/1`,
 /// `colorimetry=bt601` on UYVY, etc.). The sender side has the
 /// opposite gap: V1 `rtpvrawpay` omits `exactframerate` /
-/// `chroma-position` / `tcs` from the wire fmtp, and V1 / V2
+/// `chroma-position` / `tcs` from the SDP fmtp, and V1 / V2
 /// `rtpvrawpay` both omit `RANGE`. None of those omissions
 /// propagate to the receiver in our deployment model: the
 /// receiver gets its caps from the **SDP we publish** (which
 /// `parse_sdp` pins onto `udpsrc.caps` in [`build_udpsrc`]),
-/// not from any caps-on-the-wire mechanism. The payloader's
+/// not from any in-band caps mechanism. The payloader's
 /// `application/x-rtp` src caps are consumed only by `udpsink`,
 /// which doesn't care about anything beyond
-/// `application/x-rtp`. The only scenario where wire-caps gaps
+/// `application/x-rtp`. The only scenario where in-band caps gaps
 /// would matter is the caps-only SDP synthesis path: there
 /// [`crate::sdp::from_caps`] reads the app's **input** caps to
 /// `nmossink` (which carry full GStreamer colorimetry including
@@ -1218,7 +1218,7 @@ pub(crate) fn build_udpsrc(
         })?;
     // `udpsrc.port` is `gint` (gst-plugins-good's pspec) while
     // `udpsrc2.port` is `guint` (gst-plugins-rs' pspec) — same
-    // wire value, different glib type tag, so the property setter
+    // numeric value, different glib type tag, so the property setter
     // has to be split by factory or glib raises a type-mismatch.
     match udpsrc_factory {
         "udpsrc2" => udpsrc.set_property("port", u32::from(media.primary.destination_port)),
