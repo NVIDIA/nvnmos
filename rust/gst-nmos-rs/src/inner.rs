@@ -82,20 +82,21 @@ use crate::types::FlowFormat;
 const ANCHOR_NAME: &str = "anchor";
 
 /// How long to wait for the anchor pad to go idle before aborting a
-/// rebuild. Generous — under steady-state the pad is idle within
-/// microseconds because the activation handler has already installed
-/// its own outer IDLE probe before calling here; this only matters
-/// if some upstream element is stuck holding a buffer push.
-const PROBE_WAIT: Duration = Duration::from_secs(2);
+/// rebuild. Under steady-state the pad is idle within microseconds;
+/// this only matters if some upstream element is stuck holding a
+/// buffer push.
+const PROBE_WAIT: Duration = Duration::from_secs(1);
 
-/// How long to wait for the freshly-added inner chain to reach the
-/// outer bin's current state. Healthy swaps usually finish in
+/// How long to wait for an inner chain state change during a swap —
+/// both bringing the outgoing chain to `Null` ([`stop_chain`]) and
+/// syncing the incoming chain to the parent target
+/// ([`wait_for_chain_state`]). Healthy swaps usually finish in
 /// milliseconds: on [`nmossink`] sender sinks are pinned `async=false`
 /// in `build_real_sink` (READY→PAUSED without preroll); on [`nmossrc`]
-/// receiver sources `start()` is typically fast. The 2s budget catches
+/// receiver sources `start()` is typically fast. The 1s budget catches
 /// genuine stalls (e.g. libmxl `createFlowWriter` failing) without
 /// dragging out a healthy activation.
-const STATE_WAIT: gst::ClockTime = gst::ClockTime::from_seconds(2);
+const STATE_WAIT: gst::ClockTime = gst::ClockTime::from_seconds(1);
 
 /// Options for [`rebuild_chain_with_opts`]. When `drain_downstream` is
 /// true, [`flush_external_of_ghost`] runs on an [`nmossrc`] src ghost
@@ -263,7 +264,8 @@ fn swap_chain_inner(
             anyhow!("unlinking anchor from old chain `{}`: {e}", old_chain.name())
         })?;
 
-        let _ = old_chain.set_state(gst::State::Null);
+        stop_chain(cat, &old_chain)
+            .with_context(|| format!("stopping old chain `{}`", old_chain.name()))?;
         bin.remove(&old_chain)
             .with_context(|| format!("removing old chain `{}`", old_chain.name()))?;
     } else {
@@ -290,7 +292,7 @@ fn swap_chain_inner(
     // new chain would negotiate correctly. Link with empty checks;
     // the identity anchor forwards stickies to the new chain.
     if let Err(e) = link_pads_for_chain_swap(ghost, &link_pad, &new_chain_pad) {
-        let _ = new_chain.set_state(gst::State::Null);
+        let _ = stop_chain(cat, new_chain);
         let _ = bin.remove(new_chain);
         return Err(anyhow!(
             "linking anchor to new chain `{}`: {e}",
@@ -417,7 +419,7 @@ fn block_and_wait(
 /// would return `StateChangeError`, so the pipeline could never
 /// reach `READY` in the first place.
 ///
-/// The 2-second budget ([`STATE_WAIT`]) is deliberately generous.
+/// The 1-second budget ([`STATE_WAIT`]) is deliberately generous.
 /// Sender inner chains (`nmossink`) rely on `async=false` pinned in
 /// `build_real_sink`; receiver inner chains (`nmossrc`) rely on a
 /// quick source `start()`. Anything longer is almost certainly a real
@@ -466,6 +468,28 @@ fn wait_for_chain_state(
              current={current:?}, pending={pending:?}, parent_target={parent_target:?}",
         ),
     }
+}
+
+/// Take `chain` to `Null` with a bounded wait. Called from the
+/// `call_async` worker while the anchor block probe is installed, so
+/// an unbounded `set_state(Null)` would wedge the data path.
+fn stop_chain(
+    cat: &gst::DebugCategory,
+    chain: &gst::Element,
+) -> Result<(), anyhow::Error> {
+    let name = chain.name();
+    chain
+        .set_state(gst::State::Null)
+        .map_err(|e| anyhow!("`{name}` failed to start Null transition: {e:?}"))?;
+    let (ret, current, pending) = chain.state(STATE_WAIT);
+    if current == gst::State::Null {
+        gst::debug!(cat, "rebuild_chain: `{name}` reached Null (ret={ret:?})");
+        return Ok(());
+    }
+    bail!(
+        "`{name}` did not reach Null within {STATE_WAIT} \
+         (ret={ret:?}, current={current:?}, pending={pending:?})"
+    )
 }
 
 /// Return the state the bin is currently heading for: its pending
@@ -529,18 +553,59 @@ pub(crate) fn current_chain_is_real(ghost: &gst::GhostPad) -> bool {
     !chain.name().ends_with("-fake")
 }
 
-/// Build the `nmossink` fake chain: a `fakesink` so the element
-/// looks valid in the pipeline before configuration is complete
-/// (it sinks any caps and drops everything). The `-fake` suffix on
-/// the element name is what [`current_chain_is_real`] checks to
+/// Build the `nmossink` fake chain: a `fakesink`, optionally preceded
+/// by a `capsfilter` when essence caps are known. The `-fake` suffix
+/// on the chain name is what [`current_chain_is_real`] checks to
 /// decide whether to insert a fake hop into real → real re-activations.
-pub(crate) fn build_fake_sink() -> Result<gst::Element, anyhow::Error> {
-    gst::ElementFactory::make("fakesink")
-        .name("nmossink-fake")
+///
+/// When `caps` is `Some`, upstream negotiation is pinned to that
+/// template so sticky caps at the anchor match the advertised Sender
+/// essence before IS-05 swaps in the real payloader chain. When
+/// `caps` is `None` (constructed-time or deferred mode before peer
+/// query) the bare `fakesink` accepts any caps.
+pub(crate) fn build_fake_sink(caps: Option<&gst::Caps>) -> Result<gst::Element, anyhow::Error> {
+    let Some(caps) = caps else {
+        return gst::ElementFactory::make("fakesink")
+            .name("nmossink-fake")
+            .property("sync", true)
+            .property("async", false)
+            .build()
+            .map_err(|e| anyhow!("creating fakesink for nmossink fake chain: {e}"));
+    };
+
+    let fakesink = gst::ElementFactory::make("fakesink")
+        .name("nmossink-fake-sink")
         .property("sync", true)
         .property("async", false)
         .build()
-        .map_err(|e| anyhow!("creating fakesink for nmossink fake chain: {e}"))
+        .map_err(|e| anyhow!("creating fakesink for nmossink fake chain: {e}"))?;
+
+    let capsfilter = gst::ElementFactory::make("capsfilter")
+        .name("nmossink-fake-caps")
+        .property("caps", caps)
+        .build()
+        .context("creating capsfilter for nmossink fake chain")?;
+    let bin = gst::Bin::with_name("nmossink-fake");
+    bin.add_many([&capsfilter, &fakesink])
+        .map_err(|e| anyhow!("adding fake-chain capsfilter + fakesink: {e}"))?;
+    capsfilter
+        .link(&fakesink)
+        .context("linking fake-chain capsfilter to fakesink")?;
+    let sink_pad = capsfilter
+        .static_pad("sink")
+        .ok_or_else(|| anyhow!("fake-chain capsfilter missing sink pad"))?;
+    let ghost = gst::GhostPad::builder(gst::PadDirection::Sink)
+        .name("sink")
+        .build();
+    ghost
+        .set_target(Some(&sink_pad))
+        .map_err(|e| anyhow!("setting fake-chain ghost sink target: {e}"))?;
+    ghost
+        .set_active(true)
+        .map_err(|e| anyhow!("activating fake-chain ghost sink: {e}"))?;
+    bin.add_pad(&ghost)
+        .map_err(|e| anyhow!("adding fake-chain ghost sink pad: {e}"))?;
+    Ok(bin.upcast())
 }
 
 /// Build the `nmossrc` fake chain: a live `appsrc` that never gets
@@ -768,7 +833,7 @@ pub(crate) fn build_mxlsrc(
 /// `transport-properties`.
 ///
 /// `bind-port` is set when `primary.source_port` is `Some` so
-/// the IS-04 / IS-05 advertised source port matches the wire.
+/// the IS-04 / IS-05 advertised source port matches what we send.
 /// `bind-address` is set when [`UdpLeg::sender_interface_ip`] is
 /// `Some` so unicast send routing picks the right NIC. For multicast
 /// destinations [`multicast_iface_name`] additionally resolves that
@@ -790,15 +855,15 @@ pub(crate) fn build_mxlsrc(
 /// defaults despite the SDP saying otherwise (`framerate=0/1`,
 /// `colorimetry=bt601` on UYVY, etc.). The sender side has the
 /// opposite gap: V1 `rtpvrawpay` omits `exactframerate` /
-/// `chroma-position` / `tcs` from the wire fmtp, and V1 / V2
+/// `chroma-position` / `tcs` from the SDP fmtp, and V1 / V2
 /// `rtpvrawpay` both omit `RANGE`. None of those omissions
 /// propagate to the receiver in our deployment model: the
 /// receiver gets its caps from the **SDP we publish** (which
 /// `parse_sdp` pins onto `udpsrc.caps` in [`build_udpsrc`]),
-/// not from any caps-on-the-wire mechanism. The payloader's
+/// not from any in-band caps mechanism. The payloader's
 /// `application/x-rtp` src caps are consumed only by `udpsink`,
 /// which doesn't care about anything beyond
-/// `application/x-rtp`. The only scenario where wire-caps gaps
+/// `application/x-rtp`. The only scenario where in-band caps gaps
 /// would matter is the caps-only SDP synthesis path: there
 /// [`crate::sdp::from_caps`] reads the app's **input** caps to
 /// `nmossink` (which carry full GStreamer colorimetry including
@@ -1153,7 +1218,7 @@ pub(crate) fn build_udpsrc(
         })?;
     // `udpsrc.port` is `gint` (gst-plugins-good's pspec) while
     // `udpsrc2.port` is `guint` (gst-plugins-rs' pspec) — same
-    // wire value, different glib type tag, so the property setter
+    // numeric value, different glib type tag, so the property setter
     // has to be split by factory or glib raises a type-mismatch.
     match udpsrc_factory {
         "udpsrc2" => udpsrc.set_property("port", u32::from(media.primary.destination_port)),
@@ -1724,12 +1789,7 @@ mod tests {
     use crate::session::udp::types::UdpLeg;
     use std::str::FromStr;
 
-    fn init_gst() {
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            let _ = gst::init();
-        });
-    }
+    use crate::test_support::init_gst;
 
     fn test_log_cat() -> &'static gst::DebugCategory {
         static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
@@ -1838,6 +1898,31 @@ mod tests {
     /// Find a child element of `bin` by GstObject name (which is
     /// what we set with the builder's `name(...)` call in
     /// [`build_udpsink`]).
+    #[test]
+    fn build_fake_sink_with_caps_is_capsfilter_bin() {
+        init_gst();
+        let caps = gst::Caps::from_str("audio/x-raw,format=(string)S24BE,channels=(int)2")
+            .expect("caps");
+        let chain = build_fake_sink(Some(&caps)).expect("capped fake sink");
+        let bin = chain.downcast::<gst::Bin>().expect("returns a bin");
+        assert!(
+            bin.by_name("nmossink-fake-caps").is_some(),
+            "capped fake chain must include capsfilter",
+        );
+        assert!(
+            bin.static_pad("sink").is_some(),
+            "capped fake chain must expose ghost sink pad",
+        );
+    }
+
+    #[test]
+    fn build_fake_sink_without_caps_is_bare_fakesink() {
+        init_gst();
+        let chain = build_fake_sink(None).expect("bare fake sink");
+        assert_eq!(chain.name(), "nmossink-fake");
+        assert!(chain.static_pad("sink").is_some());
+    }
+
     fn child(bin: &gst::Bin, name: &str) -> gst::Element {
         bin.by_name(name)
             .unwrap_or_else(|| panic!("inner bin missing child `{name}`"))
@@ -2268,6 +2353,7 @@ mod tests {
 
     #[test]
     fn build_udpsrc_v1_video_pins_advertise_caps_via_capssetter() {
+        init_gst();
         // V1 `rtpvrawdepay` hardcodes `framerate=0/1` on its src caps;
         // see the doc-comment in `build_udpsrc` for the GStreamer-good
         // source pointer. The tail therefore has to *override*
@@ -2297,6 +2383,7 @@ mod tests {
 
     #[test]
     fn build_udpsrc_audio_pins_advertise_caps_via_capssetter() {
+        init_gst();
         // We use `capssetter` consistently for receiver-side caps
         // advertisement. For audio this is effectively a no-op merge,
         // but it keeps behaviour consistent across transports and
@@ -2917,7 +3004,7 @@ mod tests {
             .build()
             .expect("capsfilter");
         let nmos_bin = gst::Bin::with_name("nmossink-sim");
-        let initial = build_fake_sink().expect("initial fake sink");
+        let initial = build_fake_sink(None).expect("initial fake sink");
         let ghost = build_initial(&nmos_bin, initial, "sink", gst::PadDirection::Sink)
             .expect("build_initial");
         nmos_bin.add_pad(&ghost).expect("add ghost pad");

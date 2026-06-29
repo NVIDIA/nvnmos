@@ -220,7 +220,7 @@ SDP synthesis from `caps` emits `TP=2110TPN` (narrow traffic profile). Use
 **Prerequisites:** Install [DeepStream 9.0](https://docs.nvidia.com/metropolis/deepstream/dev-guide/text/DS_Installation.html)
 and the [Rivermax SDK](https://developer.nvidia.com/networking/rivermax)
 following their respective installation guides. You also need a ConnectX-5 or
-newer NIC for real wire traffic, and `CAP_NET_RAW` on the host binary
+newer NIC for real network traffic, and `CAP_NET_RAW` on the host binary
 (`sudo setcap CAP_NET_RAW=ep $(which gst-launch-1.0)`).
 
 The DeepStream deb ships `nvdsudpsrc` / `nvdsudpsink` as

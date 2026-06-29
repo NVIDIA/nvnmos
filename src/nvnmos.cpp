@@ -80,7 +80,7 @@ namespace nvnmos
         nmos::experimental::log_model& model;
     };
 
-    inline nmos::type parse_side(NvNmosSide side)
+    inline nmos::type type_from_side(NvNmosSide side)
     {
         switch (side)
         {
@@ -90,11 +90,89 @@ namespace nvnmos
         throw std::logic_error("invalid NvNmosSide");
     }
 
-    inline NvNmosSide make_side(const nmos::type& type)
+    inline NvNmosSide side_from_type(const nmos::type& type)
     {
         if (nmos::types::sender == type) return NVNMOS_SIDE_SENDER;
         if (nmos::types::receiver == type) return NVNMOS_SIDE_RECEIVER;
         throw std::logic_error("nmos::type is neither sender nor receiver");
+    }
+
+    inline nmos::transport make_transport(NvNmosTransport transport)
+    {
+        switch (transport)
+        {
+        case NVNMOS_TRANSPORT_RTP: return nmos::transports::rtp;
+        case NVNMOS_TRANSPORT_MXL: return nmos::transports::mxl;
+        }
+        throw std::logic_error("invalid NvNmosTransport");
+    }
+
+    channelmapping_config make_channelmapping_config(const NvNmosChannelMappingConfig& mapping)
+    {
+        if (!mapping.inputs || !mapping.outputs) throw std::logic_error("invalid channel mapping config");
+
+        channelmapping_config config;
+        config.inputs.reserve(mapping.num_inputs);
+        for (size_t index = 0; index < mapping.num_inputs; ++index)
+        {
+            const auto& in = mapping.inputs[index];
+            channelmapping_input input;
+            input.id = utility::s2us(in.id);
+            input.name = utility::s2us(in.name);
+            input.description = utility::s2us(in.description);
+            input.channel_labels.reserve(in.num_channel_labels);
+            for (size_t ch = 0; ch < in.num_channel_labels; ++ch)
+            {
+                input.channel_labels.push_back(utility::s2us(in.channel_labels[ch]));
+            }
+            input.parent_name = utility::s2us(in.parent_name);
+            input.parent_type = NVNMOS_CHANNELMAPPING_PARENT_TYPE_SOURCE == in.parent_type ? nmos::types::source : nmos::types::receiver;
+            input.reordering = 0 != in.block_size ? in.reordering : true;
+            input.block_size = 0 != in.block_size ? in.block_size : 1;
+            config.inputs.push_back(std::move(input));
+        }
+
+        config.outputs.reserve(mapping.num_outputs);
+        for (size_t index = 0; index < mapping.num_outputs; ++index)
+        {
+            const auto& out = mapping.outputs[index];
+            channelmapping_output output;
+            output.id = utility::s2us(out.id);
+            output.name = utility::s2us(out.name);
+            output.description = utility::s2us(out.description);
+            output.channel_labels.reserve(out.num_channel_labels);
+            for (size_t ch = 0; ch < out.num_channel_labels; ++ch)
+            {
+                output.channel_labels.push_back(utility::s2us(out.channel_labels[ch]));
+            }
+            output.sender_name = utility::s2us(out.sender_name);
+            if (out.routable_inputs && 0 != out.num_routable_inputs)
+            {
+                output.routable_inputs.reserve(out.num_routable_inputs);
+                for (size_t ri = 0; ri < out.num_routable_inputs; ++ri)
+                {
+                    output.routable_inputs.push_back(utility::s2us(out.routable_inputs[ri]));
+                }
+            }
+            config.outputs.push_back(std::move(output));
+        }
+
+        return config;
+    }
+
+    channelmapping_active_map make_channelmapping_active_map(const NvNmosChannelMappingActiveMapEntry* active_map, size_t num_active_map)
+    {
+        if (!active_map && 0 != num_active_map) throw std::logic_error("invalid channel mapping active map");
+
+        channelmapping_active_map entries;
+        entries.reserve(num_active_map);
+        for (size_t index = 0; index < num_active_map; ++index)
+        {
+            entries.push_back(std::make_pair(
+                utility::s2us(active_map[index].input_id),
+                active_map[index].input_channel));
+        }
+        return entries;
     }
 
     class server
@@ -108,14 +186,18 @@ namespace nvnmos
         void add_sender(const NvNmosSenderConfig& config);
         void remove_sender(const std::string& sender_name);
 
+        void add_channelmapping(const std::string& name, const NvNmosChannelMappingConfig& mapping);
+        void remove_channelmapping(const std::string& name);
+
         void activate_connection(const nmos::type& type, const std::string& name, const std::string& transport_file);
+        void activate_channelmapping(const std::string& name, const std::string& output_id, const NvNmosChannelMappingActiveMapEntry* active_map, size_t num_active_map);
 
         nmos::id node_id() const;
         nmos::id sender_id(const std::string& sender_name) const;
         nmos::id receiver_id(const std::string& receiver_name) const;
+        nmos::id source_id(const std::string& source_name) const;
 
     private:
-        static nmos::transport to_transport(NvNmosTransport transport);
         static nmos::settings make_settings(const NvNmosNodeConfig& config);
         void log_current_exception();
 
@@ -151,19 +233,49 @@ namespace nvnmos
 
             // Set up the callbacks between the node server and the underlying implementation
 
-            const auto& activated = config.connection_activated;
+            const auto& connection_activated = config.connection_activated;
+            const auto& channelmapping_activated = config.channelmapping_activated;
             auto& gate_ = gate;
-            auto connection_activated = [activated, server, &gate_](const nmos::type& type, const std::string& name, const std::string& transport_file)
+            auto connection_activated_handler = [connection_activated, server, &gate_](const nmos::type& type, const nvnmos::name& name_, const std::string& transport_file)
             {
-                if (!activated) return;
-                const auto side = nvnmos::make_side(type);
-                const bool success = activated(server, side, name.c_str(), !transport_file.empty() ? transport_file.c_str() : 0);
+                if (!connection_activated) return;
+                const auto side = nvnmos::side_from_type(type);
+                const auto name = utility::us2s(name_);
+                const bool success = connection_activated(server, side, name.c_str(), !transport_file.empty() ? transport_file.c_str() : 0);
                 if (!success)
                 {
                     slog::log<slog::severities::warning>(gate_, SLOG_FLF) << "Activation failed for " << type.name << ": " << name;
                 }
             };
-            node_implementation = make_node_implementation(node_model, connection_activated, gate);
+            auto channelmapping_activated_handler = [channelmapping_activated, server, &gate_](const nvnmos::name& name_, const nmos::channelmapping_id& output_id_, const channelmapping_active_map& active_map_)
+            {
+                if (!channelmapping_activated) return true;
+                const auto name = utility::us2s(name_);
+                const auto output_id = utility::us2s(output_id_);
+                std::vector<std::string> input_ids;
+                std::vector<NvNmosChannelMappingActiveMapEntry> active_map(active_map_.size());
+                input_ids.reserve(active_map_.size());
+                for (size_t index = 0; index < active_map_.size(); ++index)
+                {
+                    if (!active_map_[index].first.empty())
+                    {
+                        input_ids.push_back(utility::us2s(active_map_[index].first));
+                        active_map[index].input_id = input_ids.back().c_str();
+                    }
+                    else
+                    {
+                        active_map[index].input_id = nullptr;
+                    }
+                    active_map[index].input_channel = active_map_[index].second;
+                }
+                const bool success = channelmapping_activated(server, name.c_str(), output_id.c_str(), active_map.empty() ? nullptr : active_map.data(), active_map.size());
+                if (!success)
+                {
+                    slog::log<slog::severities::warning>(gate_, SLOG_FLF) << "Channel mapping activation failed for " << name << " output " << output_id;
+                }
+                return success;
+            };
+            node_implementation = make_node_implementation(node_model, connection_activated_handler, channelmapping_activated_handler, gate);
 
             // Set up the node server
 
@@ -188,13 +300,13 @@ namespace nvnmos
             for (auto& receiver : boost::make_iterator_range_n(config.receivers, config.num_receivers))
             {
                 if (!receiver.transport_file) throw std::logic_error("invalid receiver config");
-                node_implementation_add_receiver(node_model, to_transport(receiver.transport), receiver.transport_file, gate);
+                node_implementation_add_receiver(node_model, make_transport(receiver.transport), receiver.transport_file, gate);
             }
 
             for (auto& sender : boost::make_iterator_range_n(config.senders, config.num_senders))
             {
                 if (!sender.transport_file) throw std::logic_error("invalid sender config");
-                node_implementation_add_sender(node_model, to_transport(sender.transport), sender.transport_file, gate);
+                node_implementation_add_sender(node_model, make_transport(sender.transport), sender.transport_file, gate);
             }
 
             // Open the API ports and start up node operation (including the DNS-SD advertisements)
@@ -312,7 +424,6 @@ namespace nvnmos
         }
         web::json::insert(settings, std::make_pair(nmos::fields::events_port, -1));
         web::json::insert(settings, std::make_pair(nmos::fields::events_ws_port, -1));
-        web::json::insert(settings, std::make_pair(nmos::fields::channelmapping_port, -1));
         web::json::insert(settings, std::make_pair(nmos::fields::control_protocol_ws_port, -1));
 
         if (0 != config.asset_tags)
@@ -441,16 +552,6 @@ namespace nvnmos
         }
     }
 
-    nmos::transport server::to_transport(NvNmosTransport transport)
-    {
-        switch (transport)
-        {
-        case NVNMOS_TRANSPORT_RTP: return nmos::transports::rtp;
-        case NVNMOS_TRANSPORT_MXL: return nmos::transports::mxl;
-        }
-        throw std::logic_error("invalid NvNmosTransport");
-    }
-
     void server::add_receiver(const NvNmosReceiverConfig& config)
     {
         using web::json::value_of;
@@ -458,7 +559,7 @@ namespace nvnmos
         try
         {
             if (!config.transport_file) throw std::logic_error("invalid receiver config");
-            node_implementation_add_receiver(node_model, to_transport(config.transport), config.transport_file, gate);
+            node_implementation_add_receiver(node_model, make_transport(config.transport), config.transport_file, gate);
         }
         catch (...)
         {
@@ -487,7 +588,7 @@ namespace nvnmos
         try
         {
             if (!config.transport_file) throw std::logic_error("invalid sender config");
-            node_implementation_add_sender(node_model, to_transport(config.transport), config.transport_file, gate);
+            node_implementation_add_sender(node_model, make_transport(config.transport), config.transport_file, gate);
         }
         catch (...)
         {
@@ -509,11 +610,50 @@ namespace nvnmos
         }
     }
 
+    void server::add_channelmapping(const std::string& name, const NvNmosChannelMappingConfig& mapping)
+    {
+        try
+        {
+            node_implementation_add_channelmapping(node_model, utility::s2us(name), make_channelmapping_config(mapping), gate);
+        }
+        catch (...)
+        {
+            log_current_exception();
+            throw;
+        }
+    }
+
+    void server::remove_channelmapping(const std::string& name)
+    {
+        try
+        {
+            node_implementation_remove_channelmapping(node_model, utility::s2us(name), gate);
+        }
+        catch (...)
+        {
+            log_current_exception();
+            throw;
+        }
+    }
+
     void server::activate_connection(const nmos::type& type, const std::string& name, const std::string& transport_file)
     {
         try
         {
             node_implementation_activate_connection(node_model, type, utility::s2us(name), transport_file, gate);
+        }
+        catch (...)
+        {
+            log_current_exception();
+            throw;
+        }
+    }
+
+    void server::activate_channelmapping(const std::string& name, const std::string& output_id, const NvNmosChannelMappingActiveMapEntry* active_map, size_t num_active_map)
+    {
+        try
+        {
+            node_implementation_activate_channelmapping(node_model, utility::s2us(name), utility::s2us(output_id), make_channelmapping_active_map(active_map, num_active_map), gate);
         }
         catch (...)
         {
@@ -531,7 +671,7 @@ namespace nvnmos
     nmos::id server::sender_id(const std::string& sender_name) const
     {
         auto lock = node_model.read_lock();
-        const auto candidate = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::sender, utility::s2us(sender_name.c_str()));
+        const auto candidate = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::sender, utility::s2us(sender_name));
         if (node_model.node_resources.end() == nmos::find_resource(node_model.node_resources, { candidate, nmos::types::sender })) return {};
         return candidate;
     }
@@ -539,8 +679,16 @@ namespace nvnmos
     nmos::id server::receiver_id(const std::string& receiver_name) const
     {
         auto lock = node_model.read_lock();
-        const auto candidate = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::receiver, utility::s2us(receiver_name.c_str()));
+        const auto candidate = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::receiver, utility::s2us(receiver_name));
         if (node_model.node_resources.end() == nmos::find_resource(node_model.node_resources, { candidate, nmos::types::receiver })) return {};
+        return candidate;
+    }
+
+    nmos::id server::source_id(const std::string& source_name) const
+    {
+        auto lock = node_model.read_lock();
+        const auto candidate = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::source, utility::s2us(source_name));
+        if (node_model.node_resources.end() == nmos::find_resource(node_model.node_resources, { candidate, nmos::types::source })) return {};
         return candidate;
     }
 }
@@ -661,6 +809,49 @@ bool remove_nmos_sender_from_node_server(
 }
 
 NVNMOS_API
+bool add_nmos_channelmapping_to_node_server(
+    NvNmosNodeServer* server,
+    const char* name,
+    const NvNmosChannelMappingConfig* mapping)
+{
+    if (!server) return false;
+    auto impl = (nvnmos::server*)server->impl;
+    if (!impl) return false;
+    if (!name || !mapping) return false;
+
+    try
+    {
+        impl->add_channelmapping(name, *mapping);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
+bool remove_nmos_channelmapping_from_node_server(
+    NvNmosNodeServer* server,
+    const char* name)
+{
+    if (!server) return false;
+    auto impl = (nvnmos::server*)server->impl;
+    if (!impl) return false;
+    if (!name) return false;
+
+    try
+    {
+        impl->remove_channelmapping(name);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
 bool nmos_connection_activate(
     NvNmosNodeServer* server,
     NvNmosSide side,
@@ -675,8 +866,32 @@ bool nmos_connection_activate(
 
     try
     {
-        const auto type = nvnmos::parse_side(side);
+        const auto type = nvnmos::type_from_side(side);
         impl->activate_connection(type, name, transport_file);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
+bool nmos_channelmapping_activate(
+    NvNmosNodeServer* server,
+    const char* name,
+    const char* output_id,
+    const NvNmosChannelMappingActiveMapEntry* active_map,
+    size_t num_active_map)
+{
+    if (!server) return false;
+    auto impl = (nvnmos::server*)server->impl;
+    if (!impl) return false;
+    if (!name || !output_id) return false;
+
+    try
+    {
+        impl->activate_channelmapping(name, output_id, active_map, num_active_map);
         return true;
     }
     catch (...)
@@ -756,6 +971,25 @@ bool nmos_make_receiver_id(
 }
 
 NVNMOS_API
+bool nmos_make_source_id(
+    const char* seed,
+    const char* source_name,
+    char* out,
+    size_t out_len)
+{
+    if (!seed || !source_name) return false;
+    try
+    {
+        const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
+        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::source, utility::s2us(source_name)), out, out_len);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
 bool nmos_get_node_id(
     const NvNmosNodeServer* server,
     char* out,
@@ -807,6 +1041,26 @@ bool nmos_get_receiver_id(
     try
     {
         return nvnmos::copy_id_to_buffer(impl->receiver_id(receiver_name), out, out_len);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
+bool nmos_get_source_id(
+    const NvNmosNodeServer* server,
+    const char* source_name,
+    char* out,
+    size_t out_len)
+{
+    if (!server || !source_name) return false;
+    auto impl = (nvnmos::server*)server->impl;
+    if (!impl) return false;
+    try
+    {
+        return nvnmos::copy_id_to_buffer(impl->source_id(source_name), out, out_len);
     }
     catch (...)
     {

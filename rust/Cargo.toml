@@ -11,6 +11,7 @@ members = [
     "nvnmosd-example",
     "nvnmosd-bench",
     "gst-nmos-rs",
+    "test-skip",
 ]
 
 [workspace.package]

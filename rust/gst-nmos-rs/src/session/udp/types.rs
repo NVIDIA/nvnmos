@@ -3,7 +3,7 @@
 
 //! RTP transport model for the UDP inner chain (one essence, one or two legs).
 //!
-//! SDP ([`crate::sdp`]) parses and builds the wire format. [`UdpMedia`] is the
+//! [`crate::sdp`] parses and builds the SDP text. [`UdpMedia`] is the
 //! denormalised logical stream the chain factories consume — not one SDP `m=`
 //! block (ST 2022-7 may use several media lines for one shared essence).
 
@@ -33,8 +33,8 @@ use crate::types::FlowFormat;
 /// `source-port`, `destination-ip`, `destination-port`,
 /// `interface-ip`, `multicast-ip`), mapped onto these per-leg
 /// fields at property-set / SDP-splice time — see
-/// [`crate::session::CommonSettings::source_ip`] et seq. for the per-side wire
-/// semantics. GObject properties map 1:1 to IS-05 **leg-0** transport
+/// [`crate::session::CommonSettings::source_ip`] et seq. for the per-side
+/// transport-parameter semantics. GObject properties map 1:1 to IS-05 **leg-0**
 /// scalars (`destination-ip`, `interface-ip`, …); there is no `-2`
 /// suffixed leg-2 property surface. ST 2022-7 uses a dual-`m=`
 /// **transport file** on `transport=nvdsudp` (configuring passthrough

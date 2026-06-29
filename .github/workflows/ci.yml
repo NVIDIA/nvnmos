@@ -91,7 +91,8 @@ jobs:
 
       # bindgen (nvnmos-sys) needs libclang; gst-nmos-rs links GStreamer 1.x.
       # Unit tests instantiate real elements (udpsrc, rtpvrawdepay, …) from
-      # gst-plugins-base / gst-plugins-good — dev packages alone are not enough.
+      # gst-plugins-base / gst-plugins-good, and nmosaudiochannelmap uses
+      # audiomixmatrix from gst-plugins-bad — dev packages alone are not enough.
       - name: Install Rust system dependencies
         run: |
           sudo apt-get update
@@ -100,7 +101,8 @@ jobs:
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad
 
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
@@ -120,14 +122,37 @@ jobs:
           NVNMOS_LIB_DIR: ${{ github.workspace }}/build
         run: cargo clippy --workspace --locked --all-targets -- -D warnings
 
-      # The multi-flow integration test that needs `/dev/shm` and a real
-      # MXL setup is `#[ignore]`d and skipped by default.
+      # The daemon-backed integration tests self-gate: they run here because
+      # nvnmosd + libnvnmos.so are present.
       - name: Cargo test (workspace)
         working-directory: rust
         env:
           NVNMOS_LIB_DIR: ${{ github.workspace }}/build
           LD_LIBRARY_PATH: ${{ github.workspace }}/build
-        run: cargo test --workspace --locked --no-fail-fast
+        shell: bash
+        # --show-output surfaces the `test <name> ... skipped, <reason>` lines
+        # that test-skip's `skip!` prints (libtest captures them otherwise and
+        # counts the test as passed). Aggregate them into a result line and a
+        # GitHub notice / job summary so self-skips are visible at a glance.
+        run: |
+          set +e
+          cargo test --workspace --locked --no-fail-fast -- --show-output 2>&1 | tee test.log
+          status=${PIPESTATUS[0]}
+          set -e
+          skipped=$(grep -E '^test .* \.\.\. skipped,' test.log || true)
+          count=$(grep -cE '^test .* \.\.\. skipped,' test.log || true)
+          echo "test result: ${count} skipped"
+          if [ "${count}" -gt 0 ]; then
+            echo "::notice title=Runtime tests skipped::${count} test(s) self-skipped; see job summary"
+            {
+              echo "### Runtime tests skipped (${count})"
+              echo
+              echo '```text'
+              printf '%s\n' "${skipped}"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "${status}"
   docker:
     runs-on: ubuntu-24.04
     steps:

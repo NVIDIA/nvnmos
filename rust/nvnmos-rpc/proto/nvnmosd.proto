@@ -135,6 +135,29 @@ service NvnmosDaemon {
   // transport file to (re)activate the resource, or leave it absent to
   // deactivate it.
   rpc SyncResourceState(SyncResourceStateRequest) returns (Empty);
+
+  // -------- IS-08 Channel Mapping --------
+  //
+  // Parallel to Senders/Receivers + IS-05 activations, but a separate
+  // subscription stream and handle namespace:
+  //
+  // * `name` — caller-chosen channel mapping name; unique per Node;
+  //   duplicate names rejected. Not an IS-08 input or output id.
+  // * `parent_name` / `sender_name` — IS-04 linkage by resource name
+  //   (libnvnmos derives UUIDs from the Node seed).
+  // * `input_ids` / `output_ids` in the response — effective IS-08 ids
+  //   after empty-id defaulting on add.
+  // * `ChannelMappingOutput.routable_inputs` — mirrors libnvnmos / IS-08
+  //   (empty → caps `routable_inputs: null`; non-empty list; "" → null
+  //   array element). gst-nmos-rs may populate explicitly (§ design doc).
+  // * `channelmapping_handle` — daemon-local token (like `resource_handle`).
+
+  rpc AddChannelMapping(AddChannelMappingRequest) returns (AddChannelMappingResponse);
+  rpc RemoveChannelMapping(RemoveChannelMappingRequest) returns (Empty);
+  rpc SyncChannelMappingState(SyncChannelMappingStateRequest) returns (Empty);
+  rpc SubscribeChannelMappingActivations(SubscribeChannelMappingActivationsRequest)
+      returns (stream ChannelMappingActivationEvent);
+  rpc AckChannelMappingActivation(AckChannelMappingActivationRequest) returns (Empty);
 }
 
 // -------- Common --------
@@ -403,4 +426,81 @@ message SyncResourceStateRequest {
   // format as `AddSender` / `AddReceiver`. Absent means the resource
   // is being deactivated. Symmetric with `ActivationEvent.transport_file`.
   optional string transport_file = 3;
+}
+
+// -------- IS-08 Channel Mapping --------
+
+message AddChannelMappingRequest {
+  string session_handle = 1;
+  string name = 2;  // caller-chosen channel mapping name; unique per Node
+  repeated ChannelMappingInput inputs = 3;
+  repeated ChannelMappingOutput outputs = 4;
+}
+
+message AddChannelMappingResponse {
+  string channelmapping_handle = 1;
+  repeated string input_ids = 2;
+  repeated string output_ids = 3;
+}
+
+message RemoveChannelMappingRequest {
+  string session_handle = 1;
+  string channelmapping_handle = 2;
+}
+
+enum ChannelMappingParentType {
+  CHANNEL_MAPPING_PARENT_TYPE_RECEIVER = 0;
+  CHANNEL_MAPPING_PARENT_TYPE_SOURCE = 1;
+}
+
+message ChannelMappingInput {
+  string id = 1;                       // IS-08 input id; empty → default assigned on add
+  string name = 2;                     // IS-08 /properties name (not AddChannelMappingRequest.name)
+  string description = 3;
+  repeated string channel_labels = 4;
+  string parent_name = 5;              // empty → null /parent; else caller-chosen receiver or sender name
+  ChannelMappingParentType parent_type = 6;  // receiver vs source when parent_name set; ignored when parent_name empty
+  bool reordering = 7;                 // used when block_size != 0; default true when block_size is 0
+  uint32 block_size = 8;               // 0 → default 1
+}
+
+message ChannelMappingOutput {
+  string id = 1;                       // IS-08 output id; empty → default assigned on add
+  string name = 2;                     // IS-08 /properties name (not AddChannelMappingRequest.name)
+  string description = 3;
+  repeated string channel_labels = 4;
+  string sender_name = 5;              // empty → null /sourceid; else caller-chosen sender name
+  // IS-08 output /caps routable_inputs: empty → null (unrestricted); non-empty
+  // → restricted list; "" entry → null in the IS-08 array (unrouted permitted).
+  repeated string routable_inputs = 6;
+}
+
+message ActiveMapEntry {
+  optional string input_id = 1;
+  optional uint32 input_channel = 2;
+}
+
+message SyncChannelMappingStateRequest {
+  string session_handle = 1;
+  string channelmapping_handle = 2;
+  string output_id = 3;
+  repeated ActiveMapEntry active_map = 4;
+}
+
+message SubscribeChannelMappingActivationsRequest {
+  string session_handle = 1;
+}
+
+message ChannelMappingActivationEvent {
+  string channelmapping_handle = 1;
+  string activation_handle = 2;
+  string output_id = 3;
+  repeated ActiveMapEntry active_map = 4;
+}
+
+message AckChannelMappingActivationRequest {
+  string session_handle = 1;
+  string activation_handle = 2;
+  bool success = 3;
+  string failure_reason = 4;
 }

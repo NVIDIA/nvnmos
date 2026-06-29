@@ -25,11 +25,15 @@ use crate::types::{CapsMode, DEFAULT_DAEMON_URI, FlowFormat, Transport};
 /// timeout — same order of magnitude, no special meaning.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub(crate) mod channel_mapping;
+pub(crate) mod node;
 pub(crate) mod types;
+
+pub(crate) use node::NodeSettings;
 
 use self::types::Side;
 
-/// Translate the GObject `Transport` enum to the wire enum.
+/// Translate the GObject `Transport` enum to the protobuf enum.
 ///
 /// `Mxl` carries data via the MXL Domain. `Udp` and `Udp2` reach
 /// this helper once `validate_and_open` resolves an SDP into a
@@ -134,7 +138,8 @@ pub(crate) const SENDER_NAME_BLURB: &str =
      Node; a Receiver on the same Node may share the same name (the \
      daemon scopes names by side). Required unless the name is already \
      carried in `transport-file*`. Overrides the transport file's value \
-     when both are supplied.";
+     when both are supplied. The Sender's IS-04 id is derived from the \
+     name and the element's `node-seed`.";
 
 pub(crate) const RECEIVER_NAME_BLURB: &str =
     "Name for this Receiver within the Node (becomes the \
@@ -143,7 +148,8 @@ pub(crate) const RECEIVER_NAME_BLURB: &str =
      Node; a Sender on the same Node may share the same name (the \
      daemon scopes names by side). Required unless the name is already \
      carried in `transport-file*`. Overrides the transport file's value \
-     when both are supplied.";
+     when both are supplied. The Receiver's IS-04 id is derived from the \
+     name and the element's `node-seed`.";
 
 pub(crate) const LABEL_BLURB_SENDER: &str =
     "NMOS label for the Sender. Optional. Overrides the transport \
@@ -248,17 +254,7 @@ pub(crate) const AUTO_ACTIVATE_BLURB: &str =
 #[derive(Debug, Clone)]
 pub(crate) struct CommonSettings {
     pub(crate) daemon_uri: String,
-    pub(crate) node_seed: String,
-    /// See [`HTTP_PORT_BLURB`].
-    pub(crate) http_port: u16,
-    /// See [`HOST_NAME_BLURB`].
-    pub(crate) host_name: String,
-    /// See [`DOMAIN_BLURB`].
-    pub(crate) domain: String,
-    /// See [`REGISTRATION_URL_BLURB`].
-    pub(crate) registration_url: String,
-    /// See [`SYSTEM_URL_BLURB`].
-    pub(crate) system_url: String,
+    pub(crate) node: NodeSettings,
     pub(crate) transport: Transport,
     /// Whether this snapshot came from `nmossink` (Sender) or `nmossrc`
     /// (Receiver). Pinned by the element that built the snapshot.
@@ -318,7 +314,7 @@ pub(crate) struct CommonSettings {
     pub(crate) caps: Option<gst::Caps>,
     /// Per-transport overrides (`application/x-rtp,…` shape for the
     /// RTP transports; typically empty / unused for `mxl`). Carries
-    /// the parameters that the user wants to override on the wire —
+    /// the parameters that the user wants to override in the SDP —
     /// principally RTP `payload`, audio `clock-rate`, and
     /// `a-ptime` (in milliseconds) — per the
     /// override-vs-cross-check rule agreed for startup-time SDP
@@ -360,7 +356,7 @@ pub(crate) struct CommonSettings {
     ///   the configuring SDP as both the `a=source-filter:`
     ///   include-source (RFC 4607 SSM convention) and the
     ///   `a=x-nvnmos-iface-ip:` attribute, so a single property
-    ///   value drives both wire slots.
+    ///   value drives both SDP attributes.
     /// * Receiver (`side == Receiver`): SSM include-source — the
     ///   remote sender's IP. Emitted in the configuring SDP as the
     ///   `a=source-filter:` include-source.
@@ -445,12 +441,7 @@ impl Default for CommonSettings {
     fn default() -> Self {
         Self {
             daemon_uri: DEFAULT_DAEMON_URI.to_owned(),
-            node_seed: String::new(),
-            http_port: 0,
-            host_name: String::new(),
-            domain: String::new(),
-            registration_url: String::new(),
-            system_url: String::new(),
+            node: NodeSettings::default(),
             transport: Transport::default(),
             side: Side::Sender,
             name: String::new(),
@@ -471,6 +462,73 @@ impl Default for CommonSettings {
             interface_ip: String::new(),
             multicast_ip: String::new(),
             auto_activate: false,
+        }
+    }
+}
+
+/// Best-available caps for a fake inner chain (appsrc / capsfilter),
+/// resolved in priority order:
+///   1. `caps` property (user-supplied; authoritative).
+///   2. Caps derived from the literal `transport-file`.
+///   3. Caps derived from the file at `transport-file-path`.
+pub(crate) fn fake_caps_from_settings(
+    element: &str,
+    transport: Transport,
+    caps: Option<&gst::Caps>,
+    transport_file: &str,
+    transport_file_path: &str,
+) -> Result<Option<gst::Caps>, anyhow::Error> {
+    if let Some(caps) = caps {
+        return Ok(Some(caps.clone()));
+    }
+    if !transport_file.is_empty() {
+        return caps_from_transport_file(element, transport, transport_file);
+    }
+    if !transport_file_path.is_empty() {
+        let text = std::fs::read_to_string(transport_file_path).map_err(|e| {
+            anyhow::anyhow!(
+                "{element}: re-reading `transport-file-path` = `{transport_file_path}` for fake-chain caps: {e}"
+            )
+        })?;
+        return caps_from_transport_file(element, transport, &text);
+    }
+    Ok(None)
+}
+
+/// MXL `flow_def` transport file → enriched essence caps (capssetter / fake chain).
+pub(crate) fn caps_from_flow_def(
+    element: &str,
+    transport_file: Option<&str>,
+) -> Result<Option<gst::Caps>, anyhow::Error> {
+    let Some(text) = transport_file.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let raw_caps = crate::flow_def::caps_from(text)
+        .map_err(|e| anyhow::anyhow!("caps from flow-def transport file: {e}"))?;
+    let caps = crate::essence_caps::caps_from(&raw_caps, None);
+    gst::info!(gst::CAT_DEFAULT, "{element}: caps `{caps}` from transport file");
+    Ok(Some(caps))
+}
+
+fn caps_from_transport_file(
+    element: &str,
+    transport: Transport,
+    transport_file: &str,
+) -> Result<Option<gst::Caps>, anyhow::Error> {
+    if transport_file.is_empty() {
+        return Ok(None);
+    }
+    match transport {
+        Transport::Mxl => caps_from_flow_def(element, Some(transport_file)),
+        Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => {
+            let media = crate::sdp::parse_sdp(transport_file)
+                .map_err(|e| anyhow::anyhow!("caps from SDP transport file: {e}"))?;
+            let caps = crate::essence_caps::caps_from(&media.raw_caps, Some(&media.rtp_caps));
+            gst::info!(
+                gst::CAT_DEFAULT,
+                "{element}: caps `{caps}` from SDP transport file"
+            );
+            Ok(Some(caps))
         }
     }
 }
@@ -723,7 +781,7 @@ pub(crate) fn resolve_resource_name(
 
 /// Validate the settings snapshot and open a session via the shared
 /// tokio runtime. On success the session is stored under `session`
-/// and the returned [`InnerConfig`] tells the element how to wire its
+/// and the returned [`InnerConfig`] tells the element how to build its
 /// data path. `activation_handler` is forwarded to
 /// [`Session::open`] to receive `ActivationEvent`s.
 pub(crate) fn validate_and_open(
@@ -733,13 +791,17 @@ pub(crate) fn validate_and_open(
     session: &Mutex<Option<Session>>,
     activation_handler: ActivationHandler,
 ) -> Result<InnerConfig, anyhow::Error> {
-    if settings.node_seed.is_empty() {
+    if settings.node.node_seed.is_empty() {
         bail!("{element}: `node-seed` is required");
     }
 
     let resolved_transport_file = resolve_transport_file(element, settings)?;
 
-    let (mut inner, transport_file) = match settings.transport {
+    // Each `resolve_inner_config_*` applies the `auto-activate` policy
+    // itself, where the resolved state needed to judge eager-activation
+    // availability — the flow id (MXL) or the destination endpoint
+    // (RTP) — is in scope.
+    let (inner, transport_file) = match settings.transport {
         Transport::Mxl => {
             resolve_inner_config_mxl(cat, element, settings, resolved_transport_file)?
         }
@@ -761,8 +823,6 @@ pub(crate) fn validate_and_open(
             resolve_inner_config_nvdsudp(cat, element, settings, resolved_transport_file)?
         }
     };
-
-    inner = apply_auto_activate_policy(cat, element, settings, inner);
 
     let transport = transport_to_proto(settings.transport);
     let side = settings.side;
@@ -821,7 +881,7 @@ pub(crate) fn validate_and_open(
         new_session.node_id,
         new_session.created_node,
         new_session.http_port,
-        settings.node_seed,
+        settings.node.node_seed,
         side,
         name,
         settings.transport,
@@ -839,86 +899,83 @@ pub(super) fn caps_format(settings: &CommonSettings) -> FlowFormat {
         .map(FlowFormat::from_caps)
         .unwrap_or(FlowFormat::Unspecified)
 }
-/// IS-05 transport parameters that may be omitted at AddSender /
-/// AddReceiver but are required to bring up the inner data path when
-/// `auto-activate=true`.
-pub(super) fn deferred_transport_params(settings: &CommonSettings) -> Vec<&'static str> {
-    match settings.transport {
-        Transport::Mxl => {
-            if settings.mxl_flow_id.is_empty() {
-                vec!["mxl-flow-id"]
-            } else {
-                vec![]
-            }
-        }
-        Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => match settings.side {
-            Side::Sender => {
-                let mut missing = Vec::new();
-                if settings.destination_ip.is_empty() {
-                    missing.push("destination-ip");
-                }
-                if settings.destination_port == 0 {
-                    missing.push("destination-port");
-                }
-                missing
-            }
-            Side::Receiver => {
-                let mut missing = Vec::new();
-                if settings.destination_port == 0 {
-                    missing.push("destination-port");
-                }
-                missing
-            }
-        },
-    }
-}
-
-/// Honour `auto-activate` at setup time and warn when eager activation
-/// was requested but deferred transport parameters are still unset.
+/// Honour `auto-activate` at setup time.
 ///
-/// When `auto_activate` is `false` and `decide_inner_config_*` would
-/// have produced a real transport chain, downgrade to
-/// [`InnerConfig::Fake`] so the data path stays inactive until an
-/// IS-05 PATCH activates the resource (the canonical NMOS path).
+/// `eager_blocked` is the one deferrable IS-05 transport parameter
+/// (MXL `mxl-flow-id`; RTP `destination-ip`) that is needed to bring
+/// the inner data path up now but was supplied by neither a property
+/// nor the transport file — `None` when the resolved chain is fully
+/// activatable. The caller computes it from resolved state (the merged
+/// flow id for MXL, the resolved `c=` address for RTP), so a value
+/// taken from the file counts as present on the same footing as the
+/// property. This is the deferrable-params axis only; it is independent
+/// of per-leg `rtp_enabled` / `a=inactive` (a fully-specified but
+/// dormant leg), which the resolver already reflects as
+/// [`FakeKind::NotActive`] and which is not an auto-activate failure.
 ///
-/// When `auto_activate` is `true` but wire/MXL flow parameters needed
-/// for the inner chain are still unset, log a warning and keep (or
-/// downgrade to) a fake chain — AddSender / AddReceiver still proceeds
-/// when a configuring transport file is available.
+/// - `auto-activate=false` with a real chain → downgrade to a dormant
+///   [`InnerConfig::Fake`] so the path waits for an IS-05 PATCH (the
+///   canonical NMOS path).
+/// - `auto-activate=true` with `eager_blocked` set → keep (or downgrade
+///   to) a fake chain and log at error level: the user asked for eager
+///   bring-up but the flow id / destination is not yet known. The
+///   resource is still added and activates on the next IS-05 PATCH.
+///   Resources that are merely deferred ([`FakeKind::NotConfigured`])
+///   or invalid ([`FakeKind::Misconfigured`]) are left untouched — they
+///   carry their own diagnostics and are not an auto-activate mismatch.
 pub(super) fn apply_auto_activate_policy(
     cat: &gst::DebugCategory,
     element: &str,
     settings: &CommonSettings,
     inner: InnerConfig,
+    eager_blocked: Option<&'static str>,
 ) -> InnerConfig {
-    let missing = deferred_transport_params(settings);
-
-    if settings.auto_activate && !missing.is_empty() {
-        gst::warning!(
-            cat,
-            "{element}: auto-activate=true ignored — missing transport properties: {}",
-            missing.join(", "),
-        );
-        if matches!(inner, InnerConfig::Real(_)) {
-            return InnerConfig::Fake {
+    if !settings.auto_activate {
+        return match inner {
+            InnerConfig::Real(_) => InnerConfig::Fake {
                 kind: FakeKind::NotActive,
-                detail: format!(
-                    "auto-activate=true but {} unset; waiting for IS-05 PATCH",
-                    missing.join(", "),
-                ),
-            };
-        }
-        return inner;
-    }
-
-    if !settings.auto_activate && matches!(inner, InnerConfig::Real(_)) {
-        return InnerConfig::Fake {
-            kind: FakeKind::NotActive,
-            detail: "auto-activate=false; waiting for IS-05 PATCH to activate".into(),
+                detail: "auto-activate=false; waiting for IS-05 PATCH to activate".into(),
+            },
+            other => other,
         };
     }
 
-    inner
+    let Some(blocked) = eager_blocked else {
+        return inner;
+    };
+
+    // Eager bring-up was requested but the flow id / destination is not
+    // available from a property or the transport file. This applies to a
+    // real chain (which we downgrade) and the dormant "waiting for the
+    // flow id / destination" case; leave merely-deferred (NotConfigured)
+    // or invalid (Misconfigured) resources alone — they carry their own
+    // diagnostics.
+    let eager_candidate = matches!(
+        inner,
+        InnerConfig::Real(_) | InnerConfig::Fake { kind: FakeKind::NotActive, .. }
+    );
+    if !eager_candidate {
+        return inner;
+    }
+
+    // Error level for visibility, but non-fatal: the resource is added
+    // and an IS-05 PATCH activates it later.
+    gst::error!(
+        cat,
+        "{element}: auto-activate=true but the data path cannot go live yet — {blocked} not \
+         provided by a property or the transport file; the resource is added and will \
+         activate on an IS-05 PATCH",
+    );
+
+    match inner {
+        InnerConfig::Real(_) => InnerConfig::Fake {
+            kind: FakeKind::NotActive,
+            detail: format!(
+                "auto-activate=true but {blocked} unavailable; waiting for IS-05 PATCH",
+            ),
+        },
+        other => other,
+    }
 }
 
 /// Honour `auto-activate=false` for a fully-resolved inner chain.
@@ -934,8 +991,8 @@ fn apply_auto_activate_gate(inner: InnerConfig, auto_activate: bool) -> InnerCon
     inner
 }
 
-/// Fixate upstream peer caps for deferred AddSender.
-fn prepare_deferred_peer_caps(
+/// Fixate upstream peer caps for deferred AddSender and deferred fake-chain pinning.
+pub(crate) fn prepare_deferred_peer_caps(
     element: &str,
     peer_caps: gst::Caps,
 ) -> Result<gst::Caps, anyhow::Error> {
@@ -1308,6 +1365,7 @@ pub(crate) fn make_activation_plan(
 #[cfg(test)]
 mod support {
     use super::*;
+    pub(crate) use crate::test_support::init_gst;
 
     pub const NODE_SEED: &str = "test-seed";
     pub const FLOW_ID_A: &str = "00000000-0000-0000-0000-000000000001";
@@ -1315,22 +1373,16 @@ mod support {
     pub const DOMAIN_ID: &str = "1ac254d9-c9be-475a-93a7-f80b9c1063a8";
 
     pub fn cat() -> gst::DebugCategory {
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            let _ = gst::init();
-        });
         gst::DebugCategory::new("test", gst::DebugColorFlags::empty(), Some("test"))
     }
 
     pub fn settings(side: Side) -> CommonSettings {
         CommonSettings {
             daemon_uri: "unix:/dev/null".to_owned(),
-            node_seed: NODE_SEED.to_owned(),
-            http_port: 0,
-            host_name: String::new(),
-            domain: String::new(),
-            registration_url: String::new(),
-            system_url: String::new(),
+            node: NodeSettings {
+                node_seed: NODE_SEED.to_owned(),
+                ..NodeSettings::default()
+            },
             transport: Transport::Mxl,
             side,
             name: "test-name".to_owned(),
@@ -1364,7 +1416,7 @@ mod support {
 
     pub fn video_caps() -> gst::Caps {
         use std::str::FromStr;
-        cat(); // ensures gst::init() ran
+        init_gst();
         gst::Caps::from_str(
             "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1",
         )
@@ -1597,101 +1649,106 @@ mod tests {
             }
         }
 
-        #[test]
-        fn policy_downgrades_eager_mxl_without_flow_id() {
-            let s = CommonSettings {
-                mxl_flow_id: String::new(),
-                auto_activate: true,
-                ..settings(Side::Sender)
-            };
-            let inner = InnerConfig::Fake {
-                kind: FakeKind::NotActive,
-                detail: "configuring-only".into(),
-            };
-            let after = super::super::apply_auto_activate_policy(&cat(), "nmossink", &s, inner);
-            assert!(matches!(after, InnerConfig::Fake { .. }));
-        }
-
-        #[test]
-        fn policy_downgrades_eager_rtp_sender_without_destination() {
-            let s = CommonSettings {
-                transport: Transport::Udp,
-                side: Side::Sender,
-                auto_activate: true,
-                source_ip: "192.0.2.1".to_owned(),
-                destination_ip: String::new(),
-                destination_port: 0,
-                ..settings(Side::Sender)
-            };
-            let inner = InnerConfig::Real(TransportConfig::Mxl {
+        // `apply_auto_activate_policy` is transport-neutral: it acts on
+        // the `auto_activate` toggle and the `eager_blocked` param the
+        // transport resolver computes. These exercise the toggle/param
+        // matrix directly; the transport-specific computation of the
+        // param lives in `mxl_eager_blocked` / `udp_eager_blocked` tests.
+        fn real_mxl() -> InnerConfig {
+            InnerConfig::Real(TransportConfig::Mxl {
                 domain_path: "/var/lib/mxl/domain-a".to_owned(),
                 flow_id: FLOW_ID_A.to_owned(),
                 format: FlowFormat::Video,
                 transport_file: None,
-            });
-            let after = super::super::apply_auto_activate_policy(&cat(), "nmossink", &s, inner);
+            })
+        }
+
+        #[test]
+        fn policy_auto_activate_false_defers_real_chain() {
+            let s = CommonSettings {
+                auto_activate: false,
+                ..settings(Side::Sender)
+            };
+            let after = super::super::apply_auto_activate_policy(
+                &cat(),
+                "nmossink",
+                &s,
+                real_mxl(),
+                None,
+            );
+            match after {
+                InnerConfig::Fake { kind, .. } => assert_eq!(kind, FakeKind::NotActive),
+                InnerConfig::Real(_) => panic!("auto-activate=false must defer a real chain"),
+            }
+        }
+
+        #[test]
+        fn policy_eager_unblocked_keeps_real_chain() {
+            let s = CommonSettings {
+                auto_activate: true,
+                ..settings(Side::Sender)
+            };
+            let after = super::super::apply_auto_activate_policy(
+                &cat(),
+                "nmossink",
+                &s,
+                real_mxl(),
+                None,
+            );
+            assert!(matches!(after, InnerConfig::Real(_)));
+        }
+
+        #[test]
+        fn policy_eager_blocked_downgrades_real_chain() {
+            let s = CommonSettings {
+                auto_activate: true,
+                ..settings(Side::Sender)
+            };
+            let after = super::super::apply_auto_activate_policy(
+                &cat(),
+                "nmossink",
+                &s,
+                real_mxl(),
+                Some("mxl-flow-id"),
+            );
             match after {
                 InnerConfig::Fake { kind, detail } => {
                     assert_eq!(kind, FakeKind::NotActive);
-                    assert!(detail.contains("destination-ip"));
+                    assert!(detail.contains("mxl-flow-id"));
                 }
-                InnerConfig::Real(_) => panic!("must not eager-activate without destination-ip"),
+                InnerConfig::Real(_) => panic!("blocked eager activation must defer"),
             }
+        }
+
+        #[test]
+        fn policy_eager_blocked_leaves_misconfigured_untouched() {
+            let s = CommonSettings {
+                auto_activate: true,
+                ..settings(Side::Sender)
+            };
+            let inner = InnerConfig::Fake {
+                kind: FakeKind::Misconfigured,
+                detail: "bad".into(),
+            };
+            let after = super::super::apply_auto_activate_policy(
+                &cat(),
+                "nmossink",
+                &s,
+                inner,
+                Some("mxl-flow-id"),
+            );
+            assert!(matches!(
+                after,
+                InnerConfig::Fake {
+                    kind: FakeKind::Misconfigured,
+                    ..
+                }
+            ));
         }
     }
 
     mod configuring_minimum {
         use super::*;
-
-        #[test]
-        fn deferred_transport_params_mxl_without_flow_id() {
-            let s = settings(Side::Receiver);
-            assert_eq!(
-                super::super::deferred_transport_params(&s),
-                vec!["mxl-flow-id"]
-            );
-        }
-
-        #[test]
-        fn deferred_transport_params_rtp_sender_wire_endpoints() {
-            let s = CommonSettings {
-                transport: Transport::Udp,
-                side: Side::Sender,
-                source_ip: "192.0.2.1".to_owned(),
-                ..settings(Side::Sender)
-            };
-            assert_eq!(
-                super::super::deferred_transport_params(&s),
-                vec!["destination-ip", "destination-port"]
-            );
-        }
-
-        #[test]
-        fn deferred_transport_params_rtp_receiver_unicast_omits_multicast_ip() {
-            let s = CommonSettings {
-                transport: Transport::Udp,
-                side: Side::Receiver,
-                interface_ip: "192.0.2.1".to_owned(),
-                ..settings(Side::Receiver)
-            };
-            assert_eq!(
-                super::super::deferred_transport_params(&s),
-                vec!["destination-port"]
-            );
-        }
-
-        #[test]
-        fn deferred_transport_params_rtp_receiver_multicast_with_port_is_complete() {
-            let s = CommonSettings {
-                transport: Transport::Udp,
-                side: Side::Receiver,
-                interface_ip: "192.0.2.1".to_owned(),
-                multicast_ip: "239.1.1.1".to_owned(),
-                destination_port: 5004,
-                ..settings(Side::Receiver)
-            };
-            assert!(super::super::deferred_transport_params(&s).is_empty());
-        }
 
         #[test]
         fn rtp_sender_caps_synthesis_requires_source_ip() {
@@ -1755,7 +1812,7 @@ mod tests {
 
         #[test]
         fn rtp_reads_name_from_transport_file() {
-            cat();
+            init_gst();
             let mut s = settings(Side::Receiver);
             s.transport = Transport::Udp;
             s.name.clear();
@@ -1788,7 +1845,7 @@ mod tests {
 
         #[test]
         fn rejects_transport_file_without_name() {
-            cat();
+            init_gst();
             let mut s = settings(Side::Receiver);
             s.transport = Transport::Udp;
             s.name.clear();

@@ -35,12 +35,15 @@ use std::task::{Context as TaskContext, Poll};
 
 use anyhow::Context;
 use clap::Parser;
-use nvnmos::{Activation, NodeServer};
+use nvnmos::{Activation, ChannelMappingActivation, NodeServer};
 use nvnmos_rpc::v1::nvnmos_daemon_server::{NvnmosDaemon, NvnmosDaemonServer};
 use nvnmos_rpc::v1::{
-    AckActivationRequest, ActivationEvent, AddNodeRequest, AddNodeResponse, AddReceiverRequest,
-    AddResourceResponse, AddSenderRequest, CloseSessionRequest, Empty, OpenSessionRequest,
-    OpenSessionResponse, RemoveNodeRequest, RemoveResourceRequest, SubscribeActivationsRequest,
+    AckActivationRequest, AckChannelMappingActivationRequest, ActivationEvent,
+    AddChannelMappingRequest, AddChannelMappingResponse, AddNodeRequest, AddNodeResponse,
+    AddReceiverRequest, AddResourceResponse, AddSenderRequest, CloseSessionRequest, Empty,
+    OpenSessionRequest, OpenSessionResponse, RemoveChannelMappingRequest, RemoveNodeRequest,
+    RemoveResourceRequest, SubscribeActivationsRequest,
+    SubscribeChannelMappingActivationsRequest, SyncChannelMappingStateRequest,
     SyncResourceStateRequest, Transport as ProtoTransport,
 };
 use tokio::net::UnixListener;
@@ -51,7 +54,9 @@ use tonic::{Request, Response, Status};
 
 use crate::http_port::read_http_port_range;
 use crate::session_gc::SessionGc;
-use crate::state::{AckOutcome, ActivationDispatch, Side, State};
+use crate::state::{
+    AckOutcome, ActivationDispatch, ChannelMappingActivationDispatch, Side, State,
+};
 
 /// Bound on the per-session activations stream. Small because activations
 /// are rare (one per IS-05 PATCH) and the consumer is expected to ack
@@ -376,6 +381,127 @@ impl NvnmosDaemon for Daemon {
         );
         Ok(Response::new(Empty {}))
     }
+
+    async fn add_channel_mapping(
+        &self,
+        request: Request<AddChannelMappingRequest>,
+    ) -> Result<Response<AddChannelMappingResponse>, Status> {
+        let req = request.into_inner();
+        let outcome = {
+            let mut state = self.lock_state();
+            state.add_channelmapping(
+                &req.session_handle,
+                &req.name,
+                &req.inputs,
+                &req.outputs,
+            )?
+        };
+        tracing::info!(
+            session_handle = %req.session_handle,
+            name = %req.name,
+            channelmapping_handle = %outcome.channelmapping_handle,
+            node_seed = %outcome.node_seed,
+            "AddChannelMapping",
+        );
+        Ok(Response::new(AddChannelMappingResponse {
+            channelmapping_handle: outcome.channelmapping_handle,
+            input_ids: outcome.input_ids,
+            output_ids: outcome.output_ids,
+        }))
+    }
+
+    async fn remove_channel_mapping(
+        &self,
+        request: Request<RemoveChannelMappingRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let outcome = {
+            let mut state = self.lock_state();
+            state.remove_channelmapping(&req.session_handle, &req.channelmapping_handle)?
+        };
+        tracing::info!(
+            session_handle = %req.session_handle,
+            channelmapping_handle = %req.channelmapping_handle,
+            node_seed = %outcome.node_seed,
+            name = %outcome.name,
+            "RemoveChannelMapping",
+        );
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn sync_channel_mapping_state(
+        &self,
+        request: Request<SyncChannelMappingStateRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let outcome = {
+            let mut state = self.lock_state();
+            state.sync_channelmapping_state(
+                &req.session_handle,
+                &req.channelmapping_handle,
+                &req.output_id,
+                &req.active_map,
+            )?
+        };
+        tracing::info!(
+            session_handle = %req.session_handle,
+            channelmapping_handle = %req.channelmapping_handle,
+            node_seed = %outcome.node_seed,
+            name = %outcome.name,
+            "SyncChannelMappingState",
+        );
+        Ok(Response::new(Empty {}))
+    }
+
+    type SubscribeChannelMappingActivationsStream = ChannelMappingSubscriptionStream;
+
+    async fn subscribe_channel_mapping_activations(
+        &self,
+        request: Request<SubscribeChannelMappingActivationsRequest>,
+    ) -> Result<Response<Self::SubscribeChannelMappingActivationsStream>, Status> {
+        let req = request.into_inner();
+        let (tx, rx) = tokio_mpsc::channel(SUBSCRIPTION_BUFFER);
+        {
+            let mut state = self.lock_state();
+            state.subscribe_channelmapping_activations(&req.session_handle, tx)?;
+            self.session_gc.cancel_timeout(&req.session_handle);
+        }
+        tracing::info!(
+            session_handle = %req.session_handle,
+            "SubscribeChannelMappingActivations",
+        );
+        Ok(Response::new(ChannelMappingSubscriptionStream {
+            inner: ReceiverStream::new(rx),
+            session_handle: req.session_handle,
+            state: self.state.clone(),
+            session_gc: self.session_gc.clone(),
+        }))
+    }
+
+    async fn ack_channel_mapping_activation(
+        &self,
+        request: Request<AckChannelMappingActivationRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        {
+            let mut state = self.lock_state();
+            state.complete_channelmapping_activation(
+                &req.session_handle,
+                &req.activation_handle,
+                AckOutcome {
+                    success: req.success,
+                    failure_reason: req.failure_reason.clone(),
+                },
+            )?;
+        }
+        tracing::info!(
+            session_handle = %req.session_handle,
+            activation_handle = %req.activation_handle,
+            success = req.success,
+            "AckChannelMappingActivation",
+        );
+        Ok(Response::new(Empty {}))
+    }
 }
 
 /// Server-streaming wrapper that arms the resubscribe watchdog when the
@@ -412,6 +538,38 @@ impl Drop for SubscriptionStream {
     }
 }
 
+struct ChannelMappingSubscriptionStream {
+    inner: ReceiverStream<Result<nvnmos_rpc::v1::ChannelMappingActivationEvent, Status>>,
+    session_handle: String,
+    state: Arc<Mutex<State>>,
+    session_gc: SessionGc,
+}
+
+impl Stream for ChannelMappingSubscriptionStream {
+    type Item = Result<nvnmos_rpc::v1::ChannelMappingActivationEvent, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl Drop for ChannelMappingSubscriptionStream {
+    fn drop(&mut self) {
+        let session_handle = self.session_handle.clone();
+        let state = self.state.clone();
+        let session_gc = self.session_gc.clone();
+        tokio::spawn(async move {
+            let arm = {
+                let mut guard = state.lock().expect("daemon state mutex poisoned");
+                guard.on_channelmapping_subscription_stream_ended(&session_handle)
+            };
+            if arm {
+                session_gc.start_resubscribe_timeout(&session_handle);
+            }
+        });
+    }
+}
+
 /// Decode a wire-format proto3 `transport` field into the proto's
 /// generated [`ProtoTransport`] enum. Out-of-range values (a future client
 /// using a transport this daemon doesn't know) become `INVALID_ARGUMENT`
@@ -436,9 +594,14 @@ fn build_node_server(
     state: Arc<Mutex<State>>,
     node_seed: String,
 ) -> Result<NodeServer, Status> {
+    let cm_state = state.clone();
+    let cm_node_seed = node_seed.clone();
     NodeServer::builder(config)
         .on_log(log_bridge::forward)
         .on_activation(move |act| route_activation(&state, &node_seed, act))
+        .on_channelmapping_activation(move |act| {
+            route_channelmapping_activation(&cm_state, &cm_node_seed, act)
+        })
         .build()
         .map_err(|e| Status::internal(format!("create_nmos_node_server failed: {e}")))
 }
@@ -525,6 +688,81 @@ fn route_activation(
                 activation_handle,
                 "activation ack channel disconnected (session closed or \
                  ack handler dropped sender); NACKing",
+            );
+            Err("session closed before ack".to_string())
+        }
+    }
+}
+
+fn route_channelmapping_activation(
+    state: &Arc<Mutex<State>>,
+    node_seed: &str,
+    act: &ChannelMappingActivation<'_>,
+) -> std::result::Result<(), String> {
+    let proto_map = state::active_map_to_proto(act.active_map);
+
+    let dispatch = {
+        let mut s = state.lock().expect("daemon state mutex poisoned");
+        s.dispatch_channelmapping_activation(node_seed, act.output_id, proto_map)
+    };
+
+    let (activation_handle, ack_rx) = match dispatch {
+        ChannelMappingActivationDispatch::Routed {
+            activation_handle,
+            ack_rx,
+        } => (activation_handle, ack_rx),
+        ChannelMappingActivationDispatch::NoChannelMapping => {
+            tracing::warn!(
+                node_seed,
+                name = act.name,
+                output_id = act.output_id,
+                "channelmapping activation for unknown channel mapping/output; NACKing",
+            );
+            return Err("channel mapping not known to daemon".to_string());
+        }
+        ChannelMappingActivationDispatch::NoSubscriber => {
+            tracing::warn!(
+                node_seed,
+                name = act.name,
+                output_id = act.output_id,
+                "channelmapping activation with no SubscribeChannelMappingActivations stream; \
+                 NACKing",
+            );
+            return Err(
+                "no SubscribeChannelMappingActivations stream on owning session".to_string(),
+            );
+        }
+        ChannelMappingActivationDispatch::SubscriberBusy => {
+            tracing::warn!(
+                node_seed,
+                name = act.name,
+                output_id = act.output_id,
+                "channelmapping subscriber stream buffer full; NACKing",
+            );
+            return Err("subscriber stream buffer is full".to_string());
+        }
+    };
+
+    let result = ack_rx.recv_timeout(state::ACTIVATION_ACK_TIMEOUT);
+    state
+        .lock()
+        .expect("daemon state mutex poisoned")
+        .cleanup_pending_channelmapping_activation(&activation_handle);
+
+    match result {
+        Ok(outcome) if outcome.success => Ok(()),
+        Ok(outcome) => Err(outcome.failure_reason),
+        Err(std_mpsc::RecvTimeoutError::Timeout) => {
+            tracing::warn!(
+                activation_handle,
+                "channelmapping activation ack timed out; NACKing",
+            );
+            Err("activation ack timed out".to_string())
+        }
+        Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+            tracing::warn!(
+                activation_handle,
+                "channelmapping activation ack channel disconnected; NACKing",
             );
             Err("session closed before ack".to_string())
         }

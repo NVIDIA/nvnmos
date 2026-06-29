@@ -73,8 +73,11 @@
 //! Fake chain: while the inner is on the fake chain, the bin still
 //! has to look like a valid GStreamer element to the rest of the
 //! pipeline — the ghost pad needs to answer caps queries and the
-//! bin needs to reach PLAYING. `nmossink`'s fake chain is a plain
-//! `fakesink`: sinks accept ANY caps, so no extra work is needed.
+//! bin needs to reach PLAYING. `nmossink`'s fake chain is
+//! `capsfilter ! fakesink` when essence caps are known (`caps` or
+//! `transport-file*`), or a bare `fakesink` until then. Known caps
+//! are pinned at NULL→READY; deferred senders query upstream peer
+//! caps to pin the fake chain at READY→PAUSED *before* child negotiation.
 //! `nmossrc`'s fake chain is an `appsrc` configured with the
 //! best-available essence caps (the user-supplied `caps` property,
 //! or caps synthesised from `transport-file*`) and `is-live=true`;
@@ -91,7 +94,8 @@
 //! with neither `transport-file*` nor `caps` set, the session is
 //! opened without a resource and the actual `AddSender` is driven
 //! from `change_state(ReadyToPaused)`. The ghost sink pad's upstream
-//! peer is queried for caps, the result is fixated and fed to the
+//! peer is queried for caps, the result is fixated and used to pin
+//! the fake chain before child negotiation, then fed to the
 //! caps-driven transport-file builder (`flow_def` on MXL, SDP on
 //! `udp` / `udp2` / `nvdsudp`), and on success the inner is swapped to
 //! the real transport chain. State-change errors propagate when peer
@@ -138,6 +142,8 @@ use std::sync::LazyLock;
 use gst::glib;
 use gstreamer as gst;
 
+mod channel_mapping_session;
+mod channel_mapping;
 mod daemon;
 mod domain;
 mod essence_caps;
@@ -152,7 +158,25 @@ mod runtime;
 mod sdp;
 mod sdp_passthrough;
 mod session;
+mod nmosaudiochannelmap;
 mod types;
+
+/// Shared test-only helpers for the crate's unit tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::gst;
+
+    /// Initialise GStreamer once per process for tests that build caps,
+    /// elements, or SDP messages. Idempotent and race-safe (`Once`), so
+    /// every gst-dependent test can call it unconditionally as its first
+    /// statement. Tests with no GStreamer dependency deliberately omit it.
+    pub(crate) fn init_gst() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let _ = gst::init();
+        });
+    }
+}
 
 pub(crate) static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -165,6 +189,7 @@ pub(crate) static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     nmossink::register(plugin)?;
     nmossrc::register(plugin)?;
+    nmosaudiochannelmap::register(plugin)?;
     Ok(())
 }
 

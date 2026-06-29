@@ -401,8 +401,10 @@ static void print_expected_ids(const char *seed)
     };
     for (size_t i = 0; i < sizeof sender_names / sizeof sender_names[0]; ++i)
     {
-        const bool success = nmos_make_sender_id(seed, sender_names[i], id, sizeof id);
-        print_id("sender", sender_names[i], success ? id : "<error>");
+        const bool sender_success = nmos_make_sender_id(seed, sender_names[i], id, sizeof id);
+        print_id("sender", sender_names[i], sender_success ? id : "<error>");
+        const bool source_success = nmos_make_source_id(seed, sender_names[i], id, sizeof id);
+        print_id("source", sender_names[i], source_success ? id : "<error>");
     }
 
     static const char *const receiver_names[] = {
@@ -434,8 +436,10 @@ static void print_actual_ids(const NvNmosNodeServer *server)
     };
     for (size_t i = 0; i < sizeof sender_names / sizeof sender_names[0]; ++i)
     {
-        const bool success = nmos_get_sender_id(server, sender_names[i], id, sizeof id);
-        print_id("sender", sender_names[i], success ? id : "<missing>");
+        const bool sender_success = nmos_get_sender_id(server, sender_names[i], id, sizeof id);
+        print_id("sender", sender_names[i], sender_success ? id : "<missing>");
+        const bool source_success = nmos_get_source_id(server, sender_names[i], id, sizeof id);
+        print_id("source", sender_names[i], source_success ? id : "<missing>");
     }
 
     static const char *const receiver_names[] = {

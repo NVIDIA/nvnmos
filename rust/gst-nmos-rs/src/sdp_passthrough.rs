@@ -381,6 +381,7 @@ fn sync_x_nvnmos_iface_for_local_ip(m: &mut SDPMediaRef, ip: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::init_gst;
 
     const VIDEO_WITH_STALE_IFACE: &str = concat!(
         "v=0\r\n",
@@ -424,6 +425,7 @@ mod tests {
 
     #[test]
     fn interface_ip_override_to_unbound_ip_clears_x_nvnmos_iface() {
+        init_gst();
         let overrides = SdpOverrides {
             interface_ip: Some("192.0.2.254"),
             ..Default::default()

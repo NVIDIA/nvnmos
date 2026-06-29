@@ -74,6 +74,7 @@ impl Drop for SdpFileGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::init_gst;
     use std::fs;
 
     #[test]
@@ -104,7 +105,7 @@ mod tests {
 
     #[test]
     fn sdp_file_guard_survives_chain_struct_drop_until_element_finalized() {
-        gst::init().expect("gst init");
+        init_gst();
         let element = gst::ElementFactory::make("fakesink")
             .build()
             .expect("fakesink");

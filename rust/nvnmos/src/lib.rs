@@ -15,11 +15,12 @@
 //! * [`NodeServer::activate_connection`] — surface an out-of-band activation
 //!   (mirrors the `nmos_connection_activate` C function).
 //! * [`NodeServer::node_id`] / [`sender_id`](NodeServer::sender_id) /
-//!   [`receiver_id`](NodeServer::receiver_id) — look up the NMOS resource UUIDs
-//!   on a running server.
-//! * [`make_node_id`] / [`make_sender_id`] / [`make_receiver_id`] — pure
-//!   functions that compute the same UUIDs deterministically from a seed,
-//!   without needing a running server.
+//!   [`receiver_id`](NodeServer::receiver_id) /
+//!   [`source_id`](NodeServer::source_id) — look up NMOS resource UUIDs on a
+//!   running server.
+//! * [`make_node_id`] / [`make_sender_id`] / [`make_receiver_id`] /
+//!   [`make_source_id`] — pure functions that compute the same UUIDs
+//!   deterministically from a seed, without needing a running server.
 //! * [`NodeServer::builder`] — opt into IS-05 [`Activation`] handling and / or
 //!   forward libnvnmos's slog output via [`LogMessage`]. Both knobs are
 //!   chainable on the returned [`NodeServerBuilder`]; the bare
@@ -163,6 +164,97 @@ pub struct Activation<'a> {
 type ActivationCallback =
     Box<dyn Fn(&Activation<'_>) -> std::result::Result<(), String> + Send + Sync + 'static>;
 
+/// An IS-08 Channel Mapping API activation for one Output.
+#[derive(Debug)]
+pub struct ChannelMappingActivation<'a> {
+    /// Caller-chosen name of the channel mapping; not IS-08 `/properties` name.
+    pub name: &'a str,
+    /// IS-08 output id just activated.
+    pub output_id: &'a str,
+    /// Active map for this output only.
+    pub active_map: &'a [ChannelMappingActiveMapEntry],
+}
+
+/// One output channel entry in an IS-08 active map.
+///
+/// Dense array: index `i` is output channel `i`.
+#[derive(Debug, Clone)]
+pub struct ChannelMappingActiveMapEntry {
+    /// IS-08 input id, or `None` when unrouted.
+    pub input_id: Option<String>,
+    /// Input channel index when routed; `None` when unrouted (ignored at the C API).
+    pub input_channel: Option<u32>,
+}
+
+/// Parent type for an IS-08 Input `/parent` endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelMappingParentType {
+    /// IS-04 Receiver parent.
+    Receiver,
+    /// IS-04 Source parent.
+    Source,
+}
+
+impl ChannelMappingParentType {
+    fn to_ffi(self) -> sys::NvNmosChannelMappingParentType {
+        match self {
+            Self::Receiver => sys::_NvNmosChannelMappingParentType_NVNMOS_CHANNELMAPPING_PARENT_TYPE_RECEIVER,
+            Self::Source => sys::_NvNmosChannelMappingParentType_NVNMOS_CHANNELMAPPING_PARENT_TYPE_SOURCE,
+        }
+    }
+}
+
+/// IS-08 Input geometry for [`NodeServer::add_channelmapping`].
+#[derive(Debug, Clone)]
+pub struct ChannelMappingInput {
+    /// IS-08 input id (non-empty).
+    pub id: String,
+    /// IS-08 `/properties` name (not the caller-chosen channel mapping name).
+    pub name: String,
+    /// IS-08 `/properties` description.
+    pub description: String,
+    /// IS-08 channel labels; must be non-empty.
+    pub channel_labels: Vec<String>,
+    /// IS-04 parent resource name; empty → null `/parent`.
+    pub parent_name: String,
+    /// Receiver vs source when `parent_name` is set.
+    pub parent_type: ChannelMappingParentType,
+    /// Used when `block_size != 0`; ignored when `block_size` is 0.
+    pub reordering: bool,
+    /// 0 → default 1 with reordering true.
+    pub block_size: u32,
+}
+
+/// IS-08 Output geometry for [`NodeServer::add_channelmapping`].
+#[derive(Debug, Clone)]
+pub struct ChannelMappingOutput {
+    /// IS-08 output id (non-empty).
+    pub id: String,
+    /// IS-08 `/properties` name.
+    pub name: String,
+    /// IS-08 `/properties` description.
+    pub description: String,
+    /// IS-08 channel labels; must be non-empty.
+    pub channel_labels: Vec<String>,
+    /// Caller-chosen sender name for `/sourceid`; empty → null.
+    pub sender_name: String,
+    /// IS-08 output /caps routable_inputs; `None` → unrestricted (`null`).
+    /// Empty string entries → `null` in the IS-08 array (unrouted permitted).
+    pub routable_inputs: Option<Vec<String>>,
+}
+
+/// Input/output bundle for [`NodeServer::add_channelmapping`].
+#[derive(Debug, Clone)]
+pub struct ChannelMappingConfig {
+    /// IS-08 inputs to add.
+    pub inputs: Vec<ChannelMappingInput>,
+    /// IS-08 outputs to add.
+    pub outputs: Vec<ChannelMappingOutput>,
+}
+type ChannelMappingActivationCallback = Box<
+    dyn Fn(&ChannelMappingActivation<'_>) -> std::result::Result<(), String> + Send + Sync + 'static,
+>;
+
 /// A single log message from libnvnmos, passed to the callback installed via
 /// [`NodeServerBuilder::on_log`].
 ///
@@ -188,6 +280,7 @@ type LogCallback = Box<dyn Fn(&LogMessage<'_>) + Send + Sync + 'static>;
 
 struct CallbackState {
     activation: Option<ActivationCallback>,
+    channelmapping_activation: Option<ChannelMappingActivationCallback>,
     log: Option<LogCallback>,
 }
 
@@ -242,6 +335,72 @@ unsafe extern "C" fn activation_trampoline(
     // Catch panics so they don't unwind across the FFI boundary. Map any
     // panic — and any returned `Err(reason)` — to `false`, which libnvnmos
     // surfaces to IS-05 as activation failure.
+    match catch_unwind(AssertUnwindSafe(|| callback(&activation))) {
+        Ok(Ok(())) => true,
+        Ok(Err(_reason)) => false,
+        Err(_panic) => false,
+    }
+}
+
+unsafe extern "C" fn channelmapping_activation_trampoline(
+    server: *mut sys::NvNmosNodeServer,
+    name: *const c_char,
+    output_id: *const c_char,
+    active_map: *const sys::NvNmosChannelMappingActiveMapEntry,
+    num_active_map: usize,
+) -> bool {
+    if server.is_null() || name.is_null() || output_id.is_null() {
+        return false;
+    }
+    // SAFETY: `server` is owned by Rust; `user_data` is set exactly once in
+    // `NodeServer::create` and cleared only after `destroy_nmos_node_server`
+    // has joined all callback threads.
+    let user_data = unsafe { (*server).user_data };
+    if user_data.is_null() {
+        return false;
+    }
+    let state = unsafe { &*(user_data as *const CallbackState) };
+    let Some(callback) = state.channelmapping_activation.as_ref() else {
+        return false;
+    };
+
+    // SAFETY: libnvnmos passes valid NUL-terminated UTF-8.
+    let name = match unsafe { CStr::from_ptr(name) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let output_id = match unsafe { CStr::from_ptr(output_id) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let mut channels = Vec::with_capacity(num_active_map);
+    if !active_map.is_null() {
+        for index in 0..num_active_map {
+            let ch = unsafe { &*active_map.add(index) };
+            let input_id = if ch.input_id.is_null() {
+                None
+            } else {
+                match unsafe { CStr::from_ptr(ch.input_id) }.to_str() {
+                    Ok(s) => Some(s.to_string()),
+                    Err(_) => return false,
+                }
+            };
+            let input_channel = input_id.as_ref().map(|_| ch.input_channel);
+            channels.push(ChannelMappingActiveMapEntry {
+                input_id,
+                input_channel,
+            });
+        }
+    }
+
+    let activation = ChannelMappingActivation {
+        name,
+        output_id,
+        active_map: &channels,
+    };
+
+    // Catch panics so they don't unwind across the FFI boundary.
     match catch_unwind(AssertUnwindSafe(|| callback(&activation))) {
         Ok(Ok(())) => true,
         Ok(Err(_reason)) => false,
@@ -357,6 +516,174 @@ pub fn make_receiver_id(seed: &str, receiver_name: &str) -> Result<String> {
         return Err(Error::Failed("nmos_make_receiver_id"));
     }
     capture_id(&buf)
+}
+
+/// Compute the IS-04 Source resource id for a seed and source name.
+pub fn make_source_id(seed: &str, source_name: &str) -> Result<String> {
+    let cseed = CString::new(seed)?;
+    let cname = CString::new(source_name)?;
+    let mut buf = [0u8; ID_BUF_LEN];
+    let ok = unsafe {
+        sys::nmos_make_source_id(
+            cseed.as_ptr(),
+            cname.as_ptr(),
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len(),
+        )
+    };
+    if !ok {
+        return Err(Error::Failed("nmos_make_source_id"));
+    }
+    capture_id(&buf)
+}
+
+struct MarshalledChannelMapping {
+    #[allow(dead_code)] // pins FFI arrays referenced by `mapping`
+    inputs: Vec<sys::NvNmosChannelMappingInput>,
+    #[allow(dead_code)]
+    outputs: Vec<sys::NvNmosChannelMappingOutput>,
+    _input_label_ptrs: Vec<Vec<*const c_char>>,
+    _output_label_ptrs: Vec<Vec<*const c_char>>,
+    _output_routable_ptrs: Vec<Vec<*const c_char>>,
+    _strings: Vec<CString>,
+    mapping: sys::NvNmosChannelMappingConfig,
+}
+
+impl MarshalledChannelMapping {
+    fn new(mapping: &ChannelMappingConfig) -> Result<Self> {
+        let mut strings = Vec::new();
+        let mut input_label_ptrs = Vec::new();
+        let mut inputs = Vec::with_capacity(mapping.inputs.len());
+        for input in &mapping.inputs {
+            let id = store_string(&mut strings, &input.id);
+            let name = store_optional_string(&mut strings, &input.name);
+            let description = store_optional_string(&mut strings, &input.description);
+            let parent_name = store_optional_string(&mut strings, &input.parent_name);
+            let mut label_ptrs = Vec::with_capacity(input.channel_labels.len());
+            for label in &input.channel_labels {
+                label_ptrs.push(store_string(&mut strings, label));
+            }
+            input_label_ptrs.push(label_ptrs);
+            let channel_labels = input_label_ptrs.last().unwrap().as_ptr() as *mut _;
+            inputs.push(sys::NvNmosChannelMappingInput {
+                id,
+                name,
+                description,
+                channel_labels,
+                num_channel_labels: input.channel_labels.len(),
+                parent_name,
+                parent_type: input.parent_type.to_ffi(),
+                reordering: input.reordering,
+                block_size: input.block_size,
+            });
+        }
+
+        let mut output_label_ptrs = Vec::new();
+        let mut output_routable_ptrs = Vec::new();
+        let mut outputs = Vec::with_capacity(mapping.outputs.len());
+        for output in &mapping.outputs {
+            let id = store_string(&mut strings, &output.id);
+            let name = store_optional_string(&mut strings, &output.name);
+            let description = store_optional_string(&mut strings, &output.description);
+            let sender_name = store_optional_string(&mut strings, &output.sender_name);
+            let mut label_ptrs = Vec::with_capacity(output.channel_labels.len());
+            for label in &output.channel_labels {
+                label_ptrs.push(store_string(&mut strings, label));
+            }
+            output_label_ptrs.push(label_ptrs);
+            let channel_labels = output_label_ptrs.last().unwrap().as_ptr() as *mut _;
+            let (routable_inputs, num_routable_inputs) = match output.routable_inputs.as_ref() {
+                None => (ptr::null_mut(), 0),
+                Some(ids) => {
+                    let mut routable_ptrs = Vec::with_capacity(ids.len());
+                    for id in ids {
+                        routable_ptrs.push(store_string(&mut strings, id));
+                    }
+                    output_routable_ptrs.push(routable_ptrs);
+                    let routable = output_routable_ptrs.last().unwrap();
+                    (routable.as_ptr() as *mut _, routable.len())
+                }
+            };
+            outputs.push(sys::NvNmosChannelMappingOutput {
+                id,
+                name,
+                description,
+                channel_labels,
+                num_channel_labels: output.channel_labels.len(),
+                sender_name,
+                routable_inputs,
+                num_routable_inputs,
+            });
+        }
+
+        let mapping = sys::NvNmosChannelMappingConfig {
+            inputs: inputs.as_ptr(),
+            num_inputs: inputs.len(),
+            outputs: outputs.as_ptr(),
+            num_outputs: outputs.len(),
+        };
+        Ok(Self {
+            inputs,
+            outputs,
+            _input_label_ptrs: input_label_ptrs,
+            _output_label_ptrs: output_label_ptrs,
+            _output_routable_ptrs: output_routable_ptrs,
+            _strings: strings,
+            mapping,
+        })
+    }
+
+    fn as_ptr(&self) -> *const sys::NvNmosChannelMappingConfig {
+        &self.mapping
+    }
+}
+
+struct MarshalledActiveMap {
+    entries: Vec<sys::NvNmosChannelMappingActiveMapEntry>,
+    _strings: Vec<CString>,
+}
+
+impl MarshalledActiveMap {
+    fn new(active_map: &[ChannelMappingActiveMapEntry]) -> Result<Self> {
+        let mut strings = Vec::new();
+        let mut entries = Vec::with_capacity(active_map.len());
+        for entry in active_map {
+            let input_id = entry
+                .input_id
+                .as_ref()
+                .map(|id| store_string(&mut strings, id))
+                .unwrap_or(ptr::null());
+            entries.push(sys::NvNmosChannelMappingActiveMapEntry {
+                input_id,
+                input_channel: entry.input_channel.unwrap_or(0),
+            });
+        }
+        Ok(Self {
+            entries,
+            _strings: strings,
+        })
+    }
+
+    fn as_ptr(&self) -> *const sys::NvNmosChannelMappingActiveMapEntry {
+        self.entries.as_ptr()
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+fn store_string(strings: &mut Vec<CString>, value: &str) -> *const c_char {
+    strings.push(CString::new(value).expect("interior NUL"));
+    strings.last().unwrap().as_ptr()
+}
+
+fn store_optional_string(strings: &mut Vec<CString>, value: &str) -> *const c_char {
+    if value.is_empty() {
+        ptr::null()
+    } else {
+        store_string(strings, value)
+    }
 }
 
 // ============================================================================
@@ -702,6 +1029,7 @@ unsafe impl Sync for NodeServer {}
 pub struct NodeServerBuilder<'a> {
     config: &'a NodeConfig,
     activation: Option<ActivationCallback>,
+    channelmapping_activation: Option<ChannelMappingActivationCallback>,
     log: Option<LogCallback>,
 }
 
@@ -731,6 +1059,24 @@ impl<'a> NodeServerBuilder<'a> {
         self
     }
 
+    /// Install an IS-08 channel mapping activation callback.
+    ///
+    /// Invoked synchronously on a libnvnmos worker thread when an IS-08
+    /// controller activates an output. Returning `Ok(())` reports success;
+    /// `Err(_)` NACKs the activation. Panics are caught and treated as
+    /// failure. [`NodeServer::activate_channelmapping`] does **not** invoke
+    /// this callback.
+    pub fn on_channelmapping_activation<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&ChannelMappingActivation<'_>) -> std::result::Result<(), String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.channelmapping_activation = Some(Box::new(callback));
+        self
+    }
+
     /// Install a log-message callback.
     ///
     /// Invoked from any libnvnmos worker thread for every message at or above
@@ -749,7 +1095,12 @@ impl<'a> NodeServerBuilder<'a> {
 
     /// Create and start the underlying C node server.
     pub fn build(self) -> Result<NodeServer> {
-        NodeServer::create(self.config, self.activation, self.log)
+        NodeServer::create(
+            self.config,
+            self.activation,
+            self.channelmapping_activation,
+            self.log,
+        )
     }
 }
 
@@ -763,7 +1114,7 @@ impl NodeServer {
     ///
     /// Shorthand for `NodeServer::builder(config).build()`.
     pub fn new(config: &NodeConfig) -> Result<Self> {
-        Self::create(config, None, None)
+        Self::create(config, None, None, None)
     }
 
     /// Begin building a server with one or more optional callbacks. See
@@ -772,6 +1123,7 @@ impl NodeServer {
         NodeServerBuilder {
             config,
             activation: None,
+            channelmapping_activation: None,
             log: None,
         }
     }
@@ -779,6 +1131,7 @@ impl NodeServer {
     fn create(
         config: &NodeConfig,
         activation_callback: Option<ActivationCallback>,
+        channelmapping_activation_callback: Option<ChannelMappingActivationCallback>,
         log_callback: Option<LogCallback>,
     ) -> Result<Self> {
         // Marshal Rust strings to C strings. These have to outlive the
@@ -835,9 +1188,13 @@ impl NodeServer {
             .as_ref()
             .map_or(ptr::null_mut(), |s| s as *const _ as *mut _);
 
-        let callback_state = if activation_callback.is_some() || log_callback.is_some() {
+        let callback_state = if activation_callback.is_some()
+            || channelmapping_activation_callback.is_some()
+            || log_callback.is_some()
+        {
             Some(Box::new(CallbackState {
                 activation: activation_callback,
+                channelmapping_activation: channelmapping_activation_callback,
                 log: log_callback,
             }))
         } else {
@@ -863,6 +1220,13 @@ impl NodeServer {
                 .as_ref()
                 .filter(|s| s.activation.is_some())
                 .map(|_| activation_trampoline as unsafe extern "C" fn(_, _, _, _) -> _),
+            channelmapping_activated: callback_state
+                .as_ref()
+                .filter(|s| s.channelmapping_activation.is_some())
+                .map(
+                    |_| channelmapping_activation_trampoline
+                        as unsafe extern "C" fn(_, _, _, _, _) -> _,
+                ),
             log_callback: callback_state
                 .as_ref()
                 .filter(|s| s.log.is_some())
@@ -945,6 +1309,67 @@ impl NodeServer {
         };
         if !ok {
             return Err(Error::Failed("remove_nmos_receiver_from_node_server"));
+        }
+        Ok(())
+    }
+
+    /// Add channel mapping I/O to the Node.
+    ///
+    /// `name` is the caller-chosen name of the channel mapping (libnvnmos
+    /// settings index), unique per Node.
+    /// `mapping` carries IS-08 input/output ids and caller-chosen resource names for IS-04 linkage.
+    pub fn add_channelmapping(&self, name: &str, mapping: &ChannelMappingConfig) -> Result<()> {
+        let marshalled = MarshalledChannelMapping::new(mapping)?;
+        let cname = CString::new(name)?;
+        let ok = unsafe {
+            sys::add_nmos_channelmapping_to_node_server(
+                self.raw_ptr_mut(),
+                cname.as_ptr(),
+                marshalled.as_ptr(),
+            )
+        };
+        if !ok {
+            return Err(Error::Failed("add_nmos_channelmapping_to_node_server"));
+        }
+        Ok(())
+    }
+
+    /// Remove a channel mapping by `name`.
+    pub fn remove_channelmapping(&self, name: &str) -> Result<()> {
+        let cname = CString::new(name)?;
+        let ok = unsafe {
+            sys::remove_nmos_channelmapping_from_node_server(self.raw_ptr_mut(), cname.as_ptr())
+        };
+        if !ok {
+            return Err(Error::Failed("remove_nmos_channelmapping_from_node_server"));
+        }
+        Ok(())
+    }
+
+    /// Publish an out-of-band active map (data-plane → model).
+    ///
+    /// Mirrors [`nmos_channelmapping_activate`]: does **not** invoke the
+    /// channelmapping activation callback.
+    pub fn activate_channelmapping(
+        &self,
+        name: &str,
+        output_id: &str,
+        active_map: &[ChannelMappingActiveMapEntry],
+    ) -> Result<()> {
+        let cname = CString::new(name)?;
+        let coutput_id = CString::new(output_id)?;
+        let marshalled = MarshalledActiveMap::new(active_map)?;
+        let ok = unsafe {
+            sys::nmos_channelmapping_activate(
+                self.raw_ptr_mut(),
+                cname.as_ptr(),
+                coutput_id.as_ptr(),
+                marshalled.as_ptr(),
+                marshalled.len(),
+            )
+        };
+        if !ok {
+            return Err(Error::Failed("nmos_channelmapping_activate"));
         }
         Ok(())
     }
@@ -1034,6 +1459,28 @@ impl NodeServer {
         Ok(Some(capture_id(&buf)?))
     }
 
+    /// Look up the IS-04 Source UUID paired with a sender by its name.
+    ///
+    /// Returns `Ok(None)` if no sender with the given `source_name`
+    /// currently exists on this server. This is the Source id (IS-08
+    /// `/sourceid`), not the Sender id from [`sender_id`](Self::sender_id).
+    pub fn source_id(&self, source_name: &str) -> Result<Option<String>> {
+        let cname = CString::new(source_name)?;
+        let mut buf = [0u8; ID_BUF_LEN];
+        let ok = unsafe {
+            sys::nmos_get_source_id(
+                &*self.raw,
+                cname.as_ptr(),
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len(),
+            )
+        };
+        if !ok {
+            return Ok(None);
+        }
+        Ok(Some(capture_id(&buf)?))
+    }
+
     fn raw_ptr_mut(&self) -> *mut sys::NvNmosNodeServer {
         // SAFETY (justifying the `&self` → `*mut` cast): the C API takes
         // `NvNmosNodeServer *` for every mutating call, but its internal model
@@ -1102,6 +1549,15 @@ mod tests {
     }
 
     #[test]
+    fn sender_and_source_ids_diverge() {
+        let sender = make_sender_id("seed", "video").unwrap();
+        let source = make_source_id("seed", "video").unwrap();
+        assert_uuid_shape(&source);
+        assert_ne!(sender, source, "sender and source ids must not collide");
+        assert_eq!(source, make_source_id("seed", "video").unwrap());
+    }
+
+    #[test]
     fn sender_id_varies_with_name() {
         let a = make_sender_id("seed", "video-1").unwrap();
         let b = make_sender_id("seed", "video-2").unwrap();
@@ -1124,6 +1580,7 @@ mod tests {
         // don't regress the bounds in a future refactor.
         fn assert_send_sync<T: Send + Sync + 'static>() {}
         assert_send_sync::<ActivationCallback>();
+        assert_send_sync::<ChannelMappingActivationCallback>();
         assert_send_sync::<LogCallback>();
     }
 }

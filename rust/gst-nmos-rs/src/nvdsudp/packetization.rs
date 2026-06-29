@@ -27,8 +27,8 @@ pub(crate) const AUDIO_HEADER_SIZE: u32 = 12;
 /// ST 2110-40 RFC 8331 header (12-byte RTP + 8-byte payload header).
 ///
 /// Set on `nvdsudpsrc` only — enables header/data split for ANC depayload.
-/// Per-packet sizes are taken from the wire; `payload-size` stays at the
-/// plugin default.
+/// Per-packet sizes are taken from the received packets; `payload-size`
+/// stays at the plugin default.
 pub(crate) const ANC_HEADER_SIZE: u32 = 20;
 
 /// Default maximum raw RTP payload per video packet (bytes).
@@ -136,7 +136,7 @@ pub(crate) fn from_media(
 }
 
 /// ST 2110-40 ANC (`meta/x-st-2038,alignment=frame`). DeepStream selects
-/// Mode 3 from sink/src caps; ANC RTP packet sizes are variable on the wire.
+/// Mode 3 from sink/src caps; ANC RTP packet sizes vary.
 pub(crate) fn anc_from_raw_caps(raw_caps: &gst::Caps) -> Result<Packetization, anyhow::Error> {
     let s = raw_caps
         .structure(0)
@@ -242,7 +242,7 @@ fn ptime_ns_from_rtp_caps(rtp_caps: &gst::Caps) -> Result<u64, anyhow::Error> {
         .with_context(|| format!("parsing a-ptime=`{ptime}` for nvdsudp audio packetization"))
 }
 
-/// Parse SDP `a=ptime:` wire form (decimal ms) into nanoseconds.
+/// Parse SDP `a=ptime:` form (decimal ms) into nanoseconds.
 fn parse_ptime_ms_as_ns(value: &str) -> Result<u64, anyhow::Error> {
     let v = value.trim();
     if v.is_empty() {
@@ -386,12 +386,7 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    fn init_gst() {
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            let _ = gst::init();
-        });
-    }
+    use crate::test_support::init_gst;
 
     #[test]
     fn uyvp_1920x1080_matches_deepstream_table() {

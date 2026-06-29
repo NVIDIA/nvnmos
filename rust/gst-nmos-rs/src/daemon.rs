@@ -44,7 +44,6 @@ use tower::service_fn;
 use gstreamer as gst;
 
 use crate::CAT;
-use crate::network_services::node_config_from_settings;
 use crate::runtime::SHARED_RUNTIME;
 use crate::session::types::Side;
 use crate::session::CommonSettings;
@@ -104,12 +103,12 @@ pub(crate) struct Session {
     /// `Some((resource_handle, resource_id))` when `Session::open` was
     /// called with a non-empty `transport_file` and the daemon
     /// accepted the `AddSender` / `AddReceiver`. `None` otherwise.
-    resource: Option<RegisteredResource>,
+    resource: Option<AddedResource>,
     client: NvnmosDaemonClient<Channel>,
     activation_task: JoinHandle<()>,
 }
 
-struct RegisteredResource {
+struct AddedResource {
     handle: String,
     id: String,
 }
@@ -125,7 +124,7 @@ pub(crate) enum DaemonError {
     #[error(
         "session already has a resource added; deferred AddSender is a one-shot operation"
     )]
-    AlreadyRegistered,
+    AlreadyAdded,
     #[error(
         "session has no resource added yet; auto-activate sync cannot run before AddSender / AddReceiver"
     )]
@@ -153,7 +152,7 @@ impl Session {
     /// Only `unix:/path/to/sock` URIs are supported. `NodeConfig` is
     /// assembled from the element's node-identity properties (`host-name`,
     /// `domain`, `registration-url`, `system-url`, `http-port`) via
-    /// [`node_config_from_settings`]. Those fields are honoured only by
+    /// [`NodeSettings::to_node_config`]. Those fields are honoured only by
     /// the `OpenSession` that actually creates the Node; attaching to
     /// an existing Node (same `node-seed`) ignores them.
     ///
@@ -180,7 +179,7 @@ impl Session {
 
         let resp = client
             .open_session(OpenSessionRequest {
-                node_config: Some(node_config_from_settings(settings)),
+                node_config: Some(settings.node.to_node_config()),
             })
             .await?
             .into_inner();
@@ -268,7 +267,7 @@ impl Session {
     /// upstream peer caps have negotiated and a configuring transport
     /// file can be synthesised.
     ///
-    /// Errors with [`DaemonError::AlreadyRegistered`] if called on a
+    /// Errors with [`DaemonError::AlreadyAdded`] if called on a
     /// session that already has a resource (caller bug —
     /// deferred-mode AddSender is one-shot).
     pub(crate) async fn add_resource(
@@ -279,7 +278,7 @@ impl Session {
         transport_file: &str,
     ) -> Result<(), DaemonError> {
         if self.resource.is_some() {
-            return Err(DaemonError::AlreadyRegistered);
+            return Err(DaemonError::AlreadyAdded);
         }
         let resource = add_resource(
             &mut self.client,
@@ -305,7 +304,7 @@ impl Session {
     ///
     /// `transport_file: Some(_)` means "(re)activate with this
     /// transport file"; `transport_file: None` means "deactivate".
-    /// This is the same wire shape as `SubscribeActivations`'s
+    /// This is the same message shape as `SubscribeActivations`'s
     /// `ActivationEvent` carries, but the daemon does *not* fire a
     /// callback back to subscribers (the element initiating the sync
     /// already knows; other subscribers learn via IS-04 / IS-05
@@ -364,7 +363,7 @@ async fn add_resource(
     name: &str,
     transport: ProtoTransport,
     transport_file: &str,
-) -> Result<RegisteredResource, DaemonError> {
+) -> Result<AddedResource, DaemonError> {
     let resp = match side {
         Side::Sender => client
             .add_sender(AddSenderRequest {
@@ -385,13 +384,13 @@ async fn add_resource(
             .await?
             .into_inner(),
     };
-    Ok(RegisteredResource {
+    Ok(AddedResource {
         handle: resp.resource_handle,
         id: resp.resource_id,
     })
 }
 
-fn parse_unix_uri(daemon_uri: &str) -> Result<PathBuf, DaemonError> {
+pub(crate) fn parse_unix_uri(daemon_uri: &str) -> Result<PathBuf, DaemonError> {
     if let Some(path) = daemon_uri.strip_prefix("unix:") {
         Ok(PathBuf::from(path))
     } else {
@@ -404,7 +403,7 @@ fn parse_unix_uri(daemon_uri: &str) -> Result<PathBuf, DaemonError> {
     }
 }
 
-async fn connect_uds(uds_path: PathBuf) -> Result<Channel, tonic::transport::Error> {
+pub(crate) async fn connect_uds(uds_path: PathBuf) -> Result<Channel, tonic::transport::Error> {
     // tonic requires a Uri to drive HTTP/2 authority/scheme; the UDS
     // connector ignores it.
     let endpoint = Endpoint::try_from("http://[::1]:50051")?.connect_timeout(CONNECT_TIMEOUT);

@@ -107,7 +107,7 @@ impl SessionGc {
                 if !guard.sessions_contains(&handle) {
                     return;
                 }
-                if guard.has_active_subscription(&handle) {
+                if guard.has_any_activation_subscription(&handle) {
                     return;
                 }
                 let outcome = match guard.close_session(&handle) {

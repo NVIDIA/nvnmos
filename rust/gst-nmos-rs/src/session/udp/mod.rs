@@ -62,7 +62,7 @@ pub(super) fn receiver_connection_address(settings: &CommonSettings) -> &str {
 }
 
 /// Minimum IS-05 endpoint properties required to synthesise a configuring
-/// SDP for AddSender / AddReceiver. Wire destinations may be omitted.
+/// SDP for AddSender / AddReceiver. Destination addresses may be omitted.
 pub(super) fn validate_rtp_configuring_minimum(
     element: &str,
     settings: &CommonSettings,
@@ -79,6 +79,59 @@ pub(super) fn validate_rtp_configuring_minimum(
             );
         }
         _ => Ok(()),
+    }
+}
+
+/// A `c=` / IS-05 `destination_ip` that is the RFC 4566 unspecified
+/// address (or empty) is a configuring placeholder, not a real endpoint
+/// to send to / receive from.
+fn is_unspecified_destination(addr: &str) -> bool {
+    addr.is_empty()
+        || addr
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_unspecified())
+            .unwrap_or(false)
+}
+
+/// Deferrable RTP/UDP parameter still unavailable for eager
+/// `auto-activate`.
+///
+/// The one binding constraint is the same for both sides: the resolved
+/// IS-05 `destination_ip` slot in `media.primary`. There is no sensible
+/// default to invent for an unspecified address (`0.0.0.0`), so a
+/// configuring chain without one must wait for an IS-05 PATCH. It is
+/// read from the resolved `media`, so a property and a transport file
+/// are honoured on the same footing. The destination *port* is not a
+/// blocker: an unset / zero port resolves to the IS-05 auto default
+/// ([`sdp::defaults::RTP_PORT`], 5004) here and in the daemon.
+///
+/// The check is side-neutral but the reported property is not, because
+/// the same `destination_ip` slot is filled by different properties:
+/// the Sender's egress target is `destination-ip`; the Receiver has no
+/// `destination-ip` property and supplies the slot via `multicast-ip`
+/// (or `interface-ip` for unicast). The other side-specific endpoints —
+/// Sender `source-ip`, Receiver `interface-ip` — are required when the
+/// Sender / Receiver is added (or fall back to an OS default), not
+/// deferrable activation params, so they are never reported here.
+///
+/// Only a configured-but-dormant real chain can be eager-activated; any
+/// fake chain returns `None` so the policy leaves deferred
+/// (`NotConfigured`) / invalid (`Misconfigured`) resources alone and also
+/// does not treat an `a=inactive` leg (`NotActive`) — fully specified
+/// but dormant — as an auto-activate failure.
+pub(super) fn udp_eager_blocked(side: Side, inner: &InnerConfig) -> Option<&'static str> {
+    let media = match inner {
+        InnerConfig::Real(TransportConfig::Udp { media, .. })
+        | InnerConfig::Real(TransportConfig::NvDsUdp { media, .. }) => media,
+        _ => return None,
+    };
+    if is_unspecified_destination(&media.primary.destination_ip) {
+        Some(match side {
+            Side::Sender => "destination-ip",
+            Side::Receiver => "multicast-ip or interface-ip",
+        })
+    } else {
+        None
     }
 }
 
@@ -110,7 +163,7 @@ pub(super) fn sdp_build_input<'a>(
         destination_port: settings.destination_port,
         interface_ip: &settings.interface_ip,
         advertise_caps,
-        node_seed: &settings.node_seed,
+        node_seed: &settings.node.node_seed,
         narrow_traffic_profile: settings.transport == Transport::NvDsUdp,
     }
 }
@@ -203,12 +256,8 @@ pub(super) fn synthesise_deferred_sender_udp(
         )?,
         Transport::Mxl => bail!("{element}: internal: MXL is not an RTP/UDP transport"),
     };
-    let inner = super::apply_auto_activate_policy(
-        &crate::CAT,
-        element,
-        settings,
-        inner,
-    );
+    let blocked = udp_eager_blocked(settings.side, &inner);
+    let inner = super::apply_auto_activate_policy(&crate::CAT, element, settings, inner, blocked);
     Ok((text, inner))
 }
 
@@ -397,6 +446,8 @@ pub(super) fn resolve_inner_config_nvdsudp(
         )?,
         settings,
     );
+    let blocked = udp_eager_blocked(settings.side, &inner);
+    let inner = super::apply_auto_activate_policy(cat, element, settings, inner, blocked);
     Ok((inner, resolved_transport_file))
 }
 
@@ -464,6 +515,8 @@ pub(super) fn resolve_inner_config_udp(
         )?,
         settings,
     );
+    let blocked = udp_eager_blocked(settings.side, &inner);
+    let inner = super::apply_auto_activate_policy(cat, element, settings, inner, blocked);
     Ok((inner, resolved_transport_file))
 }
 
@@ -483,7 +536,7 @@ mod tests {
     /// populated so accessor-style assertions can see them.
     fn sample_udp_media() -> UdpMedia {
         use std::str::FromStr;
-        cat(); // ensures gst::init() ran
+        init_gst();
         UdpMedia {
             format: FlowFormat::Video,
             primary: UdpLeg {
@@ -502,6 +555,69 @@ mod tests {
                 "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1",
             )
             .expect("static raw caps parse"),
+        }
+    }
+
+    mod eager_blocked {
+        use super::*;
+
+        fn real_udp(media: UdpMedia) -> InnerConfig {
+            InnerConfig::Real(TransportConfig::Udp {
+                variant: UdpVariant::V1,
+                media,
+                transport_file: Some("sdp".to_owned()),
+            })
+        }
+
+        #[test]
+        fn real_endpoints_are_unblocked() {
+            assert!(udp_eager_blocked(Side::Sender, &real_udp(sample_udp_media())).is_none());
+            assert!(udp_eager_blocked(Side::Receiver, &real_udp(sample_udp_media())).is_none());
+        }
+
+        #[test]
+        fn unspecified_destination_ip_blocks_with_side_specific_label() {
+            let mut m = sample_udp_media();
+            m.primary.destination_ip = "0.0.0.0".to_owned();
+            let inner = real_udp(m);
+            assert_eq!(
+                udp_eager_blocked(Side::Sender, &inner),
+                Some("destination-ip")
+            );
+            assert_eq!(
+                udp_eager_blocked(Side::Receiver, &inner),
+                Some("multicast-ip or interface-ip")
+            );
+        }
+
+        #[test]
+        fn empty_destination_ip_blocks() {
+            let mut m = sample_udp_media();
+            m.primary.destination_ip = String::new();
+            assert_eq!(
+                udp_eager_blocked(Side::Sender, &real_udp(m)),
+                Some("destination-ip")
+            );
+        }
+
+        #[test]
+        fn zero_destination_port_does_not_block() {
+            // 0 / omitted port resolves to the IS-05 auto default (5004)
+            // here and in the daemon, so it is never a deferral reason —
+            // only an unspecified destination address can be.
+            let mut m = sample_udp_media();
+            m.primary.destination_port = 0;
+            assert!(udp_eager_blocked(Side::Sender, &real_udp(m)).is_none());
+        }
+
+        #[test]
+        fn fake_chain_never_blocks() {
+            let inner = InnerConfig::Fake {
+                kind: FakeKind::NotConfigured,
+                detail: String::new(),
+            };
+            assert!(udp_eager_blocked(Side::Sender, &inner).is_none());
+            assert!(udp_eager_blocked(Side::Receiver, &inner).is_none());
         }
     }
 
@@ -564,7 +680,7 @@ mod tests {
         );
 
         fn udp_settings(side: Side, transport: Transport) -> CommonSettings {
-            cat(); // ensures gst::init() ran for parse_sdp
+            init_gst();
             CommonSettings {
                 transport,
                 ..settings(side)
@@ -1173,6 +1289,7 @@ mod tests {
                 label: "Spliced label".to_owned(),
                 description: "Spliced description".to_owned(),
                 name: "spliced-name".to_owned(),
+                auto_activate: true,
                 ..udp_settings(Side::Receiver, Transport::Udp)
             };
             let (inner, spliced_text) = resolve_inner_config_udp(
@@ -1301,6 +1418,7 @@ mod tests {
             );
             s.interface_ip = "192.0.2.30".to_owned();
             s.destination_port = 5004;
+            s.auto_activate = true;
             let (inner, text) = resolve_inner_config_udp(
                 &cat(),
                 "nmossrc",
@@ -1329,6 +1447,7 @@ mod tests {
 
         #[test]
         fn resolve_inner_config_udp_synthesises_sdp_from_caps_only() {
+            init_gst();
             let essence = gst::Caps::from_str(
                 "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved",
             )
@@ -1339,6 +1458,7 @@ mod tests {
                 destination_port: 5004,
                 interface_ip: "192.0.2.30".to_owned(),
                 source_ip: "192.0.2.20".to_owned(),
+                auto_activate: true,
                 ..udp_settings(Side::Receiver, Transport::Udp)
             };
             let (inner, text) = resolve_inner_config_udp(
@@ -1375,6 +1495,7 @@ mod tests {
         /// `udp_leg_from_input`.
         #[test]
         fn resolve_inner_config_udp_sender_caps_only_synthesis() {
+            init_gst();
             let essence = gst::Caps::from_str(
                 "video/x-raw,format=UYVP,width=1920,height=1080,\
                  framerate=50/1,interlace-mode=progressive",
@@ -1386,6 +1507,7 @@ mod tests {
                 destination_port: 5008,
                 source_ip: "192.0.2.10".to_owned(),
                 source_port: 5008,
+                auto_activate: true,
                 ..udp_settings(Side::Sender, Transport::Udp)
             };
             let (inner, text) = resolve_inner_config_udp(
@@ -1421,6 +1543,7 @@ mod tests {
         /// layer that runs after passthrough.
         #[test]
         fn resolve_inner_config_udp_transport_file_beats_caps_synthesis() {
+            init_gst();
             const AUDIO_L24_SDP: &str = concat!(
                 "v=0\r\n",
                 "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -1475,6 +1598,7 @@ mod tests {
         /// from the caps' `payload` i32 field and cast to u8.
         #[test]
         fn property_overrides_udp_reads_pt_from_transport_caps() {
+            init_gst();
             let tc = gst::Caps::builder("application/x-rtp")
                 .field("payload", 99i32)
                 .build();
@@ -1492,6 +1616,7 @@ mod tests {
         /// the audio-essence gating downstream.
         #[test]
         fn property_overrides_udp_reads_audio_overrides_from_transport_caps() {
+            init_gst();
             let tc = gst::Caps::builder("application/x-rtp")
                 .field("clock-rate", 96_000i32)
                 .field("a-ptime", "1")
@@ -1527,9 +1652,10 @@ mod tests {
         /// `transport-caps`. Pins that the pt + clock-rate +
         /// ptime path all the way from `Settings.transport_caps`
         /// → `property_overrides_udp` → `sdp::passthrough_with_overrides`
-        /// actually changes the wire SDP.
+        /// actually changes the output SDP.
         #[test]
         fn resolve_inner_config_udp_applies_transport_caps_audio_overrides() {
+            init_gst();
             // 48 kHz L24 stereo, pt=97, ptime=0.125. The
             // simplest audio SDP that exercises all four
             // override slots in one pass.
@@ -1584,6 +1710,7 @@ mod tests {
         /// broken SDP.
         #[test]
         fn resolve_inner_config_udp_rejects_invalid_pt_in_transport_caps() {
+            init_gst();
             const AUDIO_L24_SDP: &str = concat!(
                 "v=0\r\n",
                 "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -1625,6 +1752,7 @@ mod tests {
         /// regress the existing SDP-only path.
         #[test]
         fn decide_inner_config_udp_accepts_matching_caps() {
+            init_gst();
             let s = CommonSettings {
                 caps: Some(
                     gst::Caps::builder("video/x-raw")
@@ -1656,6 +1784,7 @@ mod tests {
         /// a real misconfiguration → bail.
         #[test]
         fn decide_inner_config_udp_rejects_essence_caps_format_mismatch() {
+            init_gst();
             let s = CommonSettings {
                 caps: Some(gst::Caps::builder("audio/x-raw").build()),
                 ..udp_settings(Side::Receiver, Transport::Udp)
@@ -1683,6 +1812,7 @@ mod tests {
         /// the override case, covered by a separate test).
         #[test]
         fn decide_inner_config_udp_rejects_video_clock_rate_mismatch() {
+            init_gst();
             let s = CommonSettings {
                 transport_caps: Some(
                     gst::Caps::builder("application/x-rtp")
@@ -1712,6 +1842,7 @@ mod tests {
         /// format family still matches).
         #[test]
         fn activation_udp_wide_receiver_skips_essence_shape_cross_check() {
+            init_gst();
             const AUDIO_MONO_ACTIVATION_SDP: &str = concat!(
                 "v=0\r\n",
                 "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -1757,6 +1888,7 @@ mod tests {
         /// `a=x-nvnmos-caps:` (libnvnmos adds it for wide receivers).
         #[test]
         fn activation_udp_property_wide_without_sdp_marker_still_cross_checks() {
+            init_gst();
             const AUDIO_MONO_ACTIVATION_SDP: &str = concat!(
                 "v=0\r\n",
                 "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -1798,6 +1930,7 @@ mod tests {
         /// `Failure` with attribution.
         #[test]
         fn activation_udp_cross_check_failure_acks_failure() {
+            init_gst();
             const AUDIO_ACTIVATION_SDP: &str = concat!(
                 "v=0\r\n",
                 "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -1949,7 +2082,7 @@ mod tests {
         use std::str::FromStr;
 
         fn sender_udp_settings(transport: Transport) -> CommonSettings {
-            cat();
+            init_gst();
             CommonSettings {
                 transport,
                 destination_ip: "239.99.99.1".to_owned(),
@@ -1961,7 +2094,7 @@ mod tests {
         }
 
         fn video_peer_caps() -> gst::Caps {
-            cat();
+            init_gst();
             gst::Caps::from_str(
                 "video/x-raw,format=UYVP,width=1920,height=1080,framerate=50/1,\
                  interlace-mode=progressive",
@@ -1970,7 +2103,7 @@ mod tests {
         }
 
         fn anc_peer_caps() -> gst::Caps {
-            cat();
+            init_gst();
             gst::Caps::from_str("meta/x-st-2038,alignment=frame,framerate=30/1")
                 .expect("anc caps")
         }
@@ -2024,6 +2157,7 @@ mod tests {
 
         #[test]
         fn add_deferred_sender_udp_unsupported_video_format_is_error() {
+            init_gst();
             let caps = gst::Caps::from_str("video/x-raw,format=I420,width=1920,height=1080")
                 .expect("caps");
             let err = add_deferred_sender(

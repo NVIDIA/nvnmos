@@ -192,6 +192,35 @@ typedef bool (* nmos_connection_activation_callback)(
     const char *name,
     const char *transport_file);
 
+typedef struct _NvNmosChannelMappingActiveMapEntry NvNmosChannelMappingActiveMapEntry;
+
+/**
+ * Type for a callback from NvNmos when an IS-08 Channel Mapping API
+ * activation completes for one Output.
+ *
+ * Invoked after nmos-cpp has merged the staged action into
+ * `/map/active` for @p output_id. Not invoked for
+ * @ref nmos_channelmapping_activate.
+ *
+ * @param[in] server         The server issuing the callback.
+ * @param[in] name           The caller-chosen name of the channel
+ *                           mapping (unique per Node). Not IS-08
+ *                           `/properties` name.
+ * @param[in] output_id      IS-08 output id just activated.
+ * @param[in] active_map     Active map for @p output_id; @p num_active_map
+ *                           entries, index @c i is output channel @c i.
+ *                           Unrouted channels have NULL @p input_id.
+ * @param[in] num_active_map Length of @p active_map; must equal that
+ *                           output's @p num_channel_labels.
+ * @return Whether the data plane applied the active map.
+ */
+typedef bool (* nmos_channelmapping_activation_callback)(
+    NvNmosNodeServer *server,
+    const char *name,
+    const char *output_id,
+    const NvNmosChannelMappingActiveMapEntry *active_map,
+    size_t num_active_map);
+
 /**
  * Defines some common severity/logging levels for log messages from
  * the NvNmos library.
@@ -284,6 +313,10 @@ typedef struct _NvNmosNodeConfig
     /** Holds the callback for handling an IS-05 Connection API activation.
         May be null. */
     nmos_connection_activation_callback connection_activated;
+
+    /** Holds the callback for handling an IS-08 Channel Mapping API
+        activation (one Output at a time). May be null. */
+    nmos_channelmapping_activation_callback channelmapping_activated;
 
     /** Holds the callback for handling log messages. May be null. */
     nmos_logging_callback log_callback;
@@ -565,9 +598,9 @@ bool add_nmos_sender_to_node_server(
  * The sender may have been adding using @ref create_nmos_node_server
  * or @ref add_nmos_sender_to_node_server.
  *
- * @param[in] server        Pointer to the server to update.
- * @param[in] sender_name   The caller-chosen name of the sender to be
- *                          removed (see @ref NvNmosSenderConfig::transport_file).
+ * @param[in] server      Pointer to the server to update.
+ * @param[in] sender_name The caller-chosen name of the sender to be
+ *                        removed (see @ref NvNmosSenderConfig::transport_file).
  * @return Whether the sender has been successfully removed.
  */
 NVNMOS_API
@@ -615,6 +648,148 @@ bool nmos_connection_activate(
     NvNmosSide side,
     const char *name,
     const char *transport_file);
+
+/**
+ * Parent type for an IS-08 Input's /parent endpoint.
+ */
+typedef enum _NvNmosChannelMappingParentType
+{
+    /** IS-04 Receiver parent. Default (0). */
+    NVNMOS_CHANNELMAPPING_PARENT_TYPE_RECEIVER = 0,
+    /** IS-04 Source parent. */
+    NVNMOS_CHANNELMAPPING_PARENT_TYPE_SOURCE = 1
+} NvNmosChannelMappingParentType;
+
+typedef struct _NvNmosChannelMappingInput NvNmosChannelMappingInput;
+typedef struct _NvNmosChannelMappingOutput NvNmosChannelMappingOutput;
+typedef struct _NvNmosChannelMappingConfig NvNmosChannelMappingConfig;
+
+/**
+ * IS-08 Input geometry for @ref add_nmos_channelmapping_to_node_server.
+ */
+struct _NvNmosChannelMappingInput
+{
+    /** IS-08 input id; must not be NULL or empty. */
+    const char *id;
+    /** IS-08 /properties name (UI label); not the caller-chosen channel mapping name. */
+    const char *name;
+    /** IS-08 /properties description. May be NULL. */
+    const char *description;
+    /** Per-channel labels; length must equal @p num_channel_labels. */
+    const char **channel_labels;
+    /** Number of channels; must be non-zero. */
+    size_t num_channel_labels;
+    /** Caller-chosen receiver or source name for /parent; NULL or "" for null /parent. */
+    const char *parent_name;
+    /** Receiver vs Source when @p parent_name is set; ignored otherwise. */
+    NvNmosChannelMappingParentType parent_type;
+    /** Input /caps reordering; defaults to @c true when @p block_size is zero (unset). */
+    bool reordering;
+    /** Input /caps block_size; defaults to @c 1 when zero (unset). */
+    unsigned int block_size;
+};
+
+/**
+ * IS-08 Output geometry for @ref add_nmos_channelmapping_to_node_server.
+ */
+struct _NvNmosChannelMappingOutput
+{
+    /** IS-08 output id; must not be NULL or empty. */
+    const char *id;
+    /** IS-08 /properties name. May be NULL. */
+    const char *name;
+    /** IS-08 /properties description. May be NULL. */
+    const char *description;
+    /** Per-channel labels; length must equal @p num_channel_labels. */
+    const char **channel_labels;
+    /** Number of channels; must be non-zero. */
+    size_t num_channel_labels;
+    /** Caller-chosen sender name for /sourceid (IS-04 Source id derived internally); NULL or "" for null /sourceid. */
+    const char *sender_name;
+    /** Output /caps routable_inputs; NULL or zero length leaves /caps unrestricted. */
+    const char **routable_inputs;
+    /** Length of @p routable_inputs when non-NULL. */
+    size_t num_routable_inputs;
+};
+
+/**
+ * One output channel entry in an IS-08 active map.
+ *
+ * Array index is the output channel index (0 .. num_channel_labels-1 on that Output).
+ */
+struct _NvNmosChannelMappingActiveMapEntry
+{
+    /** IS-08 input id; NULL for an unrouted output channel. */
+    const char *input_id;
+    /** Input channel index; ignored when @p input_id is NULL. */
+    unsigned int input_channel;
+};
+
+/**
+ * Input/output bundle for @ref add_nmos_channelmapping_to_node_server.
+ */
+struct _NvNmosChannelMappingConfig
+{
+    const NvNmosChannelMappingInput *inputs;
+    size_t num_inputs;
+    const NvNmosChannelMappingOutput *outputs;
+    size_t num_outputs;
+};
+
+/**
+ * Add channel mapping I/O to a running Node server.
+ *
+ * Creates real IS-08 Input/Output resources (default unrouted active map).
+ *
+ * @param[in] server  Pointer to the server.
+ * @param[in] name    The caller-chosen name of the channel mapping (unique
+ *                    per Node; duplicate names fail).
+ * @param[in] mapping Input/output geometry.
+ *
+ * @return Whether the channel mapping was added. Returns false if @p name is
+ *         already in use or any IS-08 input or output id collides with
+ *         another channel mapping on the Node.
+ */
+NVNMOS_API
+bool add_nmos_channelmapping_to_node_server(
+    NvNmosNodeServer *server,
+    const char *name,
+    const NvNmosChannelMappingConfig *mapping);
+
+/**
+ * Remove a channel mapping and all of its IS-08 I/O.
+ *
+ * @param[in] server Pointer to the server.
+ * @param[in] name   The caller-chosen name of the channel mapping.
+ */
+NVNMOS_API
+bool remove_nmos_channelmapping_from_node_server(
+    NvNmosNodeServer *server,
+    const char *name);
+
+/**
+ * Publish an out-of-band active map for one Output in a channel mapping.
+ *
+ * Replaces the published active map for @p output_id only. Does not invoke
+ * @ref nmos_channelmapping_activation_callback.
+ *
+ * @param[in] server         Pointer to the server.
+ * @param[in] name           The caller-chosen name of the channel
+ *                           mapping.
+ * @param[in] output_id      IS-08 output id.
+ * @param[in] active_map     Active map for @p output_id; @p num_active_map
+ *                           entries, index @c i is output channel @c i.
+ *                           NULL @p input_id marks an unrouted channel.
+ * @param[in] num_active_map Length of @p active_map; must equal that
+ *                           output's @p num_channel_labels.
+ */
+NVNMOS_API
+bool nmos_channelmapping_activate(
+    NvNmosNodeServer *server,
+    const char *name,
+    const char *output_id,
+    const NvNmosChannelMappingActiveMapEntry *active_map,
+    size_t num_active_map);
 
 /**
  * Compute the NMOS Node resource id (the '/self' UUID) that an
@@ -687,6 +862,31 @@ bool nmos_make_receiver_id(
     size_t out_len);
 
 /**
+ * Compute the NMOS Source resource id that an @ref NvNmosNodeServer created
+ * with the given @p seed will use for the Source paired with a sender
+ * named @p source_name.
+ *
+ * Pure function of (@p seed, @p source_name). See @ref nmos_make_node_id
+ * for the contract. This is the IS-04 **Source** id (used for IS-08
+ * `/sourceid`), not the Sender id from @ref nmos_make_sender_id — both
+ * use the same name string from the transport file.
+ *
+ * @param[in]  seed        Seed string. Must not be null.
+ * @param[in]  source_name The caller-chosen name of the sender (see
+ *                         @ref NvNmosSenderConfig::transport_file).
+ *                         Must not be null.
+ * @param[out] out         Buffer to receive the id.
+ * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_make_source_id(
+    const char *seed,
+    const char *source_name,
+    char *out,
+    size_t out_len);
+
+/**
  * Get the NMOS Node resource id (the '/self' UUID) of a running
  * @ref NvNmosNodeServer.
  *
@@ -745,6 +945,33 @@ NVNMOS_API
 bool nmos_get_receiver_id(
     const NvNmosNodeServer *server,
     const char *receiver_name,
+    char *out,
+    size_t out_len);
+
+/**
+ * Get the NMOS Source resource id paired with a sender currently
+ * registered with the specified server.
+ *
+ * Looks the Source up by the caller-chosen sender name (the same
+ * string passed to @ref add_nmos_sender_to_node_server). Returns false
+ * (without writing to @p out) if no sender with the given @p source_name
+ * has been added to the server.
+ *
+ * This is the IS-04 **Source** id (used for IS-08 `/sourceid`), not the
+ * Sender id from @ref nmos_get_sender_id.
+ *
+ * @param[in]  server      Pointer to the server.
+ * @param[in]  source_name The caller-chosen name of the sender (see
+ *                         @ref NvNmosSenderConfig::transport_file).
+ *                         Must not be null.
+ * @param[out] out         Buffer to receive the id.
+ * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_get_source_id(
+    const NvNmosNodeServer *server,
+    const char *source_name,
     char *out,
     size_t out_len);
 

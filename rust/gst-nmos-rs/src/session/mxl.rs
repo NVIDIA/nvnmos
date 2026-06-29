@@ -115,6 +115,7 @@ pub(super) fn synthesise_deferred_sender_mxl(
         element,
         settings,
         decide_inner_config_mxl(settings, &flow, Some(&json)),
+        mxl_eager_blocked(&flow),
     );
     Ok((json, inner))
 }
@@ -144,6 +145,16 @@ pub(super) fn log_flow_origin(cat: &gst::DebugCategory, field: &str, origin: Val
         ValueOrigin::None => gst::debug!(cat, "{field} not supplied by either source"),
     }
 }
+/// Deferrable MXL parameter still unavailable for eager `auto-activate`.
+///
+/// The only deferrable MXL transport parameter is the flow id; the
+/// resolved `flow.id` already merges the property and the transport
+/// file (and is left empty when caps-only synthesis omitted it), so a
+/// flow id from either route counts as present.
+fn mxl_eager_blocked(flow: &flow_def::FlowResolution) -> Option<&'static str> {
+    flow.id.is_empty().then_some("mxl-flow-id")
+}
+
 pub(crate) fn decide_inner_config_mxl(
     settings: &CommonSettings,
     flow: &flow_def::FlowResolution,
@@ -253,6 +264,7 @@ pub(super) fn resolve_inner_config_mxl(
         element,
         settings,
         decide_inner_config_mxl(settings, &flow, transport_file.as_deref()),
+        mxl_eager_blocked(&flow),
     );
     // Deferred-mode case (sender only): no resource is going to be
     // added at NULL→READY because neither `transport-file*` nor
@@ -435,6 +447,7 @@ mod tests {
     #[test]
     fn nmossrc_caps_st2038_drives_data_format() {
         use std::str::FromStr;
+        init_gst();
         let caps = gst::Caps::from_str("meta/x-st-2038,framerate=30/1")
             .expect("static caps parse");
         let s = CommonSettings {
@@ -642,7 +655,7 @@ mod tests {
         }
 
         fn good_caps() -> gst::Caps {
-            cat(); // ensures gst::init() ran
+            init_gst();
             gst::Caps::from_str(
                 "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1,\
                  interlace-mode=progressive,pixel-aspect-ratio=1/1",
@@ -659,6 +672,7 @@ mod tests {
 
         #[test]
         fn empty_caps_is_error() {
+            init_gst();
             let res = add_deferred_sender(
                 &cat(),
                 "nmossink",
@@ -675,6 +689,7 @@ mod tests {
 
         #[test]
         fn any_caps_is_error() {
+            init_gst();
             let res = add_deferred_sender(
                 &cat(),
                 "nmossink",
@@ -743,6 +758,7 @@ mod tests {
         fn unsupported_caps_shape_is_error_via_builder() {
             // I420 isn't in the MXL pad template; the builder must
             // reject it, and the user is expected to add a capsfilter.
+            init_gst();
             let caps = gst::Caps::from_str("video/x-raw,format=I420,width=1920,height=1080")
                 .expect("static caps parse");
             let res = add_deferred_sender(&cat(), "nmossink", &sender_settings(), &no_session(), caps);

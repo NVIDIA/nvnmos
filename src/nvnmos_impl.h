@@ -26,6 +26,10 @@
 #ifndef NVNMOS_IMPL_H
 #define NVNMOS_IMPL_H
 
+#include <cstdint>
+#include <functional>
+#include <vector>
+
 #include "cpprest/json_utils.h"
 #include "nmos/id.h"
 #include "nmos/settings.h"
@@ -39,6 +43,8 @@ namespace slog
 
 namespace nmos
 {
+    typedef utility::string_t channelmapping_id;
+
     struct node_model;
 
     namespace experimental
@@ -49,10 +55,13 @@ namespace nmos
 
 namespace nvnmos
 {
+    // caller-chosen resource identity (x-nvnmos-name / urn:x-nvnmos:tag:name)
+    typedef utility::string_t name;
+
     namespace impl
     {
         // generate repeated ids for the node's resources
-        nmos::id make_id(const nmos::id& seed_id, const nmos::type& type, const utility::string_t& name = {});
+        nmos::id make_id(const nmos::id& seed_id, const nmos::type& type, const nvnmos::name& name = {});
 
         // generate URLs for the Node API and Connection API
         std::pair<utility::string_t, utility::string_t> make_api_base_urls(const nmos::settings& settings);
@@ -71,6 +80,9 @@ namespace nvnmos
 
         const web::json::field_as_value senders{ U("senders") }; // object with ids as keys
         const web::json::field_as_value receivers{ U("receivers") }; // object with ids as keys
+        const web::json::field_as_value channelmappings{ U("channelmappings") }; // keyed by caller-chosen channel mapping name
+        const web::json::field_as_value channelmapping_inputs{ U("inputs") }; // array of IS-08 input ids
+        const web::json::field_as_value channelmapping_outputs{ U("outputs") }; // array of IS-08 output ids
         const web::json::field_as_string transport{ U("transport") };
         const web::json::field_as_string transport_file{ U("transport_file") };
 
@@ -130,6 +142,43 @@ namespace nvnmos
 
     struct node_implementation_exception {};
 
+    // Dense IS-08 active map for one output; index i is output channel i (same type as nmos::make_channelmapping_active_map).
+    typedef std::vector<std::pair<nmos::channelmapping_id, uint32_t>> channelmapping_active_map;
+
+    // IS-08 input geometry for node_implementation_add_channelmapping.
+    struct channelmapping_input
+    {
+        nmos::channelmapping_id id;
+        utility::string_t name;
+        utility::string_t description;
+        std::vector<utility::string_t> channel_labels;
+        nvnmos::name parent_name;
+        // nmos::types::receiver or nmos::types::source when parent_name is set; ignored otherwise.
+        nmos::type parent_type;
+        // Input /caps reordering; libnvnmos default true (most flexible for software routing).
+        bool reordering = true;
+        // Input /caps block_size; libnvnmos default 1 (most flexible for software routing).
+        unsigned int block_size = 1;
+    };
+
+    // IS-08 output geometry for node_implementation_add_channelmapping.
+    struct channelmapping_output
+    {
+        nmos::channelmapping_id id;
+        utility::string_t name;
+        utility::string_t description;
+        std::vector<utility::string_t> channel_labels;
+        nvnmos::name sender_name;
+        std::vector<nmos::channelmapping_id> routable_inputs;
+    };
+
+    // Input/output bundle for node_implementation_add_channelmapping.
+    struct channelmapping_config
+    {
+        std::vector<channelmapping_input> inputs;
+        std::vector<channelmapping_output> outputs;
+    };
+
     // This constructs and inserts a node resource and a device resource into the model, based on the model settings.
     void node_implementation_init(nmos::node_model& model, slog::base_gate& gate);
 
@@ -137,27 +186,44 @@ namespace nvnmos
     void node_implementation_add_sender(nmos::node_model& model, const nmos::transport& transport, const std::string& transport_file, slog::base_gate& gate);
 
     // This removes sources/flows/senders from the model corresponding to the specified name.
-    void node_implementation_remove_sender(nmos::node_model& model, const utility::string_t& sender_name, slog::base_gate& gate);
+    void node_implementation_remove_sender(nmos::node_model& model, const nvnmos::name& sender_name, slog::base_gate& gate);
 
     // This constructs and inserts a receiver into the model, based on the specified transport file.
     void node_implementation_add_receiver(nmos::node_model& model, const nmos::transport& transport, const std::string& transport_file, slog::base_gate& gate);
 
     // This removes the receiver from the model corresponding to the specified name.
-    void node_implementation_remove_receiver(nmos::node_model& model, const utility::string_t& receiver_name, slog::base_gate& gate);
+    void node_implementation_remove_receiver(nmos::node_model& model, const nvnmos::name& receiver_name, slog::base_gate& gate);
 
     // This is an application callback to update the specified sender or receiver, as a result of an IS-05 Connection API activation.
     // `type` is `nmos::types::sender` or `nmos::types::receiver` and disambiguates `name`, which is unique within the given side on the Node.
     // The transport file is the updated SDP (for nmos::transports::rtp) or the updated MXL flow definition JSON (for nmos::transports::mxl).
     // If the transport file is empty, the sender or receiver has been deactivated.
-    typedef std::function<void(const nmos::type& type, const std::string& name, const std::string& transport_file)> connection_activation_handler;
+    typedef std::function<void(const nmos::type& type, const nvnmos::name& name, const std::string& transport_file)> connection_activation_handler;
+
+    // This constructs and inserts IS-08 input/output resources into the model, based on the specified channel mapping configuration.
+    void node_implementation_add_channelmapping(nmos::node_model& model, const nvnmos::name& name, const channelmapping_config& mapping, slog::base_gate& gate);
+
+    // This removes IS-08 input/output resources from the model corresponding to the specified name.
+    void node_implementation_remove_channelmapping(nmos::node_model& model, const nvnmos::name& name, slog::base_gate& gate);
+
+    // This is an application callback to apply the active map for the specified output, as a result of an IS-08 Channel Mapping API activation.
+    // `name` is the caller-chosen channel mapping name (unique per Node). `output_id` is the IS-08 output id just activated.
+    // `active_map` is dense per output channel index; unrouted channels have an empty input id (empty pair.first).
+    typedef std::function<bool(const nvnmos::name& name, const nmos::channelmapping_id& output_id, const channelmapping_active_map& active_map)> channelmapping_activation_handler;
 
     // This constructs all the callbacks used to integrate the application into the server instance for the NMOS Node.
-    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, slog::base_gate& gate);
+    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, channelmapping_activation_handler channelmapping_activated, slog::base_gate& gate);
 
     // This updates the transport parameters and transport file for the specified sender or receiver based on the specified transport file.
     // `type` selects between a sender and a receiver with the same `name` on the Node.
     // For now, the transport file is not validated against the existing sender or receiver capabilities and constraints.
-    void node_implementation_activate_connection(nmos::node_model& model, const nmos::type& type, const utility::string_t& name, const std::string& transport_file, slog::base_gate& gate);
+    // Does not invoke the application's connection activation callback.
+    void node_implementation_activate_connection(nmos::node_model& model, const nmos::type& type, const nvnmos::name& name, const std::string& transport_file, slog::base_gate& gate);
+
+    // This updates the published active map for the specified output in the channel mapping, based on the specified active map.
+    // `output_id` is the IS-08 output id. `active_map` length must equal that output's channel count; index i is output channel i.
+    // Does not invoke the application's channel mapping activation callback.
+    void node_implementation_activate_channelmapping(nmos::node_model& model, const nvnmos::name& name, const nmos::channelmapping_id& output_id, const channelmapping_active_map& active_map, slog::base_gate& gate);
 }
 
 #endif

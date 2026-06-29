@@ -327,8 +327,8 @@ or flow_def `label`. [`render_transport_fixture`](scripts/env.sh) substitutes
 `@NIC_IP@`, `@MXL_DOMAIN_ID@`, and `@LABEL@`. Upstream caps must still
 match the file essence. File-driven MXL scripts need only `mxl-domain-path`
 (`bootstrap_mxl_domain`); they omit `mxl-domain-id`, `caps`, and name
-properties. UDP fixtures set `a=x-nvnmos-iface-ip` only — wire destinations
-via IS-05 PATCH.
+properties. UDP fixtures set `a=x-nvnmos-iface-ip` only — destination
+addresses via IS-05 PATCH.
 
 **MXL:**
 
@@ -356,14 +356,6 @@ Two `nmossink` elements sharing `node-seed`, distinct
 ./scripts/example-pipelines/multi-flow-sender-mxl.sh
 # or
 ./scripts/example-pipelines/multi-flow-sender-udp.sh
-```
-
-The rigorous **video + ANC** (`meta/x-st-2038`) integration test with
-real buffer validation is [`tests/multi_flow_video_data.rs`](tests/multi_flow_video_data.rs)
-(`#[ignore]` — needs full MXL toolchain). Opt-in:
-
-```sh
-cargo test -p gst-nmos-rs --test multi_flow_video_data -- --ignored --test-threads=1
 ```
 
 ## `transport=nvdsudp` (DeepStream Rivermax)
