@@ -661,6 +661,7 @@ launch_node1() {
                     $(udp_video_buffer_props) \
                     caps="$VIDEO_CAPS" \
                     label="Node 1 / video1 (SMPTE bars, scrolling)" \
+                    group-hint="Node 1:Video" \
                     auto-activate=true \
             audiotestsrc wave=sine freq=440 is-live=true ! \
                 $AUDIO_CAPS ! \
@@ -673,6 +674,7 @@ launch_node1() {
                     $(transport_sender_props audio1) \
                     caps="$AUDIO_CAPS" \
                     label="Node 1 / audio1 (440 Hz sine)" \
+                    group-hint="Node 1:Audio" \
                     auto-activate=true \
         > "$LOG_DIR/node1-producer.log" 2>&1 &
     NODE1_PID=$!
@@ -706,6 +708,7 @@ launch_node4() {
                     $(udp_video_buffer_props) \
                     caps="$VIDEO_CAPS_ALT" \
                     label="Node 4 / video4 (snow, alt framerate)" \
+                    group-hint="Node 4:Video" \
                     auto-activate=true \
             audiotestsrc wave=sine freq=880 is-live=true ! \
                 $AUDIO_CAPS_ALT ! \
@@ -719,6 +722,7 @@ launch_node4() {
                     $(udp_audio_transport_caps_alt) \
                     caps="$AUDIO_CAPS_ALT" \
                     label="Node 4 / audio4 (880 Hz sine, 8 ch)" \
+                    group-hint="Node 4:Audio" \
                     auto-activate=true \
         > "$LOG_DIR/node4-producer.log" 2>&1 &
     NODE4_PID=$!
@@ -889,6 +893,7 @@ launch_node2() {
                 $(udp_video_buffer_props) \
                 caps="$VIDEO_CAPS" \
                 label="Node 2 / video2" \
+                group-hint="Node 2:Video" \
                 auto-activate=true ! \
             $(demo_video_queue n2-v-in) ! \
                 videoconvert ! "$DEMO_VIDEO_SINK" sync=false \
@@ -902,6 +907,7 @@ launch_node2() {
                 $(transport_receiver_props audio1) \
                 caps="$AUDIO_CAPS" \
                 label="Node 2 / audio2" \
+                group-hint="Node 2:Audio" \
                 auto-activate=true ! \
             $(demo_audio_queue n2-a-in) ! \
                 audioconvert ! "$DEMO_AUDIO_SINK" sync=false \

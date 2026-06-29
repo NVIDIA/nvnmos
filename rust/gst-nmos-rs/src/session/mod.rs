@@ -171,6 +171,20 @@ pub(crate) const DESCRIPTION_BLURB_RECEIVER: &str =
      transport file when both are supplied (top-level `description` \
      in an MXL `flow_def`; SDP `i=` line for RTP/UDP).";
 
+pub(crate) const GROUP_HINT_BLURB_SENDER: &str =
+    "NMOS group hint for the Sender (the \
+     `urn:x-nmos:tag:grouphint/v1.0` tag), e.g. `\"SDI 1:Video\"`. \
+     Becomes the `x-nvnmos-group-hint` session-level SDP attribute on \
+     RTP/UDP or the grouphint tag in an MXL `flow_def`. Overrides the \
+     transport file when both are supplied. Optional. Omitted when unset.";
+
+pub(crate) const GROUP_HINT_BLURB_RECEIVER: &str =
+    "NMOS group hint for the Receiver (the \
+     `urn:x-nmos:tag:grouphint/v1.0` tag), e.g. `\"SDI 1:Video\"`. \
+     Becomes the `x-nvnmos-group-hint` session-level SDP attribute on \
+     RTP/UDP or the grouphint tag in an MXL `flow_def`. Overrides the \
+     transport file when both are supplied. Optional. Omitted when unset.";
+
 pub(crate) const TRANSPORT_FILE_PATH_BLURB: &str =
     "Filesystem path read at NULL\u{2192}READY into `transport-file`. \
      Convenience for gst-launch; mutually exclusive with \
@@ -300,6 +314,12 @@ pub(crate) struct CommonSettings {
     /// (MXL top-level `description`; SDP `i=`). Optional; omitted
     /// when empty.
     pub(crate) description: String,
+    /// NMOS group hint (`urn:x-nmos:tag:grouphint/v1.0`) spliced into
+    /// the configuring transport file (SDP session-level
+    /// `a=x-nvnmos-group-hint`; MXL `flow_def` grouphint tag).
+    /// Optional; overrides a supplied file when non-empty and is
+    /// omitted from synthesised files when empty.
+    pub(crate) group_hint: String,
     /// Essence caps. On `nmossink`, when no `transport_file*` is
     /// supplied, synthesises a configuring transport file (MXL
     /// `flow_def` via [`crate::flow_def::from_caps`], SDP via
@@ -452,6 +472,7 @@ impl Default for CommonSettings {
             transport_file_path: String::new(),
             label: String::new(),
             description: String::new(),
+            group_hint: String::new(),
             caps: None,
             transport_caps: None,
             caps_mode: CapsMode::default(),
@@ -1393,6 +1414,7 @@ mod support {
             transport_file_path: String::new(),
             label: String::new(),
             description: String::new(),
+            group_hint: String::new(),
             caps: None,
             transport_caps: None,
             caps_mode: CapsMode::Auto,

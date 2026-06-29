@@ -45,7 +45,8 @@ pub(crate) fn reject_unsupported_multi_media(
     Ok(())
 }
 
-/// Apply session-level [`SdpOverrides`] in place (`s=`, `i=`, `a=x-nvnmos-name`).
+/// Apply session-level [`SdpOverrides`] in place (`s=`, `i=`,
+/// `a=x-nvnmos-name`, `a=x-nvnmos-group-hint`).
 pub(crate) fn apply_session_overrides_in_place(
     msg: &mut SDPMessage,
     overrides: &SdpOverrides<'_>,
@@ -58,6 +59,9 @@ pub(crate) fn apply_session_overrides_in_place(
     }
     if let Some(name) = overrides.name {
         upsert_session_attribute(msg, "x-nvnmos-name", Some(name));
+    }
+    if let Some(group_hint) = overrides.group_hint {
+        upsert_session_attribute(msg, "x-nvnmos-group-hint", Some(group_hint));
     }
     Ok(())
 }
