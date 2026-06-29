@@ -48,11 +48,9 @@ nix = { version = "0.30", default-features = false, features = ["net"] }
 tempfile = { workspace = true }
 # Runtime test skipping (prints a libtest-style `... skipped, <reason>` line).
 test-skip = { path = "../test-skip" }
-# Used by the multi-flow integration test (tests/multi_flow_video_data.rs)
-# to drive a v210 + ANC producer and pull samples back out of appsinks,
-# mirroring gst-mxl-rs's tests/video_data_sync.rs setup.
+# Used by the IS-08 audio integration test to push test tones into the
+# daemon-backed pipeline and pull samples back out of appsinks.
 gstreamer-app = "0.24.4"
-gstreamer-video = { version = "0.24.5", features = ["v1_24"] }
 
 [build-dependencies]
 gst-plugin-version-helper = "0.8.3"

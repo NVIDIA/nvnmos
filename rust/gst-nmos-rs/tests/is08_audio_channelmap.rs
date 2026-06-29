@@ -4,7 +4,7 @@
 //! IS-08 audio channel map routing: two tones (A4 440 Hz / E5 ~659 Hz) through
 //! `nmosaudiochannelmap`, verify per-src output dominance with Goertzel.
 //!
-//! Spawns a temporary `nvnmosd` (same pattern as `multi_flow_video_data.rs`).
+//! Spawns a temporary `nvnmosd` for the duration of the test.
 //! The cases run automatically when `nvnmosd` and `libnvnmos.so` are available
 //! (CI sets `LD_LIBRARY_PATH` to the C build dir); otherwise they skip.
 //!

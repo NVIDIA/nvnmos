@@ -264,7 +264,7 @@ Almost all **software** work can land without ConnectX / Rivermax / DeepStream o
 | Soak: clock provider / multi-receiver | **no** |
 | ST 2022-7 | **yes** (software path; dual-leg `transport-file*` + `nvdsudpsrc` / `nvdsudpsink`; hardware soak pending) |
 
-**Recommended CI strategy:** default `cargo test` uses pure unit tests; add `#[ignore]` integration tests `nvdsudp_chain_roundtrip` and `nvdsudp_activation_smoke` documented in README (same pattern as `multi_flow_video_data.rs`). Optional GitLab job on a Rivermax-equipped runner when available.
+**Recommended CI strategy:** default `cargo test` uses pure unit tests; add `#[ignore]` integration tests `nvdsudp_chain_roundtrip` and `nvdsudp_activation_smoke` documented in README (same pattern as `is08_audio_channelmap.rs`). Optional GitLab job on a Rivermax-equipped runner when available.
 
 ## Out of scope (this document)
 
