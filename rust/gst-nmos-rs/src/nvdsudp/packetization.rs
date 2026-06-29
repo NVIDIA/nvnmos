@@ -386,12 +386,7 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    fn init_gst() {
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            let _ = gst::init();
-        });
-    }
+    use crate::test_support::init_gst;
 
     #[test]
     fn uyvp_1920x1080_matches_deepstream_table() {

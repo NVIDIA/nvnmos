@@ -1147,6 +1147,7 @@ mod tests {
     use crate::session::{
         ActivationAck, ActivationPlan, CommonSettings, InnerConfig, TransportConfig, UdpVariant,
     };
+    use crate::test_support::init_gst;
     use crate::types::FlowFormat;
 
     /// Pins the IS-05 Receiver `transport_params` →
@@ -1193,7 +1194,7 @@ mod tests {
     #[test]
     fn from_settings_forwards_transport_caps() {
         use std::str::FromStr;
-        let _ = gst::init();
+        init_gst();
         let caps =
             gst::Caps::from_str("application/x-rtp,media=audio,payload=99,clock-rate=48000")
                 .expect("valid caps");
@@ -1209,7 +1210,7 @@ mod tests {
     fn mxl_wide_receiver_skips_capssetter() {
         use crate::flow_def::{FlowDefOverrides, splice_overrides};
         use crate::types::CapsMode;
-        let _ = gst::init();
+        init_gst();
         let narrow_file = r#"{
             "format":"urn:x-nmos:format:video",
             "media_type":"video/v210",
@@ -1269,7 +1270,7 @@ mod tests {
 
     #[test]
     fn udp_wide_receiver_skips_capssetter() {
-        let _ = gst::init();
+        init_gst();
         const NARROW_SDP: &str = concat!(
             "v=0\r\n",
             "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -1333,7 +1334,7 @@ mod tests {
     #[test]
     fn intermediate_fake_src_caps_follows_activation_not_element_property() {
         use std::str::FromStr;
-        let _ = gst::init();
+        init_gst();
         const NARROW_MXL: &str = r#"{
             "format":"urn:x-nmos:format:video",
             "media_type":"video/v210",
@@ -1377,7 +1378,7 @@ mod tests {
 
     #[test]
     fn intermediate_fake_src_caps_udp_wide_follows_sdp_marker() {
-        let _ = gst::init();
+        init_gst();
         const NARROW_SDP: &str = concat!(
             "v=0\r\n",
             "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -1416,7 +1417,7 @@ mod tests {
     #[test]
     fn intermediate_fake_src_caps_deactivation_uses_element_settings() {
         use std::str::FromStr;
-        let _ = gst::init();
+        init_gst();
         let caps = gst::Caps::from_str(
             "video/x-raw,format=v210,width=1920,height=1080,framerate=25/1",
         )

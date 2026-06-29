@@ -95,10 +95,7 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
-
-    fn init_gst() {
-        let _ = gst::init();
-    }
+    use crate::test_support::init_gst;
 
     fn raw_audio_caps(format: &str, rate: i32, channels: i32) -> gst::Caps {
         gst::Caps::from_str(&format!(

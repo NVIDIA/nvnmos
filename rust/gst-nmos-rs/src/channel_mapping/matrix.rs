@@ -168,6 +168,7 @@ pub(crate) fn input_bus_converter_config(matrix: &[Vec<f32>]) -> gstreamer_audio
 mod tests {
     use super::*;
     use crate::channel_mapping::types::{SinkPadSnapshot, SrcPadSnapshot};
+    use crate::test_support::init_gst;
 
     fn stereo_topology() -> FrozenTopology {
         let sinks = vec![
@@ -204,7 +205,7 @@ mod tests {
 
     #[test]
     fn input_bus_converter_config_sets_gst_audio_converter_mix_matrix() {
-        gstreamer::init().unwrap();
+        init_gst();
         let matrix = build_input_bus_mix_matrix(4, 2, 0);
         let config = input_bus_converter_config(&matrix);
         assert_eq!(config.mix_matrix(), matrix);
@@ -258,7 +259,7 @@ mod tests {
 
     #[test]
     fn audiomixmatrix_accepts_output_matrix_gvalue() {
-        gstreamer::init().unwrap();
+        init_gst();
         use gstreamer::prelude::*;
         let el = gstreamer::ElementFactory::make("audiomixmatrix")
             .property("in-channels", 4u32)
@@ -331,7 +332,7 @@ mod tests {
     #[test]
     fn audiomixmatrix_accepts_dual_src_identity_matrices() {
         use crate::channel_mapping::active_map::default_identity_routes;
-        gstreamer::init().unwrap();
+        init_gst();
         use gstreamer::prelude::*;
         let (topology, sinks, srcs) = dual_src_topology();
         let src_count = srcs.len();

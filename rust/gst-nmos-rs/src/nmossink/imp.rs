@@ -1060,6 +1060,7 @@ impl From<Settings> for CommonSettings {
 mod tests {
     use super::*;
     use crate::session::CommonSettings;
+    use crate::test_support::init_gst;
 
     /// Pins the IS-05 Sender `transport_params` → `CommonSettings`
     /// mapping. `nmossink` populates the sender-side slots
@@ -1121,7 +1122,7 @@ mod tests {
     #[test]
     fn from_settings_forwards_transport_caps() {
         use std::str::FromStr;
-        let _ = gst::init();
+        init_gst();
         let caps =
             gst::Caps::from_str("application/x-rtp,media=audio,payload=99,clock-rate=48000")
                 .expect("valid caps");
@@ -1151,7 +1152,7 @@ mod tests {
     #[test]
     fn intermediate_fake_sink_caps_udp_uses_activation_media() {
         use std::str::FromStr;
-        let _ = gst::init();
+        init_gst();
         const NARROW_SDP: &str = concat!(
             "v=0\r\n",
             "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -1198,7 +1199,7 @@ mod tests {
     #[test]
     fn intermediate_fake_sink_caps_mxl_uses_element_settings() {
         use std::str::FromStr;
-        let _ = gst::init();
+        init_gst();
         let caps = gst::Caps::from_str(
             "video/x-raw,format=v210,width=1920,height=1080,framerate=25/1",
         )

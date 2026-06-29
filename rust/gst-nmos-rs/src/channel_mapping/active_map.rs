@@ -193,12 +193,7 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    fn init_gst() {
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            gstreamer::init().expect("gst::init");
-        });
-    }
+    use crate::test_support::init_gst;
 
     fn map_structure(launch: &str) -> gst::Structure {
         init_gst();

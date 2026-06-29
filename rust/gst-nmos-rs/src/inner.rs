@@ -1789,12 +1789,7 @@ mod tests {
     use crate::session::udp::types::UdpLeg;
     use std::str::FromStr;
 
-    fn init_gst() {
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            let _ = gst::init();
-        });
-    }
+    use crate::test_support::init_gst;
 
     fn test_log_cat() -> &'static gst::DebugCategory {
         static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
@@ -1905,7 +1900,7 @@ mod tests {
     /// [`build_udpsink`]).
     #[test]
     fn build_fake_sink_with_caps_is_capsfilter_bin() {
-        let _ = gst::init();
+        init_gst();
         let caps = gst::Caps::from_str("audio/x-raw,format=(string)S24BE,channels=(int)2")
             .expect("caps");
         let chain = build_fake_sink(Some(&caps)).expect("capped fake sink");
@@ -1922,7 +1917,7 @@ mod tests {
 
     #[test]
     fn build_fake_sink_without_caps_is_bare_fakesink() {
-        let _ = gst::init();
+        init_gst();
         let chain = build_fake_sink(None).expect("bare fake sink");
         assert_eq!(chain.name(), "nmossink-fake");
         assert!(chain.static_pad("sink").is_some());
@@ -2358,6 +2353,7 @@ mod tests {
 
     #[test]
     fn build_udpsrc_v1_video_pins_advertise_caps_via_capssetter() {
+        init_gst();
         // V1 `rtpvrawdepay` hardcodes `framerate=0/1` on its src caps;
         // see the doc-comment in `build_udpsrc` for the GStreamer-good
         // source pointer. The tail therefore has to *override*
@@ -2387,6 +2383,7 @@ mod tests {
 
     #[test]
     fn build_udpsrc_audio_pins_advertise_caps_via_capssetter() {
+        init_gst();
         // We use `capssetter` consistently for receiver-side caps
         // advertisement. For audio this is effectively a no-op merge,
         // but it keeps behaviour consistent across transports and

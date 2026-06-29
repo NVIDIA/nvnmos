@@ -161,6 +161,23 @@ mod session;
 mod nmosaudiochannelmap;
 mod types;
 
+/// Shared test-only helpers for the crate's unit tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::gst;
+
+    /// Initialise GStreamer once per process for tests that build caps,
+    /// elements, or SDP messages. Idempotent and race-safe (`Once`), so
+    /// every gst-dependent test can call it unconditionally as its first
+    /// statement. Tests with no GStreamer dependency deliberately omit it.
+    pub(crate) fn init_gst() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let _ = gst::init();
+        });
+    }
+}
+
 pub(crate) static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
         "nmos",

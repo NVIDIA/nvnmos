@@ -447,6 +447,7 @@ mod tests {
     #[test]
     fn nmossrc_caps_st2038_drives_data_format() {
         use std::str::FromStr;
+        init_gst();
         let caps = gst::Caps::from_str("meta/x-st-2038,framerate=30/1")
             .expect("static caps parse");
         let s = CommonSettings {
@@ -654,7 +655,7 @@ mod tests {
         }
 
         fn good_caps() -> gst::Caps {
-            cat(); // ensures gst::init() ran
+            init_gst();
             gst::Caps::from_str(
                 "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1,\
                  interlace-mode=progressive,pixel-aspect-ratio=1/1",
@@ -671,6 +672,7 @@ mod tests {
 
         #[test]
         fn empty_caps_is_error() {
+            init_gst();
             let res = add_deferred_sender(
                 &cat(),
                 "nmossink",
@@ -687,6 +689,7 @@ mod tests {
 
         #[test]
         fn any_caps_is_error() {
+            init_gst();
             let res = add_deferred_sender(
                 &cat(),
                 "nmossink",
@@ -755,6 +758,7 @@ mod tests {
         fn unsupported_caps_shape_is_error_via_builder() {
             // I420 isn't in the MXL pad template; the builder must
             // reject it, and the user is expected to add a capsfilter.
+            init_gst();
             let caps = gst::Caps::from_str("video/x-raw,format=I420,width=1920,height=1080")
                 .expect("static caps parse");
             let res = add_deferred_sender(&cat(), "nmossink", &sender_settings(), &no_session(), caps);

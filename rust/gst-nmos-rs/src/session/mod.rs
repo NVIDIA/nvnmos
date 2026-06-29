@@ -1365,6 +1365,7 @@ pub(crate) fn make_activation_plan(
 #[cfg(test)]
 mod support {
     use super::*;
+    pub(crate) use crate::test_support::init_gst;
 
     pub const NODE_SEED: &str = "test-seed";
     pub const FLOW_ID_A: &str = "00000000-0000-0000-0000-000000000001";
@@ -1372,10 +1373,6 @@ mod support {
     pub const DOMAIN_ID: &str = "1ac254d9-c9be-475a-93a7-f80b9c1063a8";
 
     pub fn cat() -> gst::DebugCategory {
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            let _ = gst::init();
-        });
         gst::DebugCategory::new("test", gst::DebugColorFlags::empty(), Some("test"))
     }
 
@@ -1419,7 +1416,7 @@ mod support {
 
     pub fn video_caps() -> gst::Caps {
         use std::str::FromStr;
-        cat(); // ensures gst::init() ran
+        init_gst();
         gst::Caps::from_str(
             "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1",
         )
@@ -1815,7 +1812,7 @@ mod tests {
 
         #[test]
         fn rtp_reads_name_from_transport_file() {
-            cat();
+            init_gst();
             let mut s = settings(Side::Receiver);
             s.transport = Transport::Udp;
             s.name.clear();
@@ -1848,7 +1845,7 @@ mod tests {
 
         #[test]
         fn rejects_transport_file_without_name() {
-            cat();
+            init_gst();
             let mut s = settings(Side::Receiver);
             s.transport = Transport::Udp;
             s.name.clear();

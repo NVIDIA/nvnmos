@@ -2283,13 +2283,11 @@ fn rtp_caps_from_raw_data(raw_caps: &gst::Caps, payload_type: u8) -> Result<gst:
 mod tests {
     use super::*;
     use crate::sdp_passthrough::{reject_unsupported_multi_media, DualLegPassthroughPolicy};
-
-    fn init_gst() {
-        let _ = gst::init();
-    }
+    use crate::test_support::init_gst;
 
     #[test]
     fn indicates_wide_receiver_caps_matches_attribute_presence() {
+        init_gst();
         const NARROW: &str = concat!(
             "v=0\r\no=- 1 0 IN IP4 127.0.0.1\r\ns=x\r\nt=0 0\r\n",
             "m=video 5004 RTP/AVP 96\r\nc=IN IP4 239.0.0.1/64\r\n",

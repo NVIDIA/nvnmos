@@ -536,7 +536,7 @@ mod tests {
     /// populated so accessor-style assertions can see them.
     fn sample_udp_media() -> UdpMedia {
         use std::str::FromStr;
-        cat(); // ensures gst::init() ran
+        init_gst();
         UdpMedia {
             format: FlowFormat::Video,
             primary: UdpLeg {
@@ -680,7 +680,7 @@ mod tests {
         );
 
         fn udp_settings(side: Side, transport: Transport) -> CommonSettings {
-            cat(); // ensures gst::init() ran for parse_sdp
+            init_gst();
             CommonSettings {
                 transport,
                 ..settings(side)
@@ -1447,6 +1447,7 @@ mod tests {
 
         #[test]
         fn resolve_inner_config_udp_synthesises_sdp_from_caps_only() {
+            init_gst();
             let essence = gst::Caps::from_str(
                 "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved",
             )
@@ -1494,6 +1495,7 @@ mod tests {
         /// `udp_leg_from_input`.
         #[test]
         fn resolve_inner_config_udp_sender_caps_only_synthesis() {
+            init_gst();
             let essence = gst::Caps::from_str(
                 "video/x-raw,format=UYVP,width=1920,height=1080,\
                  framerate=50/1,interlace-mode=progressive",
@@ -1541,6 +1543,7 @@ mod tests {
         /// layer that runs after passthrough.
         #[test]
         fn resolve_inner_config_udp_transport_file_beats_caps_synthesis() {
+            init_gst();
             const AUDIO_L24_SDP: &str = concat!(
                 "v=0\r\n",
                 "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -1595,6 +1598,7 @@ mod tests {
         /// from the caps' `payload` i32 field and cast to u8.
         #[test]
         fn property_overrides_udp_reads_pt_from_transport_caps() {
+            init_gst();
             let tc = gst::Caps::builder("application/x-rtp")
                 .field("payload", 99i32)
                 .build();
@@ -1612,6 +1616,7 @@ mod tests {
         /// the audio-essence gating downstream.
         #[test]
         fn property_overrides_udp_reads_audio_overrides_from_transport_caps() {
+            init_gst();
             let tc = gst::Caps::builder("application/x-rtp")
                 .field("clock-rate", 96_000i32)
                 .field("a-ptime", "1")
@@ -1650,6 +1655,7 @@ mod tests {
         /// actually changes the output SDP.
         #[test]
         fn resolve_inner_config_udp_applies_transport_caps_audio_overrides() {
+            init_gst();
             // 48 kHz L24 stereo, pt=97, ptime=0.125. The
             // simplest audio SDP that exercises all four
             // override slots in one pass.
@@ -1704,6 +1710,7 @@ mod tests {
         /// broken SDP.
         #[test]
         fn resolve_inner_config_udp_rejects_invalid_pt_in_transport_caps() {
+            init_gst();
             const AUDIO_L24_SDP: &str = concat!(
                 "v=0\r\n",
                 "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -1745,6 +1752,7 @@ mod tests {
         /// regress the existing SDP-only path.
         #[test]
         fn decide_inner_config_udp_accepts_matching_caps() {
+            init_gst();
             let s = CommonSettings {
                 caps: Some(
                     gst::Caps::builder("video/x-raw")
@@ -1776,6 +1784,7 @@ mod tests {
         /// a real misconfiguration → bail.
         #[test]
         fn decide_inner_config_udp_rejects_essence_caps_format_mismatch() {
+            init_gst();
             let s = CommonSettings {
                 caps: Some(gst::Caps::builder("audio/x-raw").build()),
                 ..udp_settings(Side::Receiver, Transport::Udp)
@@ -1803,6 +1812,7 @@ mod tests {
         /// the override case, covered by a separate test).
         #[test]
         fn decide_inner_config_udp_rejects_video_clock_rate_mismatch() {
+            init_gst();
             let s = CommonSettings {
                 transport_caps: Some(
                     gst::Caps::builder("application/x-rtp")
@@ -1832,6 +1842,7 @@ mod tests {
         /// format family still matches).
         #[test]
         fn activation_udp_wide_receiver_skips_essence_shape_cross_check() {
+            init_gst();
             const AUDIO_MONO_ACTIVATION_SDP: &str = concat!(
                 "v=0\r\n",
                 "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -1877,6 +1888,7 @@ mod tests {
         /// `a=x-nvnmos-caps:` (libnvnmos adds it for wide receivers).
         #[test]
         fn activation_udp_property_wide_without_sdp_marker_still_cross_checks() {
+            init_gst();
             const AUDIO_MONO_ACTIVATION_SDP: &str = concat!(
                 "v=0\r\n",
                 "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -1918,6 +1930,7 @@ mod tests {
         /// `Failure` with attribution.
         #[test]
         fn activation_udp_cross_check_failure_acks_failure() {
+            init_gst();
             const AUDIO_ACTIVATION_SDP: &str = concat!(
                 "v=0\r\n",
                 "o=- 1 0 IN IP4 192.0.2.10\r\n",
@@ -2069,7 +2082,7 @@ mod tests {
         use std::str::FromStr;
 
         fn sender_udp_settings(transport: Transport) -> CommonSettings {
-            cat();
+            init_gst();
             CommonSettings {
                 transport,
                 destination_ip: "239.99.99.1".to_owned(),
@@ -2081,7 +2094,7 @@ mod tests {
         }
 
         fn video_peer_caps() -> gst::Caps {
-            cat();
+            init_gst();
             gst::Caps::from_str(
                 "video/x-raw,format=UYVP,width=1920,height=1080,framerate=50/1,\
                  interlace-mode=progressive",
@@ -2090,7 +2103,7 @@ mod tests {
         }
 
         fn anc_peer_caps() -> gst::Caps {
-            cat();
+            init_gst();
             gst::Caps::from_str("meta/x-st-2038,alignment=frame,framerate=30/1")
                 .expect("anc caps")
         }
@@ -2144,6 +2157,7 @@ mod tests {
 
         #[test]
         fn add_deferred_sender_udp_unsupported_video_format_is_error() {
+            init_gst();
             let caps = gst::Caps::from_str("video/x-raw,format=I420,width=1920,height=1080")
                 .expect("caps");
             let err = add_deferred_sender(

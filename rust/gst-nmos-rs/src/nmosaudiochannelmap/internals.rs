@@ -282,6 +282,7 @@ impl InternalGraph {
 mod tests {
     use super::*;
     use crate::nmosaudiochannelmap::caps::{caps_with_channel_count, caps_with_channel_mask};
+    use crate::test_support::init_gst;
 
     // Exercises the real InternalGraph::build() against a bin with the element's
     // ghost pads (no nvnmosd needed), so the production subgraph — sink_queues,
@@ -295,7 +296,7 @@ mod tests {
         use crate::channel_mapping::types::FrozenTopology;
         use gst::glib;
 
-        let _ = gst::init();
+        init_gst();
         let input_ch = 2u32;
         let topology = FrozenTopology {
             input_bus_channels: 4,
@@ -394,7 +395,7 @@ mod tests {
     // streaming-time remixing but not the sink caps query.
     #[test]
     fn audiomixer_sink_does_not_propagate_pinned_bus_src_caps() {
-        let _ = gst::init();
+        init_gst();
         let pipe = gst::Pipeline::new();
         let mixer = gst::ElementFactory::make("audiomixer").build().unwrap();
         // Pin the bus src to 10ch + sequential mask, as production does.

@@ -701,10 +701,11 @@ fn block_on_async<T, E>(future: impl std::future::Future<Output = Result<T, E>>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::init_gst;
 
     #[test]
     fn channels_from_structure_accepts_fixed_int_and_singleton_range() {
-        gst::init().unwrap();
+        init_gst();
 
         let fixed = gst::Structure::builder("audio/x-raw")
             .field("channels", 2i32)

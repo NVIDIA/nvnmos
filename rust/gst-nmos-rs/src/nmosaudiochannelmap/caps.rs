@@ -48,10 +48,11 @@ pub(crate) fn caps_with_channel_mask(channels: u32) -> gst::Caps {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::init_gst;
 
     #[test]
     fn caps_with_channel_count_fixates_count_only() {
-        let _ = gst::init();
+        init_gst();
         let caps = caps_with_channel_count(8);
         let s = caps.structure(0).expect("structure");
         assert_eq!(s.get::<i32>("channels").unwrap(), 8);
@@ -60,7 +61,7 @@ mod tests {
 
     #[test]
     fn caps_with_channel_mask_fixates_count_and_sequential_mask() {
-        let _ = gst::init();
+        init_gst();
         let caps = caps_with_channel_mask(8);
         let s = caps.structure(0).expect("structure");
         assert_eq!(s.get::<i32>("channels").unwrap(), 8);
@@ -72,7 +73,7 @@ mod tests {
 
     #[test]
     fn caps_with_channel_mask_omits_mask_for_mono_and_stereo() {
-        let _ = gst::init();
+        init_gst();
         for channels in [1u32, 2] {
             let caps = caps_with_channel_mask(channels);
             let s = caps.structure(0).expect("structure");

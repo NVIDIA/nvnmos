@@ -1077,16 +1077,11 @@ mod tests {
         assert!(matches!(err, FlowDefError::TagsNotAnObject), "got: {err:?}");
     }
 
-    fn ensure_gst_initialised() {
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            gst::init().expect("gst init for caps→flow_def tests");
-        });
-    }
+    use crate::test_support::init_gst;
 
     fn caps_from_str(s: &str) -> gst::Caps {
         use std::str::FromStr;
-        ensure_gst_initialised();
+        init_gst();
         gst::Caps::from_str(s).expect("test caps parse")
     }
 
@@ -1292,7 +1287,7 @@ mod tests {
 
         #[test]
         fn video_v210() {
-            ensure_gst_initialised();
+            init_gst();
             let json = r#"{
                 "id": "00000000-0000-0000-0000-000000000001",
                 "format": "urn:x-nmos:format:video",
@@ -1318,7 +1313,7 @@ mod tests {
 
         #[test]
         fn video_v210_colorspace_is_ignored_for_minimal_caps() {
-            ensure_gst_initialised();
+            init_gst();
             let json = r#"{
                 "format": "urn:x-nmos:format:video",
                 "media_type": "video/v210",
@@ -1336,7 +1331,7 @@ mod tests {
 
         #[test]
         fn video_v210_with_interlace_mode() {
-            ensure_gst_initialised();
+            init_gst();
             let json = r#"{
                 "id": "00000000-0000-0000-0000-000000000001",
                 "format": "urn:x-nmos:format:video",
@@ -1352,7 +1347,7 @@ mod tests {
 
         #[test]
         fn audio_f32le() {
-            ensure_gst_initialised();
+            init_gst();
             let json = r#"{
                 "id": "00000000-0000-0000-0000-000000000001",
                 "format": "urn:x-nmos:format:audio",
@@ -1376,7 +1371,7 @@ mod tests {
 
         #[test]
         fn data_st2038() {
-            ensure_gst_initialised();
+            init_gst();
             let json = r#"{
                 "id": "00000000-0000-0000-0000-000000000001",
                 "format": "urn:x-nmos:format:data",
@@ -1437,7 +1432,7 @@ mod tests {
 
         #[test]
         fn round_trip_with_build_from_caps_video() {
-            ensure_gst_initialised();
+            init_gst();
             let original_caps =
                 caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
             let json = from_caps(&input(UUID_A, "cam-1", &original_caps)).unwrap();
@@ -1453,7 +1448,7 @@ mod tests {
 
         #[test]
         fn round_trip_with_build_from_caps_audio() {
-            ensure_gst_initialised();
+            init_gst();
             let original_caps =
                 caps_from_str("audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved");
             let json = from_caps(&input(UUID_A, "mic-1", &original_caps)).unwrap();
@@ -1466,7 +1461,7 @@ mod tests {
 
         #[test]
         fn round_trip_with_build_from_caps_data() {
-            ensure_gst_initialised();
+            init_gst();
             let original_caps = caps_from_str("meta/x-st-2038,framerate=30/1");
             let json = from_caps(&input(UUID_A, "anc-1", &original_caps)).unwrap();
             let derived = super::caps_from(&json).unwrap();
