@@ -115,6 +115,7 @@ pub(super) fn synthesise_deferred_sender_mxl(
         element,
         settings,
         decide_inner_config_mxl(settings, &flow, Some(&json)),
+        mxl_eager_blocked(&flow),
     );
     Ok((json, inner))
 }
@@ -144,6 +145,16 @@ pub(super) fn log_flow_origin(cat: &gst::DebugCategory, field: &str, origin: Val
         ValueOrigin::None => gst::debug!(cat, "{field} not supplied by either source"),
     }
 }
+/// Deferrable MXL parameter still unavailable for eager `auto-activate`.
+///
+/// The only deferrable MXL transport parameter is the flow id; the
+/// resolved `flow.id` already merges the property and the transport
+/// file (and is left empty when caps-only synthesis omitted it), so a
+/// flow id from either route counts as present.
+fn mxl_eager_blocked(flow: &flow_def::FlowResolution) -> Option<&'static str> {
+    flow.id.is_empty().then_some("mxl-flow-id")
+}
+
 pub(crate) fn decide_inner_config_mxl(
     settings: &CommonSettings,
     flow: &flow_def::FlowResolution,
@@ -253,6 +264,7 @@ pub(super) fn resolve_inner_config_mxl(
         element,
         settings,
         decide_inner_config_mxl(settings, &flow, transport_file.as_deref()),
+        mxl_eager_blocked(&flow),
     );
     // Deferred-mode case (sender only): no resource is going to be
     // added at NULL→READY because neither `transport-file*` nor

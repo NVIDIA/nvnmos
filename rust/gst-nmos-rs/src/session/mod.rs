@@ -797,7 +797,11 @@ pub(crate) fn validate_and_open(
 
     let resolved_transport_file = resolve_transport_file(element, settings)?;
 
-    let (mut inner, transport_file) = match settings.transport {
+    // Each `resolve_inner_config_*` applies the `auto-activate` policy
+    // itself, where the resolved state needed to judge eager-activation
+    // availability — the flow id (MXL) or the destination endpoint
+    // (RTP) — is in scope.
+    let (inner, transport_file) = match settings.transport {
         Transport::Mxl => {
             resolve_inner_config_mxl(cat, element, settings, resolved_transport_file)?
         }
@@ -819,8 +823,6 @@ pub(crate) fn validate_and_open(
             resolve_inner_config_nvdsudp(cat, element, settings, resolved_transport_file)?
         }
     };
-
-    inner = apply_auto_activate_policy(cat, element, settings, inner);
 
     let transport = transport_to_proto(settings.transport);
     let side = settings.side;
@@ -897,86 +899,83 @@ pub(super) fn caps_format(settings: &CommonSettings) -> FlowFormat {
         .map(FlowFormat::from_caps)
         .unwrap_or(FlowFormat::Unspecified)
 }
-/// IS-05 transport parameters that may be omitted at AddSender /
-/// AddReceiver but are required to bring up the inner data path when
-/// `auto-activate=true`.
-pub(super) fn deferred_transport_params(settings: &CommonSettings) -> Vec<&'static str> {
-    match settings.transport {
-        Transport::Mxl => {
-            if settings.mxl_flow_id.is_empty() {
-                vec!["mxl-flow-id"]
-            } else {
-                vec![]
-            }
-        }
-        Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => match settings.side {
-            Side::Sender => {
-                let mut missing = Vec::new();
-                if settings.destination_ip.is_empty() {
-                    missing.push("destination-ip");
-                }
-                if settings.destination_port == 0 {
-                    missing.push("destination-port");
-                }
-                missing
-            }
-            Side::Receiver => {
-                let mut missing = Vec::new();
-                if settings.destination_port == 0 {
-                    missing.push("destination-port");
-                }
-                missing
-            }
-        },
-    }
-}
-
-/// Honour `auto-activate` at setup time and warn when eager activation
-/// was requested but deferred transport parameters are still unset.
+/// Honour `auto-activate` at setup time.
 ///
-/// When `auto_activate` is `false` and `decide_inner_config_*` would
-/// have produced a real transport chain, downgrade to
-/// [`InnerConfig::Fake`] so the data path stays inactive until an
-/// IS-05 PATCH activates the resource (the canonical NMOS path).
+/// `eager_blocked` is the one deferrable IS-05 transport parameter
+/// (MXL `mxl-flow-id`; RTP `destination-ip`) that is needed to bring
+/// the inner data path up now but was supplied by neither a property
+/// nor the transport file — `None` when the resolved chain is fully
+/// activatable. The caller computes it from resolved state (the merged
+/// flow id for MXL, the resolved `c=` address for RTP), so a value
+/// taken from the file counts as present on the same footing as the
+/// property. This is the deferrable-params axis only; it is independent
+/// of per-leg `rtp_enabled` / `a=inactive` (a fully-specified but
+/// dormant leg), which the resolver already reflects as
+/// [`FakeKind::NotActive`] and which is not an auto-activate failure.
 ///
-/// When `auto_activate` is `true` but wire/MXL flow parameters needed
-/// for the inner chain are still unset, log a warning and keep (or
-/// downgrade to) a fake chain — AddSender / AddReceiver still proceeds
-/// when a configuring transport file is available.
+/// - `auto-activate=false` with a real chain → downgrade to a dormant
+///   [`InnerConfig::Fake`] so the path waits for an IS-05 PATCH (the
+///   canonical NMOS path).
+/// - `auto-activate=true` with `eager_blocked` set → keep (or downgrade
+///   to) a fake chain and log at error level: the user asked for eager
+///   bring-up but the flow id / destination is not yet known. The
+///   resource is still added and activates on the next IS-05 PATCH.
+///   Resources that are merely deferred ([`FakeKind::NotConfigured`])
+///   or invalid ([`FakeKind::Misconfigured`]) are left untouched — they
+///   carry their own diagnostics and are not an auto-activate mismatch.
 pub(super) fn apply_auto_activate_policy(
     cat: &gst::DebugCategory,
     element: &str,
     settings: &CommonSettings,
     inner: InnerConfig,
+    eager_blocked: Option<&'static str>,
 ) -> InnerConfig {
-    let missing = deferred_transport_params(settings);
-
-    if settings.auto_activate && !missing.is_empty() {
-        gst::warning!(
-            cat,
-            "{element}: auto-activate=true ignored — missing transport properties: {}",
-            missing.join(", "),
-        );
-        if matches!(inner, InnerConfig::Real(_)) {
-            return InnerConfig::Fake {
+    if !settings.auto_activate {
+        return match inner {
+            InnerConfig::Real(_) => InnerConfig::Fake {
                 kind: FakeKind::NotActive,
-                detail: format!(
-                    "auto-activate=true but {} unset; waiting for IS-05 PATCH",
-                    missing.join(", "),
-                ),
-            };
-        }
-        return inner;
-    }
-
-    if !settings.auto_activate && matches!(inner, InnerConfig::Real(_)) {
-        return InnerConfig::Fake {
-            kind: FakeKind::NotActive,
-            detail: "auto-activate=false; waiting for IS-05 PATCH to activate".into(),
+                detail: "auto-activate=false; waiting for IS-05 PATCH to activate".into(),
+            },
+            other => other,
         };
     }
 
-    inner
+    let Some(blocked) = eager_blocked else {
+        return inner;
+    };
+
+    // Eager bring-up was requested but the flow id / destination is not
+    // available from a property or the transport file. This applies to a
+    // real chain (which we downgrade) and the dormant "waiting for the
+    // flow id / destination" case; leave merely-deferred (NotConfigured)
+    // or invalid (Misconfigured) resources alone — they carry their own
+    // diagnostics.
+    let eager_candidate = matches!(
+        inner,
+        InnerConfig::Real(_) | InnerConfig::Fake { kind: FakeKind::NotActive, .. }
+    );
+    if !eager_candidate {
+        return inner;
+    }
+
+    // Error level for visibility, but non-fatal: the resource is added
+    // and an IS-05 PATCH activates it later.
+    gst::error!(
+        cat,
+        "{element}: auto-activate=true but the data path cannot go live yet — {blocked} not \
+         provided by a property or the transport file; the resource is added and will \
+         activate on an IS-05 PATCH",
+    );
+
+    match inner {
+        InnerConfig::Real(_) => InnerConfig::Fake {
+            kind: FakeKind::NotActive,
+            detail: format!(
+                "auto-activate=true but {blocked} unavailable; waiting for IS-05 PATCH",
+            ),
+        },
+        other => other,
+    }
 }
 
 /// Honour `auto-activate=false` for a fully-resolved inner chain.
@@ -1653,101 +1652,106 @@ mod tests {
             }
         }
 
-        #[test]
-        fn policy_downgrades_eager_mxl_without_flow_id() {
-            let s = CommonSettings {
-                mxl_flow_id: String::new(),
-                auto_activate: true,
-                ..settings(Side::Sender)
-            };
-            let inner = InnerConfig::Fake {
-                kind: FakeKind::NotActive,
-                detail: "configuring-only".into(),
-            };
-            let after = super::super::apply_auto_activate_policy(&cat(), "nmossink", &s, inner);
-            assert!(matches!(after, InnerConfig::Fake { .. }));
-        }
-
-        #[test]
-        fn policy_downgrades_eager_rtp_sender_without_destination() {
-            let s = CommonSettings {
-                transport: Transport::Udp,
-                side: Side::Sender,
-                auto_activate: true,
-                source_ip: "192.0.2.1".to_owned(),
-                destination_ip: String::new(),
-                destination_port: 0,
-                ..settings(Side::Sender)
-            };
-            let inner = InnerConfig::Real(TransportConfig::Mxl {
+        // `apply_auto_activate_policy` is transport-neutral: it acts on
+        // the `auto_activate` toggle and the `eager_blocked` param the
+        // transport resolver computes. These exercise the toggle/param
+        // matrix directly; the transport-specific computation of the
+        // param lives in `mxl_eager_blocked` / `udp_eager_blocked` tests.
+        fn real_mxl() -> InnerConfig {
+            InnerConfig::Real(TransportConfig::Mxl {
                 domain_path: "/var/lib/mxl/domain-a".to_owned(),
                 flow_id: FLOW_ID_A.to_owned(),
                 format: FlowFormat::Video,
                 transport_file: None,
-            });
-            let after = super::super::apply_auto_activate_policy(&cat(), "nmossink", &s, inner);
+            })
+        }
+
+        #[test]
+        fn policy_auto_activate_false_defers_real_chain() {
+            let s = CommonSettings {
+                auto_activate: false,
+                ..settings(Side::Sender)
+            };
+            let after = super::super::apply_auto_activate_policy(
+                &cat(),
+                "nmossink",
+                &s,
+                real_mxl(),
+                None,
+            );
+            match after {
+                InnerConfig::Fake { kind, .. } => assert_eq!(kind, FakeKind::NotActive),
+                InnerConfig::Real(_) => panic!("auto-activate=false must defer a real chain"),
+            }
+        }
+
+        #[test]
+        fn policy_eager_unblocked_keeps_real_chain() {
+            let s = CommonSettings {
+                auto_activate: true,
+                ..settings(Side::Sender)
+            };
+            let after = super::super::apply_auto_activate_policy(
+                &cat(),
+                "nmossink",
+                &s,
+                real_mxl(),
+                None,
+            );
+            assert!(matches!(after, InnerConfig::Real(_)));
+        }
+
+        #[test]
+        fn policy_eager_blocked_downgrades_real_chain() {
+            let s = CommonSettings {
+                auto_activate: true,
+                ..settings(Side::Sender)
+            };
+            let after = super::super::apply_auto_activate_policy(
+                &cat(),
+                "nmossink",
+                &s,
+                real_mxl(),
+                Some("mxl-flow-id"),
+            );
             match after {
                 InnerConfig::Fake { kind, detail } => {
                     assert_eq!(kind, FakeKind::NotActive);
-                    assert!(detail.contains("destination-ip"));
+                    assert!(detail.contains("mxl-flow-id"));
                 }
-                InnerConfig::Real(_) => panic!("must not eager-activate without destination-ip"),
+                InnerConfig::Real(_) => panic!("blocked eager activation must defer"),
             }
+        }
+
+        #[test]
+        fn policy_eager_blocked_leaves_misconfigured_untouched() {
+            let s = CommonSettings {
+                auto_activate: true,
+                ..settings(Side::Sender)
+            };
+            let inner = InnerConfig::Fake {
+                kind: FakeKind::Misconfigured,
+                detail: "bad".into(),
+            };
+            let after = super::super::apply_auto_activate_policy(
+                &cat(),
+                "nmossink",
+                &s,
+                inner,
+                Some("mxl-flow-id"),
+            );
+            assert!(matches!(
+                after,
+                InnerConfig::Fake {
+                    kind: FakeKind::Misconfigured,
+                    ..
+                }
+            ));
         }
     }
 
     mod configuring_minimum {
         use super::*;
-
-        #[test]
-        fn deferred_transport_params_mxl_without_flow_id() {
-            let s = settings(Side::Receiver);
-            assert_eq!(
-                super::super::deferred_transport_params(&s),
-                vec!["mxl-flow-id"]
-            );
-        }
-
-        #[test]
-        fn deferred_transport_params_rtp_sender_wire_endpoints() {
-            let s = CommonSettings {
-                transport: Transport::Udp,
-                side: Side::Sender,
-                source_ip: "192.0.2.1".to_owned(),
-                ..settings(Side::Sender)
-            };
-            assert_eq!(
-                super::super::deferred_transport_params(&s),
-                vec!["destination-ip", "destination-port"]
-            );
-        }
-
-        #[test]
-        fn deferred_transport_params_rtp_receiver_unicast_omits_multicast_ip() {
-            let s = CommonSettings {
-                transport: Transport::Udp,
-                side: Side::Receiver,
-                interface_ip: "192.0.2.1".to_owned(),
-                ..settings(Side::Receiver)
-            };
-            assert_eq!(
-                super::super::deferred_transport_params(&s),
-                vec!["destination-port"]
-            );
-        }
-
-        #[test]
-        fn deferred_transport_params_rtp_receiver_multicast_with_port_is_complete() {
-            let s = CommonSettings {
-                transport: Transport::Udp,
-                side: Side::Receiver,
-                interface_ip: "192.0.2.1".to_owned(),
-                multicast_ip: "239.1.1.1".to_owned(),
-                destination_port: 5004,
-                ..settings(Side::Receiver)
-            };
-            assert!(super::super::deferred_transport_params(&s).is_empty());
-        }
 
         #[test]
         fn rtp_sender_caps_synthesis_requires_source_ip() {

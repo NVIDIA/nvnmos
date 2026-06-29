@@ -458,8 +458,6 @@ fn build_producer(
                 node-seed={NODE_SEED} \
                 sender-name={PRODUCER_VIDEO_NAME} \
                 auto-activate=true \
-                mxl-flow-id={VIDEO_FLOW_ID} \
-                mxl-domain-id={DOMAIN_ID} \
                 mxl-domain-path={domain_path} \
                 transport-file-path={video_flow_path} \
          ext.st2038 \
@@ -470,8 +468,6 @@ fn build_producer(
                 node-seed={NODE_SEED} \
                 sender-name={PRODUCER_DATA_NAME} \
                 auto-activate=true \
-                mxl-flow-id={DATA_FLOW_ID} \
-                mxl-domain-id={DOMAIN_ID} \
                 mxl-domain-path={domain_path} \
                 transport-file-path={data_flow_path}"
     );
@@ -505,8 +501,6 @@ fn build_consumer(
              node-seed={NODE_SEED} \
              receiver-name={CONSUMER_VIDEO_NAME} \
              auto-activate=true \
-             mxl-flow-id={VIDEO_FLOW_ID} \
-             mxl-domain-id={DOMAIN_ID} \
              mxl-domain-path={domain_path} \
              transport-file-path={video_flow_path} \
            ! queue \
@@ -518,8 +512,6 @@ fn build_consumer(
              node-seed={NODE_SEED} \
              receiver-name={CONSUMER_DATA_NAME} \
              auto-activate=true \
-             mxl-flow-id={DATA_FLOW_ID} \
-             mxl-domain-id={DOMAIN_ID} \
              mxl-domain-path={domain_path} \
              transport-file-path={data_flow_path} \
            ! queue \

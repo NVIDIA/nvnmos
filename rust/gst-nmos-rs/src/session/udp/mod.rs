@@ -82,6 +82,59 @@ pub(super) fn validate_rtp_configuring_minimum(
     }
 }
 
+/// A `c=` / IS-05 `destination_ip` that is the RFC 4566 unspecified
+/// address (or empty) is a configuring placeholder, not a real endpoint
+/// to send to / receive from.
+fn is_unspecified_destination(addr: &str) -> bool {
+    addr.is_empty()
+        || addr
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_unspecified())
+            .unwrap_or(false)
+}
+
+/// Deferrable RTP/UDP parameter still unavailable for eager
+/// `auto-activate`.
+///
+/// The one binding constraint is the same for both sides: the resolved
+/// IS-05 `destination_ip` slot in `media.primary`. There is no sensible
+/// default to invent for an unspecified address (`0.0.0.0`), so a
+/// configuring chain without one must wait for an IS-05 PATCH. It is
+/// read from the resolved `media`, so a property and a transport file
+/// are honoured on the same footing. The destination *port* is not a
+/// blocker: an unset / zero port resolves to the IS-05 auto default
+/// ([`sdp::defaults::RTP_PORT`], 5004) here and in the daemon.
+///
+/// The check is side-neutral but the reported property is not, because
+/// the same `destination_ip` slot is filled by different properties:
+/// the Sender's egress target is `destination-ip`; the Receiver has no
+/// `destination-ip` property and supplies the slot via `multicast-ip`
+/// (or `interface-ip` for unicast). The other side-specific endpoints —
+/// Sender `source-ip`, Receiver `interface-ip` — are required when the
+/// Sender / Receiver is added (or fall back to an OS default), not
+/// deferrable activation params, so they are never reported here.
+///
+/// Only a configured-but-dormant real chain can be eager-activated; any
+/// fake chain returns `None` so the policy leaves deferred
+/// (`NotConfigured`) / invalid (`Misconfigured`) resources alone and also
+/// does not treat an `a=inactive` leg (`NotActive`) — fully specified
+/// but dormant — as an auto-activate failure.
+pub(super) fn udp_eager_blocked(side: Side, inner: &InnerConfig) -> Option<&'static str> {
+    let media = match inner {
+        InnerConfig::Real(TransportConfig::Udp { media, .. })
+        | InnerConfig::Real(TransportConfig::NvDsUdp { media, .. }) => media,
+        _ => return None,
+    };
+    if is_unspecified_destination(&media.primary.destination_ip) {
+        Some(match side {
+            Side::Sender => "destination-ip",
+            Side::Receiver => "multicast-ip or interface-ip",
+        })
+    } else {
+        None
+    }
+}
+
 /// Build [`sdp::SdpBuildInput`] from element settings and essence caps.
 /// Shared by NULL→READY caps synthesis and READY→PAUSED deferred
 /// sender AddSender.
@@ -203,12 +256,8 @@ pub(super) fn synthesise_deferred_sender_udp(
         )?,
         Transport::Mxl => bail!("{element}: internal: MXL is not an RTP/UDP transport"),
     };
-    let inner = super::apply_auto_activate_policy(
-        &crate::CAT,
-        element,
-        settings,
-        inner,
-    );
+    let blocked = udp_eager_blocked(settings.side, &inner);
+    let inner = super::apply_auto_activate_policy(&crate::CAT, element, settings, inner, blocked);
     Ok((text, inner))
 }
 
@@ -397,6 +446,8 @@ pub(super) fn resolve_inner_config_nvdsudp(
         )?,
         settings,
     );
+    let blocked = udp_eager_blocked(settings.side, &inner);
+    let inner = super::apply_auto_activate_policy(cat, element, settings, inner, blocked);
     Ok((inner, resolved_transport_file))
 }
 
@@ -464,6 +515,8 @@ pub(super) fn resolve_inner_config_udp(
         )?,
         settings,
     );
+    let blocked = udp_eager_blocked(settings.side, &inner);
+    let inner = super::apply_auto_activate_policy(cat, element, settings, inner, blocked);
     Ok((inner, resolved_transport_file))
 }
 
@@ -502,6 +555,69 @@ mod tests {
                 "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1",
             )
             .expect("static raw caps parse"),
+        }
+    }
+
+    mod eager_blocked {
+        use super::*;
+
+        fn real_udp(media: UdpMedia) -> InnerConfig {
+            InnerConfig::Real(TransportConfig::Udp {
+                variant: UdpVariant::V1,
+                media,
+                transport_file: Some("sdp".to_owned()),
+            })
+        }
+
+        #[test]
+        fn real_endpoints_are_unblocked() {
+            assert!(udp_eager_blocked(Side::Sender, &real_udp(sample_udp_media())).is_none());
+            assert!(udp_eager_blocked(Side::Receiver, &real_udp(sample_udp_media())).is_none());
+        }
+
+        #[test]
+        fn unspecified_destination_ip_blocks_with_side_specific_label() {
+            let mut m = sample_udp_media();
+            m.primary.destination_ip = "0.0.0.0".to_owned();
+            let inner = real_udp(m);
+            assert_eq!(
+                udp_eager_blocked(Side::Sender, &inner),
+                Some("destination-ip")
+            );
+            assert_eq!(
+                udp_eager_blocked(Side::Receiver, &inner),
+                Some("multicast-ip or interface-ip")
+            );
+        }
+
+        #[test]
+        fn empty_destination_ip_blocks() {
+            let mut m = sample_udp_media();
+            m.primary.destination_ip = String::new();
+            assert_eq!(
+                udp_eager_blocked(Side::Sender, &real_udp(m)),
+                Some("destination-ip")
+            );
+        }
+
+        #[test]
+        fn zero_destination_port_does_not_block() {
+            // 0 / omitted port resolves to the IS-05 auto default (5004)
+            // here and in the daemon, so it is never a deferral reason —
+            // only an unspecified destination address can be.
+            let mut m = sample_udp_media();
+            m.primary.destination_port = 0;
+            assert!(udp_eager_blocked(Side::Sender, &real_udp(m)).is_none());
+        }
+
+        #[test]
+        fn fake_chain_never_blocks() {
+            let inner = InnerConfig::Fake {
+                kind: FakeKind::NotConfigured,
+                detail: String::new(),
+            };
+            assert!(udp_eager_blocked(Side::Sender, &inner).is_none());
+            assert!(udp_eager_blocked(Side::Receiver, &inner).is_none());
         }
     }
 
@@ -1173,6 +1289,7 @@ mod tests {
                 label: "Spliced label".to_owned(),
                 description: "Spliced description".to_owned(),
                 name: "spliced-name".to_owned(),
+                auto_activate: true,
                 ..udp_settings(Side::Receiver, Transport::Udp)
             };
             let (inner, spliced_text) = resolve_inner_config_udp(
@@ -1301,6 +1418,7 @@ mod tests {
             );
             s.interface_ip = "192.0.2.30".to_owned();
             s.destination_port = 5004;
+            s.auto_activate = true;
             let (inner, text) = resolve_inner_config_udp(
                 &cat(),
                 "nmossrc",
@@ -1339,6 +1457,7 @@ mod tests {
                 destination_port: 5004,
                 interface_ip: "192.0.2.30".to_owned(),
                 source_ip: "192.0.2.20".to_owned(),
+                auto_activate: true,
                 ..udp_settings(Side::Receiver, Transport::Udp)
             };
             let (inner, text) = resolve_inner_config_udp(
@@ -1386,6 +1505,7 @@ mod tests {
                 destination_port: 5008,
                 source_ip: "192.0.2.10".to_owned(),
                 source_port: 5008,
+                auto_activate: true,
                 ..udp_settings(Side::Sender, Transport::Udp)
             };
             let (inner, text) = resolve_inner_config_udp(
