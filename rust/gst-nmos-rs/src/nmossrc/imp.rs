@@ -64,6 +64,7 @@ struct Settings {
     mxl_flow_id: String,
     label: String,
     description: String,
+    group_hint: String,
     transport_file: String,
     transport_file_path: String,
     caps: Option<gst::Caps>,
@@ -110,6 +111,7 @@ impl Default for Settings {
             mxl_flow_id: String::new(),
             label: String::new(),
             description: String::new(),
+            group_hint: String::new(),
             transport_file: String::new(),
             transport_file_path: String::new(),
             caps: None,
@@ -231,6 +233,10 @@ impl ObjectImpl for NmosSrc {
                 glib::ParamSpecString::builder("description")
                     .nick("Description")
                     .blurb(crate::session::DESCRIPTION_BLURB_RECEIVER)
+                    .build(),
+                glib::ParamSpecString::builder("group-hint")
+                    .nick("Group hint")
+                    .blurb(crate::session::GROUP_HINT_BLURB_RECEIVER)
                     .build(),
                 glib::ParamSpecString::builder("transport-file")
                     .nick("Transport file")
@@ -385,6 +391,9 @@ impl ObjectImpl for NmosSrc {
             "description" => {
                 settings.description = string_or_empty(value);
             }
+            "group-hint" => {
+                settings.group_hint = string_or_empty(value);
+            }
             "transport-file" => {
                 settings.transport_file = string_or_empty(value);
             }
@@ -441,6 +450,7 @@ impl ObjectImpl for NmosSrc {
             "auto-activate" => settings.auto_activate.to_value(),
             "label" => settings.label.to_value(),
             "description" => settings.description.to_value(),
+            "group-hint" => settings.group_hint.to_value(),
             "transport-file" => settings.transport_file.to_value(),
             "transport-file-path" => settings.transport_file_path.to_value(),
             "caps" => settings.caps.to_value(),
@@ -1125,6 +1135,7 @@ impl From<Settings> for CommonSettings {
             transport_file_path: s.transport_file_path,
             label: s.label,
             description: s.description,
+            group_hint: s.group_hint,
             caps: s.caps,
             transport_caps: s.transport_caps,
             caps_mode: s.receiver_caps_mode,

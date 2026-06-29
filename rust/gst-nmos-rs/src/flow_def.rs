@@ -41,9 +41,10 @@
 //! (`grain_rate`, `frame_width`, `frame_height`, `components`, …)
 //! are required by libnvnmos and are derived from `caps`; omitting
 //! `caps` leaves nothing to synthesise. Cosmetic / identity fields
-//! (`format`, non-empty `label`, `tags["urn:x-nmos:tag:grouphint/v1.0"]`,
-//! `urn:x-nvnmos:tag:*`) are also emitted. The top-level `id` is
-//! omitted when `flow_id` is empty so libnvnmos can create the
+//! (`format`, non-empty `label`, the `urn:x-nvnmos:tag:name` and
+//! `urn:x-nvnmos:tag:mxl-domain-id` tags, and the optional
+//! `urn:x-nmos:tag:grouphint/v1.0` tag) are also emitted. The top-level
+//! `id` is omitted when `flow_id` is empty so libnvnmos can create the
 //! resource and resolve the MXL flow id at activation (Senders fall
 //! back to the generated NMOS Flow id; Receivers ignore `id` at
 //! AddReceiver). When the inner data path later goes live, `mxlsink`
@@ -288,12 +289,14 @@ fn resolve_format(
 pub(crate) struct FlowDefOverrides<'a> {
     /// Top-level `id` (the MXL flow id).
     pub(crate) flow_id: Option<&'a str>,
+    /// `tags["urn:x-nvnmos:tag:name"]` (the per-side resource name).
+    pub(crate) name: Option<&'a str>,
     /// Top-level `label`.
     pub(crate) label: Option<&'a str>,
     /// Top-level `description`.
     pub(crate) description: Option<&'a str>,
-    /// `tags["urn:x-nvnmos:tag:name"]` (the per-side resource name).
-    pub(crate) name: Option<&'a str>,
+    /// `tags["urn:x-nmos:tag:grouphint/v1.0"]` (the NMOS group hint).
+    pub(crate) group_hint: Option<&'a str>,
     /// `tags["urn:x-nvnmos:tag:mxl-domain-id"]`.
     pub(crate) mxl_domain_id: Option<&'a str>,
     /// Presence of `tags["urn:x-nvnmos:tag:caps"]`. See [`CapsMode`].
@@ -340,6 +343,7 @@ pub(crate) fn splice_overrides(
     // when there's nothing to do, so a transport file without a
     // `tags` object still round-trips cleanly.
     let touches_tags = overrides.name.is_some()
+        || overrides.group_hint.is_some()
         || overrides.mxl_domain_id.is_some()
         || overrides.caps_mode != CapsMode::Auto;
     if touches_tags {
@@ -353,6 +357,12 @@ pub(crate) fn splice_overrides(
             tags.insert(
                 "urn:x-nvnmos:tag:name".to_owned(),
                 serde_json::json!([name]),
+            );
+        }
+        if let Some(group_hint) = overrides.group_hint {
+            tags.insert(
+                "urn:x-nmos:tag:grouphint/v1.0".to_owned(),
+                serde_json::json!([group_hint]),
             );
         }
         if let Some(mxl_domain_id) = overrides.mxl_domain_id {
@@ -406,8 +416,7 @@ pub(crate) struct FlowDefBuildInput<'a> {
     /// concrete MXL flow id (the inner chain stays fake until IS-05
     /// activation supplies one).
     pub(crate) flow_id: &'a str,
-    /// NMOS resource name. Used as the `<group>` portion of the
-    /// `urn:x-nmos:tag:grouphint/v1.0` tag and as the value of the
+    /// NMOS resource name. Emitted as the value of the
     /// `urn:x-nvnmos:tag:name` tag (required by `libnvnmos`).
     /// Required non-empty.
     pub(crate) name: &'a str,
@@ -422,6 +431,9 @@ pub(crate) struct FlowDefBuildInput<'a> {
     pub(crate) label: &'a str,
     /// NMOS `description`. Optional; omitted from the JSON when empty.
     pub(crate) description: &'a str,
+    /// NMOS group hint (`urn:x-nmos:tag:grouphint/v1.0`). Optional;
+    /// the tag is omitted from the JSON when empty.
+    pub(crate) group_hint: &'a str,
     /// Essence caps to translate. The first structure is used.
     pub(crate) caps: &'a gst::Caps,
 }
@@ -458,13 +470,6 @@ pub(crate) fn from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDef
         other => return Err(FlowDefError::UnsupportedCaps(other.to_owned())),
     };
 
-    let role = match format {
-        FlowFormat::Video => "Video",
-        FlowFormat::Audio => "Audio",
-        FlowFormat::Data => "Ancillary Data",
-        FlowFormat::Unspecified => unreachable!("body builders never return Unspecified"),
-    };
-    let grouphint = format!("{}:{}", input.name, role);
     // `label` is `field_as_string` (required) in nmos-cpp — empty
     // would be accepted as long as the key is present, but a more
     // helpful default is the resource name.
@@ -483,16 +488,25 @@ pub(crate) fn from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDef
         // `description` is `field_as_string` (required) in nmos-cpp;
         // emit the property value as-is, even if it's empty.
         "description": input.description,
-        // The three tags consumed by `libnvnmos` (`name`, `mxl-domain-id`)
-        // and the group-hint tag required in configuring flow_def JSON.
+        // Required tags consumed by `libnvnmos` (`name`, `mxl-domain-id`);
+        // the optional group hint is added below only when supplied.
         "tags": {
-            "urn:x-nmos:tag:grouphint/v1.0": [grouphint],
             "urn:x-nvnmos:tag:name": [input.name],
             "urn:x-nvnmos:tag:mxl-domain-id": [input.mxl_domain_id],
         },
         "parents": [],
     });
     let object = value.as_object_mut().unwrap();
+    if !input.group_hint.is_empty() {
+        object
+            .get_mut("tags")
+            .and_then(|t| t.as_object_mut())
+            .expect("tags object emitted above")
+            .insert(
+                "urn:x-nmos:tag:grouphint/v1.0".to_owned(),
+                serde_json::json!([input.group_hint]),
+            );
+    }
     if !input.flow_id.is_empty() {
         object.insert("id".to_owned(), serde_json::json!(input.flow_id));
     }
@@ -1098,6 +1112,7 @@ mod tests {
             mxl_domain_id: DOMAIN_ID,
             label: "",
             description: "",
+            group_hint: "",
             caps,
         }
     }
@@ -1123,9 +1138,9 @@ mod tests {
         assert_eq!(v["label"], "cam-1", "label falls back to name when property is empty");
         assert_eq!(v["description"], "", "description is emitted even when empty");
         assert_eq!(v["parents"], serde_json::json!([]));
-        assert_eq!(
-            v["tags"]["urn:x-nmos:tag:grouphint/v1.0"],
-            serde_json::json!(["cam-1:Video"]),
+        assert!(
+            v["tags"]["urn:x-nmos:tag:grouphint/v1.0"].is_null(),
+            "group hint tag omitted when property is unset",
         );
         assert_eq!(
             v["tags"]["urn:x-nvnmos:tag:name"],
@@ -1182,12 +1197,48 @@ mod tests {
         assert_eq!(v["bit_depth"], 32);
         assert_eq!(v["label"], "mic-1", "label falls back to name when property is empty");
         assert_eq!(v["description"], "", "description is emitted even when empty");
-        assert_eq!(
-            v["tags"]["urn:x-nmos:tag:grouphint/v1.0"],
-            serde_json::json!(["mic-1:Audio"]),
+        assert!(
+            v["tags"]["urn:x-nmos:tag:grouphint/v1.0"].is_null(),
+            "group hint tag omitted when property is unset",
         );
         assert!(v.get("colorspace").is_none(), "colorspace is video-only");
         assert!(v.get("components").is_none(), "components is video-only");
+    }
+
+    #[test]
+    fn from_caps_emits_group_hint_when_set() {
+        let caps =
+            caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=25/1");
+        let json = from_caps(&FlowDefBuildInput {
+            group_hint: "SDI 1:Video",
+            ..input(UUID_A, "cam-1", &caps)
+        })
+        .unwrap();
+        let v = parse(&json);
+        assert_eq!(
+            v["tags"]["urn:x-nmos:tag:grouphint/v1.0"],
+            serde_json::json!(["SDI 1:Video"]),
+        );
+    }
+
+    #[test]
+    fn splice_overrides_group_hint_tag() {
+        let original = format!(
+            r#"{{"id":"{UUID_A}","format":"urn:x-nmos:format:video","tags":{{"urn:x-nmos:tag:grouphint/v1.0":["old:Video"]}}}}"#
+        );
+        let spliced = splice_overrides(
+            &original,
+            &FlowDefOverrides {
+                group_hint: Some("SDI 1:Video"),
+                ..FlowDefOverrides::default()
+            },
+        )
+        .unwrap();
+        let v = parse_value(&spliced);
+        assert_eq!(
+            v["tags"]["urn:x-nmos:tag:grouphint/v1.0"],
+            serde_json::json!(["SDI 1:Video"]),
+        );
     }
 
     #[test]
@@ -1199,9 +1250,9 @@ mod tests {
         assert_eq!(v["media_type"], "video/smpte291");
         assert_eq!(v["grain_rate"]["numerator"], 30);
         assert_eq!(v["grain_rate"]["denominator"], 1);
-        assert_eq!(
-            v["tags"]["urn:x-nmos:tag:grouphint/v1.0"],
-            serde_json::json!(["anc-1:Ancillary Data"]),
+        assert!(
+            v["tags"]["urn:x-nmos:tag:grouphint/v1.0"].is_null(),
+            "group hint tag omitted when property is unset",
         );
     }
 

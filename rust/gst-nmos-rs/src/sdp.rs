@@ -347,6 +347,15 @@ pub(crate) struct SdpSession<'a> {
     /// field; SDP-only entry points would have failed with
     /// "Missing or empty x-nvnmos-name attribute in SDP".
     pub name: Option<&'a str>,
+    /// Session-level `a=x-nvnmos-group-hint:` value (the NMOS group
+    /// hint, `urn:x-nmos:tag:grouphint/v1.0`). `None` suppresses the
+    /// attribute entirely. Splices in via [`SdpOverrides::group_hint`].
+    /// libnvnmos reads it from `session_attributes`
+    /// (`get_session_description_group_hint` in `nvnmos_impl.cpp`) and
+    /// applies it to the IS-04 resource for both Senders and Receivers.
+    /// Emitted immediately after `a=x-nvnmos-name` to match the
+    /// daemon's own ordering in `make_session_description`.
+    pub group_hint: Option<&'a str>,
     /// Whether to emit a media-level `a=x-nvnmos-caps:<pt>` line
     /// for the resulting Receiver. `true` advertises *wide* caps
     /// (the daemon adds the IS-04 Receiver with the
@@ -702,6 +711,7 @@ pub(crate) fn normalise_to_single_active_leg(text: &str) -> Result<String, SdpEr
         session_name,
         description: msg.information(),
         name: session_attribute_value(&msg, "x-nvnmos-name"),
+        group_hint: session_attribute_value(&msg, "x-nvnmos-group-hint"),
         advertise_caps: false,
         emit_ptp_ts_refclk,
     };
@@ -801,6 +811,12 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
     // emission would be invisible to SDP-only entry points.
     if let Some(name) = session.name {
         msg.add_attribute("x-nvnmos-name", Some(name));
+    }
+    // Session-level group hint, emitted after `x-nvnmos-name` to match
+    // the daemon's `make_session_description` ordering. libnvnmos lifts
+    // it onto the IS-04 resource via `get_session_description_group_hint`.
+    if let Some(group_hint) = session.group_hint {
+        msg.add_attribute("x-nvnmos-group-hint", Some(group_hint));
     }
 
     let leg = &media.primary;
@@ -1048,9 +1064,10 @@ fn canonicalise_fmtp_value(value: &str) -> Option<String> {
 /// constructing the struct.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct SdpOverrides<'a> {
+    pub name: Option<&'a str>,
     pub label: Option<&'a str>,
     pub description: Option<&'a str>,
-    pub name: Option<&'a str>,
+    pub group_hint: Option<&'a str>,
     pub interface_ip: Option<&'a str>,
     pub destination_ip: Option<&'a str>,
     pub destination_port: Option<u16>,
@@ -1289,16 +1306,19 @@ pub(crate) struct SdpBuildInput<'a> {
     /// `source_ip` / `interface_ip` into the produced
     /// [`UdpLeg`].
     pub side: Side,
+    /// NMOS resource name → session-level `a=x-nvnmos-name:`.
+    /// Empty omits the attribute (libnvnmos then falls back to
+    /// the `s=` value at `get_session_description_resource_name`).
+    pub name: &'a str,
     /// NMOS resource label → SDP `s=` line. Empty falls back to
     /// `"nvnmos"`; RFC 4566 §5.3 requires `s=` to be non-empty.
     pub label: &'a str,
     /// NMOS resource description → SDP `i=` line. Empty omits
     /// the `i=` line.
     pub description: &'a str,
-    /// NMOS resource name → session-level `a=x-nvnmos-name:`.
-    /// Empty omits the attribute (libnvnmos then falls back to
-    /// the `s=` value at `get_session_description_resource_name`).
-    pub name: &'a str,
+    /// NMOS group hint → session-level `a=x-nvnmos-group-hint:`.
+    /// Empty omits the attribute.
+    pub group_hint: &'a str,
     /// IS-05 `source_ip` — per-side meaning:
     /// * Sender: local egress NIC IP. Drives both
     ///   `a=source-filter:` include and the
@@ -1425,6 +1445,11 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
     } else {
         Some(input.name)
     };
+    let group_hint = if input.group_hint.is_empty() {
+        None
+    } else {
+        Some(input.group_hint)
+    };
 
     let origin_session_id = stable_origin_session_id(input.node_seed, input.side, input.name);
     let emit_ptp_ts_refclk =
@@ -1435,6 +1460,7 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
         session_name,
         description,
         name,
+        group_hint,
         advertise_caps: input.advertise_caps,
         emit_ptp_ts_refclk,
     };
@@ -3044,6 +3070,7 @@ mod tests {
             session_name: "test session",
             description: None,
             name: None,
+            group_hint: None,
             advertise_caps: false,
             emit_ptp_ts_refclk: false,
         }
@@ -3251,6 +3278,37 @@ mod tests {
     }
 
     #[test]
+    fn build_sdp_emits_group_hint_after_name_when_set() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let mut session = test_session();
+        session.name = Some("Camera 1");
+        session.group_hint = Some("SDI 1:Video");
+        let text = build_sdp(&media, session).expect("build");
+        let name_at = text
+            .find("a=x-nvnmos-name:Camera 1")
+            .expect("x-nvnmos-name line present");
+        let hint_at = text
+            .find("a=x-nvnmos-group-hint:SDI 1:Video")
+            .expect("x-nvnmos-group-hint line present");
+        assert!(
+            name_at < hint_at,
+            "group hint must follow name to match the daemon ordering:\n{text}",
+        );
+    }
+
+    #[test]
+    fn build_sdp_omits_group_hint_when_unset() {
+        init_gst();
+        let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
+        let text = build_sdp(&media, test_session()).expect("build");
+        assert!(
+            !text.contains("x-nvnmos-group-hint"),
+            "RTP/UDP synthesis must not invent a group hint when unset: {text}",
+        );
+    }
+
+    #[test]
     fn build_sdp_emits_ptp_ts_refclk_when_flag_set() {
         init_gst();
         let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
@@ -3453,6 +3511,49 @@ mod tests {
             name_pos < media_pos,
             "a=x-nvnmos-name (offset {name_pos}) must appear before first m= (offset {media_pos}); \
              session-level attributes precede the first media section per RFC 4566 §5: {spliced}",
+        );
+    }
+
+    #[test]
+    fn passthrough_upserts_group_hint_at_session_level() {
+        init_gst();
+        let spliced = passthrough_with_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides { group_hint: Some("SDI 1:Video"), ..Default::default() },
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )
+        .expect("splice");
+        let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse");
+        assert_eq!(
+            msg.attribute_val("x-nvnmos-group-hint"),
+            Some("SDI 1:Video"),
+            "x-nvnmos-group-hint must be readable at session level: {spliced}",
+        );
+    }
+
+    #[test]
+    fn passthrough_leaves_group_hint_untouched_when_unset() {
+        init_gst();
+        // Seed a file that already carries a group hint (via the same
+        // upsert path, so the attribute lands at a valid offset), then
+        // splice an unrelated override and assert the hint survives.
+        let with_hint = passthrough_with_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides { group_hint: Some("orig:Video"), ..Default::default() },
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )
+        .expect("seed");
+        let spliced = passthrough_with_overrides(
+            &with_hint,
+            &SdpOverrides { label: Some("new label"), ..Default::default() },
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )
+        .expect("splice");
+        let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse");
+        assert_eq!(
+            msg.attribute_val("x-nvnmos-group-hint"),
+            Some("orig:Video"),
+            "an absent group_hint override must preserve the file's value: {spliced}",
         );
     }
 
@@ -4803,9 +4904,10 @@ mod tests {
             essence_caps,
             transport_caps,
             side,
+            name: "test-name",
             label: "test-label",
             description: "test-description",
-            name: "test-name",
+            group_hint: "",
             source_ip: "192.0.2.10",
             source_port: 5004,
             destination_ip: "239.0.0.1",
@@ -5290,6 +5392,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn from_caps_emits_group_hint_when_set() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let mut input = build_input(&essence, Side::Sender, None);
+        input.group_hint = "SDI 1:Audio";
+        let text = from_caps(&input).expect("synth");
+        assert!(
+            text.contains("a=x-nvnmos-group-hint:SDI 1:Audio"),
+            "a=x-nvnmos-group-hint must be emitted when set:\n{text}",
+        );
+    }
+
+    #[test]
+    fn from_caps_empty_group_hint_omits_attribute() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let input = build_input(&essence, Side::Sender, None);
+        let text = from_caps(&input).expect("synth");
+        assert!(
+            !text.contains("x-nvnmos-group-hint"),
+            "RTP/UDP synthesis must not synthesise a group hint default:\n{text}",
+        );
+    }
+
     /// Regression guard for the synthesised raw-video SDP
     /// case. nmos-cpp's `make_video_raw_sdp_parameters` emits
     /// the rtpmap encoding name lower-case (`raw`) and the
@@ -5312,9 +5439,10 @@ mod tests {
             essence_caps: &essence,
             transport_caps: None,
             side: Side::Sender,
+            name: "video1",
             label: "video1",
             description: "",
-            name: "video1",
+            group_hint: "",
             source_ip: "192.0.2.10",
             source_port: 0,
             destination_ip: "232.99.99.1",

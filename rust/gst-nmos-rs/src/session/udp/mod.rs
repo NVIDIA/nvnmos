@@ -154,9 +154,10 @@ pub(super) fn sdp_build_input<'a>(
         essence_caps,
         transport_caps: settings.transport_caps.as_ref(),
         side: settings.side,
+        name: &settings.name,
         label: &settings.label,
         description: &settings.description,
-        name: &settings.name,
+        group_hint: &settings.group_hint,
         source_ip: &settings.source_ip,
         source_port: settings.source_port,
         destination_ip,
@@ -306,9 +307,10 @@ pub(crate) fn property_overrides_udp(settings: &CommonSettings) -> SdpOverrides<
     let a_maxptime = tc.and_then(|s| s.get::<&str>("a-maxptime").ok());
 
     SdpOverrides {
+        name: opt(&settings.name),
         label: opt(&settings.label),
         description: opt(&settings.description),
-        name: opt(&settings.name),
+        group_hint: opt(&settings.group_hint),
         interface_ip,
         destination_ip,
         destination_port: opt_port(settings.destination_port),

@@ -48,6 +48,7 @@ pub(crate) fn synthesise_or_passthrough_mxl(
                 mxl_domain_id: resolved_mxl_domain_id,
                 label: &settings.label,
                 description: &settings.description,
+                group_hint: &settings.group_hint,
                 caps,
             })
             .with_context(|| format!("{element}: synthesising flow_def from caps"))?;
@@ -98,6 +99,7 @@ pub(super) fn synthesise_deferred_sender_mxl(
         mxl_domain_id: &domain_resolution.id,
         label: &settings.label,
         description: &settings.description,
+        group_hint: &settings.group_hint,
         caps: fixated,
     })
     .with_context(|| format!("{element}: synthesising flow_def from peer caps"))?;
@@ -129,9 +131,10 @@ pub(crate) fn property_overrides_mxl<'a>(
     }
     FlowDefOverrides {
         flow_id: opt(&settings.mxl_flow_id),
+        name: opt(&settings.name),
         label: opt(&settings.label),
         description: opt(&settings.description),
-        name: opt(&settings.name),
+        group_hint: opt(&settings.group_hint),
         mxl_domain_id: opt(resolved_mxl_domain_id),
         caps_mode: settings.caps_mode,
     }
@@ -747,6 +750,7 @@ mod tests {
                 mxl_domain_id: DOMAIN_ID,
                 label: &s.label,
                 description: &s.description,
+                group_hint: &s.group_hint,
                 caps: &caps,
             })
             .expect("deferred AddSender may synthesise without mxl-flow-id");
