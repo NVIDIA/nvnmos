@@ -334,7 +334,7 @@ fn finish_udp_inner_config(
     if transport != Transport::NvDsUdp && sdp::sdp_media_block_count(text)? > 1 {
         return Err(anyhow::Error::new(sdp::SdpError::DualLegNotSupported));
     }
-    let media = sdp::parse_sdp(text).with_context(|| {
+    let mut media = sdp::parse_sdp(text).with_context(|| {
         format!(
             "{element}: parsing SDP transport file for transport={transport:?}"
         )
@@ -357,6 +357,10 @@ fn finish_udp_inner_config(
             detail: "all legs inactive (rtp_enabled: false)".into(),
         });
     }
+    // The SDP cannot carry caps features; re-attach any requested on
+    // the `caps` property (e.g. `memory:NVMM`) so the inner element
+    // (for example, nvdsudpsrc) sees them and negotiates accordingly.
+    media.raw_caps = crate::essence_caps::overlay_features(&media.raw_caps, settings.caps.as_ref());
     Ok(build_real(media))
 }
 

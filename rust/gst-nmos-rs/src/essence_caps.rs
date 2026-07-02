@@ -28,6 +28,46 @@ pub(crate) fn caps_from(raw_caps: &gst::Caps, rtp_caps: Option<&gst::Caps>) -> g
     }
 }
 
+/// Copy the caps features (e.g. `memory:NVMM`) from `source`'s first
+/// structure onto a clone of `base`.
+///
+/// Transport files (SDP, MXL `flow_def`) have no representation for
+/// caps features, so essence caps reconstructed from a transport file
+/// have an empty feature set (which GStreamer treats as the default
+/// system-memory feature). When a `caps` property requests a non-default
+/// feature set, this re-attaches it onto the file-derived essence caps
+/// that configure the inner element. A `source` with an empty feature
+/// set or `ANY` leaves `base` unchanged.
+pub(crate) fn overlay_features(base: &gst::Caps, source: Option<&gst::Caps>) -> gst::Caps {
+    let Some(features) = source.and_then(|c| c.features(0)) else {
+        return base.clone();
+    };
+    // No structure 0 to attach to (empty or any base), or nothing to
+    // overlay (empty or any source feature set).
+    if base.structure(0).is_none() || features.is_any() || features.is_empty() {
+        return base.clone();
+    }
+    let features = features.to_owned();
+    let mut out = base.clone();
+    out.make_mut().set_features(0, Some(features));
+    out
+}
+
+/// Clone `caps` with every structure's feature set emptied (the
+/// system-memory default). The essence-shape cross-check intersects
+/// the `caps` property against caps parsed from the transport file;
+/// because the file cannot express features, a requested feature must
+/// be dropped here so it does not read as a shape mismatch. Complements
+/// [`overlay_features`].
+pub(crate) fn without_features(caps: &gst::Caps) -> gst::Caps {
+    let mut out = caps.clone();
+    let out_mut = out.make_mut();
+    for i in 0..out_mut.size() {
+        out_mut.set_features(i, Some(gst::CapsFeatures::new_empty()));
+    }
+    out
+}
+
 fn audio_caps_from(caps: &gst::Caps, channel_order: Option<&str>) -> gst::Caps {
     let Some(s) = caps.structure(0) else {
         return caps.clone();
@@ -134,6 +174,39 @@ mod tests {
             s.get::<gst::Bitmask>("channel-mask").unwrap(),
             gst::Bitmask::new((1u64 << 6) - 1),
         );
+    }
+
+    #[test]
+    fn overlay_features_reattaches_non_default_feature() {
+        init_gst();
+        let base = gst::Caps::from_str("video/x-raw,format=UYVY,width=1920,height=1080")
+            .expect("base caps");
+        let source =
+            gst::Caps::from_str("video/x-raw(memory:NVMM),format=UYVY").expect("source caps");
+        let out = overlay_features(&base, Some(&source));
+        assert!(out.features(0).unwrap().contains("memory:NVMM"));
+        // essence fields untouched
+        assert_eq!(out.structure(0).unwrap().get::<i32>("width").unwrap(), 1920);
+    }
+
+    #[test]
+    fn overlay_features_ignores_system_memory_and_none() {
+        init_gst();
+        let base = gst::Caps::from_str("video/x-raw,format=UYVY").expect("base caps");
+        let plain = gst::Caps::from_str("video/x-raw,format=UYVY").expect("plain caps");
+        assert_eq!(overlay_features(&base, None).to_string(), base.to_string());
+        assert_eq!(
+            overlay_features(&base, Some(&plain)).to_string(),
+            base.to_string(),
+        );
+    }
+
+    #[test]
+    fn without_features_resets_to_system_memory() {
+        init_gst();
+        let caps = gst::Caps::from_str("video/x-raw(memory:NVMM),format=UYVY").expect("caps");
+        let out = without_features(&caps);
+        assert!(out.features(0).unwrap().is_empty());
     }
 
     #[test]
