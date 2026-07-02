@@ -538,6 +538,11 @@ namespace nvnmos
         {
             slog::log<slog::severities::error>(gate, SLOG_FLF) << "System error: " << e.what() << " [" << e.code() << "]";
         }
+        catch (const std::logic_error& e)
+        {
+            // caller error, e.g. invalid argument to the libnvnmos API
+            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Logic error: " << e.what();
+        }
         catch (const std::runtime_error& e)
         {
             slog::log<slog::severities::error>(gate, SLOG_FLF) << "Implementation error: " << e.what();

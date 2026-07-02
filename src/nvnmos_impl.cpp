@@ -146,6 +146,10 @@ namespace nvnmos
         // generate URLs for a sender or receiver in the Node API and Connection API
         std::pair<utility::string_t, utility::string_t> make_resource_api_urls(const nmos::settings& settings, const nmos::id& id, const nmos::type& type);
 
+        // insert a resource into the model, logging the outcome (cf. nmos-cpp-node's node_implementation)
+        // throws node_implementation_exception if the resource could not be inserted, e.g. because of an unexpected duplicate id
+        void insert_resource(nmos::resources& resources, nmos::resource&& resource, slog::base_gate& gate);
+
         // set the name for the sender or receiver as a resource tag
         void set_name(nmos::resource& resource, const nvnmos::name& name);
         // get the name for the sender or receiver from a resource tag
@@ -224,7 +228,7 @@ namespace nvnmos
             node.data[nmos::fields::label] = value::string(nvnmos::fields::node_label(settings));
             node.data[nmos::fields::description] = value::string(nvnmos::fields::node_description(settings));
             node.data[nmos::fields::tags] = nvnmos::fields::node_tags(settings);
-            if (!nmos::insert_resource(node_resources, std::move(node)).second) throw node_implementation_exception();
+            impl::insert_resource(node_resources, std::move(node), gate);
         }
 
         // device
@@ -239,7 +243,7 @@ namespace nvnmos
             device.data[nmos::fields::label] = value::string(nvnmos::fields::device_label(settings));
             device.data[nmos::fields::description] = value::string(nvnmos::fields::device_description(settings));
             device.data[nmos::fields::tags] = nvnmos::fields::device_tags(settings);
-            if (!nmos::insert_resource(node_resources, std::move(device)).second) throw node_implementation_exception();
+            impl::insert_resource(node_resources, std::move(device), gate);
         }
 
         // insert empty clock, sender, receiver, channelmapping and interface_binding configs
@@ -411,14 +415,14 @@ namespace nvnmos
         // set the group hint as a resource tag
         if (!group_hint.empty()) impl::set_group_hint(sender, group_hint);
 
-        if (!insert_resource(node_resources, std::move(source)).second) throw node_implementation_exception();
-        if (!insert_resource(node_resources, std::move(flow)).second) throw node_implementation_exception();
-        if (!insert_resource(node_resources, std::move(sender)).second) throw node_implementation_exception();
-        if (!insert_resource(connection_resources, std::move(connection_sender)).second) throw node_implementation_exception();
+        impl::insert_resource(node_resources, std::move(source), gate);
+        impl::insert_resource(node_resources, std::move(flow), gate);
+        impl::insert_resource(node_resources, std::move(sender), gate);
+        impl::insert_resource(connection_resources, std::move(connection_sender), gate);
 
         {
             const auto urls = impl::make_resource_api_urls(settings, sender_id, nmos::types::sender);
-            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(sender_id, nmos::types::sender) << ": " << urls.first << " " << urls.second;
+            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(sender_id, nmos::types::sender) << " (" << name << "): " << urls.first << " " << urls.second;
         }
 
         // update node's interfaces
@@ -592,12 +596,12 @@ namespace nvnmos
         // set the group hint as a resource tag
         if (!group_hint.empty()) impl::set_group_hint(receiver, group_hint);
 
-        if (!insert_resource(node_resources, std::move(receiver)).second) throw node_implementation_exception();
-        if (!insert_resource(connection_resources, std::move(connection_receiver)).second) throw node_implementation_exception();
+        impl::insert_resource(node_resources, std::move(receiver), gate);
+        impl::insert_resource(connection_resources, std::move(connection_receiver), gate);
 
         {
             const auto urls = impl::make_resource_api_urls(settings, receiver_id, nmos::types::receiver);
-            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(receiver_id, nmos::types::receiver) << ": " << urls.first << " " << urls.second;
+            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(receiver_id, nmos::types::receiver) << " (" << name << "): " << urls.first << " " << urls.second;
         }
 
         // update node's interfaces
@@ -703,10 +707,9 @@ namespace nvnmos
             flow = nmos::make_sdianc_data_flow(flow_id, source_id, device_id, {}, settings);
             flow.data[nmos::fields::grain_rate] = nmos::make_rational(grain_rate);
         }
-        else
+        else // e.g. if (impl::format::mux == format)
         {
-            slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Unsupported MXL media type for sender: " << media_type.name;
-            throw node_implementation_exception();
+            throw std::invalid_argument("Unsupported media type for MXL sender: " + utility::us2s(media_type.name));
         }
 
         // MXL sender: no manifest_href (no /transportfile), no interface_bindings
@@ -723,14 +726,14 @@ namespace nvnmos
         impl::set_name(sender, name);
         if (!group_hint.empty()) impl::set_group_hint(sender, group_hint);
 
-        if (!insert_resource(node_resources, std::move(source)).second) throw node_implementation_exception();
-        if (!insert_resource(node_resources, std::move(flow)).second) throw node_implementation_exception();
-        if (!insert_resource(node_resources, std::move(sender)).second) throw node_implementation_exception();
-        if (!insert_resource(connection_resources, std::move(connection_sender)).second) throw node_implementation_exception();
+        impl::insert_resource(node_resources, std::move(source), gate);
+        impl::insert_resource(node_resources, std::move(flow), gate);
+        impl::insert_resource(node_resources, std::move(sender), gate);
+        impl::insert_resource(connection_resources, std::move(connection_sender), gate);
 
         {
             const auto urls = impl::make_resource_api_urls(settings, sender_id, nmos::types::sender);
-            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(sender_id, nmos::types::sender) << ": " << urls.first << " " << urls.second;
+            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(sender_id, nmos::types::sender) << " (" << name << "): " << urls.first << " " << urls.second;
         }
 
         // insert into settings
@@ -829,10 +832,9 @@ namespace nvnmos
                 }
             }
         }
-        else
+        else // e.g. if (impl::format::mux == format)
         {
-            slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Unsupported MXL media type for receiver: " << media_type.name;
-            throw node_implementation_exception();
+            throw std::invalid_argument("Unsupported media type for MXL receiver: " + utility::us2s(media_type.name));
         }
 
         auto connection_receiver = nmos::make_connection_mxl_receiver(receiver_id, mxl_domain_id);
@@ -846,12 +848,12 @@ namespace nvnmos
         impl::set_name(receiver, name);
         if (!group_hint.empty()) impl::set_group_hint(receiver, group_hint);
 
-        if (!insert_resource(node_resources, std::move(receiver)).second) throw node_implementation_exception();
-        if (!insert_resource(connection_resources, std::move(connection_receiver)).second) throw node_implementation_exception();
+        impl::insert_resource(node_resources, std::move(receiver), gate);
+        impl::insert_resource(connection_resources, std::move(connection_receiver), gate);
 
         {
             const auto urls = impl::make_resource_api_urls(settings, receiver_id, nmos::types::receiver);
-            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(receiver_id, nmos::types::receiver) << ": " << urls.first << " " << urls.second;
+            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Created " << std::make_pair(receiver_id, nmos::types::receiver) << " (" << name << "): " << urls.first << " " << urls.second;
         }
 
         // insert into settings
@@ -869,7 +871,8 @@ namespace nvnmos
         const auto seed_id = nmos::experimental::fields::seed_id(settings);
         const auto node_id = impl::make_id(seed_id, nmos::types::node);
         const auto id = impl::make_id(seed_id, type, name);
-        auto resource = nmos::find_resource(node_resources, { id, type });
+        const std::pair<nmos::id, nmos::type> id_type{ id, type };
+        auto resource = nmos::find_resource(node_resources, id_type);
 
         if (node_resources.end() != resource)
         {
@@ -922,13 +925,11 @@ namespace nvnmos
                 configs.erase(id);
             }
 
-            slog::log<slog::severities::info>(gate, SLOG_FLF)
-                << "Destroyed " << std::make_pair(id, type);
+            slog::log<slog::severities::info>(gate, SLOG_FLF) << "Destroyed " << id_type << " (" << name << ")";
         }
         else
         {
-            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Could not find " << type.name << " with name: " << name;
-            throw node_implementation_exception();
+            throw std::invalid_argument("Could not find " + utility::us2s(type.name) + ": " + utility::us2s(id) + " (" + utility::us2s(name) + ")");
         }
     }
 
@@ -961,8 +962,7 @@ namespace nvnmos
         }
         else
         {
-            slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Unsupported transport: " << transport.name;
-            throw node_implementation_exception();
+            throw std::invalid_argument("Unsupported transport: " + utility::us2s(transport.name));
         }
 
         model.notify();
@@ -985,8 +985,7 @@ namespace nvnmos
         }
         else
         {
-            slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Unsupported transport: " << transport.name;
-            throw node_implementation_exception();
+            throw std::invalid_argument("Unsupported transport: " + utility::us2s(transport.name));
         }
 
         model.notify();
@@ -1091,6 +1090,19 @@ namespace nvnmos
 
     namespace impl
     {
+        void insert_resource(nmos::resources& resources, nmos::resource&& resource, slog::base_gate& gate)
+        {
+            const std::pair<nmos::id, nmos::type> id_type{ resource.id, resource.type };
+            if (!nmos::insert_resource(resources, std::move(resource)).second)
+            {
+                slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Model update error: " << id_type;
+                throw node_implementation_exception();
+            }
+
+            // per-resource progress reporting
+            slog::log<slog::severities::more_info>(gate, SLOG_FLF) << "Updated model with " << id_type;
+        }
+
         void resolve_auto(const nmos::resource& resource, const nmos::resource& connection_resource, web::json::value& transport_params, const utility::string_t& transport_file)
         {
             using web::json::value;
@@ -1361,9 +1373,17 @@ namespace nvnmos
         if (nmos::types::sender == id_type.second && !sdp.empty())
         {
             auto source = impl::find_source_for_sender(node_resources, resource);
-            if (node_resources.end() == source) throw node_implementation_exception();
+            if (node_resources.end() == source)
+            {
+                slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Could not find source for " << id_type;
+                throw node_implementation_exception();
+            }
             auto& clock_or_null = nmos::fields::clock_name(source->data);
-            if (clock_or_null.is_null()) throw node_implementation_exception();
+            if (clock_or_null.is_null())
+            {
+                slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Source " << source->id << " for " << id_type << " has no clock";
+                throw node_implementation_exception();
+            }
             const auto clock = nmos::clock_name(clock_or_null.as_string());
 
             // hmm, the IS-05 update already calls sdp::parse_session_description(sdp) twice...
@@ -1481,21 +1501,17 @@ namespace nvnmos
 
         const auto seed_id = nmos::experimental::fields::seed_id(settings);
         const auto resource_id = impl::make_id(seed_id, type, name);
+        const std::pair<nmos::id, nmos::type> id_type{ resource_id, type };
 
-        auto resource = nmos::find_resource(node_resources, { resource_id, type });
+        auto resource = nmos::find_resource(node_resources, id_type);
 
-        if (node_resources.end() == resource)
-        {
-            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Could not find " << type.name << " with name: " << name;
-            return;
-        }
+        if (node_resources.end() == resource) throw std::invalid_argument("Could not find " + utility::us2s(type.name) + ": " + utility::us2s(resource_id) + " (" + utility::us2s(name) + ")");
 
         // hmm, consider how to handle this 'internal' activation
         // * for now, setting /active endpoint directly, cf. nmos::connection_activation_thread
         // * alternatively, by setting or patching /staged with an immediate or scheduled activation
 
-        const std::pair<nmos::id, nmos::type> id_type{ resource->id, resource->type };
-        slog::log<slog::severities::info>(gate, SLOG_FLF) << "Updating " << id_type << " with name: " << name;
+        slog::log<slog::severities::info>(gate, SLOG_FLF) << "Updating " << id_type << " (" << name << ")";
 
         const auto transport_base = nmos::transport_base(nmos::transport{ nmos::fields::transport(resource->data) });
 
@@ -1509,7 +1525,8 @@ namespace nvnmos
         }
         else
         {
-            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Unsupported transport for activate: " << transport_base.name;
+            slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Unsupported transport for " << id_type << " (" << name << "): " << transport_base.name;
+            throw node_implementation_exception();
         }
     }
 
@@ -1827,7 +1844,7 @@ namespace nvnmos
             if (nmos::media_type{ U("video/v210") } == media_type) return format::video;
             if (nmos::media_type{ U("video/v210a") } == media_type) return format::video;
             if (nmos::media_type{ U("audio/float32") } == media_type) return format::audio;
-            throw node_implementation_exception{};
+            throw std::invalid_argument("Unsupported media type: " + utility::us2s(media_type.name));
         }
 
         // get a little mnemonic string to use in resource labels and descriptions
@@ -2391,8 +2408,13 @@ namespace nvnmos
             const auto seed_id = nmos::experimental::fields::seed_id(model.settings);
             const auto device_id = impl::make_id(seed_id, nmos::types::device);
 
-            const auto device = nmos::find_resource(model.node_resources, { device_id, nmos::types::device });
-            if (model.node_resources.end() == device) throw node_implementation_exception();
+            const std::pair<nmos::id, nmos::type> id_type{ device_id, nmos::types::device };
+            const auto device = nmos::find_resource(model.node_resources, id_type);
+            if (model.node_resources.end() == device)
+            {
+                slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Could not find " << id_type;
+                throw node_implementation_exception();
+            }
             if (has_channelmapping_control(device->data.at(U("controls")))) return;
 
             nmos::modify_resource(model.node_resources, device_id, [&](nmos::resource& device)
@@ -2411,8 +2433,13 @@ namespace nvnmos
             const auto seed_id = nmos::experimental::fields::seed_id(model.settings);
             const auto device_id = impl::make_id(seed_id, nmos::types::device);
 
-            const auto device = nmos::find_resource(model.node_resources, { device_id, nmos::types::device });
-            if (model.node_resources.end() == device) throw node_implementation_exception();
+            const std::pair<nmos::id, nmos::type> id_type{ device_id, nmos::types::device };
+            const auto device = nmos::find_resource(model.node_resources, id_type);
+            if (model.node_resources.end() == device)
+            {
+                slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Could not find " << id_type;
+                throw node_implementation_exception();
+            }
             if (!has_channelmapping_control(device->data.at(U("controls")))) return;
 
             nmos::modify_resource(model.node_resources, device_id, [&](nmos::resource& device)
@@ -2431,11 +2458,11 @@ namespace nvnmos
         using web::json::value;
         using web::json::value_of;
 
-        if (name.empty()) throw node_implementation_exception();
-        if (mapping.inputs.empty() && mapping.outputs.empty()) throw node_implementation_exception();
+        if (name.empty()) throw std::invalid_argument("Channel mapping name must not be empty");
+        if (mapping.inputs.empty() && mapping.outputs.empty()) throw std::invalid_argument("Channel mapping " + utility::us2s(name) + " must have at least one input or output");
 
         auto& channelmappings = nvnmos::fields::channelmappings(model.settings);
-        if (channelmappings.has_field(name)) throw node_implementation_exception();
+        if (channelmappings.has_field(name)) throw std::invalid_argument("Channel mapping " + utility::us2s(name) + " already exists");
 
         const auto seed_id = nmos::experimental::fields::seed_id(model.settings);
 
@@ -2447,9 +2474,9 @@ namespace nvnmos
         for (const auto& input : mapping.inputs)
         {
             const auto& id = input.id;
-            if (id.empty()) throw node_implementation_exception();
-            if (impl::channelmapping_ids_contains(channelmappings, nvnmos::fields::channelmapping_inputs, id)) throw node_implementation_exception();
-            if (input.channel_labels.empty()) throw node_implementation_exception();
+            if (id.empty()) throw std::invalid_argument("Channel mapping " + utility::us2s(name) + " input id must not be empty");
+            if (impl::channelmapping_ids_contains(channelmappings, nvnmos::fields::channelmapping_inputs, id)) throw std::invalid_argument("Channel mapping " + utility::us2s(name) + " input " + utility::us2s(id) + " already exists");
+            if (input.channel_labels.empty()) throw std::invalid_argument("Channel mapping " + utility::us2s(name) + " input " + utility::us2s(id) + " must have at least one channel label");
 
             const auto parent_id = !input.parent_name.empty() ? impl::make_id(seed_id, input.parent_type, input.parent_name) : nmos::id{};
             const auto parent = std::make_pair(parent_id, parent_id.empty() ? nmos::type{} : input.parent_type);
@@ -2458,22 +2485,22 @@ namespace nvnmos
 
             auto resource = nmos::make_channelmapping_input(id, input.name, input.description, parent, input.channel_labels, reordering, block_size);
 
-            if (!nmos::insert_resource(model.channelmapping_resources, std::move(resource)).second) throw node_implementation_exception();
+            impl::insert_resource(model.channelmapping_resources, std::move(resource), gate);
             input_ids.push_back(id);
         }
 
         for (const auto& output : mapping.outputs)
         {
             const auto& id = output.id;
-            if (id.empty()) throw node_implementation_exception();
-            if (impl::channelmapping_ids_contains(channelmappings, nvnmos::fields::channelmapping_outputs, id)) throw node_implementation_exception();
-            if (output.channel_labels.empty()) throw node_implementation_exception();
+            if (id.empty()) throw std::invalid_argument("Channel mapping " + utility::us2s(name) + " output id must not be empty");
+            if (impl::channelmapping_ids_contains(channelmappings, nvnmos::fields::channelmapping_outputs, id)) throw std::invalid_argument("Channel mapping " + utility::us2s(name) + " output " + utility::us2s(id) + " already exists");
+            if (output.channel_labels.empty()) throw std::invalid_argument("Channel mapping " + utility::us2s(name) + " output " + utility::us2s(id) + " must have at least one channel label");
 
             const auto source_id = !output.sender_name.empty() ? impl::make_id(seed_id, nmos::types::source, output.sender_name) : nmos::id{};
 
             auto resource = nmos::make_channelmapping_output(id, output.name, output.description, source_id, output.channel_labels, output.routable_inputs);
 
-            if (!nmos::insert_resource(model.channelmapping_resources, std::move(resource)).second) throw node_implementation_exception();
+            impl::insert_resource(model.channelmapping_resources, std::move(resource), gate);
             output_ids.push_back(id);
         }
 
@@ -2494,7 +2521,7 @@ namespace nvnmos
         using web::json::value;
 
         auto& channelmappings = nvnmos::fields::channelmappings(model.settings);
-        if (!channelmappings.has_field(name)) throw node_implementation_exception();
+        if (!channelmappings.has_field(name)) throw std::invalid_argument("Could not find channel mapping with name: " + utility::us2s(name));
 
         const auto& config = channelmappings.at(name);
 
@@ -2522,34 +2549,23 @@ namespace nvnmos
     void node_implementation_activate_channelmapping_(nmos::node_model& model, const nvnmos::name& name, const nmos::channelmapping_id& output_id, const channelmapping_active_map& active_map, slog::base_gate& gate)
     {
         const auto& channelmappings = nvnmos::fields::channelmappings(model.settings);
-        if (!channelmappings.has_field(name))
-        {
-            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Could not find channel mapping with name: " << name;
-            throw node_implementation_exception();
-        }
+        if (!channelmappings.has_field(name)) throw std::invalid_argument("Could not find channel mapping with name: " + utility::us2s(name));
 
         const auto& config = channelmappings.at(name);
         const auto& output_ids = nvnmos::fields::channelmapping_outputs(config);
-        if (!impl::channelmapping_ids_contains(output_ids, output_id))
-        {
-            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Output " << output_id << " is not in channel mapping " << name;
-            throw node_implementation_exception();
-        }
+        if (!impl::channelmapping_ids_contains(output_ids, output_id)) throw std::invalid_argument("Output " + utility::us2s(output_id) + " is not in channel mapping " + utility::us2s(name));
 
         const auto resource_id = nmos::make_channelmapping_resource_id({ output_id, nmos::types::output });
         const auto output = nmos::find_resource(model.channelmapping_resources, { resource_id, nmos::types::output });
         if (model.channelmapping_resources.end() == output)
         {
-            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Could not find channel mapping output resource: " << output_id;
+            // the channel mapping config references this output, so its resource must exist
+            slog::log<slog::severities::severe>(gate, SLOG_FLF) << "Could not find channel mapping output resource: " << output_id;
             throw node_implementation_exception();
         }
 
         const auto channel_count = nmos::fields::channels(nmos::fields::endpoint_io(output->data)).size();
-        if (active_map.size() != channel_count)
-        {
-            slog::log<slog::severities::error>(gate, SLOG_FLF) << "Active map length " << active_map.size() << " does not match output " << output_id << " channel count " << channel_count;
-            throw node_implementation_exception();
-        }
+        if (active_map.size() != channel_count) throw std::invalid_argument("Active map length " + std::to_string(active_map.size()) + " does not match output " + utility::us2s(output_id) + " channel count " + std::to_string(channel_count));
 
         const auto map_value = nmos::make_channelmapping_active_map(active_map);
         const auto activation_time = nmos::tai_now();
