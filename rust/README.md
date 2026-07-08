@@ -167,6 +167,7 @@ using DeepStream and Rivermax SDK, see
 | `nvnmosd-example`  | binary      | Example/regression client modelled on the C `nvnmos-example`.        |
 | `nvnmosd-bench`    | binary      | Scale smoke / benchmark client for `nvnmosd`.                        |
 | `gst-nmos-rs`      | GStreamer plugin (cdylib) | `nmos` plugin — `nmossrc` / `nmossink` elements. See [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md). |
+| `gst-avsynctest-rs` | GStreamer plugin (cdylib) | `avsynctest` plugin — `avsyncvideotestsrc` / `avsyncaudiotestsrc` phase-locked A/V test sources (with a public `analyze` module) used by the `gst-nmos-rs` sync test. |
 
 ## Container Image
 
