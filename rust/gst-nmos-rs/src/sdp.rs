@@ -50,7 +50,8 @@
 //!     unsupported (out of scope for ST 2110-30).
 //!   * ANC: RFC 8331 `encoding-name=SMPTE291` over
 //!     `m=video` (SMPTE ST 2110-40), producing
-//!     `meta/x-st-2038, alignment=frame[, framerate=N/D]`.
+//!     `meta/x-st-2038[, framerate=N/D]` (no `alignment` —
+//!     buffer grouping is an element concern, not a transport one).
 //!     Conversion happens via the
 //!     [`rtpsmpte291pay`](https://gstreamer.freedesktop.org/documentation/rsrtp/rtpsmpte291pay.html)
 //!     / `rtpsmpte291depay` elements from `gst-plugins-rs`'
@@ -1976,13 +1977,14 @@ fn raw_caps_from_rtp_audio(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> 
 /// Derive `meta/x-st-2038,...` caps from an `application/x-rtp,...`
 /// caps that describes an RFC 8331 / SMPTE ST 2110-40 ANC media.
 ///
-/// The produced caps match the sink-pad template of `gst-plugins-rs`'
-/// `rtpsmpte291pay` (and the src-pad template of `rtpsmpte291depay`)
-/// and the existing `meta/x-st-2038, framerate=N/D` convention used
-/// by [`crate::flow_def::build_data_body`]:
+/// Matches the `meta/x-st-2038, framerate=N/D` convention used by
+/// [`crate::flow_def::build_data_body`] — deliberately without an
+/// `alignment` field, which is a GStreamer buffer-grouping detail
+/// (packet/line/frame) rather than a transport property. Pipeline
+/// elements declare the grouping they need themselves:
 ///
 /// ```text
-/// meta/x-st-2038, alignment=frame[, framerate=N/D]
+/// meta/x-st-2038[, framerate=N/D]
 /// ```
 ///
 /// `framerate` is hoisted from the `exactframerate` token on the
@@ -2008,7 +2010,12 @@ fn raw_caps_from_rtp_data(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
         .get::<&str>("exactframerate")
         .ok()
         .and_then(parse_exact_framerate);
-    let mut caps_text = String::from("meta/x-st-2038,alignment=frame");
+    // No `alignment` field: it describes how many ANC packets a GStreamer
+    // buffer groups (packet/line/frame), not anything the SDP carries. Each
+    // pipeline element declares the grouping it needs (`rtpsmpte291pay` /
+    // `mxlsink` sink templates require `frame`; `rtpsmpte291depay` emits
+    // `packet`); the transport-file-derived caps must not assert one.
+    let mut caps_text = String::from("meta/x-st-2038");
     if let Some((num, den)) = framerate {
         caps_text.push_str(&format!(",framerate={num}/{den}"));
     }
@@ -4296,10 +4303,10 @@ mod tests {
             "ANC raw caps must match the `rtpsmpte291*` element's pad template \
              and the existing `flow_def::build_data_body` convention",
         );
-        assert_eq!(
-            raw_s.get::<&str>("alignment").unwrap(),
-            "frame",
-            "`alignment=frame` matches `rtpsmpte291pay`'s sink pad template",
+        assert!(
+            raw_s.get::<&str>("alignment").is_err(),
+            "ANC raw caps must not carry `alignment` — buffer grouping is an \
+             element concern (sink templates require it), not a transport one",
         );
         assert_eq!(
             raw_s.get::<gst::Fraction>("framerate").unwrap(),
@@ -4337,10 +4344,9 @@ mod tests {
              exactframerate; downstream caps-merge (element property / \
              paired-flow context) fills it in",
         );
-        assert_eq!(
-            raw_s.get::<&str>("alignment").unwrap(),
-            "frame",
-            "alignment=frame must still be present without exactframerate",
+        assert!(
+            raw_s.get::<&str>("alignment").is_err(),
+            "ANC raw caps must not carry `alignment` regardless of exactframerate",
         );
     }
 
@@ -4364,9 +4370,10 @@ mod tests {
         let orig_raw = original.raw_caps.structure(0).unwrap();
         let rt_raw = round_tripped.raw_caps.structure(0).unwrap();
         assert_eq!(rt_raw.name(), orig_raw.name());
-        assert_eq!(
-            rt_raw.get::<&str>("alignment"),
-            orig_raw.get::<&str>("alignment"),
+        assert!(
+            orig_raw.get::<&str>("alignment").is_err()
+                && rt_raw.get::<&str>("alignment").is_err(),
+            "ANC raw caps carry no `alignment` on either side of the round-trip",
         );
         assert_eq!(
             rt_raw.get::<gst::Fraction>("framerate"),
@@ -4810,7 +4817,7 @@ mod tests {
     #[test]
     fn rtp_caps_from_raw_data_minimal_meta_x_st_2038() {
         init_gst();
-        let raw = gst::Caps::from_str("meta/x-st-2038,alignment=frame").expect("data caps");
+        let raw = gst::Caps::from_str("meta/x-st-2038").expect("data caps");
         let rtp = rtp_caps_from_raw_data(&raw, 100).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("media").unwrap(), "video");
@@ -4826,14 +4833,14 @@ mod tests {
     #[test]
     fn rtp_caps_from_raw_data_propagates_framerate() {
         init_gst();
-        let raw = gst::Caps::from_str("meta/x-st-2038,alignment=frame,framerate=25/1")
+        let raw = gst::Caps::from_str("meta/x-st-2038,framerate=25/1")
             .expect("data caps");
         let rtp = rtp_caps_from_raw_data(&raw, 100).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("exactframerate").unwrap(), "25");
 
         let fractional = gst::Caps::from_str(
-            "meta/x-st-2038,alignment=frame,framerate=30000/1001",
+            "meta/x-st-2038,framerate=30000/1001",
         )
         .expect("data caps");
         let rtp = rtp_caps_from_raw_data(&fractional, 100).expect("synth");
@@ -4853,7 +4860,7 @@ mod tests {
     fn rtp_caps_from_raw_data_round_trips_through_raw_caps_from_rtp_data() {
         init_gst();
         let original = gst::Caps::from_str(
-            "meta/x-st-2038,alignment=frame,framerate=25/1",
+            "meta/x-st-2038,framerate=25/1",
         )
         .expect("data caps");
         let rtp = rtp_caps_from_raw_data(&original, 100).expect("synth");
@@ -5233,7 +5240,7 @@ mod tests {
     fn from_caps_data_synthesises_st2110_40_sdp() {
         init_gst();
         let essence = gst::Caps::from_str(
-            "meta/x-st-2038,alignment=frame,framerate=25/1",
+            "meta/x-st-2038,framerate=25/1",
         )
         .unwrap();
         let input = build_input(&essence, Side::Sender, None);
@@ -5336,7 +5343,7 @@ mod tests {
     fn from_caps_round_trips_through_parse_sdp_for_data() {
         init_gst();
         let essence = gst::Caps::from_str(
-            "meta/x-st-2038,alignment=frame,framerate=25/1",
+            "meta/x-st-2038,framerate=25/1",
         )
         .unwrap();
         let input = build_input(&essence, Side::Sender, None);

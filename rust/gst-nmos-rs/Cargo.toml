@@ -51,6 +51,11 @@ test-skip = { path = "../test-skip" }
 # Used by the IS-08 audio integration test to push test tones into the
 # daemon-backed pipeline and pull samples back out of appsinks.
 gstreamer-app = "0.24.4"
+# Aligned A/V test sources (avsyncvideotestsrc / avsyncaudiotestsrc) and the
+# recovery-side analysis helpers used by the end-to-end sync test.
+gst-avsynctest-rs = { path = "../gst-avsynctest-rs" }
+# CDP parser for decoding the recovered CEA-708 captions in the sync test.
+cdp-types = "0.3"
 
 [build-dependencies]
 gst-plugin-version-helper = "0.8.3"

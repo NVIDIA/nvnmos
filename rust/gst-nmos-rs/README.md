@@ -242,3 +242,27 @@ See [`doc/designs/gst-nmos-rs-st2022-7-dual-leg-plan.md`](../../doc/designs/gst-
 **Not yet supported:** `video/x-jxsv`.
 
 Design notes: [`doc/designs/gst-nmos-rs-nvdsudp-plan.md`](../../doc/designs/gst-nmos-rs-nvdsudp-plan.md).
+
+## Sync Testing
+
+[`tests/av_sync.rs`](tests/av_sync.rs) is an end-to-end integration test that
+drives [`gst-avsynctest-rs`](../gst-avsynctest-rs)'s `avsyncvideotestsrc` /
+`avsyncaudiotestsrc` through real NMOS Senders and Receivers and asserts that
+video, audio-pip, and CEA-708 caption alignment survive the round-trip. The
+video's ancillary data (frame index plus a phase-locked TICK/TOCK caption) is
+split into its own Sender with `st2038extractor` and re-attached on the
+Receiver side with `st2038combiner`. It runs once per transport
+(`av_sync_via_mxl`, `av_sync_via_udp`, `av_sync_via_nvdsudp`), negotiating the
+essence format each transport expects (MXL: `v210`/`F32LE`, RTP/UDP:
+`UYVP`/`S24BE`).
+
+```sh
+cargo test -p gst-nmos-rs --test av_sync -- --test-threads=1
+```
+
+Each case **self-skips** (rather than fails) when its prerequisites are
+missing — `libnvnmos` / `nvnmosd` (see [workspace README](../README.md)), the
+transport's element factories on `GST_PLUGIN_PATH`, and, for MXL, `/dev/shm`.
+The `mxl` and `udp` cases additionally need current `st2038combiner`
+(`drop-late-st2038`) and `rtpsmpte291depay` builds on `GST_PLUGIN_PATH`; the
+`nvdsudp` case needs the DeepStream/Rivermax stack above.

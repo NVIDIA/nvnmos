@@ -93,6 +93,8 @@ jobs:
       # Unit tests instantiate real elements (udpsrc, rtpvrawdepay, …) from
       # gst-plugins-base / gst-plugins-good, and nmosaudiochannelmap uses
       # audiomixmatrix from gst-plugins-bad — dev packages alone are not enough.
+      # cairo / pango are needed to build (and load) the gst-plugins-rs
+      # closedcaption plugin below (its overlay elements link pangocairo).
       - name: Install Rust system dependencies
         run: |
           sudo apt-get update
@@ -102,7 +104,9 @@ jobs:
             libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad
+            gstreamer1.0-plugins-bad \
+            libcairo2-dev \
+            libpango1.0-dev
 
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
@@ -122,13 +126,37 @@ jobs:
           NVNMOS_LIB_DIR: ${{ github.workspace }}/build
         run: cargo clippy --workspace --locked --all-targets -- -D warnings
 
+      # Build the gst-plugins-rs elements the sync tests need — st2038extractor /
+      # st2038combiner (closedcaption), rtpsmpte291pay / rtpsmpte291depay (rtp) and
+      # udpsrc2 (udp) — at a pinned main commit that carries the st2038combiner skew
+      # and rtpsmpte291depay multi-ANC fixes (and, unlike the 0.15 branch, udpsrc2),
+      # and put them on GST_PLUGIN_PATH so the udp av_sync case (and udp2 tests) run
+      # here instead of self-skipping. The mxl and nvdsudp cases still self-skip
+      # (no libmxl / DeepStream on the runner).
+      - name: Build gst-plugins-rs plugins (pinned)
+        env:
+          GST_PLUGINS_RS_REF: 8d5c60f0a67d3aa8120bf940b46fc3c18209661c
+          RUSTUP_TOOLCHAIN: "1.92"
+        run: |
+          git init "${RUNNER_TEMP}/gst-plugins-rs"
+          cd "${RUNNER_TEMP}/gst-plugins-rs"
+          git remote add origin https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git
+          git fetch --depth 1 origin "${GST_PLUGINS_RS_REF}"
+          git checkout FETCH_HEAD
+          cargo build --release \
+            -p gst-plugin-closedcaption \
+            -p gst-plugin-rtp \
+            -p gst-plugin-udp
+
       # The daemon-backed integration tests self-gate: they run here because
-      # nvnmosd + libnvnmos.so are present.
+      # nvnmosd + libnvnmos.so are present. GST_PLUGIN_PATH adds the pinned
+      # gst-plugins-rs plugins built above.
       - name: Cargo test (workspace)
         working-directory: rust
         env:
           NVNMOS_LIB_DIR: ${{ github.workspace }}/build
           LD_LIBRARY_PATH: ${{ github.workspace }}/build
+          GST_PLUGIN_PATH: ${{ runner.temp }}/gst-plugins-rs/target/release
         shell: bash
         # --show-output surfaces the `test <name> ... skipped, <reason>` lines
         # that test-skip's `skip!` prints (libtest captures them otherwise and

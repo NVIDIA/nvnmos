@@ -135,8 +135,15 @@ pub(crate) fn from_media(
     }
 }
 
-/// ST 2110-40 ANC (`meta/x-st-2038,alignment=frame`). DeepStream selects
-/// Mode 3 from sink/src caps; ANC RTP packet sizes vary.
+/// ST 2110-40 ANC (`meta/x-st-2038`). DeepStream Mode-3 ANC is inherently
+/// per-frame, but the `nvdsudpsink`/`nvdsudpsrc` pads are `ANY` so they can't
+/// carry that grouping in negotiation; it's materialised on the graph by the
+/// `capsfilter` `build_nvdsudpsink` inserts and the output caps `build_nvdsudpsrc`
+/// stamps. This build-time check complements them: classify the flow as ANC
+/// (drives `header-size`) and reject an *explicit* non-`frame` alignment before a
+/// chain is built. An absent alignment is fine —
+/// transport-file caps never carry the field (an explicit one can only appear
+/// when `caps` are applied directly rather than resynthesised).
 pub(crate) fn anc_from_raw_caps(raw_caps: &gst::Caps) -> Result<Packetization, anyhow::Error> {
     let s = raw_caps
         .structure(0)
@@ -148,9 +155,8 @@ pub(crate) fn anc_from_raw_caps(raw_caps: &gst::Caps) -> Result<Packetization, a
         );
     }
     match s.get::<&str>("alignment") {
-        Ok("frame") => {}
+        Ok("frame") | Err(_) => {}
         Ok(other) => bail!("nvdsudp ANC requires alignment=frame, got `{other}`"),
-        Err(_) => bail!("nvdsudp ANC requires alignment=frame on meta/x-st-2038 caps"),
     }
     Ok(Packetization::Anc)
 }
@@ -501,6 +507,18 @@ mod tests {
             .unwrap();
         let pkt = from_media(FlowFormat::Data, &caps, &gst::Caps::new_empty())
             .expect("ANC packetization");
+        assert!(matches!(pkt, Packetization::Anc));
+    }
+
+    #[test]
+    fn anc_accepts_missing_alignment() {
+        init_gst();
+        // Transport-file caps omit `alignment` (a buffer-grouping detail); the
+        // classifier tolerates that — the per-frame grouping is enforced on the
+        // graph by the nvdsudp capsfilter / output caps, not here.
+        let caps = gst::Caps::from_str("meta/x-st-2038,framerate=60/1").unwrap();
+        let pkt = from_media(FlowFormat::Data, &caps, &gst::Caps::new_empty())
+            .expect("ANC packetization with no alignment");
         assert!(matches!(pkt, Packetization::Anc));
     }
 
