@@ -33,7 +33,7 @@ The nvnmos tree is taken from the build context (`COPY src/`, `COPY rust/` via t
 | `MXL_REPO` | `https://github.com/dmf-mxl/mxl.git` | MXL source repository (`libmxl`, `gst-mxl-rs`). |
 | `MXL_REF` | `81738a15adb55119a6855343bc1053a4389bf6df` | Pinned MXL commit (`81738a1`, tip of `release/v1.1` at time of writing). Use a full 40-character SHA or a branch/tag name. |
 | `GST_PLUGINS_RS_REPO` | `https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git` | gst-plugins-rs source for `transport=udp2`. |
-| `GST_PLUGINS_RS_REF` | `207b1f4eeef4c192696181ce2ddb69da8ff73c8a` | Pinned gst-plugins-rs commit (`udpsrc2` landed after tag `0.15.2`). Builds `gst-plugin-udp` + `gst-plugin-rtp`. Use a full 40-character SHA or a branch/tag name. |
+| `GST_PLUGINS_RS_REF` | `8d5c60f0a67d3aa8120bf940b46fc3c18209661c` | Pinned gst-plugins-rs commit on `main` (`udpsrc2` is main-only; this commit also carries the `st2038combiner` skew and `rtpsmpte291depay` multi-ANC fixes). Builds `gst-plugin-udp` + `gst-plugin-rtp`. Use a full 40-character SHA or a branch/tag name. |
 | `NVNMOS_UID` | `10001` | Fixed runtime user UID (`nvnmos`). |
 | `NVNMOS_GID` | `10001` | Fixed runtime group GID (`nvnmos`). |
 | `EXTRA_APT_PACKAGES` | *(empty)* | Optional space-separated apt package names added in the final image stage (e.g. `gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly`). Installed to the default GStreamer plugin path. |
