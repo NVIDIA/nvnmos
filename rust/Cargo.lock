@@ -579,7 +579,9 @@ name = "gst-nmos-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cdp-types",
  "glib",
+ "gst-avsynctest-rs",
  "gst-plugin-version-helper",
  "gstreamer",
  "gstreamer-app",
