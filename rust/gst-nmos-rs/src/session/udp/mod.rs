@@ -2110,7 +2110,7 @@ mod tests {
 
         fn anc_peer_caps() -> gst::Caps {
             init_gst();
-            gst::Caps::from_str("meta/x-st-2038,alignment=frame,framerate=30/1")
+            gst::Caps::from_str("meta/x-st-2038,framerate=30/1")
                 .expect("anc caps")
         }
 

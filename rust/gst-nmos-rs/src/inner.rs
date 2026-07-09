@@ -682,9 +682,10 @@ pub(crate) struct UdpSrcChain {
 
 #[derive(Debug)]
 pub(crate) struct NvDsUdpSinkChain {
-    /// Inner `nvdsudpsink` added directly to the outer bin (same object as [`Self::bin`]).
+    /// Wrapper added to the outer bin: the bare `nvdsudpsink`, or (for ST-2038)
+    /// a sub-bin wrapping `capsfilter ! nvdsudpsink` that pins `alignment=frame`.
     pub bin: gst::Element,
-    /// Same element as [`Self::bin`].
+    /// Inner `nvdsudpsink` (same object as [`Self::bin`] unless wrapped).
     pub transport: gst::Element,
 }
 
@@ -1483,6 +1484,51 @@ pub(crate) fn build_nvdsudpsink(
     // drop this chain struct — keep the temp file on the GstObject.
     SdpFileGuard::attach_to_element(&sink, sdp_file);
 
+    // `nvdsudpsink`'s sink pad template is `ANY` (see gst-nvdsudp), so on its
+    // own it neither advertises nor rejects the per-frame ST-2038 grouping its
+    // Mode-3 ANC path assumes — a `packet`/`line` peer would be accepted and
+    // silently mis-packetized. `mxlsink` and `rtpsmpte291pay` get this from their
+    // real sink templates; for ANC we restore parity by standing in for the
+    // missing template with a `capsfilter`. Pin exactly what those templates pin
+    // — `meta/x-st-2038, alignment=frame`, nothing more — so it rejects a
+    // non-`frame` peer and fixates an alignment-less one without constraining
+    // framerate (which negotiates freely, as it does through their templates).
+    // Drop this if `nvdsudpsink` ever grows a real sink template.
+    if media.format == FlowFormat::Data {
+        let filter_caps = gst::Caps::builder("meta/x-st-2038")
+            .field("alignment", "frame")
+            .build();
+        let capsfilter = gst::ElementFactory::make("capsfilter")
+            .name("nmossink-nvdsudp-anc-align")
+            .property("caps", filter_caps)
+            .build()
+            .with_context(|| "instantiating `capsfilter` for nvdsudp ANC alignment")?;
+        let bin = gst::Bin::with_name("nmossink-nvdsudp");
+        bin.add_many([&capsfilter, &sink])
+            .map_err(|e| anyhow!("adding capsfilter + nvdsudpsink to inner bin: {e}"))?;
+        capsfilter
+            .link(&sink)
+            .with_context(|| "linking capsfilter to nvdsudpsink")?;
+        let cf_sink = capsfilter
+            .static_pad("sink")
+            .ok_or_else(|| anyhow!("capsfilter missing sink pad"))?;
+        let ghost = gst::GhostPad::builder(gst::PadDirection::Sink)
+            .name("sink")
+            .build();
+        ghost
+            .set_target(Some(&cf_sink))
+            .map_err(|e| anyhow!("setting inner ghost sink target: {e}"))?;
+        ghost
+            .set_active(true)
+            .map_err(|e| anyhow!("activating inner ghost sink: {e}"))?;
+        bin.add_pad(&ghost)
+            .map_err(|e| anyhow!("adding ghost sink to inner bin: {e}"))?;
+        return Ok(NvDsUdpSinkChain {
+            bin: bin.upcast(),
+            transport: sink,
+        });
+    }
+
     Ok(NvDsUdpSinkChain {
         bin: sink.clone(),
         transport: sink,
@@ -1519,20 +1565,34 @@ fn set_nvdsudp_ptp_src_from_sdp(
 /// No external depayloader.
 pub(crate) fn build_nvdsudpsrc(
     media: &UdpMedia,
-    caps: &gst::Caps,
     sdp_text: &str,
 ) -> Result<NvDsUdpSrcChain, anyhow::Error> {
     require_nvdsudp_factory("nvdsudpsrc")?;
-    let pkt = packetization::from_media(media.format, &media.raw_caps, &media.rtp_caps)?;
+    // ST-2038 essence caps carry no `alignment` (a buffer-grouping detail, not a
+    // transport property), but `nvdsudpsrc`'s src pad is `ANY` and can't advertise
+    // the per-frame grouping DeepStream's Mode-3 ANC path produces. Stamp `frame`
+    // onto the output caps so a downstream `st2038combiner` (which requires the
+    // field) sees it — the src-side mirror of the `capsfilter` `build_nvdsudpsink`
+    // inserts. Add only when absent; an explicit non-`frame` is left for
+    // `from_media`/`anc_from_raw_caps` to reject rather than silently relabel.
+    let mut caps = media.raw_caps.clone();
+    if media.format == FlowFormat::Data
+        && let Some(s) = caps.make_mut().structure_mut(0)
+        && s.name() == "meta/x-st-2038"
+        && s.get::<&str>("alignment").is_err()
+    {
+        s.set("alignment", "frame");
+    }
+    let pkt = packetization::from_media(media.format, &caps, &media.rtp_caps)?;
 
     let src = if let Some(secondary) = &media.secondary {
         let streams = format!("{},{}", host_port(&media.primary), host_port(secondary));
-        nvdsudpsrc_builder(caps)
+        nvdsudpsrc_builder(&caps)
             .property("st2022-7-streams", &streams)
             .build()
             .with_context(|| format!("instantiating `nvdsudpsrc` (st2022-7-streams={streams})"))?
     } else {
-        nvdsudpsrc_builder(caps)
+        nvdsudpsrc_builder(&caps)
             .property("address", &media.primary.destination_ip)
             .property("port", i32::from(media.primary.destination_port))
             .build()
@@ -1864,7 +1924,7 @@ mod tests {
             )
             .expect("static rtp caps parse"),
             raw_caps: gst::Caps::from_str(
-                "meta/x-st-2038,alignment=frame,framerate=60/1",
+                "meta/x-st-2038,framerate=60/1",
             )
             .expect("static raw caps parse"),
         }
@@ -2524,8 +2584,30 @@ mod tests {
         if !nvdsudp_available() {
             return;
         }
-        build_nvdsudpsink(&anc_smpte291_media(), ANC_NVDSUDP_SDP)
-            .expect("ANC nvdsudpsink chain");
+        let chain =
+            build_nvdsudpsink(&anc_smpte291_media(), ANC_NVDSUDP_SDP).expect("ANC nvdsudpsink chain");
+        // The bin wraps `capsfilter ! nvdsudpsink` so its sink pad advertises the
+        // per-frame grouping `nvdsudpsink`'s own `ANY` pad can't (see the wrap in
+        // build_nvdsudpsink): a `packet`/`line` peer must fail negotiation here.
+        assert_ne!(
+            chain.bin.as_ptr(),
+            chain.transport.as_ptr(),
+            "ANC sink must be wrapped behind an alignment capsfilter"
+        );
+        let sink_pad = chain.bin.static_pad("sink").expect("bin sink pad");
+        let advertised = sink_pad.query_caps(None);
+        assert!(
+            advertised.can_intersect(
+                &gst::Caps::from_str("meta/x-st-2038,alignment=frame").unwrap()
+            ),
+            "ANC sink bin must advertise alignment=frame, got {advertised}"
+        );
+        assert!(
+            advertised
+                .intersect(&gst::Caps::from_str("meta/x-st-2038,alignment=packet").unwrap())
+                .is_empty(),
+            "ANC sink bin must reject a non-frame peer, got {advertised}"
+        );
     }
 
     #[test]
@@ -2533,8 +2615,7 @@ mod tests {
         if !nvdsudp_available() {
             return;
         }
-        let caps = anc_smpte291_media().raw_caps.clone();
-        let chain = build_nvdsudpsrc(&anc_smpte291_media(), &caps, ANC_NVDSUDP_SDP)
+        let chain = build_nvdsudpsrc(&anc_smpte291_media(), ANC_NVDSUDP_SDP)
             .expect("ANC nvdsudpsrc chain");
         assert_eq!(chain.transport.property::<u32>("header-size"), 20);
     }
@@ -2549,7 +2630,7 @@ mod tests {
         let sdp = format!(
             "{ANC_NVDSUDP_SDP}a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n",
         );
-        let chain = build_nvdsudpsrc(&media, &media.raw_caps, &sdp).expect("nvdsudpsrc chain");
+        let chain = build_nvdsudpsrc(&media, &sdp).expect("nvdsudpsrc chain");
         assert_eq!(
             chain.transport.property::<String>("ptp-src"),
             "192.0.2.11",
@@ -2592,7 +2673,7 @@ mod tests {
         let sdp = format!(
             "{ANC_NVDSUDP_SDP}a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n",
         );
-        let chain = build_nvdsudpsrc(&media, &media.raw_caps, &sdp).expect("nvdsudpsrc chain");
+        let chain = build_nvdsudpsrc(&media, &sdp).expect("nvdsudpsrc chain");
         assert!(
             chain.transport.property::<Option<String>>("ptp-src").is_none(),
             "receiver ptp-src must require a=x-nvnmos-iface-ip, not source-filter source",
