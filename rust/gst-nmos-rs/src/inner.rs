@@ -908,6 +908,21 @@ pub(crate) fn build_udpsink(
         payloader.set_property("min-ptime", ns);
         payloader.set_property("max-ptime", ns);
     }
+    // Default the RTP timestamp base to 0 so the timestamp is a pure function of the
+    // buffer's running time (rtp_ts = running_time · clock_rate). This makes the
+    // advertised `a=mediaclk:direct=0` truthful and — because every flow of one
+    // Sender shares the pipeline base_time — yields equal RTP timestamps for equal
+    // PTS across flows (e.g. video and its extracted ancillary), which the stock
+    // random per-stream offset breaks. Set before `pay-properties` are applied so a
+    // caller can restore the GStreamer default with `timestamp-offset=-1`. V1
+    // payloaders type the property `guint`; the `pay2` siblings `gint64`.
+    if let Some(pspec) = payloader.class().find_property("timestamp-offset") {
+        if pspec.value_type() == glib::Type::U32 {
+            payloader.set_property("timestamp-offset", 0u32);
+        } else if pspec.value_type() == glib::Type::I64 {
+            payloader.set_property("timestamp-offset", 0i64);
+        }
+    }
 
     let udpsink = gst::ElementFactory::make("udpsink")
         .name("nmossink-udpsink")
@@ -1953,6 +1968,30 @@ mod tests {
             .static_pad("sink")
             .expect("inner bin missing `sink` ghost pad");
         assert!(ghost.is::<gst::GhostPad>());
+    }
+
+    #[test]
+    fn build_udpsink_defaults_timestamp_offset_zero_and_pay_properties_override() {
+        // Default: pin the RTP timestamp base to 0 so equal PTS yields equal RTP
+        // timestamps across a Sender's flows and `a=mediaclk:direct=0` is truthful.
+        let chain = build_udpsink(&minimal_udp_media(), UdpVariant::V1)
+            .expect("V1 video sender chain must construct");
+        assert_eq!(
+            chain.pay.property::<u32>("timestamp-offset"),
+            0,
+            "payloader timestamp-offset must default to 0",
+        );
+        // Overridable: `pay-properties` are applied after the default, so a caller can
+        // restore the GStreamer random default (`-1`, i.e. u32::MAX for the V1 spec).
+        let props = gst::Structure::builder("properties")
+            .field("timestamp-offset", u32::MAX)
+            .build();
+        apply_udp_sink_inner_properties(test_log_cat(), "nmossink", &chain, None, Some(&props));
+        assert_eq!(
+            chain.pay.property::<u32>("timestamp-offset"),
+            u32::MAX,
+            "pay-properties must override the pinned default",
+        );
     }
 
     #[test]
