@@ -1226,7 +1226,12 @@ fn cross_check_essence_format_family(media: &UdpMedia, caps: &gst::Caps) -> Resu
 
 fn cross_check_essence_caps(media: &UdpMedia, caps: &gst::Caps) -> Result<(), SdpError> {
     cross_check_essence_format_family(media, caps)?;
-    let intersect = caps.intersect(&media.raw_caps);
+    // Caps parsed from the SDP always carry system memory; a caps-property
+    // feature (e.g. `memory:NVMM`) the file cannot express must not read as
+    // a shape mismatch. It is re-attached onto the inner-chain essence caps
+    // separately (see `essence_caps::overlay_features`).
+    let stripped = crate::essence_caps::without_features(caps);
+    let intersect = stripped.intersect(&media.raw_caps);
     if intersect.is_empty() {
         return Err(SdpError::EssenceShapeMismatch {
             caps: caps.to_string(),
