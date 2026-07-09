@@ -140,6 +140,7 @@ namespace nvnmos
         const web::json::field<uint64_t> format_bit_rate{ U("x-nvnmos-format-bit-rate") }; // format bit rate excluding IP/UDP/RTP overhead
     }
 
+    // exception type indicating the node model is in an inconsistent state
     struct node_implementation_exception {};
 
     // Dense IS-08 active map for one output; index i is output channel i (same type as nmos::make_channelmapping_active_map).
