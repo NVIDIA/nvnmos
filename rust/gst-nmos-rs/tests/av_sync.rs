@@ -83,6 +83,19 @@ const NUM_AUDIO_BUFFERS: i32 = 155; // covers the video run with margin
 /// combiner can pair ancillary onto them. After attach there are no drops (in
 /// practice the offset is one or two frames). Applied once — not per reader.
 const ATTACH_SLACK: usize = 5;
+/// Extra grace (`GstAggregator:latency`) for the `st2038combiner` to wait for a
+/// late ancillary grain before finishing a video frame. The combiner's own
+/// latency is one frame, so by default the ancillary grain's journey (producer
+/// commit → MXL → data `mxlsrc` → queue → combiner) has only ~one frame plus the
+/// reported upstream latency to arrive. This test co-locates producer and
+/// consumer in a single process, so scheduling jitter of the consumer's data
+/// reader thread (amplified under CPU load) can occasionally push the grain past
+/// that deadline; the aggregator would then emit the video frame bare and
+/// `drop-late` would discard the now-late grain (the data itself is never lost —
+/// see the module header). One extra frame absorbs that jitter (proven: 0 vs. the
+/// default window's intermittent drops under load). Folded straight into the
+/// aggregator's wait deadline and reported downstream, so sync stays consistent.
+const COMBINER_LATENCY_NS: u64 = FRAME_PERIOD_NS; // 40 ms at 25 fps
 
 const NODE_SEED: &str = "nvnmos-avsync-test";
 const VIDEO_SENDER: &str = "video-sender";
@@ -369,7 +382,7 @@ fn build_consumer(t: Transport, uri: &str, nic: &str, domain: &str) -> gst::Pipe
            ! queue \
            ! comb.sink \
          {data_branch} \
-         st2038combiner name=comb drop-late-st2038={drop_late} \
+         st2038combiner name=comb drop-late-st2038={drop_late} latency={COMBINER_LATENCY_NS} \
            ! queue \
            ! appsink name=video_sink sync=true caps=video/x-raw,format={vfmt} \
          nmossrc daemon-uri=\"{uri}\" transport={tp} node-seed={NODE_SEED} \
