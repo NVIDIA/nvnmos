@@ -31,6 +31,7 @@ use gstreamer as gst;
 pub mod analyze;
 pub mod audiosrc;
 pub mod captions;
+pub(crate) mod imp_error;
 pub mod signal;
 pub mod videosrc;
 
