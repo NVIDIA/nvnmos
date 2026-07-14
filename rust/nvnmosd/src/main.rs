@@ -42,21 +42,18 @@ use nvnmos_rpc::v1::{
     AddChannelMappingRequest, AddChannelMappingResponse, AddNodeRequest, AddNodeResponse,
     AddReceiverRequest, AddResourceResponse, AddSenderRequest, CloseSessionRequest, Empty,
     OpenSessionRequest, OpenSessionResponse, RemoveChannelMappingRequest, RemoveNodeRequest,
-    RemoveResourceRequest, SubscribeActivationsRequest,
-    SubscribeChannelMappingActivationsRequest, SyncChannelMappingStateRequest,
-    SyncResourceStateRequest, Transport as ProtoTransport,
+    RemoveResourceRequest, SubscribeActivationsRequest, SubscribeChannelMappingActivationsRequest,
+    SyncChannelMappingStateRequest, SyncResourceStateRequest, Transport as ProtoTransport,
 };
 use tokio::net::UnixListener;
 use tokio::sync::mpsc as tokio_mpsc;
-use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tokio_stream::Stream;
+use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::{Request, Response, Status};
 
 use crate::http_port::read_http_port_range;
 use crate::session_gc::SessionGc;
-use crate::state::{
-    AckOutcome, ActivationDispatch, ChannelMappingActivationDispatch, Side, State,
-};
+use crate::state::{AckOutcome, ActivationDispatch, ChannelMappingActivationDispatch, Side, State};
 
 /// Bound on the per-session activations stream. Small because activations
 /// are rare (one per IS-05 PATCH) and the consumer is expected to ack
@@ -290,8 +287,7 @@ impl NvnmosDaemon for Daemon {
         let req = request.into_inner();
         let outcome = {
             let mut state = self.lock_state();
-            let outcome =
-                state.remove_resource(&req.session_handle, &req.resource_handle)?;
+            let outcome = state.remove_resource(&req.session_handle, &req.resource_handle)?;
             malloc_trim::maybe_after_remove_resource(&state, &outcome.node_seed);
             outcome
         };
@@ -389,12 +385,7 @@ impl NvnmosDaemon for Daemon {
         let req = request.into_inner();
         let outcome = {
             let mut state = self.lock_state();
-            state.add_channelmapping(
-                &req.session_handle,
-                &req.name,
-                &req.inputs,
-                &req.outputs,
-            )?
+            state.add_channelmapping(&req.session_handle, &req.name, &req.inputs, &req.outputs)?
         };
         tracing::info!(
             session_handle = %req.session_handle,
@@ -677,10 +668,7 @@ fn route_activation(
         Ok(outcome) if outcome.success => Ok(()),
         Ok(outcome) => Err(outcome.failure_reason),
         Err(std_mpsc::RecvTimeoutError::Timeout) => {
-            tracing::warn!(
-                activation_handle,
-                "activation ack timed out; NACKing",
-            );
+            tracing::warn!(activation_handle, "activation ack timed out; NACKing",);
             Err("activation ack timed out".to_string())
         }
         Err(std_mpsc::RecvTimeoutError::Disconnected) => {

@@ -96,7 +96,10 @@ mod tests {
 
     #[test]
     fn absent_ts_refclk_is_unset() {
-        assert_eq!(ptp_src_from_sdp("a=mediaclk:direct=0\r\n"), PtpSrcResolution::Unset);
+        assert_eq!(
+            ptp_src_from_sdp("a=mediaclk:direct=0\r\n"),
+            PtpSrcResolution::Unset
+        );
     }
 
     #[test]

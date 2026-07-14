@@ -239,16 +239,21 @@ pub(crate) fn resolve_mxl_flow_meta(
     let (id, id_origin) = resolve_id(property_id, file_meta.as_ref().map(|m| m.id.as_str()))?;
     let (format, format_origin) = resolve_format(
         property_format,
-        file_meta.as_ref().map(|m| m.format).unwrap_or(FlowFormat::Unspecified),
+        file_meta
+            .as_ref()
+            .map(|m| m.format)
+            .unwrap_or(FlowFormat::Unspecified),
     )?;
 
-    Ok(FlowResolution { id, id_origin, format, format_origin })
+    Ok(FlowResolution {
+        id,
+        id_origin,
+        format,
+        format_origin,
+    })
 }
 
-fn resolve_id(
-    property: &str,
-    file: Option<&str>,
-) -> Result<(String, ValueOrigin), FlowDefError> {
+fn resolve_id(property: &str, file: Option<&str>) -> Result<(String, ValueOrigin), FlowDefError> {
     let file_present = file.filter(|s| !s.is_empty());
     match (property.is_empty(), file_present) {
         (true, Some(f)) => Ok((f.to_owned(), ValueOrigin::File)),
@@ -272,7 +277,10 @@ fn resolve_format(
         (p, Unspecified) => Ok((p, ValueOrigin::Property)),
         (Unspecified, f) => Ok((f, ValueOrigin::File)),
         (p, f) if p == f => Ok((p, ValueOrigin::Both)),
-        (p, f) => Err(FlowDefError::FormatMismatch { property: p, file: f }),
+        (p, f) => Err(FlowDefError::FormatMismatch {
+            property: p,
+            file: f,
+        }),
     }
 }
 
@@ -323,7 +331,10 @@ pub(crate) fn splice_overrides(
     let object = value.as_object_mut().ok_or(FlowDefError::NotAnObject)?;
 
     if let Some(flow_id) = overrides.flow_id {
-        object.insert("id".to_owned(), serde_json::Value::String(flow_id.to_owned()));
+        object.insert(
+            "id".to_owned(),
+            serde_json::Value::String(flow_id.to_owned()),
+        );
     }
     if let Some(label) = overrides.label {
         object.insert(
@@ -377,10 +388,7 @@ pub(crate) fn splice_overrides(
                 tags.remove("urn:x-nvnmos:tag:caps");
             }
             CapsMode::Wide => {
-                tags.insert(
-                    "urn:x-nvnmos:tag:caps".to_owned(),
-                    serde_json::json!([""]),
-                );
+                tags.insert("urn:x-nvnmos:tag:caps".to_owned(), serde_json::json!([""]));
             }
         }
     }
@@ -457,10 +465,7 @@ pub(crate) fn from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDef
     if input.mxl_domain_id.is_empty() {
         return Err(FlowDefError::MissingMxlDomainId);
     }
-    let structure = input
-        .caps
-        .structure(0)
-        .ok_or(FlowDefError::EmptyCaps)?;
+    let structure = input.caps.structure(0).ok_or(FlowDefError::EmptyCaps)?;
 
     let name = structure.name();
     let (format, body) = match name.as_str() {
@@ -548,7 +553,10 @@ fn build_video_body(
 
     let chroma_width = width / 2;
     let mut fields: Vec<(String, serde_json::Value)> = vec![
-        ("media_type".to_owned(), serde_json::Value::String(media_type.to_owned())),
+        (
+            "media_type".to_owned(),
+            serde_json::Value::String(media_type.to_owned()),
+        ),
         (
             "grain_rate".to_owned(),
             serde_json::json!({
@@ -558,7 +566,10 @@ fn build_video_body(
         ),
         ("frame_width".to_owned(), serde_json::json!(width)),
         ("frame_height".to_owned(), serde_json::json!(height)),
-        ("colorspace".to_owned(), serde_json::Value::String("BT709".to_owned())),
+        (
+            "colorspace".to_owned(),
+            serde_json::Value::String("BT709".to_owned()),
+        ),
         (
             "components".to_owned(),
             serde_json::json!([
@@ -597,7 +608,10 @@ fn build_audio_body(
     let channels = caps_field_i32(structure, "channels")?;
 
     let fields: Vec<(String, serde_json::Value)> = vec![
-        ("media_type".to_owned(), serde_json::Value::String(media_type.to_owned())),
+        (
+            "media_type".to_owned(),
+            serde_json::Value::String(media_type.to_owned()),
+        ),
         (
             "sample_rate".to_owned(),
             serde_json::json!({ "numerator": rate, "denominator": 1 }),
@@ -653,10 +667,7 @@ pub(crate) enum FlowDefCapsError {
     )]
     UnsupportedMediaType(String),
     #[error("transport file `{field}` has an out-of-range value `{value}` (must fit in i32)")]
-    OutOfRangeField {
-        field: &'static str,
-        value: i64,
-    },
+    OutOfRangeField { field: &'static str, value: i64 },
 }
 
 /// Reverse of [`from_caps`]: turn an MXL `flow_def` JSON
@@ -717,12 +728,13 @@ pub(crate) fn caps_from(text: &str) -> Result<gst::Caps, FlowDefCapsError> {
                     value: rate.denominator,
                 });
             }
-            let rate_i32: i32 = rate.numerator.try_into().map_err(|_| {
-                FlowDefCapsError::OutOfRangeField {
-                    field: "sample_rate.numerator",
-                    value: rate.numerator,
-                }
-            })?;
+            let rate_i32: i32 =
+                rate.numerator
+                    .try_into()
+                    .map_err(|_| FlowDefCapsError::OutOfRangeField {
+                        field: "sample_rate.numerator",
+                        value: rate.numerator,
+                    })?;
             Ok(gst::Caps::builder("audio/x-raw")
                 .field("format", "F32LE")
                 .field("rate", rate_i32)
@@ -777,10 +789,7 @@ fn caps_field_string(
         })
 }
 
-fn caps_field_i32(
-    structure: &gst::StructureRef,
-    field: &'static str,
-) -> Result<i32, FlowDefError> {
+fn caps_field_i32(structure: &gst::StructureRef, field: &'static str) -> Result<i32, FlowDefError> {
     structure
         .get::<i32>(field)
         .map_err(|_| FlowDefError::MissingCapsField {
@@ -850,9 +859,12 @@ mod tests {
 
     #[test]
     fn unknown_format_urn_is_hard_error() {
-        let err =
-            read_flow_def_meta(&format!(r#"{{"id":"{UUID_A}","format":"urn:bogus"}}"#)).unwrap_err();
-        assert!(matches!(err, FlowDefError::UnknownFormat(_)), "got: {err:?}");
+        let err = read_flow_def_meta(&format!(r#"{{"id":"{UUID_A}","format":"urn:bogus"}}"#))
+            .unwrap_err();
+        assert!(
+            matches!(err, FlowDefError::UnknownFormat(_)),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -872,8 +884,8 @@ mod tests {
 
     #[test]
     fn file_only() {
-        let r =
-            resolve_mxl_flow_meta("", FlowFormat::Unspecified, Some(&video_flow_def(UUID_A))).unwrap();
+        let r = resolve_mxl_flow_meta("", FlowFormat::Unspecified, Some(&video_flow_def(UUID_A)))
+            .unwrap();
         assert_eq!(r.id, UUID_A);
         assert_eq!(r.id_origin, ValueOrigin::File);
         assert_eq!(r.format, FlowFormat::Video);
@@ -882,8 +894,8 @@ mod tests {
 
     #[test]
     fn both_agree() {
-        let r =
-            resolve_mxl_flow_meta(UUID_A, FlowFormat::Video, Some(&video_flow_def(UUID_A))).unwrap();
+        let r = resolve_mxl_flow_meta(UUID_A, FlowFormat::Video, Some(&video_flow_def(UUID_A)))
+            .unwrap();
         assert_eq!(r.id, UUID_A);
         assert_eq!(r.id_origin, ValueOrigin::Both);
         assert_eq!(r.format, FlowFormat::Video);
@@ -892,17 +904,26 @@ mod tests {
 
     #[test]
     fn id_mismatch_is_hard_error() {
-        let err =
-            resolve_mxl_flow_meta(UUID_B, FlowFormat::Unspecified, Some(&video_flow_def(UUID_A)))
-                .unwrap_err();
-        assert!(matches!(err, FlowDefError::IdMismatch { .. }), "got: {err:?}");
+        let err = resolve_mxl_flow_meta(
+            UUID_B,
+            FlowFormat::Unspecified,
+            Some(&video_flow_def(UUID_A)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, FlowDefError::IdMismatch { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
     fn format_mismatch_is_hard_error() {
-        let err =
-            resolve_mxl_flow_meta("", FlowFormat::Audio, Some(&video_flow_def(UUID_A))).unwrap_err();
-        assert!(matches!(err, FlowDefError::FormatMismatch { .. }), "got: {err:?}");
+        let err = resolve_mxl_flow_meta("", FlowFormat::Audio, Some(&video_flow_def(UUID_A)))
+            .unwrap_err();
+        assert!(
+            matches!(err, FlowDefError::FormatMismatch { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -972,7 +993,10 @@ mod tests {
         )
         .unwrap();
         let v = parse_value(&spliced);
-        assert_eq!(v["tags"]["urn:x-nvnmos:tag:name"], serde_json::json!(["new-name"]));
+        assert_eq!(
+            v["tags"]["urn:x-nvnmos:tag:name"],
+            serde_json::json!(["new-name"])
+        );
         assert_eq!(
             v["tags"]["urn:x-nvnmos:tag:mxl-domain-id"],
             serde_json::json!([DOMAIN_ID])
@@ -996,7 +1020,10 @@ mod tests {
         )
         .unwrap();
         let v = parse_value(&spliced);
-        assert_eq!(v["tags"]["urn:x-nvnmos:tag:name"], serde_json::json!(["foo"]));
+        assert_eq!(
+            v["tags"]["urn:x-nvnmos:tag:name"],
+            serde_json::json!(["foo"])
+        );
     }
 
     #[test]
@@ -1014,7 +1041,11 @@ mod tests {
         .unwrap();
         let v = parse_value(&spliced);
         assert!(
-            v["tags"].as_object().unwrap().get("urn:x-nvnmos:tag:caps").is_none(),
+            v["tags"]
+                .as_object()
+                .unwrap()
+                .get("urn:x-nvnmos:tag:caps")
+                .is_none(),
             "tag should be removed; got {v}"
         );
     }
@@ -1036,7 +1067,10 @@ mod tests {
             .expect("caps tag must be an array");
         // libnvnmos's rule is "present + non-empty array means wide";
         // assert that's what we wrote.
-        assert!(!arr.is_empty(), "wide-mode array must be non-empty; got {v}");
+        assert!(
+            !arr.is_empty(),
+            "wide-mode array must be non-empty; got {v}"
+        );
     }
 
     #[test]
@@ -1068,7 +1102,10 @@ mod tests {
         let v = parse_value(&still_without);
         // No tags object was needed, so none should have been
         // synthesised either.
-        assert!(v.get("tags").is_none(), "auto must not synthesise tags; got {v}");
+        assert!(
+            v.get("tags").is_none(),
+            "auto must not synthesise tags; got {v}"
+        );
     }
 
     #[test]
@@ -1101,11 +1138,7 @@ mod tests {
 
     const DOMAIN_ID: &str = "1ac254d9-c9be-475a-93a7-f80b9c1063a8";
 
-    fn input<'a>(
-        flow_id: &'a str,
-        name: &'a str,
-        caps: &'a gst::Caps,
-    ) -> FlowDefBuildInput<'a> {
+    fn input<'a>(flow_id: &'a str, name: &'a str, caps: &'a gst::Caps) -> FlowDefBuildInput<'a> {
         FlowDefBuildInput {
             flow_id,
             name,
@@ -1123,9 +1156,8 @@ mod tests {
 
     #[test]
     fn build_video_v210_minimal() {
-        let caps = caps_from_str(
-            "video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001",
-        );
+        let caps =
+            caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
         let json = from_caps(&input(UUID_A, "cam-1", &caps)).unwrap();
         let v = parse(&json);
         assert_eq!(v["id"], UUID_A);
@@ -1135,8 +1167,14 @@ mod tests {
         assert_eq!(v["frame_height"], 1080);
         assert_eq!(v["grain_rate"]["numerator"], 30000);
         assert_eq!(v["grain_rate"]["denominator"], 1001);
-        assert_eq!(v["label"], "cam-1", "label falls back to name when property is empty");
-        assert_eq!(v["description"], "", "description is emitted even when empty");
+        assert_eq!(
+            v["label"], "cam-1",
+            "label falls back to name when property is empty"
+        );
+        assert_eq!(
+            v["description"], "",
+            "description is emitted even when empty"
+        );
         assert_eq!(v["parents"], serde_json::json!([]));
         assert!(
             v["tags"]["urn:x-nmos:tag:grouphint/v1.0"].is_null(),
@@ -1152,7 +1190,10 @@ mod tests {
             serde_json::json!([DOMAIN_ID]),
             "libnvnmos requires the mxl-domain-id tag",
         );
-        assert!(v.get("interlace_mode").is_none(), "no caps field → no interlace_mode emitted");
+        assert!(
+            v.get("interlace_mode").is_none(),
+            "no caps field → no interlace_mode emitted"
+        );
         assert_eq!(v["colorspace"], "BT709", "BT709 default for v210");
         let components = v["components"].as_array().expect("components is an array");
         assert_eq!(components.len(), 3, "Y/Cb/Cr triple");
@@ -1177,16 +1218,18 @@ mod tests {
         })
         .unwrap();
         let v = parse(&json);
-        assert_eq!(v["label"], "Studio A v210", "property wins over name fallback");
+        assert_eq!(
+            v["label"], "Studio A v210",
+            "property wins over name fallback"
+        );
         assert_eq!(v["description"], "long description goes here");
         assert_eq!(v["interlace_mode"], "interlaced_tff");
     }
 
     #[test]
     fn build_audio_f32le_minimal() {
-        let caps = caps_from_str(
-            "audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved",
-        );
+        let caps =
+            caps_from_str("audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved");
         let json = from_caps(&input(UUID_A, "mic-1", &caps)).unwrap();
         let v = parse(&json);
         assert_eq!(v["format"], "urn:x-nmos:format:audio");
@@ -1195,8 +1238,14 @@ mod tests {
         assert_eq!(v["sample_rate"]["denominator"], 1);
         assert_eq!(v["channel_count"], 2);
         assert_eq!(v["bit_depth"], 32);
-        assert_eq!(v["label"], "mic-1", "label falls back to name when property is empty");
-        assert_eq!(v["description"], "", "description is emitted even when empty");
+        assert_eq!(
+            v["label"], "mic-1",
+            "label falls back to name when property is empty"
+        );
+        assert_eq!(
+            v["description"], "",
+            "description is emitted even when empty"
+        );
         assert!(
             v["tags"]["urn:x-nmos:tag:grouphint/v1.0"].is_null(),
             "group hint tag omitted when property is unset",
@@ -1207,8 +1256,7 @@ mod tests {
 
     #[test]
     fn from_caps_emits_group_hint_when_set() {
-        let caps =
-            caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=25/1");
+        let caps = caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=25/1");
         let json = from_caps(&FlowDefBuildInput {
             group_hint: "SDI 1:Video",
             ..input(UUID_A, "cam-1", &caps)
@@ -1261,8 +1309,17 @@ mod tests {
         let caps = caps_from_str("meta/x-st-2038");
         let err = from_caps(&input(UUID_A, "anc-1", &caps)).unwrap_err();
         let msg = err.to_string();
-        assert!(matches!(err, FlowDefError::MissingCapsField { field: "framerate", .. }));
-        assert!(msg.contains("capsfilter"), "missing-framerate error guides the user: {msg}");
+        assert!(matches!(
+            err,
+            FlowDefError::MissingCapsField {
+                field: "framerate",
+                ..
+            }
+        ));
+        assert!(
+            msg.contains("capsfilter"),
+            "missing-framerate error guides the user: {msg}"
+        );
     }
 
     #[test]
@@ -1271,7 +1328,10 @@ mod tests {
             caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
         let json = from_caps(&input("", "cam-1", &caps)).expect("registration synthesis");
         let v = parse(&json);
-        assert!(v.get("id").is_none(), "empty flow_id must omit top-level `id`");
+        assert!(
+            v.get("id").is_none(),
+            "empty flow_id must omit top-level `id`"
+        );
         assert_eq!(v["format"], "urn:x-nmos:format:video");
     }
 
@@ -1292,7 +1352,10 @@ mod tests {
             ..input(UUID_A, "cam-1", &caps)
         })
         .unwrap_err();
-        assert!(matches!(err, FlowDefError::MissingMxlDomainId), "got: {err:?}");
+        assert!(
+            matches!(err, FlowDefError::MissingMxlDomainId),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -1301,7 +1364,13 @@ mod tests {
             caps_from_str("video/x-raw,format=I420,width=1920,height=1080,framerate=30000/1001");
         let err = from_caps(&input(UUID_A, "cam-1", &caps)).unwrap_err();
         assert!(
-            matches!(err, FlowDefError::UnsupportedCapsValue { field: "format", .. }),
+            matches!(
+                err,
+                FlowDefError::UnsupportedCapsValue {
+                    field: "format",
+                    ..
+                }
+            ),
             "got: {err:?}"
         );
     }
@@ -1310,7 +1379,10 @@ mod tests {
     fn unsupported_caps_is_hard_error() {
         let caps = caps_from_str("application/x-rtp,media=video");
         let err = from_caps(&input(UUID_A, "cam-1", &caps)).unwrap_err();
-        assert!(matches!(err, FlowDefError::UnsupportedCaps(_)), "got: {err:?}");
+        assert!(
+            matches!(err, FlowDefError::UnsupportedCaps(_)),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -1318,7 +1390,13 @@ mod tests {
         let caps = caps_from_str("video/x-raw,format=v210,width=1920,height=1080");
         let err = from_caps(&input(UUID_A, "cam-1", &caps)).unwrap_err();
         assert!(
-            matches!(err, FlowDefError::MissingCapsField { field: "framerate", .. }),
+            matches!(
+                err,
+                FlowDefError::MissingCapsField {
+                    field: "framerate",
+                    ..
+                }
+            ),
             "got: {err:?}",
         );
     }
@@ -1448,7 +1526,10 @@ mod tests {
         #[test]
         fn unsupported_media_type_is_error() {
             let err = super::caps_from(r#"{"media_type":"image/jpeg"}"#).unwrap_err();
-            assert!(matches!(err, FlowDefCapsError::UnsupportedMediaType(_)), "got: {err:?}");
+            assert!(
+                matches!(err, FlowDefCapsError::UnsupportedMediaType(_)),
+                "got: {err:?}"
+            );
         }
 
         #[test]
@@ -1478,14 +1559,18 @@ mod tests {
         #[test]
         fn parse_error_is_surfaced() {
             let err = super::caps_from("not json").unwrap_err();
-            assert!(matches!(err, FlowDefCapsError::Parse { .. }), "got: {err:?}");
+            assert!(
+                matches!(err, FlowDefCapsError::Parse { .. }),
+                "got: {err:?}"
+            );
         }
 
         #[test]
         fn round_trip_with_build_from_caps_video() {
             init_gst();
-            let original_caps =
-                caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
+            let original_caps = caps_from_str(
+                "video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001",
+            );
             let json = from_caps(&input(UUID_A, "cam-1", &original_caps)).unwrap();
             let derived = super::caps_from(&json).unwrap();
             // Both should agree on the structure name + the essence

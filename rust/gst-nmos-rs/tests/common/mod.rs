@@ -38,7 +38,8 @@ fn ensure_gst_plugin_path() {
         return;
     }
     let target_dir = std::env::var("CARGO_TARGET_DIR").ok().unwrap_or_else(|| {
-        let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
+        let manifest =
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
         PathBuf::from(manifest)
             .parent()
             .expect("manifest parent")
@@ -97,7 +98,8 @@ pub fn nvnmosd_bin() -> PathBuf {
         return PathBuf::from(p);
     }
     let target_dir = std::env::var("CARGO_TARGET_DIR").ok().unwrap_or_else(|| {
-        let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
+        let manifest =
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
         PathBuf::from(manifest)
             .parent()
             .expect("manifest parent")
@@ -117,7 +119,12 @@ pub fn nvnmosd_bin() -> PathBuf {
 pub fn libnvnmos_dir() -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(paths) = std::env::var("LD_LIBRARY_PATH") {
-        dirs.extend(paths.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
+        dirs.extend(
+            paths
+                .split(':')
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+        );
     }
     if let Ok(dir) = std::env::var("NVNMOS_LIB_DIR") {
         dirs.push(PathBuf::from(dir));
@@ -161,7 +168,10 @@ impl DaemonGuard {
         command
             .arg("--uds")
             .arg(&socket)
-            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
+            .env(
+                "RUST_LOG",
+                std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+            )
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
         // nvnmosd links libnvnmos.so; surface NVNMOS_LIB_DIR to the loader even

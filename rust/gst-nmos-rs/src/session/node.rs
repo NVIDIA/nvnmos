@@ -7,8 +7,8 @@
 use gstreamer as gst;
 use nvnmos_rpc::v1::{NetworkServicesConfig, NodeConfig};
 
-use crate::network_services::parse_nmos_url;
 use crate::CAT;
+use crate::network_services::parse_nmos_url;
 
 /// Snapshot of element properties that map to proto `NodeConfig`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -75,12 +75,7 @@ fn run_impl(via: &str, node_seed: &str) {
         log_malloc_info(via, "after");
     }
 
-    tracing::info!(
-        via,
-        node_seed,
-        released,
-        "malloc_trim"
-    );
+    tracing::info!(via, node_seed, released, "malloc_trim");
 }
 
 #[cfg(target_os = "linux")]
@@ -112,8 +107,5 @@ fn log_malloc_info(via: &str, phase: &str) {
 
 #[cfg(not(target_os = "linux"))]
 fn run_impl(_via: &str, node_seed: &str) {
-    tracing::debug!(
-        node_seed,
-        "malloc_trim skipped (not Linux)"
-    );
+    tracing::debug!(node_seed, "malloc_trim skipped (not Linux)");
 }

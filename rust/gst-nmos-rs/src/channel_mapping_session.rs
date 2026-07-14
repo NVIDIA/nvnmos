@@ -21,7 +21,7 @@ use tonic::transport::Channel;
 
 use gstreamer as gst;
 
-use crate::daemon::{connect_uds, parse_unix_uri, DaemonError};
+use crate::daemon::{DaemonError, connect_uds, parse_unix_uri};
 use crate::runtime::SHARED_RUNTIME;
 use crate::session::channel_mapping::ChannelMappingSettings;
 
@@ -123,9 +123,7 @@ impl ChannelMappingSession {
     }
 
     pub(crate) fn channelmapping_handle(&self) -> Option<&str> {
-        self.channelmapping
-            .as_ref()
-            .map(|cm| cm.handle.as_str())
+        self.channelmapping.as_ref().map(|cm| cm.handle.as_str())
     }
 
     pub(crate) async fn add_channel_mapping(
@@ -135,11 +133,7 @@ impl ChannelMappingSession {
         if self.channelmapping.is_some() {
             return Err(DaemonError::AlreadyAdded);
         }
-        let resp = self
-            .client
-            .add_channel_mapping(request)
-            .await?
-            .into_inner();
+        let resp = self.client.add_channel_mapping(request).await?.into_inner();
         self.channelmapping = Some(AddedChannelMapping {
             handle: resp.channelmapping_handle.clone(),
         });
@@ -279,8 +273,8 @@ mod session_integration {
     use super::*;
     use crate::channel_mapping::request::build_add_channel_mapping_request;
     use crate::channel_mapping::types::{SinkPadSnapshot, SrcPadSnapshot};
-    use crate::session::channel_mapping::ChannelMappingSettings;
     use crate::session::NodeSettings;
+    use crate::session::channel_mapping::ChannelMappingSettings;
     use std::path::PathBuf;
     use std::process::{Child, Command, Stdio};
     use std::sync::Arc;
@@ -312,7 +306,12 @@ mod session_integration {
     fn libnvnmos_dir() -> Option<PathBuf> {
         let mut dirs: Vec<PathBuf> = Vec::new();
         if let Ok(paths) = std::env::var("LD_LIBRARY_PATH") {
-            dirs.extend(paths.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
+            dirs.extend(
+                paths
+                    .split(':')
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from),
+            );
         }
         if let Ok(dir) = std::env::var("NVNMOS_LIB_DIR") {
             dirs.push(PathBuf::from(dir));
@@ -354,7 +353,10 @@ mod session_integration {
             command
                 .arg("--uds")
                 .arg(&socket)
-                .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
+                .env(
+                    "RUST_LOG",
+                    std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+                )
                 .stdout(Stdio::null())
                 .stderr(Stdio::inherit());
             // nvnmosd links libnvnmos.so; surface NVNMOS_LIB_DIR to the loader even

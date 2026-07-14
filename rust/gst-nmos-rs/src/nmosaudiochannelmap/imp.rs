@@ -3,11 +3,10 @@
 
 use std::sync::{Arc, LazyLock, Mutex};
 
-use anyhow::{bail, Context};
-use gstreamer as gst;
-use gstreamer::glib;
-use gstreamer::prelude::*;
-use gstreamer::subclass::prelude::*;
+use super::internals::InternalGraph;
+use super::pad::{
+    NmosAudioChannelMapSinkPad, NmosAudioChannelMapSrcPad, sink_pad_templates, src_pad_templates,
+};
 use crate::channel_mapping::active_map::{
     active_map_entries_for_src, default_identity_routes, parse_active_map_structure,
 };
@@ -19,14 +18,15 @@ use crate::channel_mapping_session::{
     ChannelMappingActivationRequest, ChannelMappingSession,
 };
 use crate::session::channel_mapping::{
-    close as close_session, validate_and_open, ChannelMappingSettings,
-    CHANNELMAPPING_NAME_BLURB, RESTRICT_ROUTABLE_INPUTS_BLURB,
+    CHANNELMAPPING_NAME_BLURB, ChannelMappingSettings, RESTRICT_ROUTABLE_INPUTS_BLURB,
+    close as close_session, validate_and_open,
 };
 use crate::types::DEFAULT_DAEMON_URI;
-use super::internals::InternalGraph;
-use super::pad::{
-    sink_pad_templates, src_pad_templates, NmosAudioChannelMapSinkPad, NmosAudioChannelMapSrcPad,
-};
+use anyhow::{Context, bail};
+use gstreamer as gst;
+use gstreamer::glib;
+use gstreamer::prelude::*;
+use gstreamer::subclass::prelude::*;
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -203,7 +203,8 @@ impl ChildProxyImpl for NmosAudioChannelMap {
             .into_iter()
             .filter(|p| p.name().starts_with("sink_") || p.name().starts_with("src_"))
             .collect();
-        pads.get(index as usize).map(|p| p.upcast_ref::<glib::Object>().clone())
+        pads.get(index as usize)
+            .map(|p| p.upcast_ref::<glib::Object>().clone())
     }
 
     fn children_count(&self) -> u32 {
@@ -314,9 +315,13 @@ impl ElementImpl for NmosAudioChannelMap {
             gst::StateChange::NullToReady => {
                 let settings = self.settings.lock().unwrap().clone();
                 let handler = self.activation_handler();
-                if let Err(e) =
-                    validate_and_open(&CAT, "nmosaudiochannelmap", &(&settings).into(), &self.session, handler)
-                {
+                if let Err(e) = validate_and_open(
+                    &CAT,
+                    "nmosaudiochannelmap",
+                    &(&settings).into(),
+                    &self.session,
+                    handler,
+                ) {
                     element.post_error_message(gst::error_msg!(
                         gst::ResourceError::OpenRead,
                         ["failed to open channel mapping session: {e:#}"]
@@ -402,7 +407,11 @@ impl NmosAudioChannelMap {
                 };
             }
         };
-        let src_index = match topology.output_ids.iter().position(|id| id == &req.output_id) {
+        let src_index = match topology
+            .output_ids
+            .iter()
+            .position(|id| id == &req.output_id)
+        {
             Some(i) => i,
             None => {
                 return ChannelMappingActivationOutcome::Failed {
@@ -499,8 +508,8 @@ impl NmosAudioChannelMap {
                 &src_snapshots,
                 settings.restrict_routable_inputs,
             );
-            let resp = block_on_async(session.add_channel_mapping(req))
-                .context("AddChannelMapping")?;
+            let resp =
+                block_on_async(session.add_channel_mapping(req)).context("AddChannelMapping")?;
             for (snap, id) in sink_snapshots.iter_mut().zip(resp.input_ids.iter()) {
                 if snap.input_id.is_empty() {
                     snap.input_id.clone_from(id);
@@ -543,13 +552,8 @@ impl NmosAudioChannelMap {
         let mut output_routes = Vec::new();
         let mut sync_entries = Vec::new();
         for (src_idx, src) in src_snapshots.iter().enumerate() {
-            let entries = active_map_entries_for_src(
-                &topology,
-                src,
-                src_idx,
-                &sink_snapshots,
-                src_count,
-            )?;
+            let entries =
+                active_map_entries_for_src(&topology, src, src_idx, &sink_snapshots, src_count)?;
             let routes = if let Some(structure) = src.active_map.as_ref() {
                 parse_active_map_structure(structure)?
             } else {
@@ -565,13 +569,7 @@ impl NmosAudioChannelMap {
             sync_entries.push((src.output_id.clone(), entries));
         }
 
-        let graph = InternalGraph::build(
-            bin,
-            &topology,
-            &sink_pads,
-            &src_pads,
-            &output_routes,
-        )?;
+        let graph = InternalGraph::build(bin, &topology, &sink_pads, &src_pads, &output_routes)?;
 
         for pad in sink_pads.iter().chain(src_pads.iter()) {
             if let Some(sink) = pad.downcast_ref::<NmosAudioChannelMapSinkPad>() {

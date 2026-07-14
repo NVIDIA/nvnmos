@@ -9,10 +9,10 @@
 //! vendor and spec-extension attributes the model does not represent survive
 //! verbatim to `libnvnmos`.
 
-use gstreamer_sdp::{SDPAttribute, SDPMediaRef, SDPConnection, SDPMessage};
+use gstreamer_sdp::{SDPAttribute, SDPConnection, SDPMediaRef, SDPMessage};
 
 use crate::iface;
-use crate::sdp::{self, defaults, BitRates, SdpError, SdpOverrides};
+use crate::sdp::{self, BitRates, SdpError, SdpOverrides, defaults};
 use crate::types::CapsMode;
 
 /// Whether the configuring passthrough path may carry a dual-`m=` ST 2022-7 SDP.
@@ -96,8 +96,8 @@ pub(crate) fn passthrough_with_overrides(
     overrides: &SdpOverrides<'_>,
     policy: DualLegPassthroughPolicy,
 ) -> Result<String, SdpError> {
-    let mut msg = SDPMessage::parse_buffer(text.as_bytes())
-        .map_err(|e| SdpError::Parse(e.to_string()))?;
+    let mut msg =
+        SDPMessage::parse_buffer(text.as_bytes()).map_err(|e| SdpError::Parse(e.to_string()))?;
     reject_unsupported_multi_media(&msg, policy)?;
     apply_session_overrides_in_place(&mut msg, overrides)?;
     apply_media_overrides_in_place(&mut msg, overrides)?;
@@ -117,7 +117,9 @@ fn apply_primary_leg_transport_overrides(
     m: &mut SDPMediaRef,
     overrides: &SdpOverrides<'_>,
 ) -> Result<(), SdpError> {
-    let is_audio = m.media().is_some_and(|kind| kind.eq_ignore_ascii_case("audio"));
+    let is_audio = m
+        .media()
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("audio"));
 
     if let Some(port) = overrides.destination_port {
         let num_ports = m.num_ports();
@@ -202,14 +204,15 @@ fn rewrite_payload_type(m: &mut SDPMediaRef, new_pt: u8) -> Result<(), SdpError>
     let old_prefix = format!("{old_pt} ");
     let mut rewrites: Vec<(u32, String, String)> = Vec::new();
     for idx in 0..m.attributes_len() {
-        let Some(attr) = m.attribute(idx) else { continue };
+        let Some(attr) = m.attribute(idx) else {
+            continue;
+        };
         let key = attr.key().to_owned();
         let Some(value) = attr.value() else { continue };
         if let Some(new_value) = match key.as_str() {
-            "rtpmap" | "fmtp" if value.starts_with(&old_prefix) => Some(format!(
-                "{new_pt_str} {}",
-                &value[old_prefix.len()..]
-            )),
+            "rtpmap" | "fmtp" if value.starts_with(&old_prefix) => {
+                Some(format!("{new_pt_str} {}", &value[old_prefix.len()..]))
+            }
             "x-nvnmos-caps" if value == old_pt => Some(new_pt_str.clone()),
             _ => None,
         } {
@@ -224,7 +227,9 @@ fn rewrite_payload_type(m: &mut SDPMediaRef, new_pt: u8) -> Result<(), SdpError>
 
 fn rewrite_audio_clock_rate(m: &mut SDPMediaRef, new_rate: u32) -> Result<(), SdpError> {
     for idx in 0..m.attributes_len() {
-        let Some(attr) = m.attribute(idx) else { continue };
+        let Some(attr) = m.attribute(idx) else {
+            continue;
+        };
         if attr.key() != "rtpmap" {
             continue;
         }
@@ -267,13 +272,7 @@ fn replace_connection_address(m: &mut SDPMediaRef, address: &str) -> Result<(), 
     } else {
         conn.ttl()
     };
-    let new_conn = SDPConnection::new(
-        nettype,
-        addrtype,
-        address,
-        ttl,
-        conn.addr_number(),
-    );
+    let new_conn = SDPConnection::new(nettype, addrtype, address, ttl, conn.addr_number());
     m.replace_connection(0, new_conn)
         .map_err(|e| SdpError::Parse(e.to_string()))
 }
@@ -288,7 +287,9 @@ fn is_multicast_address(address: &str) -> bool {
 
 fn update_source_filter_destination(m: &mut SDPMediaRef, dest: &str) {
     for idx in 0..m.attributes_len() {
-        let Some(attr) = m.attribute(idx) else { continue };
+        let Some(attr) = m.attribute(idx) else {
+            continue;
+        };
         if attr.key() != "source-filter" {
             continue;
         }
@@ -323,18 +324,10 @@ fn upsert_session_attribute(msg: &mut SDPMessage, key: &str, value: Option<&str>
 }
 
 fn find_session_attribute_index(msg: &SDPMessage, key: &str) -> Option<u32> {
-    (0..msg.attributes_len()).find(|&idx| {
-        msg.attribute(idx)
-            .is_some_and(|attr| attr.key() == key)
-    })
+    (0..msg.attributes_len()).find(|&idx| msg.attribute(idx).is_some_and(|attr| attr.key() == key))
 }
 
-fn upsert_media_attribute(
-    m: &mut SDPMediaRef,
-    key: &str,
-    value: Option<&str>,
-    canonicalise: bool,
-) {
+fn upsert_media_attribute(m: &mut SDPMediaRef, key: &str, value: Option<&str>, canonicalise: bool) {
     if let Some(idx) = find_media_attribute_index(m, key) {
         upsert_media_attribute_at(m, idx, key, value, canonicalise);
     } else {
@@ -360,9 +353,7 @@ fn upsert_media_attribute_at(
 }
 
 fn find_media_attribute_index(m: &SDPMediaRef, key: &str) -> Option<u32> {
-    (0..m.attributes_len()).find(|&idx| {
-        m.attribute(idx).is_some_and(|attr| attr.key() == key)
-    })
+    (0..m.attributes_len()).find(|&idx| m.attribute(idx).is_some_and(|attr| attr.key() == key))
 }
 
 fn remove_media_attributes_by_key(m: &mut SDPMediaRef, key: &str) {
@@ -413,7 +404,12 @@ mod tests {
             interface_ip: Some(&ip_str),
             ..Default::default()
         };
-        let out = passthrough_with_overrides(VIDEO_WITH_STALE_IFACE, &overrides, DualLegPassthroughPolicy::RejectDualLeg).expect("splice");
+        let out = passthrough_with_overrides(
+            VIDEO_WITH_STALE_IFACE,
+            &overrides,
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )
+        .expect("splice");
         assert!(
             out.contains(&format!("a=x-nvnmos-iface-ip:{ip}")),
             "iface-ip must be overridden: {out}",
@@ -437,8 +433,12 @@ mod tests {
             interface_ip: Some("192.0.2.254"),
             ..Default::default()
         };
-        let out =
-            passthrough_with_overrides(VIDEO_WITH_STALE_IFACE, &overrides, DualLegPassthroughPolicy::RejectDualLeg).expect("splice");
+        let out = passthrough_with_overrides(
+            VIDEO_WITH_STALE_IFACE,
+            &overrides,
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )
+        .expect("splice");
         assert!(
             out.contains("a=x-nvnmos-iface-ip:192.0.2.254"),
             "iface-ip override: {out}",
@@ -448,5 +448,4 @@ mod tests {
             "unresolvable override must drop stale iface: {out}",
         );
     }
-
 }

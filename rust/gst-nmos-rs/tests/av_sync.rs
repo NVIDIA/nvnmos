@@ -52,10 +52,10 @@
 mod common;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use common::{init, nvnmosd_skip_reason, DaemonGuard};
+use common::{DaemonGuard, init, nvnmosd_skip_reason};
 use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_app as gst_app;
@@ -649,8 +649,7 @@ fn assert_synchronised(video: &[VideoFrame], pips: &[u64], anc_tol: usize) {
         std::collections::BTreeMap::new();
     for f in video {
         for c in &f.captions {
-            let target = ((f.idx as i64 - anc_tol as i64).max(0)
-                ..=(f.idx as i64 + anc_tol as i64))
+            let target = ((f.idx as i64 - anc_tol as i64).max(0)..=(f.idx as i64 + anc_tol as i64))
                 .find_map(|i| {
                     let i = i as u8;
                     (i != 0
@@ -755,7 +754,7 @@ fn skip_reason(t: Transport) -> Option<String> {
                 "nvdsudp needs the DeepStream/Rivermax + PTP runtime (hardware \
                  timestamping) to co-time the flows; not available here"
                     .into(),
-            )
+            );
         }
         Transport::Mxl => {
             if !cfg!(target_os = "linux") {
@@ -823,8 +822,12 @@ fn run_case(t: Transport) {
     let _teardown = Teardown(producer.clone(), consumer.clone());
 
     // Producer first so all three flows exist before the consumer attaches.
-    producer.set_state(gst::State::Playing).expect("producer Playing");
-    consumer.set_state(gst::State::Playing).expect("consumer Playing");
+    producer
+        .set_state(gst::State::Playing)
+        .expect("producer Playing");
+    consumer
+        .set_state(gst::State::Playing)
+        .expect("consumer Playing");
     let (res, _, _) = consumer.state(gst::ClockTime::from_seconds(10));
     res.expect("consumer reached Playing");
 

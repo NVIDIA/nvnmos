@@ -3,18 +3,18 @@
 
 //! Internal `audiomixer` + `audiomixmatrix` subgraph.
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 
+use super::caps::{caps_with_channel_count, caps_with_channel_mask, sequential_channel_mask};
+use super::pad::{NmosAudioChannelMapSinkPad, NmosAudioChannelMapSrcPad};
 use crate::channel_mapping::active_map::ActiveMapRoute;
 use crate::channel_mapping::matrix::{
     build_input_bus_mix_matrix, build_output_mix_matrix, input_bus_converter_config,
     matrix_to_audiomixmatrix_gvalue,
 };
 use crate::channel_mapping::types::FrozenTopology;
-use super::caps::{caps_with_channel_count, caps_with_channel_mask, sequential_channel_mask};
-use super::pad::{NmosAudioChannelMapSinkPad, NmosAudioChannelMapSrcPad};
 
 // Extra wait the live audiomixer allows for jittery inputs before emitting.
 // Covers software-receive scheduling jitter at small RTP packet times.
@@ -102,11 +102,8 @@ impl InternalGraph {
                 .ok_or_else(|| anyhow::anyhow!("audiomixer request sink pad failed"))?;
             let input_ch = topology.input_channels[idx];
             let bus_offset = topology.input_bus_offsets[idx];
-            let matrix = build_input_bus_mix_matrix(
-                topology.input_bus_channels,
-                input_ch,
-                bus_offset,
-            );
+            let matrix =
+                build_input_bus_mix_matrix(topology.input_bus_channels, input_ch, bus_offset);
             mixer_sink.set_property("converter-config", input_bus_converter_config(&matrix));
 
             // Pin each input leg to exactly its channel count: the converter-config
@@ -140,10 +137,9 @@ impl InternalGraph {
                 .link(&mixer_sink)
                 .context("linking sink queue to audiomixer")?;
 
-            let ghost: NmosAudioChannelMapSinkPad = sink_pad
-                .clone()
-                .downcast()
-                .map_err(|_| anyhow::anyhow!("pad `{}` is not a sink ghost pad", sink_pad.name()))?;
+            let ghost: NmosAudioChannelMapSinkPad = sink_pad.clone().downcast().map_err(|_| {
+                anyhow::anyhow!("pad `{}` is not a sink ghost pad", sink_pad.name())
+            })?;
             ghost.set_target(sink_capsfilter.static_pad("sink").as_ref())?;
             ghost.set_active(true)?;
             sink_capsfilters.push(sink_capsfilter);

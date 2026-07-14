@@ -94,10 +94,7 @@ pub(crate) fn iface_name_for_ip(_target: std::net::IpAddr) -> Option<String> {
 }
 
 #[cfg(unix)]
-fn port_id_for_interface(
-    addrs: &[nix::ifaddrs::InterfaceAddress],
-    ifname: &str,
-) -> Option<String> {
+fn port_id_for_interface(addrs: &[nix::ifaddrs::InterfaceAddress], ifname: &str) -> Option<String> {
     for ifa in addrs {
         if ifa.interface_name != ifname {
             continue;
@@ -177,7 +174,10 @@ mod tests {
         let Some(name) = iface_name_for_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)) else {
             return;
         };
-        assert!(!name.is_empty(), "`::1` resolution must yield a non-empty name");
+        assert!(
+            !name.is_empty(),
+            "`::1` resolution must yield a non-empty name"
+        );
     }
 
     #[test]

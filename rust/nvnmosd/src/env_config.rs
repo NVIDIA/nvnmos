@@ -26,13 +26,7 @@ pub(crate) enum EnvDefault {
 
 /// Read `name` from the process environment and parse it with [`parse_env_bool`].
 pub(crate) fn read_env_bool(name: &str, default: EnvDefault) -> bool {
-    parse_env_bool(
-        std::env::var(name)
-            .ok()
-            .as_deref()
-            .map(str::trim),
-        default,
-    )
+    parse_env_bool(std::env::var(name).ok().as_deref().map(str::trim), default)
 }
 
 /// Parse a boolean environment value. `None` means the variable was unset.

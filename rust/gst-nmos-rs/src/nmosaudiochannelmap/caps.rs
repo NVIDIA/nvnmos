@@ -11,11 +11,7 @@ pub(crate) fn sequential_channel_mask(channels: u32) -> Option<gst::Bitmask> {
     if !(1..=64).contains(&ch) {
         return None;
     }
-    let mask = if ch == 64 {
-        u64::MAX
-    } else {
-        (1u64 << ch) - 1
-    };
+    let mask = if ch == 64 { u64::MAX } else { (1u64 << ch) - 1 };
     Some(gst::Bitmask::new(mask))
 }
 

@@ -78,7 +78,11 @@ impl SessionGc {
     }
 
     pub fn cancel_timeout(&self, session_handle: &str) {
-        if let Some(handle) = self.watchdogs.lock().expect("watchdog mutex poisoned").remove(session_handle)
+        if let Some(handle) = self
+            .watchdogs
+            .lock()
+            .expect("watchdog mutex poisoned")
+            .remove(session_handle)
         {
             handle.abort();
         }
@@ -127,7 +131,10 @@ impl SessionGc {
                 implicit = true,
                 "CloseSession",
             );
-            let _ = watchdogs.lock().expect("watchdog mutex poisoned").remove(&handle);
+            let _ = watchdogs
+                .lock()
+                .expect("watchdog mutex poisoned")
+                .remove(&handle);
         });
         self.watchdogs
             .lock()

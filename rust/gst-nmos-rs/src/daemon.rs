@@ -30,9 +30,9 @@ use std::time::Duration;
 use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
-    AckActivationRequest, ActivationEvent, AddReceiverRequest, AddSenderRequest, CloseSessionRequest,
-    OpenSessionRequest, Side as ProtoSide, SubscribeActivationsRequest, SyncResourceStateRequest,
-    Transport as ProtoTransport,
+    AckActivationRequest, ActivationEvent, AddReceiverRequest, AddSenderRequest,
+    CloseSessionRequest, OpenSessionRequest, Side as ProtoSide, SubscribeActivationsRequest,
+    SyncResourceStateRequest, Transport as ProtoTransport,
 };
 use thiserror::Error;
 use tokio::net::UnixStream;
@@ -45,8 +45,8 @@ use gstreamer as gst;
 
 use crate::CAT;
 use crate::runtime::SHARED_RUNTIME;
-use crate::session::types::Side;
 use crate::session::CommonSettings;
+use crate::session::types::Side;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -121,9 +121,7 @@ pub(crate) enum DaemonError {
     Transport(#[from] Box<tonic::transport::Error>),
     #[error("RPC error: {0}")]
     Rpc(#[from] Box<tonic::Status>),
-    #[error(
-        "session already has a resource added; deferred AddSender is a one-shot operation"
-    )]
+    #[error("session already has a resource added; deferred AddSender is a one-shot operation")]
     AlreadyAdded,
     #[error(
         "session has no resource added yet; auto-activate sync cannot run before AddSender / AddReceiver"
@@ -217,28 +215,22 @@ impl Session {
         );
 
         let resource = match transport_file {
-            Some(file) => match add_resource(
-                &mut client,
-                &session_handle,
-                side,
-                name,
-                transport,
-                file,
-            )
-            .await
-            {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    activation_task.abort();
-                    let _ = activation_task.await;
-                    let _ = client
-                        .close_session(CloseSessionRequest {
-                            session_handle: session_handle.clone(),
-                        })
-                        .await;
-                    return Err(e);
+            Some(file) => {
+                match add_resource(&mut client, &session_handle, side, name, transport, file).await
+                {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        activation_task.abort();
+                        let _ = activation_task.await;
+                        let _ = client
+                            .close_session(CloseSessionRequest {
+                                session_handle: session_handle.clone(),
+                            })
+                            .await;
+                        return Err(e);
+                    }
                 }
-            },
+            }
             None => None,
         };
 

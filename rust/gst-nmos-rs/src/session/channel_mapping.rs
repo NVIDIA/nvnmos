@@ -6,12 +6,10 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use gstreamer as gst;
 
-use crate::channel_mapping_session::{
-    ChannelMappingActivationHandler, ChannelMappingSession,
-};
+use crate::channel_mapping_session::{ChannelMappingActivationHandler, ChannelMappingSession};
 use crate::runtime::SHARED_RUNTIME;
 use crate::types::DEFAULT_DAEMON_URI;
 
@@ -19,13 +17,11 @@ use super::NodeSettings;
 
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) const CHANNELMAPPING_NAME_BLURB: &str =
-    "Caller-chosen name for this channel mapping within the Node. Unique per \
+pub(crate) const CHANNELMAPPING_NAME_BLURB: &str = "Caller-chosen name for this channel mapping within the Node. Unique per \
      Node; identifies the Input/Output bundle added at NULL→READY. Not an IS-08 \
      Input or Output id.";
 
-pub(crate) const RESTRICT_ROUTABLE_INPUTS_BLURB: &str =
-    "When true, each Output's IS-08 /caps routable_inputs lists only this \
+pub(crate) const RESTRICT_ROUTABLE_INPUTS_BLURB: &str = "When true, each Output's IS-08 /caps routable_inputs lists only this \
      element's Input ids. When false (default), routable inputs are \
      unrestricted on the IS-08 Output /caps endpoint.";
 
@@ -70,7 +66,12 @@ pub(crate) fn validate_and_open(
             )
             .await
         })
-        .with_context(|| format!("{element}: OpenSession against {} timed out", settings.daemon_uri))?
+        .with_context(|| {
+            format!(
+                "{element}: OpenSession against {} timed out",
+                settings.daemon_uri
+            )
+        })?
         .with_context(|| format!("{element}: OpenSession against {}", settings.daemon_uri))?;
 
     gst::info!(

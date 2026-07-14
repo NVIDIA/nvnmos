@@ -198,8 +198,12 @@ pub enum ChannelMappingParentType {
 impl ChannelMappingParentType {
     fn to_ffi(self) -> sys::NvNmosChannelMappingParentType {
         match self {
-            Self::Receiver => sys::_NvNmosChannelMappingParentType_NVNMOS_CHANNELMAPPING_PARENT_TYPE_RECEIVER,
-            Self::Source => sys::_NvNmosChannelMappingParentType_NVNMOS_CHANNELMAPPING_PARENT_TYPE_SOURCE,
+            Self::Receiver => {
+                sys::_NvNmosChannelMappingParentType_NVNMOS_CHANNELMAPPING_PARENT_TYPE_RECEIVER
+            }
+            Self::Source => {
+                sys::_NvNmosChannelMappingParentType_NVNMOS_CHANNELMAPPING_PARENT_TYPE_SOURCE
+            }
         }
     }
 }
@@ -252,7 +256,10 @@ pub struct ChannelMappingConfig {
     pub outputs: Vec<ChannelMappingOutput>,
 }
 type ChannelMappingActivationCallback = Box<
-    dyn Fn(&ChannelMappingActivation<'_>) -> std::result::Result<(), String> + Send + Sync + 'static,
+    dyn Fn(&ChannelMappingActivation<'_>) -> std::result::Result<(), String>
+        + Send
+        + Sync
+        + 'static,
 >;
 
 /// A single log message from libnvnmos, passed to the callback installed via
@@ -1223,10 +1230,9 @@ impl NodeServer {
             channelmapping_activated: callback_state
                 .as_ref()
                 .filter(|s| s.channelmapping_activation.is_some())
-                .map(
-                    |_| channelmapping_activation_trampoline
-                        as unsafe extern "C" fn(_, _, _, _, _) -> _,
-                ),
+                .map(|_| {
+                    channelmapping_activation_trampoline as unsafe extern "C" fn(_, _, _, _, _) -> _
+                }),
             log_callback: callback_state
                 .as_ref()
                 .filter(|s| s.log.is_some())
@@ -1292,9 +1298,8 @@ impl NodeServer {
     /// Remove a sender by its name.
     pub fn remove_sender(&self, sender_name: &str) -> Result<()> {
         let cname = CString::new(sender_name)?;
-        let ok = unsafe {
-            sys::remove_nmos_sender_from_node_server(self.raw_ptr_mut(), cname.as_ptr())
-        };
+        let ok =
+            unsafe { sys::remove_nmos_sender_from_node_server(self.raw_ptr_mut(), cname.as_ptr()) };
         if !ok {
             return Err(Error::Failed("remove_nmos_sender_from_node_server"));
         }
@@ -1517,7 +1522,11 @@ mod tests {
     fn assert_uuid_shape(id: &str) {
         assert_eq!(id.len(), 36, "expected 36-char UUID, got {id:?}");
         let parts: Vec<usize> = id.split('-').map(str::len).collect();
-        assert_eq!(parts, vec![8, 4, 4, 4, 12], "id {id:?} not in 8-4-4-4-12 form");
+        assert_eq!(
+            parts,
+            vec![8, 4, 4, 4, 12],
+            "id {id:?} not in 8-4-4-4-12 form"
+        );
         assert!(
             id.chars().all(|c| c == '-' || c.is_ascii_hexdigit()),
             "id {id:?} contains non-hex characters",
@@ -1566,7 +1575,10 @@ mod tests {
 
     #[test]
     fn rejects_interior_nul() {
-        assert!(matches!(make_node_id("bad\0seed"), Err(Error::InteriorNul(_))));
+        assert!(matches!(
+            make_node_id("bad\0seed"),
+            Err(Error::InteriorNul(_))
+        ));
         assert!(matches!(
             make_sender_id("seed", "bad\0name"),
             Err(Error::InteriorNul(_))

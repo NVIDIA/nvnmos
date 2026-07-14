@@ -289,14 +289,16 @@ mod imp {
 pub(crate) fn sink_pad_templates() -> &'static [gst::PadTemplate] {
     static TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
         let caps = gst::Caps::builder("audio/x-raw").build();
-        vec![gst::PadTemplate::with_gtype(
-            "sink_%u",
-            gst::PadDirection::Sink,
-            gst::PadPresence::Request,
-            &caps,
-            NmosAudioChannelMapSinkPad::static_type(),
-        )
-        .expect("sink pad template")]
+        vec![
+            gst::PadTemplate::with_gtype(
+                "sink_%u",
+                gst::PadDirection::Sink,
+                gst::PadPresence::Request,
+                &caps,
+                NmosAudioChannelMapSinkPad::static_type(),
+            )
+            .expect("sink pad template"),
+        ]
     });
     TEMPLATES.as_ref()
 }
@@ -304,14 +306,16 @@ pub(crate) fn sink_pad_templates() -> &'static [gst::PadTemplate] {
 pub(crate) fn src_pad_templates() -> &'static [gst::PadTemplate] {
     static TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
         let caps = gst::Caps::builder("audio/x-raw").build();
-        vec![gst::PadTemplate::with_gtype(
-            "src_%u",
-            gst::PadDirection::Src,
-            gst::PadPresence::Request,
-            &caps,
-            NmosAudioChannelMapSrcPad::static_type(),
-        )
-        .expect("src pad template")]
+        vec![
+            gst::PadTemplate::with_gtype(
+                "src_%u",
+                gst::PadDirection::Src,
+                gst::PadPresence::Request,
+                &caps,
+                NmosAudioChannelMapSrcPad::static_type(),
+            )
+            .expect("src pad template"),
+        ]
     });
     TEMPLATES.as_ref()
 }

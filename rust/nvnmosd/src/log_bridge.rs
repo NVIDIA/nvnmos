@@ -15,9 +15,7 @@
 //! directive equivalent) brings the full firehose into view; the default
 //! `info` filter shows just warnings and errors.
 
-use nvnmos::{
-    LOG_LEVEL_ERROR, LOG_LEVEL_INFO, LOG_LEVEL_VERBOSE, LOG_LEVEL_WARNING, LogMessage,
-};
+use nvnmos::{LOG_LEVEL_ERROR, LOG_LEVEL_INFO, LOG_LEVEL_VERBOSE, LOG_LEVEL_WARNING, LogMessage};
 use tracing::{Level, event};
 
 /// `tracing` target used for every event emitted by the bridge.

@@ -16,8 +16,8 @@ use nvnmos_rpc::v1::{
 };
 use tempfile::TempDir;
 use tokio::net::UnixStream;
-use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::Code;
+use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
 struct DaemonHarness {
@@ -71,9 +71,7 @@ fn find_libnvnmos_dir() -> String {
     if let Ok(dir) = std::env::var("NVNMOS_LIB_DIR") {
         candidates.push(PathBuf::from(dir));
     }
-    candidates.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../build"),
-    );
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../build"));
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("../build"));
         candidates.push(cwd.join("build"));
@@ -223,11 +221,7 @@ async fn open_session(client: &mut NvnmosDaemonClient<Channel>, seed: &str) -> S
 }
 
 fn expect_code(err: tonic::Status, expected: Code) {
-    assert_eq!(
-        err.code(),
-        expected,
-        "unexpected gRPC status: {err}"
-    );
+    assert_eq!(err.code(), expected, "unexpected gRPC status: {err}");
 }
 
 /// Case A — subscribe before add.

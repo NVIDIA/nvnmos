@@ -107,8 +107,10 @@ pub(crate) fn read_domain_def_id(domain_path: &Path) -> Result<Option<String>, D
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(DomainError::Read { path: file, source }),
     };
-    let parsed: DomainDef = serde_json::from_str(&text)
-        .map_err(|source| DomainError::Parse { path: file.clone(), source })?;
+    let parsed: DomainDef = serde_json::from_str(&text).map_err(|source| DomainError::Parse {
+        path: file.clone(),
+        source,
+    })?;
     let id = parsed.id.unwrap_or_default();
     if id.is_empty() {
         return Err(DomainError::MissingId { path: file });

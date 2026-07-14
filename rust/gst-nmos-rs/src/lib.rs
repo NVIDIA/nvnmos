@@ -142,8 +142,8 @@ use std::sync::LazyLock;
 use gst::glib;
 use gstreamer as gst;
 
-mod channel_mapping_session;
 mod channel_mapping;
+mod channel_mapping_session;
 mod daemon;
 mod domain;
 mod essence_caps;
@@ -151,14 +151,14 @@ mod flow_def;
 mod iface;
 mod inner;
 mod network_services;
-mod nvdsudp;
+mod nmosaudiochannelmap;
 mod nmossink;
 mod nmossrc;
+mod nvdsudp;
 mod runtime;
 mod sdp;
 mod sdp_passthrough;
 mod session;
-mod nmosaudiochannelmap;
 mod types;
 
 /// Shared test-only helpers for the crate's unit tests.
