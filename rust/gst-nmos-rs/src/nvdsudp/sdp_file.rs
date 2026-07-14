@@ -15,9 +15,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use tempfile::Builder;
 use glib::object::ObjectExt;
 use gstreamer as gst;
+use tempfile::Builder;
 
 /// GObject qdata key for [`SdpFileGuard`] on the inner `nvdsudpsink`.
 const SDP_FILE_GUARD_KEY: &str = "nvnmos-nvdsudp-sdp-file";
@@ -41,9 +41,7 @@ impl SdpFileGuard {
             .context("creating nvdsudpsink sdp temp file")?;
         file.write_all(sdp_text.as_bytes())
             .with_context(|| format!("writing nvdsudpsink sdp-file `{}`", file.path().display()))?;
-        let (_, path) = file
-            .keep()
-            .context("keeping nvdsudpsink sdp temp file")?;
+        let (_, path) = file.keep().context("keeping nvdsudpsink sdp temp file")?;
         Ok(Self { path })
     }
 
@@ -117,6 +115,9 @@ mod tests {
         };
         assert!(path.exists(), "file must outlive the Rust guard move");
         drop(element);
-        assert!(!path.exists(), "file must be removed when element is finalized");
+        assert!(
+            !path.exists(),
+            "file must be removed when element is finalized"
+        );
     }
 }

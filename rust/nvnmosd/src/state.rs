@@ -49,9 +49,9 @@ use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use nvnmos::{
-    ChannelMappingActiveMapEntry, AssetConfig, ChannelMappingConfig, ChannelMappingInput, ChannelMappingOutput,
-    ChannelMappingParentType, NetworkServicesConfig, NodeConfig, NodeServer, ReceiverConfig,
-    SenderConfig, Side as WrapperSide, Transport,
+    AssetConfig, ChannelMappingActiveMapEntry, ChannelMappingConfig, ChannelMappingInput,
+    ChannelMappingOutput, ChannelMappingParentType, NetworkServicesConfig, NodeConfig, NodeServer,
+    ReceiverConfig, SenderConfig, Side as WrapperSide, Transport,
 };
 use nvnmos_rpc::v1::{
     ActivationEvent, ActiveMapEntry as ProtoActiveMapEntry, AssetConfig as ProtoAssetConfig,
@@ -177,11 +177,7 @@ impl Side {
     /// `Ok(None)` when libnvnmos does not have a resource of this side
     /// with the given `name`. Used as the post-add validation
     /// primitive by [`State::add_resource`].
-    fn lookup_id(
-        self,
-        server: &NodeServer,
-        name: &str,
-    ) -> nvnmos::Result<Option<String>> {
+    fn lookup_id(self, server: &NodeServer, name: &str) -> nvnmos::Result<Option<String>> {
         match self {
             Self::Sender => server.sender_id(name),
             Self::Receiver => server.receiver_id(name),
@@ -191,11 +187,7 @@ impl Side {
     /// Dispatch the wrapper's `remove_*` call. Used both by
     /// [`State::remove_resource`] and by [`State::close_session`] when
     /// dropping a session's resources before tearing down the Node.
-    fn remove_from_server(
-        self,
-        server: &NodeServer,
-        name: &str,
-    ) -> nvnmos::Result<()> {
+    fn remove_from_server(self, server: &NodeServer, name: &str) -> nvnmos::Result<()> {
         match self {
             Self::Sender => server.remove_sender(name),
             Self::Receiver => server.remove_receiver(name),
@@ -557,12 +549,7 @@ impl State {
                         http_port,
                     },
                 );
-                (
-                    true,
-                    node_id,
-                    Lifetime::SessionRefcounted,
-                    http_port,
-                )
+                (true, node_id, Lifetime::SessionRefcounted, http_port)
             }
         };
 
@@ -648,8 +635,9 @@ impl State {
                 resource.side,
                 resource.name.clone(),
             ));
-            if let Err(e) =
-                resource.side.remove_from_server(&node.server, &resource.name)
+            if let Err(e) = resource
+                .side
+                .remove_from_server(&node.server, &resource.name)
             {
                 tracing::warn!(
                     %resource_handle,
@@ -702,8 +690,7 @@ impl State {
         let lifetime = entry.lifetime;
         entry.attached_sessions = entry.attached_sessions.saturating_sub(1);
         let remaining_sessions = entry.attached_sessions;
-        let node_destroyed =
-            lifetime == Lifetime::SessionRefcounted && remaining_sessions == 0;
+        let node_destroyed = lifetime == Lifetime::SessionRefcounted && remaining_sessions == 0;
         if node_destroyed {
             self.http_ports.remove(&entry.http_port);
             self.nodes.remove(&seed);
@@ -778,9 +765,10 @@ impl State {
     ///   currently attached (the caller must close them first).
     pub fn remove_node(&mut self, seed: &str) -> Result<RemoveNodeOutcome, Status> {
         require_non_empty_seed(seed)?;
-        let entry = self.nodes.get(seed).ok_or_else(|| {
-            Status::not_found(format!("no Node exists for seed {seed:?}"))
-        })?;
+        let entry = self
+            .nodes
+            .get(seed)
+            .ok_or_else(|| Status::not_found(format!("no Node exists for seed {seed:?}")))?;
         match entry.lifetime {
             Lifetime::Persistent => {}
             Lifetime::SessionRefcounted => {
@@ -1001,8 +989,9 @@ impl State {
         // removal is best-effort — a failure here would leak a resource
         // in libnvnmos's IS-04 model, but our state stays clean.
         if let Some(node) = self.nodes.get(&resource.node_seed) {
-            if let Err(e) =
-                resource.side.remove_from_server(&node.server, &resource.name)
+            if let Err(e) = resource
+                .side
+                .remove_from_server(&node.server, &resource.name)
             {
                 tracing::warn!(
                     resource_handle,
@@ -1338,11 +1327,7 @@ impl State {
     /// Resolve `requested` (`0` = allocate from `port_range`) to an
     /// available TCP port. Skips ports already assigned to another Node
     /// and runs a bind-only host probe before Node creation.
-    fn resolve_http_port(
-        &self,
-        requested: u16,
-        port_range: &PortRange,
-    ) -> Result<u16, Status> {
+    fn resolve_http_port(&self, requested: u16, port_range: &PortRange) -> Result<u16, Status> {
         if requested != 0 {
             if let Some(owner) = self.http_ports.get(&requested) {
                 return Err(Status::already_exists(format!(
@@ -1385,9 +1370,7 @@ impl State {
     }
 
     fn allocate_channelmapping_handle(&self) -> String {
-        let n = self
-            .next_channelmapping_id
-            .fetch_add(1, Ordering::Relaxed);
+        let n = self.next_channelmapping_id.fetch_add(1, Ordering::Relaxed);
         format!("cm-{n}")
     }
 
@@ -1491,16 +1474,11 @@ impl State {
             .values()
             .any(|entry| entry.node_seed == node_seed);
 
-        let effective_input_ids =
-            effective_channelmapping_input_ids(name, inputs, first_on_node);
+        let effective_input_ids = effective_channelmapping_input_ids(name, inputs, first_on_node);
         let effective_output_ids =
             effective_channelmapping_output_ids(name, outputs, first_on_node);
-        let mapping = build_channel_mapping(
-            inputs,
-            outputs,
-            &effective_input_ids,
-            &effective_output_ids,
-        );
+        let mapping =
+            build_channel_mapping(inputs, outputs, &effective_input_ids, &effective_output_ids);
 
         let node = self.nodes.get(&node_seed).ok_or_else(|| {
             Status::internal(format!(
@@ -1509,11 +1487,13 @@ impl State {
             ))
         })?;
 
-        node.server.add_channelmapping(name, &mapping).map_err(|e| {
-            Status::invalid_argument(format!(
-                "libnvnmos add_channelmapping failed (duplicate or invalid geometry): {e}"
-            ))
-        })?;
+        node.server
+            .add_channelmapping(name, &mapping)
+            .map_err(|e| {
+                Status::invalid_argument(format!(
+                    "libnvnmos add_channelmapping failed (duplicate or invalid geometry): {e}"
+                ))
+            })?;
 
         let channelmapping_handle = self.allocate_channelmapping_handle();
         let output_id_set: HashSet<String> = effective_output_ids.iter().cloned().collect();
@@ -1625,12 +1605,15 @@ impl State {
             )));
         }
 
-        let entry = self.channelmappings.get(channelmapping_handle).ok_or_else(|| {
-            Status::internal(format!(
-                "session {session_handle:?} owns channelmapping_handle \
+        let entry = self
+            .channelmappings
+            .get(channelmapping_handle)
+            .ok_or_else(|| {
+                Status::internal(format!(
+                    "session {session_handle:?} owns channelmapping_handle \
                  {channelmapping_handle:?} but no entry exists"
-            ))
-        })?;
+                ))
+            })?;
         let node = self.nodes.get(&entry.node_seed).ok_or_else(|| {
             Status::internal(format!(
                 "channelmapping {channelmapping_handle:?} references seed {:?} but no Node \
@@ -1952,9 +1935,7 @@ pub fn translate_config(proto: Option<&ProtoNodeConfig>) -> Result<NodeConfig, S
 /// `INVALID_ARGUMENT`: libnvnmos requires all four fields when asset
 /// tags are present at all, so failing here gives the client a clearer
 /// error than letting the wrapper trip over an empty string later.
-fn translate_asset_tags(
-    proto: Option<&ProtoAssetConfig>,
-) -> Result<Option<AssetConfig>, Status> {
+fn translate_asset_tags(proto: Option<&ProtoAssetConfig>) -> Result<Option<AssetConfig>, Status> {
     let Some(proto) = proto else { return Ok(None) };
     let all_empty = proto.manufacturer.is_empty()
         && proto.product.is_empty()

@@ -59,16 +59,13 @@ pub(crate) fn transport_to_proto(t: Transport) -> ProtoTransport {
 // `label`, `description`, `mxl-flow-id`, `caps`) keep their text
 // inline in the respective `imp.rs`.
 
-pub(crate) const DAEMON_URI_BLURB: &str =
-    "gRPC endpoint for nvnmosd. Only `unix:/path/to/sock` URIs are \
+pub(crate) const DAEMON_URI_BLURB: &str = "gRPC endpoint for nvnmosd. Only `unix:/path/to/sock` URIs are \
      currently supported.";
 
-pub(crate) const NODE_SEED_BLURB: &str =
-    "NvNmos Node seed (node_config.seed). Required. Sessions sharing \
+pub(crate) const NODE_SEED_BLURB: &str = "NvNmos Node seed (node_config.seed). Required. Sessions sharing \
      this seed contribute to the same NMOS Node.";
 
-pub(crate) const HTTP_PORT_BLURB: &str =
-    "TCP port libnvnmos serves the NMOS HTTP APIs on \
+pub(crate) const HTTP_PORT_BLURB: &str = "TCP port libnvnmos serves the NMOS HTTP APIs on \
      (node_config.http_port). 0 (the default) asks nvnmosd to allocate \
      from NVNMOSD_HTTP_PORT_MIN..NVNMOSD_HTTP_PORT_MAX. Non-zero selects \
      an explicit port (rejected when unavailable). Honoured only by the \
@@ -77,37 +74,32 @@ pub(crate) const HTTP_PORT_BLURB: &str =
      the same node-seed) this property is ignored. The effective port is \
      returned in OpenSessionResponse.http_port.";
 
-pub(crate) const HOST_NAME_BLURB: &str =
-    "NMOS Node host name (`node_config.host_name`). Empty (the \
+pub(crate) const HOST_NAME_BLURB: &str = "NMOS Node host name (`node_config.host_name`). Empty (the \
      default) leaves libnvnmos to autodetect. Honoured only by the \
      OpenSession that actually creates the Node; ignored when \
      attaching to a pre-existing Node with the same `node-seed`.";
 
-pub(crate) const DOMAIN_BLURB: &str =
-    "DNS domain for NMOS network services (`network_services.domain`). \
+pub(crate) const DOMAIN_BLURB: &str = "DNS domain for NMOS network services (`network_services.domain`). \
      Use `local` to force mDNS. Empty (the default) leaves libnvnmos \
      on automatic discovery. Not to be confused with `mxl-domain-id` \
      / `mxl-domain-path`, which identify an MXL shared-memory Domain. \
      Honoured only by the OpenSession that creates the Node.";
 
-pub(crate) const REGISTRATION_URL_BLURB: &str =
-    "Fixed IS-04 Registration API URL. Format: \
+pub(crate) const REGISTRATION_URL_BLURB: &str = "Fixed IS-04 Registration API URL. Format: \
      `http://host[:port]/x-nmos/registration/v<X.Y>[/]`. Parsed into \
      `network_services.registration_*`; invalid URLs are logged and \
      ignored. Empty (the default) leaves libnvnmos on DNS-SD discovery \
      based on `host-name`. Honoured only by the OpenSession that \
      creates the Node.";
 
-pub(crate) const SYSTEM_URL_BLURB: &str =
-    "Fixed IS-09 System API URL. Format: \
+pub(crate) const SYSTEM_URL_BLURB: &str = "Fixed IS-09 System API URL. Format: \
      `http://host[:port]/x-nmos/system/v<X.Y>[/]`. Parsed into \
      `network_services.system_*`; invalid URLs are logged and ignored. \
      Honoured only when `registration-url` is also set (libnvnmos \
      ignores a standalone System API). Honoured only by the OpenSession \
      that creates the Node.";
 
-pub(crate) const TRANSPORT_BLURB: &str =
-    "Inner data path family. \
+pub(crate) const TRANSPORT_BLURB: &str = "Inner data path family. \
      `mxl`: MXL shared-memory transport (`mxlsrc` / `mxlsink`). \
      `udp`: ST 2110 over RTP/UDP via gst-plugins-good (`udpsrc` / \
      `udpsink` + the `rtpvrawpay` / `rtpL24pay` / `rtpsmpte291pay` \
@@ -119,8 +111,7 @@ pub(crate) const TRANSPORT_BLURB: &str =
      (Rivermax kernel-bypass, built-in RTP (de)payload, Mode 3). \
      Requires ConnectX-5+ and the Rivermax SDK.";
 
-pub(crate) const MXL_DOMAIN_ID_BLURB: &str =
-    "MXL Domain identifier (UUID) included as \
+pub(crate) const MXL_DOMAIN_ID_BLURB: &str = "MXL Domain identifier (UUID) included as \
      `urn:x-nvnmos:tag:mxl-domain-id` in the transport file. \
      Required when transport=mxl, but may be omitted if \
      `mxl-domain-path` points at a directory containing a \
@@ -131,8 +122,7 @@ pub(crate) const MXL_DOMAIN_ID_BLURB: &str =
      NULL\u{2192}READY; on `nmossink` it may also be set in READY \
      for deferred AddSender.";
 
-pub(crate) const SENDER_NAME_BLURB: &str =
-    "Name for this Sender within the Node (becomes the \
+pub(crate) const SENDER_NAME_BLURB: &str = "Name for this Sender within the Node (becomes the \
      `x-nvnmos-name` SDP attribute or the `urn:x-nvnmos:tag:name` \
      flow-def tag in the transport file). Unique across Senders on the \
      Node; a Receiver on the same Node may share the same name (the \
@@ -141,8 +131,7 @@ pub(crate) const SENDER_NAME_BLURB: &str =
      when both are supplied. The Sender's IS-04 id is derived from the \
      name and the element's `node-seed`.";
 
-pub(crate) const RECEIVER_NAME_BLURB: &str =
-    "Name for this Receiver within the Node (becomes the \
+pub(crate) const RECEIVER_NAME_BLURB: &str = "Name for this Receiver within the Node (becomes the \
      `x-nvnmos-name` SDP attribute or the `urn:x-nvnmos:tag:name` \
      flow-def tag in the transport file). Unique across Receivers on the \
      Node; a Sender on the same Node may share the same name (the \
@@ -151,47 +140,39 @@ pub(crate) const RECEIVER_NAME_BLURB: &str =
      when both are supplied. The Receiver's IS-04 id is derived from the \
      name and the element's `node-seed`.";
 
-pub(crate) const LABEL_BLURB_SENDER: &str =
-    "NMOS label for the Sender. Optional. Overrides the transport \
+pub(crate) const LABEL_BLURB_SENDER: &str = "NMOS label for the Sender. Optional. Overrides the transport \
      file when both are supplied (top-level `label` in an MXL \
      `flow_def`; SDP `s=` line for RTP/UDP).";
 
-pub(crate) const LABEL_BLURB_RECEIVER: &str =
-    "NMOS label for the Receiver. Optional. Overrides the transport \
+pub(crate) const LABEL_BLURB_RECEIVER: &str = "NMOS label for the Receiver. Optional. Overrides the transport \
      file when both are supplied (top-level `label` in an MXL \
      `flow_def`; SDP `s=` line for RTP/UDP).";
 
-pub(crate) const DESCRIPTION_BLURB_SENDER: &str =
-    "NMOS description for the Sender. Optional. Overrides the \
+pub(crate) const DESCRIPTION_BLURB_SENDER: &str = "NMOS description for the Sender. Optional. Overrides the \
      transport file when both are supplied (top-level `description` \
      in an MXL `flow_def`; SDP `i=` line for RTP/UDP).";
 
-pub(crate) const DESCRIPTION_BLURB_RECEIVER: &str =
-    "NMOS description for the Receiver. Optional. Overrides the \
+pub(crate) const DESCRIPTION_BLURB_RECEIVER: &str = "NMOS description for the Receiver. Optional. Overrides the \
      transport file when both are supplied (top-level `description` \
      in an MXL `flow_def`; SDP `i=` line for RTP/UDP).";
 
-pub(crate) const GROUP_HINT_BLURB_SENDER: &str =
-    "NMOS group hint for the Sender (the \
+pub(crate) const GROUP_HINT_BLURB_SENDER: &str = "NMOS group hint for the Sender (the \
      `urn:x-nmos:tag:grouphint/v1.0` tag), e.g. `\"SDI 1:Video\"`. \
      Becomes the `x-nvnmos-group-hint` session-level SDP attribute on \
      RTP/UDP or the grouphint tag in an MXL `flow_def`. Overrides the \
      transport file when both are supplied. Optional. Omitted when unset.";
 
-pub(crate) const GROUP_HINT_BLURB_RECEIVER: &str =
-    "NMOS group hint for the Receiver (the \
+pub(crate) const GROUP_HINT_BLURB_RECEIVER: &str = "NMOS group hint for the Receiver (the \
      `urn:x-nmos:tag:grouphint/v1.0` tag), e.g. `\"SDI 1:Video\"`. \
      Becomes the `x-nvnmos-group-hint` session-level SDP attribute on \
      RTP/UDP or the grouphint tag in an MXL `flow_def`. Overrides the \
      transport file when both are supplied. Optional. Omitted when unset.";
 
-pub(crate) const TRANSPORT_FILE_PATH_BLURB: &str =
-    "Filesystem path read at NULL\u{2192}READY into `transport-file`. \
+pub(crate) const TRANSPORT_FILE_PATH_BLURB: &str = "Filesystem path read at NULL\u{2192}READY into `transport-file`. \
      Convenience for gst-launch; mutually exclusive with \
      `transport-file`.";
 
-pub(crate) const TRANSPORT_FILE_BLURB_SENDER: &str =
-    "Literal contents of the NvNmos transport file: MXL `flow_def` JSON \
+pub(crate) const TRANSPORT_FILE_BLURB_SENDER: &str = "Literal contents of the NvNmos transport file: MXL `flow_def` JSON \
      for `transport=mxl`, SDP text for `transport=udp` / `udp2` / \
      `nvdsudp`. The daemon adds the Sender via AddSender and \
      re-publishes the transport file on IS-05 activation. Pass the \
@@ -201,8 +182,7 @@ pub(crate) const TRANSPORT_FILE_BLURB_SENDER: &str =
      element synthesises a configuring transport file from the essence \
      caps (MXL `flow_def` or SDP, depending on `transport`).";
 
-pub(crate) const TRANSPORT_FILE_BLURB_RECEIVER: &str =
-    "Literal contents of the NvNmos transport file: MXL `flow_def` JSON \
+pub(crate) const TRANSPORT_FILE_BLURB_RECEIVER: &str = "Literal contents of the NvNmos transport file: MXL `flow_def` JSON \
      for `transport=mxl`, SDP text for `transport=udp` / `udp2` / \
      `nvdsudp`. The daemon adds the Receiver via AddReceiver and \
      re-publishes the transport file on IS-05 activation. Pass the \
@@ -210,8 +190,7 @@ pub(crate) const TRANSPORT_FILE_BLURB_RECEIVER: &str =
      gst-launch use `transport-file-path` instead. Mutually exclusive \
      with `transport-file-path`. Required unless `caps` is provided.";
 
-pub(crate) const CAPS_BLURB_SENDER: &str =
-    "Essence caps for this Sender. Synthesises the configuring transport \
+pub(crate) const CAPS_BLURB_SENDER: &str = "Essence caps for this Sender. Synthesises the configuring transport \
      file when `transport-file*` is unset (MXL `flow_def` or SDP depending \
      on `transport`). On `transport=mxl`, requires `mxl-flow-id`; supported \
      shapes: v210 video, F32LE audio, `meta/x-st-2038` data. On RTP \
@@ -219,8 +198,7 @@ pub(crate) const CAPS_BLURB_SENDER: &str =
      `transport-file*` is also set, the file wins and `caps` are \
      cross-checked against it — mismatch is a hard error.";
 
-pub(crate) const CAPS_BLURB_RECEIVER: &str =
-    "Essence caps for this Receiver. Required when `transport-file*` is \
+pub(crate) const CAPS_BLURB_RECEIVER: &str = "Essence caps for this Receiver. Required when `transport-file*` is \
      unset; synthesises the configuring transport file (MXL `flow_def` or \
      SDP depending on `transport`). On `transport=mxl`, requires \
      `mxl-flow-id` (media-type structure name picks the matching `mxlsrc` \
@@ -232,8 +210,7 @@ pub(crate) const CAPS_BLURB_RECEIVER: &str =
 pub(crate) const TRANSPORT_CAPS_BLURB: &str =
     "Per-transport overrides (SDP fmtp-style). Typically empty for MXL.";
 
-pub(crate) const FORMAT_BIT_RATE_BLURB: &str =
-    "Coded essence (Flow) bit rate in kilobits per second (1000 bits/s), \
+pub(crate) const FORMAT_BIT_RATE_BLURB: &str = "Coded essence (Flow) bit rate in kilobits per second (1000 bits/s), \
      matching NMOS Flow `bit_rate` and SDP fmtp `x-nvnmos-format-bit-rate`. \
      On JPEG XS RTP transports, synthesises the configuring SDP \
      `a=fmtp:… x-nvnmos-format-bit-rate=` attribute and `b=AS:` (via the \
@@ -246,8 +223,7 @@ pub(crate) const FORMAT_BIT_RATE_BLURB: &str =
      sides declare a rate and splices when the file omits it. Ignored on \
      `transport=mxl`.";
 
-pub(crate) const TRANSPORT_BIT_RATE_BLURB: &str =
-    "Transport (Sender) bit rate in kilobits per second (1000 bits/s), \
+pub(crate) const TRANSPORT_BIT_RATE_BLURB: &str = "Transport (Sender) bit rate in kilobits per second (1000 bits/s), \
      including RTP/UDP/IP overhead, matching NMOS Sender `bit_rate`, SDP \
      `b=AS:`, and fmtp `x-nvnmos-transport-bit-rate`. On JPEG XS RTP \
      transports, synthesises the configuring SDP `b=AS:` bandwidth line and \
@@ -257,8 +233,7 @@ pub(crate) const TRANSPORT_BIT_RATE_BLURB: &str =
      With a supplied `transport-file*`, cross-checks when both sides declare \
      a rate and splices when the file omits it. Ignored on `transport=mxl`.";
 
-pub(crate) const TRANSPORT_PROPERTIES_BLURB: &str =
-    "Overrides applied to the inner source or sink (`udpsrc`, `udpsink`, \
+pub(crate) const TRANSPORT_PROPERTIES_BLURB: &str = "Overrides applied to the inner source or sink (`udpsrc`, `udpsink`, \
      `nvdsudpsrc`, `nvdsudpsink`, `mxlsrc`, or `mxlsink`) every time the \
      data-path chain is built. \
      Pass a `GstStructure` whose fields are GObject property names on that \
@@ -266,20 +241,17 @@ pub(crate) const TRANSPORT_PROPERTIES_BLURB: &str =
      The structure name is not interpreted. Takes effect on the next chain \
      build, not immediately on the one currently in the chain.";
 
-pub(crate) const PAY_PROPERTIES_BLURB: &str =
-    "Overrides applied to the inner RTP payloader every time the UDP sender \
+pub(crate) const PAY_PROPERTIES_BLURB: &str = "Overrides applied to the inner RTP payloader every time the UDP sender \
      chain is built. Same `GstStructure` syntax as `transport-properties`; \
      ignored on non-UDP transports (a warning is logged if non-empty). Takes \
      effect on the next chain build.";
 
-pub(crate) const DEPAY_PROPERTIES_BLURB: &str =
-    "Overrides applied to the inner RTP depayloader every time the UDP \
+pub(crate) const DEPAY_PROPERTIES_BLURB: &str = "Overrides applied to the inner RTP depayloader every time the UDP \
      receiver chain is built. Same `GstStructure` syntax as \
      `transport-properties`; ignored on non-UDP transports (a warning is \
      logged if non-empty). Takes effect on the next chain build.";
 
-pub(crate) const AUTO_ACTIVATE_BLURB: &str =
-    "When `true`, swap in the real transport sink or source (instead of the \
+pub(crate) const AUTO_ACTIVATE_BLURB: &str = "When `true`, swap in the real transport sink or source (instead of the \
      fake chain) once the configuring transport file has been resolved at \
      NULL\u{2192}READY (or READY\u{2192}PAUSED for deferred senders), and call \
      `SyncResourceState` so IS-04/IS-05 show active without an IS-05 PATCH. \
@@ -562,7 +534,10 @@ pub(crate) fn caps_from_flow_def(
     let parsed_caps = crate::flow_def::caps_from(text)
         .map_err(|e| anyhow::anyhow!("caps from flow-def transport file: {e}"))?;
     let caps = crate::essence_caps::caps_from(&parsed_caps, None);
-    gst::info!(gst::CAT_DEFAULT, "{element}: caps `{caps}` from transport file");
+    gst::info!(
+        gst::CAT_DEFAULT,
+        "{element}: caps `{caps}` from transport file"
+    );
     Ok(Some(caps))
 }
 
@@ -823,7 +798,9 @@ pub(crate) fn resolve_resource_name(
         );
     };
     let from_file = match settings.transport {
-        Transport::Mxl => mxl::resource_name_from_transport_file(text).map_err(anyhow::Error::from)?,
+        Transport::Mxl => {
+            mxl::resource_name_from_transport_file(text).map_err(anyhow::Error::from)?
+        }
         Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => {
             udp::resource_name_from_transport_file(text).map_err(anyhow::Error::from)?
         }
@@ -902,7 +879,12 @@ pub(crate) fn validate_and_open(
             )
             .await
         })
-        .with_context(|| format!("{element}: OpenSession against {} timed out", settings.daemon_uri))?
+        .with_context(|| {
+            format!(
+                "{element}: OpenSession against {} timed out",
+                settings.daemon_uri
+            )
+        })?
         .with_context(|| format!("{element}: OpenSession against {}", settings.daemon_uri))?;
 
     let resource_summary = match new_session.resource_id() {
@@ -914,8 +896,15 @@ pub(crate) fn validate_and_open(
     // session-level identifier — the network params live on
     // `UdpMedia` and are summarised below.
     let inner_summary = match &inner {
-        InnerConfig::Real(TransportConfig::Mxl { domain_path, flow_id, format, .. }) => {
-            format!("inner data path: mxl (domain_path={domain_path:?}, flow_id={flow_id}, format={format:?})")
+        InnerConfig::Real(TransportConfig::Mxl {
+            domain_path,
+            flow_id,
+            format,
+            ..
+        }) => {
+            format!(
+                "inner data path: mxl (domain_path={domain_path:?}, flow_id={flow_id}, format={format:?})"
+            )
         }
         InnerConfig::Real(TransportConfig::Udp { variant, media, .. }) => {
             udp_inner_summary("udp", Some(*variant), media)
@@ -1010,7 +999,11 @@ pub(super) fn apply_auto_activate_policy(
     // diagnostics.
     let eager_candidate = matches!(
         inner,
-        InnerConfig::Real(_) | InnerConfig::Fake { kind: FakeKind::NotActive, .. }
+        InnerConfig::Real(_)
+            | InnerConfig::Fake {
+                kind: FakeKind::NotActive,
+                ..
+            }
     );
     if !eager_candidate {
         return inner;
@@ -1184,9 +1177,11 @@ pub(crate) fn sync_active(
     session: &Mutex<Option<Session>>,
     transport_file: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    let mut taken = session.lock().unwrap().take().ok_or_else(|| {
-        anyhow::anyhow!("{element}: SyncResourceState but no open session")
-    })?;
+    let mut taken = session
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("{element}: SyncResourceState but no open session"))?;
     let rpc_result = SHARED_RUNTIME.block_on(async {
         tokio::time::timeout(OPEN_TIMEOUT, taken.sync_resource_state(transport_file)).await
     });
@@ -1326,10 +1321,12 @@ pub(crate) fn make_activation_plan(
     };
 
     let inner = match settings.transport {
-        Transport::Mxl => match resolve_activation_inner_mxl(cat, element, settings, transport_file) {
-            Ok(inner) => inner,
-            Err(plan) => return *plan,
-        },
+        Transport::Mxl => {
+            match resolve_activation_inner_mxl(cat, element, settings, transport_file) {
+                Ok(inner) => inner,
+                Err(plan) => return *plan,
+            }
+        }
         Transport::Udp => match decide_inner_config_udp(
             element,
             settings,
@@ -1408,9 +1405,7 @@ pub(crate) fn make_activation_plan(
                 detail.clone()
             };
             ActivationAck::Failure {
-                reason: format!(
-                    "{element}: activation cannot bring up inner data path: {msg}"
-                ),
+                reason: format!("{element}: activation cannot bring up inner data path: {msg}"),
             }
         }
     };
@@ -1478,10 +1473,8 @@ mod support {
     pub fn video_caps() -> gst::Caps {
         use std::str::FromStr;
         init_gst();
-        gst::Caps::from_str(
-            "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1",
-        )
-        .expect("static caps parse")
+        gst::Caps::from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=50/1")
+            .expect("static caps parse")
     }
 
     pub fn video_flow_def(id: &str) -> String {
@@ -1528,7 +1521,12 @@ mod tests {
 
     #[test]
     fn deactivation_is_fake_success() {
-        let plan = make_activation_plan(&cat(), "nmossink", &settings(Side::Sender), &req(Side::Sender, None));
+        let plan = make_activation_plan(
+            &cat(),
+            "nmossink",
+            &settings(Side::Sender),
+            &req(Side::Sender, None),
+        );
         assert!(matches!(plan.inner, InnerConfig::Fake { .. }));
         assert!(matches!(plan.ack, ActivationAck::Success));
     }
@@ -1574,7 +1572,9 @@ mod tests {
         fn gate_passes_real_through_when_auto_activate_true() {
             let after = super::super::apply_auto_activate_gate(real_inner(), true);
             match after {
-                InnerConfig::Real(TransportConfig::Mxl { flow_id, format, .. }) => {
+                InnerConfig::Real(TransportConfig::Mxl {
+                    flow_id, format, ..
+                }) => {
                     assert_eq!(flow_id, FLOW_ID_A);
                     assert_eq!(format, FlowFormat::Video);
                 }
@@ -1730,13 +1730,8 @@ mod tests {
                 auto_activate: false,
                 ..settings(Side::Sender)
             };
-            let after = super::super::apply_auto_activate_policy(
-                &cat(),
-                "nmossink",
-                &s,
-                real_mxl(),
-                None,
-            );
+            let after =
+                super::super::apply_auto_activate_policy(&cat(), "nmossink", &s, real_mxl(), None);
             match after {
                 InnerConfig::Fake { kind, .. } => assert_eq!(kind, FakeKind::NotActive),
                 InnerConfig::Real(_) => panic!("auto-activate=false must defer a real chain"),
@@ -1749,13 +1744,8 @@ mod tests {
                 auto_activate: true,
                 ..settings(Side::Sender)
             };
-            let after = super::super::apply_auto_activate_policy(
-                &cat(),
-                "nmossink",
-                &s,
-                real_mxl(),
-                None,
-            );
+            let after =
+                super::super::apply_auto_activate_policy(&cat(), "nmossink", &s, real_mxl(), None);
             assert!(matches!(after, InnerConfig::Real(_)));
         }
 
@@ -1877,8 +1867,8 @@ mod tests {
             let mut s = settings(Side::Receiver);
             s.transport = Transport::Udp;
             s.name.clear();
-            let name = super::resolve_resource_name("nmossrc", &s, Some(SDP_WITH_NAME))
-                .expect("SDP name");
+            let name =
+                super::resolve_resource_name("nmossrc", &s, Some(SDP_WITH_NAME)).expect("SDP name");
             assert_eq!(name, "from-file");
         }
 
@@ -1886,10 +1876,8 @@ mod tests {
         fn mxl_reads_name_from_transport_file() {
             let mut s = settings(Side::Sender);
             s.name.clear();
-            let name =
-                super::resolve_resource_name("nmossink", &s, Some(FLOW_DEF_WITH_NAME)).expect(
-                    "flow_def name",
-                );
+            let name = super::resolve_resource_name("nmossink", &s, Some(FLOW_DEF_WITH_NAME))
+                .expect("flow_def name");
             assert_eq!(name, "from-file");
         }
 

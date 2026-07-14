@@ -8,8 +8,8 @@ pub(crate) mod types;
 use anyhow::{Context, bail};
 use gstreamer as gst;
 
-use super::{CommonSettings, FakeKind, InnerConfig, TransportConfig};
 use super::types::Side;
+use super::{CommonSettings, FakeKind, InnerConfig, TransportConfig};
 use crate::sdp::{self, DualLegPassthroughPolicy, SdpOverrides};
 use crate::types::{CapsMode, Transport};
 
@@ -17,7 +17,9 @@ use crate::types::{CapsMode, Transport};
 ///
 /// Used when the element already has a `transport-file` at NULL→READY.
 /// Caps-only synthesis and deferred AddSender still require the name property.
-pub(super) fn resource_name_from_transport_file(text: &str) -> Result<Option<String>, sdp::SdpError> {
+pub(super) fn resource_name_from_transport_file(
+    text: &str,
+) -> Result<Option<String>, sdp::SdpError> {
     sdp::resource_name_from_transport(text)
 }
 
@@ -69,9 +71,7 @@ pub(super) fn validate_rtp_configuring_minimum(
 ) -> Result<(), anyhow::Error> {
     match settings.side {
         Side::Sender if settings.source_ip.is_empty() => {
-            bail!(
-                "{element}: `source-ip` is required to synthesise configuring SDP for AddSender"
-            );
+            bail!("{element}: `source-ip` is required to synthesise configuring SDP for AddSender");
         }
         Side::Receiver if settings.interface_ip.is_empty() => {
             bail!(
@@ -338,9 +338,7 @@ fn finish_udp_inner_config(
         return Err(anyhow::Error::new(sdp::SdpError::DualLegNotSupported));
     }
     let mut media = sdp::parse_sdp(text).with_context(|| {
-        format!(
-            "{element}: parsing SDP transport file for transport={transport:?}"
-        )
+        format!("{element}: parsing SDP transport file for transport={transport:?}")
     })?;
     sdp::cross_check_essence(
         &media,
@@ -431,7 +429,8 @@ fn passthrough_user_transport_file(
 ) -> Result<String, anyhow::Error> {
     let file = sdp::bit_rates_from_sdp_text(text)
         .with_context(|| format!("{element}: parsing bit rates from transport-file SDP"))?;
-    let property = sdp::bit_rates_from_properties(settings.format_bit_rate, settings.transport_bit_rate);
+    let property =
+        sdp::bit_rates_from_properties(settings.format_bit_rate, settings.transport_bit_rate);
     sdp::cross_check_bit_rates(property, file)
         .with_context(|| format!("{element}: cross-checking bit rates against transport-file"))?;
 
@@ -440,9 +439,8 @@ fn passthrough_user_transport_file(
         overrides.bit_rates = property;
     }
 
-    sdp::passthrough_with_overrides(text, &overrides, policy).with_context(|| {
-        format!("{element}: applying property overrides to transport-file SDP")
-    })
+    sdp::passthrough_with_overrides(text, &overrides, policy)
+        .with_context(|| format!("{element}: applying property overrides to transport-file SDP"))
 }
 
 pub(super) fn resolve_inner_config_nvdsudp(
@@ -547,8 +545,8 @@ pub(super) fn resolve_inner_config_udp(
 mod tests {
     use super::super::support::*;
     use super::super::*;
-    use super::*;
     use super::types::{UdpLeg, UdpMedia};
+    use super::*;
     use crate::sdp;
     use crate::types::FlowFormat;
     use std::str::FromStr;
@@ -714,15 +712,14 @@ mod tests {
         #[test]
         fn decide_udp_v1_with_valid_sdp_is_real() {
             let s = udp_settings(Side::Receiver, Transport::Udp);
-            let inner =
-                decide_inner_config_udp(
-                    "nmossrc",
-                    &s,
-                    UdpVariant::V1,
-                    Some(VIDEO_UDP_SDP),
-                    sdp::EssenceCrossCheckMode::Full,
-                )
-                .expect("valid SDP parses");
+            let inner = decide_inner_config_udp(
+                "nmossrc",
+                &s,
+                UdpVariant::V1,
+                Some(VIDEO_UDP_SDP),
+                sdp::EssenceCrossCheckMode::Full,
+            )
+            .expect("valid SDP parses");
             match inner {
                 InnerConfig::Real(TransportConfig::Udp {
                     variant,
@@ -746,15 +743,14 @@ mod tests {
         #[test]
         fn decide_udp_v2_picks_udp2_variant() {
             let s = udp_settings(Side::Sender, Transport::Udp2);
-            let inner =
-                decide_inner_config_udp(
-                    "nmossink",
-                    &s,
-                    UdpVariant::V2,
-                    Some(VIDEO_UDP_SDP),
-                    sdp::EssenceCrossCheckMode::Full,
-                )
-                .expect("valid SDP parses");
+            let inner = decide_inner_config_udp(
+                "nmossink",
+                &s,
+                UdpVariant::V2,
+                Some(VIDEO_UDP_SDP),
+                sdp::EssenceCrossCheckMode::Full,
+            )
+            .expect("valid SDP parses");
             match inner {
                 InnerConfig::Real(TransportConfig::Udp { variant, .. }) => {
                     assert_eq!(variant, UdpVariant::V2);
@@ -829,12 +825,8 @@ mod tests {
                 "m=video 5004 RTP/AVP 96\r\na=inactive\r\n",
             );
             let s = udp_settings(Side::Receiver, Transport::Udp);
-            let plan = make_activation_plan(
-                &cat(),
-                "nmossrc",
-                &s,
-                &req(Side::Receiver, Some(&sdp)),
-            );
+            let plan =
+                make_activation_plan(&cat(), "nmossrc", &s, &req(Side::Receiver, Some(&sdp)));
             match plan.inner {
                 InnerConfig::Fake { kind, .. } => {
                     assert_eq!(kind, FakeKind::NotActive);
@@ -851,15 +843,14 @@ mod tests {
         fn decide_udp_without_transport_file_is_misconfigured() {
             for side in [Side::Sender, Side::Receiver] {
                 let s = udp_settings(side, Transport::Udp);
-                let inner =
-                    decide_inner_config_udp(
-                        "nmossrc",
-                        &s,
-                        UdpVariant::V1,
-                        None,
-                        sdp::EssenceCrossCheckMode::Full,
-                    )
-                    .expect("None transport_file is not an error");
+                let inner = decide_inner_config_udp(
+                    "nmossrc",
+                    &s,
+                    UdpVariant::V1,
+                    None,
+                    sdp::EssenceCrossCheckMode::Full,
+                )
+                .expect("None transport_file is not an error");
                 match inner {
                     InnerConfig::Fake { kind, detail } => {
                         assert_eq!(kind, FakeKind::Misconfigured);
@@ -876,15 +867,14 @@ mod tests {
         #[test]
         fn decide_udp_with_malformed_sdp_attributes_error() {
             let s = udp_settings(Side::Receiver, Transport::Udp);
-            let err =
-                decide_inner_config_udp(
-                    "nmossrc",
-                    &s,
-                    UdpVariant::V1,
-                    Some("garbage"),
-                    sdp::EssenceCrossCheckMode::Full,
-                )
-                .expect_err("malformed SDP must error");
+            let err = decide_inner_config_udp(
+                "nmossrc",
+                &s,
+                UdpVariant::V1,
+                Some("garbage"),
+                sdp::EssenceCrossCheckMode::Full,
+            )
+            .expect_err("malformed SDP must error");
             let msg = format!("{err:#}");
             assert!(
                 msg.contains("nmossrc"),
@@ -936,12 +926,8 @@ mod tests {
         #[test]
         fn activation_udp_malformed_sdp_is_failure() {
             let s = udp_settings(Side::Receiver, Transport::Udp);
-            let plan = make_activation_plan(
-                &cat(),
-                "nmossrc",
-                &s,
-                &req(Side::Receiver, Some("garbage")),
-            );
+            let plan =
+                make_activation_plan(&cat(), "nmossrc", &s, &req(Side::Receiver, Some("garbage")));
             assert!(matches!(plan.inner, InnerConfig::Fake { .. }));
             match plan.ack {
                 ActivationAck::Failure { reason } => assert!(
@@ -1106,11 +1092,7 @@ mod tests {
                 }
             }
 
-            fn receiver_settings(
-                multicast: bool,
-                interface: bool,
-                source: bool,
-            ) -> CommonSettings {
+            fn receiver_settings(multicast: bool, interface: bool, source: bool) -> CommonSettings {
                 let mut s = udp_settings(Side::Receiver, Transport::Udp);
                 if multicast {
                     s.multicast_ip = PROP_MCAST.to_owned();
@@ -1222,16 +1204,9 @@ mod tests {
                             for source in [false, true] {
                                 let settings = receiver_settings(multicast, interface, source);
                                 let spliced = splice(sdp_kind.sdp(), &settings);
-                                let c = expected_c(
-                                    multicast,
-                                    interface,
-                                    sdp_kind.baseline_c(),
-                                );
+                                let c = expected_c(multicast, interface, sdp_kind.baseline_c());
 
-                                assert_c_contains(
-                                    &spliced,
-                                    c,
-                                );
+                                assert_c_contains(&spliced, c);
 
                                 let sf = if source {
                                     Some((c, PROP_SRC))
@@ -1244,10 +1219,7 @@ mod tests {
                                 };
                                 assert_source_filter(&spliced, sf);
 
-                                assert_iface_attr(
-                                    &spliced,
-                                    interface.then_some(PROP_IFACE),
-                                );
+                                assert_iface_attr(&spliced, interface.then_some(PROP_IFACE));
                             }
                         }
                     }
@@ -1366,23 +1338,39 @@ mod tests {
             // The returned transport_file text carries the
             // overrides.
             let spliced = spliced_text.expect("transport_file must be Some after splice");
-            assert!(spliced.contains("c=IN IP4 232.0.0.1"),
-                "c= must be overridden to multicast_ip 232.0.0.1; got: {spliced}");
-            assert!(spliced.contains("m=video 5008"),
-                "m= port must be overridden to 5008; got: {spliced}");
-            assert!(spliced.contains("s=Spliced label\r\n"),
-                "s= must be overridden to label; got: {spliced}");
-            assert!(spliced.contains("i=Spliced description\r\n"),
-                "i= must be overridden to description; got: {spliced}");
-            assert!(spliced.contains("a=x-nvnmos-name:spliced-name\r\n"),
-                "session-level a=x-nvnmos-name must carry overridden name; got: {spliced}");
-            assert!(spliced.contains("a=x-nvnmos-iface-ip:192.0.2.30"),
-                "a=x-nvnmos-iface-ip must carry receiver's interface_ip; got: {spliced}");
+            assert!(
+                spliced.contains("c=IN IP4 232.0.0.1"),
+                "c= must be overridden to multicast_ip 232.0.0.1; got: {spliced}"
+            );
+            assert!(
+                spliced.contains("m=video 5008"),
+                "m= port must be overridden to 5008; got: {spliced}"
+            );
+            assert!(
+                spliced.contains("s=Spliced label\r\n"),
+                "s= must be overridden to label; got: {spliced}"
+            );
+            assert!(
+                spliced.contains("i=Spliced description\r\n"),
+                "i= must be overridden to description; got: {spliced}"
+            );
+            assert!(
+                spliced.contains("a=x-nvnmos-name:spliced-name\r\n"),
+                "session-level a=x-nvnmos-name must carry overridden name; got: {spliced}"
+            );
+            assert!(
+                spliced.contains("a=x-nvnmos-iface-ip:192.0.2.30"),
+                "a=x-nvnmos-iface-ip must carry receiver's interface_ip; got: {spliced}"
+            );
 
             // The Real(Udp) inner config carries the spliced
             // UdpMedia (same source of truth).
             match inner {
-                InnerConfig::Real(TransportConfig::Udp { media, transport_file, .. }) => {
+                InnerConfig::Real(TransportConfig::Udp {
+                    media,
+                    transport_file,
+                    ..
+                }) => {
                     assert_eq!(media.primary.destination_ip, "232.0.0.1");
                     assert_eq!(media.primary.destination_port, 5008);
                     assert_eq!(media.primary.source_ip.as_deref(), Some("192.0.2.20"));
@@ -1405,14 +1393,9 @@ mod tests {
                 multicast_ip: "232.0.0.1".to_owned(),
                 ..udp_settings(Side::Receiver, Transport::Udp)
             };
-            let (inner, text) = resolve_inner_config_udp(
-                &cat(),
-                "nmossrc",
-                &s,
-                UdpVariant::V1,
-                None,
-            )
-            .expect("no error");
+            let (inner, text) =
+                resolve_inner_config_udp(&cat(), "nmossrc", &s, UdpVariant::V1, None)
+                    .expect("no error");
             assert!(text.is_none(), "no input → no synth, no spliced output");
             match inner {
                 InnerConfig::Fake { kind, .. } => {
@@ -1430,14 +1413,9 @@ mod tests {
                 destination_ip: "239.1.1.1".to_owned(),
                 ..udp_settings(Side::Sender, Transport::Udp)
             };
-            let (inner, text) = resolve_inner_config_udp(
-                &cat(),
-                "nmossink",
-                &s,
-                UdpVariant::V1,
-                None,
-            )
-            .expect("no error");
+            let (inner, text) =
+                resolve_inner_config_udp(&cat(), "nmossink", &s, UdpVariant::V1, None)
+                    .expect("no error");
             assert!(text.is_none());
             match inner {
                 InnerConfig::Fake { kind, .. } => {
@@ -1453,8 +1431,8 @@ mod tests {
                 destination_ip: "239.1.1.1".to_owned(),
                 ..udp_settings(Side::Sender, Transport::NvDsUdp)
             };
-            let (inner, text) = resolve_inner_config_nvdsudp(&cat(), "nmossink", &s, None)
-                .expect("no error");
+            let (inner, text) =
+                resolve_inner_config_nvdsudp(&cat(), "nmossink", &s, None).expect("no error");
             assert!(text.is_none());
             assert!(matches!(
                 inner,
@@ -1481,14 +1459,9 @@ mod tests {
             s.interface_ip = "192.0.2.30".to_owned();
             s.destination_port = 5004;
             s.auto_activate = true;
-            let (inner, text) = resolve_inner_config_udp(
-                &cat(),
-                "nmossrc",
-                &s,
-                UdpVariant::V1,
-                None,
-            )
-            .expect("unicast receiver caps synthesis");
+            let (inner, text) =
+                resolve_inner_config_udp(&cat(), "nmossrc", &s, UdpVariant::V1, None)
+                    .expect("unicast receiver caps synthesis");
             let text = text.expect("synthesised SDP");
             assert!(
                 text.contains("c=IN IP4 192.0.2.30"),
@@ -1523,18 +1496,19 @@ mod tests {
                 auto_activate: true,
                 ..udp_settings(Side::Receiver, Transport::Udp)
             };
-            let (inner, text) = resolve_inner_config_udp(
-                &cat(),
-                "nmossrc",
-                &s,
-                UdpVariant::V1,
-                None,
-            )
-            .expect("synth + splice + decide must succeed");
+            let (inner, text) =
+                resolve_inner_config_udp(&cat(), "nmossrc", &s, UdpVariant::V1, None)
+                    .expect("synth + splice + decide must succeed");
             let text = text.expect("synthesised SDP must be returned");
-            assert!(text.contains("m=audio 5004 RTP/AVP 97"), "synthesised SDP:\n{text}");
+            assert!(
+                text.contains("m=audio 5004 RTP/AVP 97"),
+                "synthesised SDP:\n{text}"
+            );
             assert!(text.contains("a=rtpmap:97 L24/48000/2"), "rtpmap:\n{text}");
-            assert!(text.contains("c=IN IP4 232.99.99.1/"), "multicast c=:\n{text}");
+            assert!(
+                text.contains("c=IN IP4 232.99.99.1/"),
+                "multicast c=:\n{text}"
+            );
             assert!(
                 text.contains("a=x-nvnmos-iface-ip:192.0.2.30"),
                 "Receiver iface-ip:\n{text}",
@@ -1572,16 +1546,14 @@ mod tests {
                 auto_activate: true,
                 ..udp_settings(Side::Sender, Transport::Udp)
             };
-            let (inner, text) = resolve_inner_config_udp(
-                &cat(),
-                "nmossink",
-                &s,
-                UdpVariant::V1,
-                None,
-            )
-            .expect("synth + splice + decide must succeed");
+            let (inner, text) =
+                resolve_inner_config_udp(&cat(), "nmossink", &s, UdpVariant::V1, None)
+                    .expect("synth + splice + decide must succeed");
             let text = text.expect("synthesised SDP");
-            assert!(text.contains("m=video 5008 RTP/AVP 96"), "Sender SDP:\n{text}");
+            assert!(
+                text.contains("m=video 5008 RTP/AVP 96"),
+                "Sender SDP:\n{text}"
+            );
             assert!(text.contains("c=IN IP4 239.99.99.1/"), "Sender c=:\n{text}");
             assert!(
                 text.contains("a=source-filter: incl IN IP4 239.99.99.1 192.0.2.10"),
@@ -1754,14 +1726,22 @@ mod tests {
             .expect("splice + decide must succeed");
             let spliced = spliced.expect("transport_file must round-trip");
 
-            assert!(spliced.contains("m=audio 5004 RTP/AVP 100"),
-                "pt override must hit m= line; got: {spliced}");
-            assert!(spliced.contains("a=rtpmap:100 L24/96000/2"),
-                "pt + clock-rate must land on rtpmap together; got: {spliced}");
-            assert!(spliced.contains("a=ptime:1\r\n"),
-                "a=ptime override; got: {spliced}");
-            assert!(spliced.contains("a=maxptime:1\r\n"),
-                "a=maxptime override; got: {spliced}");
+            assert!(
+                spliced.contains("m=audio 5004 RTP/AVP 100"),
+                "pt override must hit m= line; got: {spliced}"
+            );
+            assert!(
+                spliced.contains("a=rtpmap:100 L24/96000/2"),
+                "pt + clock-rate must land on rtpmap together; got: {spliced}"
+            );
+            assert!(
+                spliced.contains("a=ptime:1\r\n"),
+                "a=ptime override; got: {spliced}"
+            );
+            assert!(
+                spliced.contains("a=maxptime:1\r\n"),
+                "a=maxptime override; got: {spliced}"
+            );
         }
 
         /// An invalid pt in `transport-caps` causes
@@ -1861,8 +1841,7 @@ mod tests {
             .expect_err("audio caps + video SDP must error");
             let chain = format!("{err:#}");
             assert!(
-                chain.contains("essence format mismatch")
-                    && chain.contains("cross-checking SDP"),
+                chain.contains("essence format mismatch") && chain.contains("cross-checking SDP"),
                 "error must attribute to cross-check; got: {chain}",
             );
         }
@@ -2048,7 +2027,11 @@ mod tests {
                 &req(Side::Receiver, Some(VIDEO_UDP_SDP)),
             );
             match plan.inner {
-                InnerConfig::Real(TransportConfig::Udp { media, transport_file, .. }) => {
+                InnerConfig::Real(TransportConfig::Udp {
+                    media,
+                    transport_file,
+                    ..
+                }) => {
                     // Activation address is preserved.
                     assert_eq!(media.primary.destination_ip, "239.1.1.1");
                     assert_eq!(media.primary.destination_port, 5004);
@@ -2127,10 +2110,7 @@ mod tests {
                     InnerConfig::Real(TransportConfig::NvDsUdp { media, .. })
                     | InnerConfig::Real(TransportConfig::Udp { media, .. }) => {
                         assert_eq!(media.format, FlowFormat::Data);
-                        assert_eq!(
-                            media.caps.structure(0).unwrap().name(),
-                            "meta/x-st-2038",
-                        );
+                        assert_eq!(media.caps.structure(0).unwrap().name(), "meta/x-st-2038",);
                     }
                     other => panic!("expected Real for {transport:?} ANC, got {other:?}"),
                 }
@@ -2166,35 +2146,32 @@ mod tests {
 
         fn anc_peer_caps() -> gst::Caps {
             init_gst();
-            gst::Caps::from_str("meta/x-st-2038,framerate=30/1")
-                .expect("anc caps")
+            gst::Caps::from_str("meta/x-st-2038,framerate=30/1").expect("anc caps")
         }
 
         #[test]
         fn synthesise_deferred_sender_udp_video_udp_builds_real_inner() {
             let s = sender_udp_settings(Transport::Udp);
-            let (text, inner) = synthesise_deferred_sender_udp(
-                "nmossink",
-                &s,
-                &video_peer_caps(),
-            )
-            .expect("synth");
+            let (text, inner) =
+                synthesise_deferred_sender_udp("nmossink", &s, &video_peer_caps()).expect("synth");
             assert!(text.contains("m=video 5004 RTP/AVP 96"), "SDP:\n{text}");
             assert!(text.contains("c=IN IP4 239.99.99.1/"));
-            assert!(matches!(inner, InnerConfig::Real(TransportConfig::Udp { .. })));
+            assert!(matches!(
+                inner,
+                InnerConfig::Real(TransportConfig::Udp { .. })
+            ));
         }
 
         #[test]
         fn synthesise_deferred_sender_udp_anc_nvdsudp_builds_real_inner() {
             let s = sender_udp_settings(Transport::NvDsUdp);
-            let (text, inner) = synthesise_deferred_sender_udp(
-                "nmossink",
-                &s,
-                &anc_peer_caps(),
-            )
-            .expect("synth");
+            let (text, inner) =
+                synthesise_deferred_sender_udp("nmossink", &s, &anc_peer_caps()).expect("synth");
             assert!(text.contains("smpte291/90000"), "ANC SDP:\n{text}");
-            assert!(matches!(inner, InnerConfig::Real(TransportConfig::NvDsUdp { .. })));
+            assert!(matches!(
+                inner,
+                InnerConfig::Real(TransportConfig::NvDsUdp { .. })
+            ));
         }
 
         #[test]

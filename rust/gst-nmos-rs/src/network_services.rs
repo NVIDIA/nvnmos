@@ -112,13 +112,19 @@ mod tests {
 
     #[test]
     fn parse_rejects_https() {
-        let parts = parse_nmos_url("https://reg.example/x-nmos/registration/v1.3", "registration");
+        let parts = parse_nmos_url(
+            "https://reg.example/x-nmos/registration/v1.3",
+            "registration",
+        );
         assert!(!parts.valid);
     }
 
     #[test]
     fn parse_rejects_invalid_port() {
-        let parts = parse_nmos_url("http://reg.example:99999/x-nmos/registration/v1.3", "registration");
+        let parts = parse_nmos_url(
+            "http://reg.example:99999/x-nmos/registration/v1.3",
+            "registration",
+        );
         assert!(!parts.valid);
     }
 
@@ -133,7 +139,9 @@ mod tests {
         let config = node.to_node_config();
         assert_eq!(config.seed, "seed-a");
         assert_eq!(config.host_name, "studio-a");
-        let ns = config.network_services.expect("domain should populate network_services");
+        let ns = config
+            .network_services
+            .expect("domain should populate network_services");
         assert_eq!(ns.domain, "local");
     }
 
@@ -146,7 +154,9 @@ mod tests {
             ..NodeSettings::default()
         };
         let config = node.to_node_config();
-        let ns = config.network_services.expect("urls should populate network_services");
+        let ns = config
+            .network_services
+            .expect("urls should populate network_services");
         assert_eq!(ns.registration_address, "reg");
         assert_eq!(ns.registration_port, 3210);
         assert_eq!(ns.registration_version, "v1.3");

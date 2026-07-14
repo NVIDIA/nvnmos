@@ -19,11 +19,13 @@ mod common;
 use std::str::FromStr;
 use std::time::Duration;
 
-use common::{init, nvnmosd_skip_reason, perfect_fifth_hz, require_factories, A4_HZ, DaemonGuard, Tone};
-use test_skip::skip;
+use common::{
+    A4_HZ, DaemonGuard, Tone, init, nvnmosd_skip_reason, perfect_fifth_hz, require_factories,
+};
 use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_app as gst_app;
+use test_skip::skip;
 
 const SAMPLE_RATE: i32 = 48_000;
 const CHANNELS: u32 = 2;
@@ -91,7 +93,8 @@ fn pull_mono_samples(appsink: &gst_app::AppSink, timeout: Duration) -> Vec<f32> 
         if remaining_ms == 0 {
             break;
         }
-        let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(remaining_ms)) else {
+        let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(remaining_ms))
+        else {
             std::thread::sleep(Duration::from_millis(5));
             continue;
         };
@@ -233,11 +236,9 @@ fn run_routing_case(daemon_uri: &str, node_seed: &str, case: &RoutingCase, decla
         .link(&sink1)
         .expect("link cf_high -> map.sink_1");
 
-    src0
-        .link(&out0.static_pad("sink").unwrap())
+    src0.link(&out0.static_pad("sink").unwrap())
         .expect("link map.src_0 -> appsink0");
-    src1
-        .link(&out1.static_pad("sink").unwrap())
+    src1.link(&out1.static_pad("sink").unwrap())
         .expect("link map.src_1 -> appsink1");
 
     set_playing_or_panic(&pipeline);
@@ -245,9 +246,7 @@ fn run_routing_case(daemon_uri: &str, node_seed: &str, case: &RoutingCase, decla
     let samples0 = pull_mono_samples(&out0, Duration::from_secs(3));
     let samples1 = pull_mono_samples(&out1, Duration::from_secs(3));
 
-    pipeline
-        .set_state(gst::State::Null)
-        .expect("NULL");
+    pipeline.set_state(gst::State::Null).expect("NULL");
 
     assert!(
         case.expect_src0.dominant_in(&samples0, SAMPLE_RATE as f32),
@@ -309,11 +308,7 @@ fn is08_audio_channelmap_routes_and_swaps_tones() {
     ];
 
     for (idx, case) in cases.iter().enumerate() {
-        let node_seed = format!(
-            "gst-is08-audio-{}-{}",
-            std::process::id(),
-            idx
-        );
+        let node_seed = format!("gst-is08-audio-{}-{}", std::process::id(), idx);
         run_routing_case(&daemon_uri, &node_seed, case, true);
     }
 }
@@ -378,20 +373,36 @@ fn gst_parse_applies_child_properties_on_request_pads() {
     let map = map.dynamic_cast::<gst::ChildProxy>().expect("ChildProxy");
 
     let sink = map.child_by_name("sink_0").expect("sink_0 pad");
-    assert_eq!(sink.property::<u32>("channels"), 7, "sink channels child prop");
+    assert_eq!(
+        sink.property::<u32>("channels"),
+        7,
+        "sink channels child prop"
+    );
     assert_eq!(
         sink.property::<String>("receiver-name"),
         "rin",
         "sink receiver-name child prop"
     );
-    assert_eq!(sink.property::<String>("label"), "in0", "sink label child prop");
+    assert_eq!(
+        sink.property::<String>("label"),
+        "in0",
+        "sink label child prop"
+    );
 
     let src = map.child_by_name("src_0").expect("src_0 pad");
-    assert_eq!(src.property::<u32>("channels"), 5, "src channels child prop");
+    assert_eq!(
+        src.property::<u32>("channels"),
+        5,
+        "src channels child prop"
+    );
     assert_eq!(
         src.property::<String>("sender-name"),
         "sout",
         "src sender-name child prop"
     );
-    assert_eq!(src.property::<String>("label"), "out0", "src label child prop");
+    assert_eq!(
+        src.property::<String>("label"),
+        "out0",
+        "src label child prop"
+    );
 }

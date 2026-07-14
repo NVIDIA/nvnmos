@@ -581,11 +581,7 @@ impl NmosSrc {
         Ok(())
     }
 
-    fn activate_inner(
-        &self,
-        bin: &gst::Bin,
-        outcome: &InnerConfig,
-    ) -> Result<(), anyhow::Error> {
+    fn activate_inner(&self, bin: &gst::Bin, outcome: &InnerConfig) -> Result<(), anyhow::Error> {
         match outcome {
             InnerConfig::Real(transport) => {
                 let new_inner = match transport {
@@ -595,8 +591,7 @@ impl NmosSrc {
                         format,
                         transport_file,
                     } => {
-                        let capssetter_caps =
-                            mxl_capssetter_caps(transport_file.as_deref())?;
+                        let capssetter_caps = mxl_capssetter_caps(transport_file.as_deref())?;
                         {
                             let chain = inner::build_mxlsrc(
                                 domain_path,
@@ -620,14 +615,10 @@ impl NmosSrc {
                         media,
                         transport_file,
                     } => {
-                        let capssetter_caps =
-                            udp_capssetter_caps(transport_file.as_deref(), media);
+                        let capssetter_caps = udp_capssetter_caps(transport_file.as_deref(), media);
                         {
-                            let chain = inner::build_udpsrc(
-                                media,
-                                *variant,
-                                capssetter_caps.as_ref(),
-                            )?;
+                            let chain =
+                                inner::build_udpsrc(media, *variant, capssetter_caps.as_ref())?;
                             let settings = self.settings.lock().unwrap();
                             inner::apply_udp_src_inner_properties(
                                 &CAT,
@@ -639,20 +630,22 @@ impl NmosSrc {
                             chain.bin
                         }
                     }
-                    TransportConfig::NvDsUdp { media, transport_file, .. } => {
-                        {
-                            let sdp = transport_file.as_deref().unwrap_or("");
-                            let chain = inner::build_nvdsudpsrc(media, sdp)?;
-                            let settings = self.settings.lock().unwrap();
-                            inner::apply_nvdsudp_src_inner_properties(
-                                &CAT,
-                                "nmossrc",
-                                &chain,
-                                settings.transport_properties.as_ref(),
-                                settings.depay_properties.as_ref(),
-                            );
-                            chain.bin
-                        }
+                    TransportConfig::NvDsUdp {
+                        media,
+                        transport_file,
+                        ..
+                    } => {
+                        let sdp = transport_file.as_deref().unwrap_or("");
+                        let chain = inner::build_nvdsudpsrc(media, sdp)?;
+                        let settings = self.settings.lock().unwrap();
+                        inner::apply_nvdsudp_src_inner_properties(
+                            &CAT,
+                            "nmossrc",
+                            &chain,
+                            settings.transport_properties.as_ref(),
+                            settings.depay_properties.as_ref(),
+                        );
+                        chain.bin
                     }
                 };
                 self.swap_inner(bin, &new_inner, inner::RebuildChainOpts::default())?;
@@ -691,7 +684,8 @@ impl NmosSrc {
         let snapshot = self.settings.lock().unwrap().clone();
         match build_fake_src_for_settings(&snapshot) {
             Ok(fake) => {
-                if let Err(e) = self.swap_inner(bin_ref, &fake, inner::RebuildChainOpts::default()) {
+                if let Err(e) = self.swap_inner(bin_ref, &fake, inner::RebuildChainOpts::default())
+                {
                     gst::warning!(CAT, "restoring nmossrc fake chain: {e:#}");
                 }
             }
@@ -760,18 +754,20 @@ impl NmosSrc {
     /// the bin alive on its own.
     fn activation_handler(&self) -> ActivationHandler {
         let weak: glib::WeakRef<super::NmosSrc> = self.obj().downgrade();
-        Arc::new(move |req: ActivationRequest, tx: oneshot::Sender<ActivationOutcome>| {
-            let Some(bin) = weak.upgrade() else {
-                let _ = tx.send(ActivationOutcome::Failed {
-                    reason: "nmossrc element was dropped before activation could be applied"
-                        .to_owned(),
+        Arc::new(
+            move |req: ActivationRequest, tx: oneshot::Sender<ActivationOutcome>| {
+                let Some(bin) = weak.upgrade() else {
+                    let _ = tx.send(ActivationOutcome::Failed {
+                        reason: "nmossrc element was dropped before activation could be applied"
+                            .to_owned(),
+                    });
+                    return;
+                };
+                bin.call_async(move |bin| {
+                    bin.imp().apply_activation(req, tx);
                 });
-                return;
-            };
-            bin.call_async(move |bin| {
-                bin.imp().apply_activation(req, tx);
-            });
-        })
+            },
+        )
     }
 
     /// Apply an activation. Runs on a GStreamer worker thread (via
@@ -828,11 +824,9 @@ impl NmosSrc {
         let bin_ref: &gst::Bin = bin.upcast_ref();
         let from_real = self.current_chain_is_real();
         let to_real = matches!(plan.inner, InnerConfig::Real(_));
-        let drain_downstream = (from_real || to_real)
-            && bin_ref.current_state() == gst::State::Playing;
-        let reroute_opts = inner::RebuildChainOpts {
-            drain_downstream,
-        };
+        let drain_downstream =
+            (from_real || to_real) && bin_ref.current_state() == gst::State::Playing;
+        let reroute_opts = inner::RebuildChainOpts { drain_downstream };
         let settings = self.settings.lock().unwrap().clone();
 
         if from_real && to_real {
@@ -847,17 +841,13 @@ impl NmosSrc {
                 Ok(fake) => {
                     if let Err(e) = self.swap_inner(bin_ref, &fake, reroute_opts) {
                         return ActivationOutcome::Failed {
-                            reason: format!(
-                                "nmossrc: intermediate fake-chain swap failed: {e:#}"
-                            ),
+                            reason: format!("nmossrc: intermediate fake-chain swap failed: {e:#}"),
                         };
                     }
                 }
                 Err(e) => {
                     return ActivationOutcome::Failed {
-                        reason: format!(
-                            "nmossrc: building intermediate fake chain: {e:#}"
-                        ),
+                        reason: format!("nmossrc: building intermediate fake chain: {e:#}"),
                     };
                 }
             }
@@ -865,7 +855,10 @@ impl NmosSrc {
 
         let new_inner = match &plan.inner {
             InnerConfig::Real(TransportConfig::Mxl {
-                domain_path, flow_id, format, transport_file,
+                domain_path,
+                flow_id,
+                format,
+                transport_file,
             }) => {
                 let capssetter_caps = match mxl_capssetter_caps(transport_file.as_deref()) {
                     Ok(c) => c,
@@ -901,8 +894,7 @@ impl NmosSrc {
                 media,
                 transport_file,
             }) => {
-                let capssetter_caps =
-                    udp_capssetter_caps(transport_file.as_deref(), media);
+                let capssetter_caps = udp_capssetter_caps(transport_file.as_deref(), media);
                 let settings = self.settings.lock().unwrap();
                 match inner::build_udpsrc(media, *variant, capssetter_caps.as_ref()) {
                     Ok(chain) => {
@@ -922,7 +914,11 @@ impl NmosSrc {
                     }
                 }
             }
-            InnerConfig::Real(TransportConfig::NvDsUdp { media, transport_file, .. }) => {
+            InnerConfig::Real(TransportConfig::NvDsUdp {
+                media,
+                transport_file,
+                ..
+            }) => {
                 let settings = self.settings.lock().unwrap();
                 let sdp = transport_file.as_deref().unwrap_or("");
                 match inner::build_nvdsudpsrc(media, sdp) {
@@ -975,10 +971,7 @@ impl NmosSrc {
             // twice.
             if let Ok(p) = build_fake_src_for_settings(&settings) {
                 if let Err(e2) = self.swap_inner(bin_ref, &p, inner::RebuildChainOpts::default()) {
-                    gst::warning!(
-                        CAT,
-                        "nmossrc fake-chain restore also failed: {e2:#}",
-                    );
+                    gst::warning!(CAT, "nmossrc fake-chain restore also failed: {e2:#}",);
                 }
             }
             return ActivationOutcome::Failed {
@@ -999,8 +992,7 @@ fn install_initial_fake_chain(bin: &gst::Bin) -> Result<gst::GhostPad, glib::Boo
     // so we have no caps source. Build a bare `appsrc` without caps;
     // it'll be replaced at NULL→READY (`activate_inner`) once `caps`
     // / `transport-file*` are known.
-    let fake = inner::build_fake_src(None)
-        .map_err(|e| glib::bool_error!("{e}"))?;
+    let fake = inner::build_fake_src(None).map_err(|e| glib::bool_error!("{e}"))?;
     let ghost = inner::build_initial(bin, fake, "src", gst::PadDirection::Src)?;
     bin.add_pad(&ghost)
         .map_err(|e| glib::bool_error!("adding ghost pad to nmossrc: {e}"))?;
@@ -1062,9 +1054,7 @@ fn mxl_indicates_wide_receiver_caps(text: &str) -> bool {
 /// transport file indicates wide Receiver Caps, return `None` so runtime
 /// caps come from the filesystem flow via bare `mxlsrc`; otherwise pin
 /// configuring essence caps from the same file.
-fn mxl_capssetter_caps(
-    transport_file: Option<&str>,
-) -> Result<Option<gst::Caps>, anyhow::Error> {
+fn mxl_capssetter_caps(transport_file: Option<&str>) -> Result<Option<gst::Caps>, anyhow::Error> {
     if transport_file
         .filter(|s| !s.is_empty())
         .is_some_and(mxl_indicates_wide_receiver_caps)
@@ -1115,9 +1105,7 @@ fn udp_capssetter_caps(
 /// caps and the pipeline will fail caps negotiation if it tries
 /// to reach PLAYING in that state. Filesystem / parse errors when
 /// a source is set are propagated as `Err`.
-fn fake_caps_from_settings(
-    settings: &Settings,
-) -> Result<Option<gst::Caps>, anyhow::Error> {
+fn fake_caps_from_settings(settings: &Settings) -> Result<Option<gst::Caps>, anyhow::Error> {
     crate::session::fake_caps_from_settings(
         "nmossrc",
         settings.transport,
@@ -1204,8 +1192,14 @@ mod tests {
         assert_eq!(cs.interface_ip, "192.0.2.20");
         assert_eq!(cs.multicast_ip, "239.1.1.1");
         assert_eq!(cs.destination_port, 5004);
-        assert_eq!(cs.source_port, 0, "sender-only on the Receiver side must be 0");
-        assert_eq!(cs.destination_ip, "", "sender-only on the Receiver side must be empty");
+        assert_eq!(
+            cs.source_port, 0,
+            "sender-only on the Receiver side must be 0"
+        );
+        assert_eq!(
+            cs.destination_ip, "",
+            "sender-only on the Receiver side must be empty"
+        );
         assert_eq!(cs.side, crate::session::types::Side::Receiver);
     }
 
@@ -1229,9 +1223,8 @@ mod tests {
     fn from_settings_forwards_transport_caps() {
         use std::str::FromStr;
         init_gst();
-        let caps =
-            gst::Caps::from_str("application/x-rtp,media=audio,payload=99,clock-rate=48000")
-                .expect("valid caps");
+        let caps = gst::Caps::from_str("application/x-rtp,media=audio,payload=99,clock-rate=48000")
+            .expect("valid caps");
         let s = Settings {
             transport_caps: Some(caps.clone()),
             ..Settings::default()
@@ -1269,21 +1262,15 @@ mod tests {
         )
         .expect("wide splice");
         assert!(
-            mxl_capssetter_caps(Some(&spliced_wide))
-                .unwrap()
-                .is_none(),
+            mxl_capssetter_caps(Some(&spliced_wide)).unwrap().is_none(),
             "post-splice wide transport file must skip capssetter",
         );
         assert!(
-            mxl_capssetter_caps(Some(wide_file))
-                .unwrap()
-                .is_none(),
+            mxl_capssetter_caps(Some(wide_file)).unwrap().is_none(),
             "activation/configuring file with wide caps tag must skip capssetter",
         );
         assert!(
-            mxl_capssetter_caps(Some(narrow_file))
-                .unwrap()
-                .is_some(),
+            mxl_capssetter_caps(Some(narrow_file)).unwrap().is_some(),
             "narrow transport file still uses capssetter",
         );
         let spliced_narrow = splice_overrides(
@@ -1384,10 +1371,9 @@ mod tests {
             "frame_height":1080,
             "tags":{"urn:x-nvnmos:tag:caps":[""]}
         }"#;
-        let narrow_element_caps = gst::Caps::from_str(
-            "video/x-raw,format=v210,width=1920,height=1080,framerate=25/1",
-        )
-        .expect("narrow caps");
+        let narrow_element_caps =
+            gst::Caps::from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=25/1")
+                .expect("narrow caps");
         let snapshot = Settings {
             caps: Some(narrow_element_caps),
             ..Settings::default()
@@ -1452,10 +1438,9 @@ mod tests {
     fn intermediate_fake_src_caps_deactivation_uses_element_settings() {
         use std::str::FromStr;
         init_gst();
-        let caps = gst::Caps::from_str(
-            "video/x-raw,format=v210,width=1920,height=1080,framerate=25/1",
-        )
-        .expect("caps");
+        let caps =
+            gst::Caps::from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=25/1")
+                .expect("caps");
         let snapshot = Settings {
             caps: Some(caps.clone()),
             ..Settings::default()
@@ -1472,5 +1457,4 @@ mod tests {
             Some(caps),
         );
     }
-
 }

@@ -37,24 +37,19 @@ pub fn prepare_listen_path(path: &Path) -> anyhow::Result<()> {
         Err(e) if e.kind() == ErrorKind::ConnectionRefused => {
             // Stale socket file with no acceptor.
             if path.exists() {
-                std::fs::remove_file(path).with_context(|| {
-                    format!("removing stale UDS socket at {}", path.display())
-                })?;
+                std::fs::remove_file(path)
+                    .with_context(|| format!("removing stale UDS socket at {}", path.display()))?;
             }
         }
         Err(e) => {
-            anyhow::bail!(
-                "cannot probe UDS socket at {}: {e}",
-                path.display()
-            );
+            anyhow::bail!("cannot probe UDS socket at {}: {e}", path.display());
         }
     }
 
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("creating parent directory for {}", path.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent directory for {}", path.display()))?;
         }
     }
 
@@ -69,10 +64,7 @@ mod tests {
 
     #[test]
     fn rejects_live_listener() {
-        let dir = std::env::temp_dir().join(format!(
-            "nvnmosd-uds-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("nvnmosd-uds-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let sock = dir.join("nvnmosd.sock");
 
@@ -81,20 +73,14 @@ mod tests {
 
         let err = prepare_listen_path(&sock).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(
-            msg.contains("already in use"),
-            "unexpected error: {msg}"
-        );
+        assert!(msg.contains("already in use"), "unexpected error: {msg}");
 
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn probes_even_when_pathname_is_missing() {
-        let dir = std::env::temp_dir().join(format!(
-            "nvnmosd-uds-missing-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("nvnmosd-uds-missing-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let sock = dir.join("nvnmosd.sock");
 
@@ -106,10 +92,7 @@ mod tests {
 
     #[test]
     fn removes_stale_socket_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "nvnmosd-uds-stale-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("nvnmosd-uds-stale-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let sock = dir.join("nvnmosd.sock");
         std::fs::write(&sock, b"").expect("create stale socket file");
@@ -123,10 +106,7 @@ mod tests {
 
     #[test]
     fn rejects_while_background_listener_holds_path() {
-        let dir = std::env::temp_dir().join(format!(
-            "nvnmosd-uds-bg-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("nvnmosd-uds-bg-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let sock = dir.join("nvnmosd.sock");
 

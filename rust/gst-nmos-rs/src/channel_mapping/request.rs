@@ -4,8 +4,7 @@
 //! Build `AddChannelMappingRequest` from pad snapshots.
 
 use nvnmos_rpc::v1::{
-    AddChannelMappingRequest, ChannelMappingInput, ChannelMappingOutput,
-    ChannelMappingParentType,
+    AddChannelMappingRequest, ChannelMappingInput, ChannelMappingOutput, ChannelMappingParentType,
 };
 
 use super::types::{SinkPadSnapshot, SrcPadSnapshot};
@@ -25,10 +24,7 @@ pub(crate) fn build_add_channel_mapping_request(
     srcs: &[SrcPadSnapshot],
     restrict_routable_inputs: bool,
 ) -> AddChannelMappingRequest {
-    let input_ids_for_routable: Vec<String> = sinks
-        .iter()
-        .map(|s| s.input_id.clone())
-        .collect();
+    let input_ids_for_routable: Vec<String> = sinks.iter().map(|s| s.input_id.clone()).collect();
 
     let inputs = sinks
         .iter()
@@ -92,13 +88,7 @@ mod tests {
             negotiated_channels: 2,
             active_map: None,
         }];
-        let req = build_add_channel_mapping_request(
-            "sess",
-            "studio",
-            &sinks,
-            &srcs,
-            true,
-        );
+        let req = build_add_channel_mapping_request("sess", "studio", &sinks, &srcs, true);
         assert_eq!(req.name, "studio");
         assert_eq!(req.inputs.len(), 1);
         assert_eq!(req.inputs[0].parent_name, "rx1");

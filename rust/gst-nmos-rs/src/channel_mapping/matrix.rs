@@ -16,7 +16,9 @@ use crate::channel_mapping_session::ChannelMappingActivationRequest;
 pub(crate) enum ActiveMapValidationError {
     #[error("unknown input id `{0}`")]
     UnknownInputId(String),
-    #[error("input channel {input_channel} out of range for input `{input_id}` (max {max_channel})")]
+    #[error(
+        "input channel {input_channel} out of range for input `{input_id}` (max {max_channel})"
+    )]
     InputChannelOutOfRange {
         input_id: String,
         input_channel: u32,
@@ -85,11 +87,7 @@ pub(crate) fn validate_active_map_for_output(
             .iter()
             .position(|id| id == &route.input_id)
             .ok_or_else(|| ActiveMapValidationError::UnknownInputId(route.input_id.clone()))?;
-        let max_ch = topology
-            .input_channels
-            .get(pad_idx)
-            .copied()
-            .unwrap_or(0);
+        let max_ch = topology.input_channels.get(pad_idx).copied().unwrap_or(0);
         if route.input_channel >= max_ch {
             return Err(ActiveMapValidationError::InputChannelOutOfRange {
                 input_id: route.input_id.clone(),
@@ -148,17 +146,16 @@ use glib::prelude::*;
 /// Pack `out-channels × in-channels` matrix for `audiomixmatrix.matrix` (coefficients are `double`).
 pub(crate) fn matrix_to_audiomixmatrix_gvalue(rows: &[Vec<f32>]) -> gst::Array {
     gst::Array::from_values(rows.iter().map(|row| {
-        let inner = gst::Array::from_values(
-            row.iter()
-                .copied()
-                .map(|v| (f64::from(v)).to_send_value()),
-        );
+        let inner =
+            gst::Array::from_values(row.iter().copied().map(|v| (f64::from(v)).to_send_value()));
         glib::SendValue::from_owned(inner)
     }))
 }
 
 /// Build `converter-config` for an audiomixer sink pad (`input_bus_channels × input_channels` mix matrix).
-pub(crate) fn input_bus_converter_config(matrix: &[Vec<f32>]) -> gstreamer_audio::AudioConverterConfig {
+pub(crate) fn input_bus_converter_config(
+    matrix: &[Vec<f32>],
+) -> gstreamer_audio::AudioConverterConfig {
     let mut config = gstreamer_audio::AudioConverterConfig::new();
     config.set_mix_matrix(matrix);
     config
@@ -338,13 +335,7 @@ mod tests {
         let src_count = srcs.len();
         for src_idx in 0..src_count {
             let out_ch = topology.output_channels[src_idx];
-            let routes = default_identity_routes(
-                &topology,
-                src_idx,
-                out_ch,
-                &sinks,
-                src_count,
-            );
+            let routes = default_identity_routes(&topology, src_idx, out_ch, &sinks, src_count);
             let mix = build_output_mix_matrix(&topology, out_ch, &routes).unwrap();
             let el = gstreamer::ElementFactory::make("audiomixmatrix")
                 .property("in-channels", topology.input_bus_channels)

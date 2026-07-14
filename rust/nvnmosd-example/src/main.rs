@@ -93,21 +93,22 @@ use clap::Parser;
 use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
-    AckActivationRequest, AckChannelMappingActivationRequest, ActivationEvent, AddChannelMappingRequest,
-    AddChannelMappingResponse, AddNodeRequest, AddNodeResponse, AddReceiverRequest,
-    AddResourceResponse, AddSenderRequest, AssetConfig, ChannelMappingActivationEvent,
-    ChannelMappingInput as ProtoChannelMappingInput, ChannelMappingOutput as ProtoChannelMappingOutput,
+    AckActivationRequest, AckChannelMappingActivationRequest, ActivationEvent, ActiveMapEntry,
+    AddChannelMappingRequest, AddChannelMappingResponse, AddNodeRequest, AddNodeResponse,
+    AddReceiverRequest, AddResourceResponse, AddSenderRequest, AssetConfig,
+    ChannelMappingActivationEvent, ChannelMappingInput as ProtoChannelMappingInput,
+    ChannelMappingOutput as ProtoChannelMappingOutput,
     ChannelMappingParentType as ProtoChannelMappingParentType, CloseSessionRequest, NodeConfig,
     OpenSessionRequest, OpenSessionResponse, RemoveChannelMappingRequest, RemoveNodeRequest,
     RemoveResourceRequest, Side as ProtoSide, SubscribeActivationsRequest,
     SubscribeChannelMappingActivationsRequest, SyncChannelMappingStateRequest,
-    SyncResourceStateRequest, ActiveMapEntry, Transport as ProtoTransport,
+    SyncResourceStateRequest, Transport as ProtoTransport,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::mpsc as tokio_mpsc;
-use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::Code;
+use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
 #[derive(Parser, Debug)]
@@ -189,7 +190,13 @@ async fn main() -> anyhow::Result<()> {
     let mut client = NvnmosDaemonClient::new(channel);
 
     // (1) First OpenSession: creates the Node.
-    let a = open(&mut client, &args.node_seed, args.http_port, "first session (creates Node)").await?;
+    let a = open(
+        &mut client,
+        &args.node_seed,
+        args.http_port,
+        "first session (creates Node)",
+    )
+    .await?;
     anyhow::ensure!(
         a.created_node,
         "first OpenSession on a fresh seed should have created_node=true; got {}",
@@ -201,7 +208,13 @@ async fn main() -> anyhow::Result<()> {
     // ignored by the daemon when the Node already exists; we still
     // send a NodeConfig because the wire requires `node_config.seed`
     // to identify which Node to attach to.
-    let b = open(&mut client, &args.node_seed, args.http_port, "second session (refcount bump)").await?;
+    let b = open(
+        &mut client,
+        &args.node_seed,
+        args.http_port,
+        "second session (refcount bump)",
+    )
+    .await?;
     anyhow::ensure!(
         !b.created_node,
         "second OpenSession on the same seed should have created_node=false; got {}",
@@ -221,10 +234,20 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // (3) Close the first session: refcount 2→1, Node remains.
-    close(&mut client, &a.session_handle, "first close (refcount to 1)").await?;
+    close(
+        &mut client,
+        &a.session_handle,
+        "first close (refcount to 1)",
+    )
+    .await?;
 
     // (4) Close the second session: refcount 1→0, Node destroyed.
-    close(&mut client, &b.session_handle, "second close (Node destroyed)").await?;
+    close(
+        &mut client,
+        &b.session_handle,
+        "second close (Node destroyed)",
+    )
+    .await?;
 
     // -------- Persistent Node lifecycle --------
     let persistent_seed = format!("{}-persistent", args.node_seed);
@@ -236,8 +259,20 @@ async fn main() -> anyhow::Result<()> {
     // affecting its lifetime. Both must return the persistent Node's id
     // *and* report `created_node=false` (the persistent Node was
     // created by AddNode in step 5).
-    let c = open(&mut client, &persistent_seed, args.http_port, "first session on persistent Node").await?;
-    let d = open(&mut client, &persistent_seed, args.http_port, "second session on persistent Node").await?;
+    let c = open(
+        &mut client,
+        &persistent_seed,
+        args.http_port,
+        "first session on persistent Node",
+    )
+    .await?;
+    let d = open(
+        &mut client,
+        &persistent_seed,
+        args.http_port,
+        "second session on persistent Node",
+    )
+    .await?;
     anyhow::ensure!(
         c.node_id == added.node_id && d.node_id == added.node_id,
         "OpenSession on the persistent seed returned the wrong node_id: \
@@ -317,8 +352,8 @@ async fn main() -> anyhow::Result<()> {
         &build_video_sdp(sender_name, true, &iface_ip),
     )
     .await?;
-    let expected_sender_id = nvnmos::make_sender_id(&resource_seed, sender_name)
-        .context("make_sender_id")?;
+    let expected_sender_id =
+        nvnmos::make_sender_id(&resource_seed, sender_name).context("make_sender_id")?;
     anyhow::ensure!(
         sender_resp.resource_id == expected_sender_id,
         "AddSender returned resource_id {} but make_sender_id({:?}, {:?}) says {}",
@@ -343,8 +378,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     let expected_receiver_id =
-        nvnmos::make_receiver_id(&resource_seed, receiver_name)
-            .context("make_receiver_id")?;
+        nvnmos::make_receiver_id(&resource_seed, receiver_name).context("make_receiver_id")?;
     anyhow::ensure!(
         receiver_resp.resource_id == expected_receiver_id,
         "AddReceiver returned resource_id {} but make_receiver_id({:?}, {:?}) says {}",
@@ -420,7 +454,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("Connection API PATCH deactivate round-trip")?;
     } else {
-        tracing::info!("--skip-connection set; skipping the in-band Connection API PATCH round-trip");
+        tracing::info!(
+            "--skip-connection set; skipping the in-band Connection API PATCH round-trip"
+        );
     }
 
     // (16) Mismatch: claim name="claimed-id" but build the SDP with a
@@ -652,8 +688,7 @@ async fn spawn_auto_ack_task(
             match stream.message().await {
                 Ok(Some(event)) => {
                     let activated = event.transport_file.is_some();
-                    let side = ProtoSide::try_from(event.side)
-                        .unwrap_or(ProtoSide::Unspecified);
+                    let side = ProtoSide::try_from(event.side).unwrap_or(ProtoSide::Unspecified);
                     tracing::info!(
                         session_handle,
                         resource_handle = %event.resource_handle,
@@ -1098,9 +1133,7 @@ async fn connection_patch(
             .split_whitespace()
             .nth(1)
             .and_then(|s| s.parse().ok())
-            .ok_or_else(|| {
-                anyhow::anyhow!("could not parse HTTP status line: {status_line:?}")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("could not parse HTTP status line: {status_line:?}"))?;
         Ok((status, resp))
     })
     .await
@@ -1125,16 +1158,18 @@ async fn drive_connection_sender_activation(
         r#"{{"master_enable":{enable},"activation":{{"mode":"activate_immediate"}}}}"#,
         enable = expect_active,
     );
-    let path = format!(
-        "/x-nmos/connection/v1.1/single/senders/{sender_resource_id}/staged"
-    );
+    let path = format!("/x-nmos/connection/v1.1/single/senders/{sender_resource_id}/staged");
     tracing::info!(
         connection_host,
         connection_port,
         sender_resource_id,
         expect_active,
         "IS-05 PATCH (sender {action})",
-        action = if expect_active { "activate" } else { "deactivate" },
+        action = if expect_active {
+            "activate"
+        } else {
+            "deactivate"
+        },
     );
 
     let (status, body_resp) = connection_patch(connection_host, connection_port, &path, &body)

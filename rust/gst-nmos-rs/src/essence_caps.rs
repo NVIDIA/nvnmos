@@ -15,10 +15,7 @@ use gstreamer as gst;
 /// is taken from the fmtp slot on the companion `application/x-rtp`
 /// caps; otherwise audio defaults use channel count (`M` / `ST` / `Uxx`).
 pub(crate) fn caps_from(caps: &gst::Caps, rtp_caps: Option<&gst::Caps>) -> gst::Caps {
-    if caps
-        .structure(0)
-        .is_some_and(|s| s.name() == "audio/x-raw")
-    {
+    if caps.structure(0).is_some_and(|s| s.name() == "audio/x-raw") {
         let channel_order = rtp_caps
             .and_then(|rtp| rtp.structure(0))
             .and_then(channel_order_from_rtp_structure);
@@ -113,9 +110,7 @@ pub(crate) fn default_smpte2110_channel_order(channels: i32) -> String {
 /// Read `channel-order` from parsed `application/x-rtp` caps (the
 /// fmtp `channel-order=` slot from SDP).
 pub(crate) fn channel_order_from_rtp_structure(s: &gst::StructureRef) -> Option<String> {
-    s.get::<&str>("channel-order")
-        .ok()
-        .map(str::to_owned)
+    s.get::<&str>("channel-order").ok().map(str::to_owned)
 }
 
 fn default_channel_mask(channels: i32) -> Option<gst::Bitmask> {
@@ -156,10 +151,9 @@ mod tests {
     #[test]
     fn caps_from_leaves_video_unchanged() {
         init_gst();
-        let caps = gst::Caps::from_str(
-            "video/x-raw,format=UYVY,width=1920,height=1080,framerate=25/1",
-        )
-        .expect("video caps");
+        let caps =
+            gst::Caps::from_str("video/x-raw,format=UYVY,width=1920,height=1080,framerate=25/1")
+                .expect("video caps");
         let out = caps_from(&caps, None);
         assert_eq!(out.to_string(), caps.to_string());
     }
@@ -221,7 +215,10 @@ mod tests {
         let s = out.structure(0).expect("structure");
         assert_eq!(
             s.get::<gst::Bitmask>("channel-mask").unwrap(),
-            caps.structure(0).unwrap().get::<gst::Bitmask>("channel-mask").unwrap(),
+            caps.structure(0)
+                .unwrap()
+                .get::<gst::Bitmask>("channel-mask")
+                .unwrap(),
         );
     }
 }

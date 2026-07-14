@@ -62,18 +62,17 @@
 //! round-trips them as standalone `a=…:` lines on build — see
 //! [`caps_from_rtp_audio`] for the reasoning.
 
-
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::sync::LazyLock;
 
 use gst_sdp::{SDPAttribute, SDPBandwidth, SDPMedia, SDPMediaRef, SDPMessage};
-use unicase::Ascii;
 use gstreamer as gst;
 use gstreamer_sdp as gst_sdp;
 use thiserror::Error;
+use unicase::Ascii;
 
 use crate::session::types::Side;
 use crate::session::udp::types::{UdpLeg, UdpMedia};
@@ -230,13 +229,9 @@ pub(crate) enum SdpError {
         "dual-leg SDP requires transport=nvdsudp; transport=udp/udp2 supports single-leg RTP only"
     )]
     DualLegNotSupported,
-    #[error(
-        "cannot normalise SDP to a single active leg: expected exactly one active `m=` block"
-    )]
+    #[error("cannot normalise SDP to a single active leg: expected exactly one active `m=` block")]
     NotExactlyOneActiveLeg,
-    #[error(
-        "SDP `m=` blocks carry mismatched essence (PT / rtpmap / fmtp differ across legs)"
-    )]
+    #[error("SDP `m=` blocks carry mismatched essence (PT / rtpmap / fmtp differ across legs)")]
     DualLegEssenceMismatch,
     #[error("SDP has {0} media lines; at most two same-essence legs are supported")]
     TooManyMediaBlocks(usize),
@@ -276,9 +271,7 @@ pub(crate) enum SdpError {
     // `FlowDefError::FormatMismatch` on the MXL path so both
     // transport stacks reject the same misconfigurations with
     // parallel attribution.
-    #[error(
-        "essence format mismatch: `caps` declares `{caps:?}` but SDP declares `{sdp:?}`"
-    )]
+    #[error("essence format mismatch: `caps` declares `{caps:?}` but SDP declares `{sdp:?}`")]
     FormatMismatch { caps: FlowFormat, sdp: FlowFormat },
     #[error(
         "essence shape mismatch: `caps` `{caps}` does not intersect \
@@ -290,10 +283,7 @@ pub(crate) enum SdpError {
          SDP-derived RTP caps `{sdp}` (override-class fields `payload`, \
          `a-ptime`, `a-maxptime` excluded from the comparison)"
     )]
-    TransportCapsMismatch {
-        transport_caps: String,
-        sdp: String,
-    },
+    TransportCapsMismatch { transport_caps: String, sdp: String },
     #[error(
         "bit-rate mismatch: properties resolve to format {property_format} / transport \
          {property_transport} kbit/s but transport-file declares format {file_format} / \
@@ -539,8 +529,7 @@ fn as_bandwidth_from_media(m: &SDPMediaRef) -> Option<u64> {
 /// derive the missing side from the other fmtp key or `b=AS:`.
 pub(crate) fn bit_rates_from_media(m: &SDPMediaRef) -> BitRates {
     let params = fmtp_params_from_media(m);
-    let fmtp_format =
-        params.and_then(|params| fmtp_param::<u64>(params, FMTP_FORMAT_BIT_RATE));
+    let fmtp_format = params.and_then(|params| fmtp_param::<u64>(params, FMTP_FORMAT_BIT_RATE));
     let fmtp_transport =
         params.and_then(|params| fmtp_param::<u64>(params, FMTP_TRANSPORT_BIT_RATE));
     let b_as = as_bandwidth_from_media(m);
@@ -567,8 +556,8 @@ pub(crate) fn bit_rates_from_media(m: &SDPMediaRef) -> BitRates {
 
 /// Parse bit rates from the first `m=` block of a configuring SDP.
 pub(crate) fn bit_rates_from_sdp_text(text: &str) -> Result<BitRates, SdpError> {
-    let msg = SDPMessage::parse_buffer(text.as_bytes())
-        .map_err(|e| SdpError::Parse(e.to_string()))?;
+    let msg =
+        SDPMessage::parse_buffer(text.as_bytes()).map_err(|e| SdpError::Parse(e.to_string()))?;
     let media = msg.media(0).ok_or(SdpError::NoMedia)?;
     Ok(bit_rates_from_media(media))
 }
@@ -634,15 +623,15 @@ pub(crate) fn is_media_inactive(media: &SDPMediaRef) -> bool {
 
 /// Number of `m=` blocks in an SDP transport file.
 pub(crate) fn sdp_media_block_count(text: &str) -> Result<usize, SdpError> {
-    let msg = SDPMessage::parse_buffer(text.as_bytes())
-        .map_err(|e| SdpError::Parse(e.to_string()))?;
+    let msg =
+        SDPMessage::parse_buffer(text.as_bytes()).map_err(|e| SdpError::Parse(e.to_string()))?;
     Ok(msg.medias_len() as usize)
 }
 
 /// Count `m=` blocks that are not `a=inactive` (IS-05 `rtp_enabled: true`).
 pub(crate) fn count_active_sdp_legs(text: &str) -> Result<u8, SdpError> {
-    let msg = SDPMessage::parse_buffer(text.as_bytes())
-        .map_err(|e| SdpError::Parse(e.to_string()))?;
+    let msg =
+        SDPMessage::parse_buffer(text.as_bytes()).map_err(|e| SdpError::Parse(e.to_string()))?;
     let num = msg.medias_len();
     if num == 0 {
         return Err(SdpError::NoMedia);
@@ -677,7 +666,10 @@ pub(crate) fn validate_dual_leg_sdp(msg: &SDPMessage) -> Result<(), SdpError> {
 }
 
 /// Derive RTP + raw essence caps from one SDP `m=` block.
-fn parse_media_essence(msg: &SDPMessage, media: &SDPMediaRef) -> Result<ParsedMediaEssence, SdpError> {
+fn parse_media_essence(
+    msg: &SDPMessage,
+    media: &SDPMediaRef,
+) -> Result<ParsedMediaEssence, SdpError> {
     let pt_str = media.format(0).ok_or(SdpError::MissingPt)?;
     let pt: i32 = pt_str.parse().map_err(|_| SdpError::MissingPt)?;
 
@@ -729,9 +721,9 @@ fn parse_media_essence(msg: &SDPMessage, media: &SDPMediaRef) -> Result<ParsedMe
         FlowFormat::Video => caps_from_rtp_video(&rtp_caps)?,
         FlowFormat::Audio => caps_from_rtp_audio(&rtp_caps)?,
         FlowFormat::Data => caps_from_rtp_data(&rtp_caps)?,
-        FlowFormat::Unspecified => unreachable!(
-            "format dispatch above never produces FlowFormat::Unspecified"
-        ),
+        FlowFormat::Unspecified => {
+            unreachable!("format dispatch above never produces FlowFormat::Unspecified")
+        }
     };
     let caps = crate::essence_caps::caps_from(&parsed_caps, Some(&rtp_caps));
 
@@ -793,10 +785,7 @@ fn dual_leg_essence_equivalent(a: &ParsedMediaEssence, b: &ParsedMediaEssence) -
 /// [`UdpMedia::secondary`]. Inactive legs are skipped. When no leg is
 /// active, the first `m=` block is still stored on `primary` so essence
 /// caps remain available; chain gating treats zero active legs as fake.
-fn active_legs_to_udp_media(
-    essence: ParsedMediaEssence,
-    legs: [(UdpLeg, bool); 2],
-) -> UdpMedia {
+fn active_legs_to_udp_media(essence: ParsedMediaEssence, legs: [(UdpLeg, bool); 2]) -> UdpMedia {
     let leg0_fallback = legs[0].0.clone();
     let active: Vec<UdpLeg> = legs
         .into_iter()
@@ -824,8 +813,8 @@ fn active_legs_to_udp_media(
 /// legs are omitted from [`UdpMedia::secondary`]. Three or more `m=`
 /// lines, or mixed essence (e.g. video + audio), return typed errors.
 pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
-    let msg = SDPMessage::parse_buffer(text.as_bytes())
-        .map_err(|e| SdpError::Parse(e.to_string()))?;
+    let msg =
+        SDPMessage::parse_buffer(text.as_bytes()).map_err(|e| SdpError::Parse(e.to_string()))?;
 
     let num_medias = msg.medias_len() as usize;
     if num_medias == 0 {
@@ -889,20 +878,15 @@ pub(crate) fn normalise_to_single_active_leg(text: &str) -> Result<String, SdpEr
         return Err(SdpError::NotExactlyOneActiveLeg);
     }
     let media = parse_sdp(text)?;
-    let msg = SDPMessage::parse_buffer(text.as_bytes())
-        .map_err(|e| SdpError::Parse(e.to_string()))?;
+    let msg =
+        SDPMessage::parse_buffer(text.as_bytes()).map_err(|e| SdpError::Parse(e.to_string()))?;
     let origin = msg.origin();
     let origin_address = origin
         .and_then(|o| o.addr())
         .unwrap_or(defaults::UNSPECIFIED_ADDRESS);
-    let origin_session_id = origin
-        .and_then(|o| o.sess_id())
-        .unwrap_or("0");
+    let origin_session_id = origin.and_then(|o| o.sess_id()).unwrap_or("0");
     let session_name = msg.session_name().unwrap_or("nvnmos session");
-    let active_idx = (0..2).find(|&idx| {
-        msg.media(idx)
-            .is_some_and(|m| !is_media_inactive(m))
-    });
+    let active_idx = (0..2).find(|&idx| msg.media(idx).is_some_and(|m| !is_media_inactive(m)));
     let emit_ptp_ts_refclk = active_idx
         .and_then(|idx| msg.media(idx))
         .and_then(|m| m.attribute_val("ts-refclk"))
@@ -930,8 +914,8 @@ fn session_attribute_value<'a>(msg: &'a SDPMessage, key: &str) -> Option<&'a str
 
 /// Session-level `a=x-nvnmos-name` from configuring SDP text.
 pub(crate) fn resource_name_from_transport(text: &str) -> Result<Option<String>, SdpError> {
-    let msg = SDPMessage::parse_buffer(text.as_bytes())
-        .map_err(|e| SdpError::Parse(e.to_string()))?;
+    let msg =
+        SDPMessage::parse_buffer(text.as_bytes()).map_err(|e| SdpError::Parse(e.to_string()))?;
     Ok(session_attribute_value(&msg, "x-nvnmos-name")
         .filter(|name| !name.is_empty())
         .map(str::to_owned))
@@ -1122,7 +1106,8 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
 
     msg.add_media(m);
 
-    msg.as_text().map_err(|e| SdpError::Serialise(e.to_string()))
+    msg.as_text()
+        .map_err(|e| SdpError::Serialise(e.to_string()))
 }
 
 /// Canonical SDP spellings for ST 2110 `a=fmtp:` keys.
@@ -1131,11 +1116,22 @@ pub(crate) fn build_sdp(media: &UdpMedia, session: SdpSession<'_>) -> Result<Str
 static ST_2110_UPPERCASE_FMTP_KEYS: LazyLock<HashSet<Ascii<&'static str>>> = LazyLock::new(|| {
     [
         // ST 2110-20 §7.2 / §7.3
-        "PM", "SSN", "TCS", "RANGE", "PAR",
+        "PM",
+        "SSN",
+        "TCS",
+        "RANGE",
+        "PAR",
         // ST 2110-21 §8.1 / §8.2 (also -40 for TROFF, TSMODE, TSDELAY)
-        "TP", "TROFF", "CMAX", "MAXUDP", "TSMODE", "TSDELAY",
+        "TP",
+        "TROFF",
+        "CMAX",
+        "MAXUDP",
+        "TSMODE",
+        "TSDELAY",
         // ST 2110-40 §6
-        "DID_SDID", "VPID_Code", "TM",
+        "DID_SDID",
+        "VPID_Code",
+        "TM",
     ]
     .into_iter()
     .map(Ascii::new)
@@ -1146,17 +1142,17 @@ static ST_2110_UPPERCASE_FMTP_KEYS: LazyLock<HashSet<Ascii<&'static str>>> = Laz
 /// encoding-names. `gstreamer-sdp` upper-cases the encoding-name
 /// on the SDP → caps direction; `nmos-cpp`'s `get_format`
 /// expects the canonical case.
-static ST_2110_LOWERCASE_RTPMAP_NAMES: LazyLock<HashSet<Ascii<&'static str>>> = LazyLock::new(|| {
-    [
-        "raw",      // RFC 4175 / ST 2110-20
-        "jxsv",     // RFC 9134 / ST 2110-22
-        "smpte291", // RFC 8331 / ST 2110-40
-    ]
-    .into_iter()
-    .map(Ascii::new)
-    .collect()
-});
-
+static ST_2110_LOWERCASE_RTPMAP_NAMES: LazyLock<HashSet<Ascii<&'static str>>> =
+    LazyLock::new(|| {
+        [
+            "raw",      // RFC 4175 / ST 2110-20
+            "jxsv",     // RFC 9134 / ST 2110-22
+            "smpte291", // RFC 8331 / ST 2110-40
+        ]
+        .into_iter()
+        .map(Ascii::new)
+        .collect()
+    });
 
 /// Rewrite the `rtpmap` and `fmtp` attributes that
 /// `set_media_from_caps` just populated on `m` into the canonical
@@ -1283,8 +1279,13 @@ fn canonicalise_fmtp_value(value: &str) -> Option<String> {
     let fixed = rest
         .split(';')
         .map(|kv| {
-            let Some((key, val)) = kv.split_once('=') else { return kv.to_owned() };
-            match ST_2110_UPPERCASE_FMTP_KEYS.get(&Ascii::new(key)).map(|m| **m) {
+            let Some((key, val)) = kv.split_once('=') else {
+                return kv.to_owned();
+            };
+            match ST_2110_UPPERCASE_FMTP_KEYS
+                .get(&Ascii::new(key))
+                .map(|m| **m)
+            {
                 Some(canonical) if canonical != key => {
                     changed = true;
                     format!("{canonical}={val}")
@@ -1413,9 +1414,7 @@ pub(crate) struct SdpOverrides<'a> {
     pub bit_rates: BitRates,
 }
 
-pub(crate) use crate::sdp_passthrough::{
-    passthrough_with_overrides, DualLegPassthroughPolicy,
-};
+pub(crate) use crate::sdp_passthrough::{DualLegPassthroughPolicy, passthrough_with_overrides};
 
 /// Cross-check the parsed [`UdpMedia`] (post-splice) against
 /// the user-supplied `caps` (essence shape) and
@@ -1536,7 +1535,10 @@ fn cross_check_essence_caps(media: &UdpMedia, caps: &gst::Caps) -> Result<(), Sd
     Ok(())
 }
 
-fn cross_check_transport_caps(media: &UdpMedia, transport_caps: &gst::Caps) -> Result<(), SdpError> {
+fn cross_check_transport_caps(
+    media: &UdpMedia,
+    transport_caps: &gst::Caps,
+) -> Result<(), SdpError> {
     // Strip always-override fields from both sides so the
     // intersect only sees cross-check fields. The audio-only
     // `clock-rate` override is implicit: passthrough has already
@@ -1685,9 +1687,8 @@ pub(crate) struct SdpBuildInput<'a> {
 /// [`SdpError::InvalidPayloadType`] when `transport_caps` carries
 /// a payload-type outside RFC 3551's dynamic range.
 pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
-    let format = essence_caps_format(input.caps).ok_or_else(|| {
-        SdpError::UnsupportedEssence(format!("essence caps `{}`", input.caps))
-    })?;
+    let format = essence_caps_format(input.caps)
+        .ok_or_else(|| SdpError::UnsupportedEssence(format!("essence caps `{}`", input.caps)))?;
 
     let payload_type = resolve_payload_type(format, input.transport_caps)?;
 
@@ -1700,17 +1701,9 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
                 .structure(0)
                 .is_some_and(|s| matches!(s.name().as_str(), "image/x-jxsc" | "video/x-jxsv"));
             if is_jxsv {
-                rtp_caps_from_video_jxsv(
-                    input.caps,
-                    payload_type,
-                    input.narrow_traffic_profile,
-                )?
+                rtp_caps_from_video_jxsv(input.caps, payload_type, input.narrow_traffic_profile)?
             } else {
-                rtp_caps_from_video(
-                    input.caps,
-                    payload_type,
-                    input.narrow_traffic_profile,
-                )?
+                rtp_caps_from_video(input.caps, payload_type, input.narrow_traffic_profile)?
             }
         }
         FlowFormat::Audio => {
@@ -1778,8 +1771,7 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
     };
 
     let origin_session_id = stable_origin_session_id(input.node_seed, input.side, input.name);
-    let emit_ptp_ts_refclk =
-        input.narrow_traffic_profile && input.side == Side::Sender;
+    let emit_ptp_ts_refclk = input.narrow_traffic_profile && input.side == Side::Sender;
     let session = SdpSession {
         origin_address,
         origin_session_id: &origin_session_id,
@@ -2088,7 +2080,9 @@ fn caps_colorimetry_from_sdp(sdp: &str, depth: u32, tcs: Option<&str>) -> Option
 /// presets return `None`, leaving the SDP without explicit
 /// `colorimetry=` / `TCS=` parameters; standards-compliant
 /// receivers then fall back to ST 2110-20's "unspecified" entry.
-fn sdp_colorimetry_from_caps(caps_colorimetry: &str) -> Option<(&'static str, Option<&'static str>)> {
+fn sdp_colorimetry_from_caps(
+    caps_colorimetry: &str,
+) -> Option<(&'static str, Option<&'static str>)> {
     match caps_colorimetry {
         "bt601" => Some(("BT601", None)),
         "bt709" => Some(("BT709", None)),
@@ -2201,13 +2195,14 @@ fn caps_from_rtp_video(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
         .unwrap_or("")
         .parse()
         .map_err(|_| SdpError::UnsupportedEssence("missing or non-integer width".to_owned()))?;
-    let height: i32 = s
-        .get::<&str>("height")
-        .unwrap_or("")
-        .parse()
-        .map_err(|_| SdpError::UnsupportedEssence("missing or non-integer height".to_owned()))?;
+    let height: i32 =
+        s.get::<&str>("height").unwrap_or("").parse().map_err(|_| {
+            SdpError::UnsupportedEssence("missing or non-integer height".to_owned())
+        })?;
     let (fr_num, fr_den) = parse_exact_framerate(s.get::<&str>("exactframerate").unwrap_or(""))
-        .ok_or_else(|| SdpError::UnsupportedEssence("missing or unparseable exactframerate".to_owned()))?;
+        .ok_or_else(|| {
+            SdpError::UnsupportedEssence("missing or unparseable exactframerate".to_owned())
+        })?;
     // RFC 4175 §6.1's `interlace` flag is a value-less fmtp token;
     // `gst_sdp_media_get_caps_from_media` translates value-less
     // params into `<param>=(string)"1"` on the caps, so a missing
@@ -2280,9 +2275,9 @@ fn caps_from_rtp_audio(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
             )));
         }
     };
-    let rate: i32 = s.get::<i32>("clock-rate").map_err(|_| {
-        SdpError::UnsupportedEssence("audio caps missing clock-rate".to_owned())
-    })?;
+    let rate: i32 = s
+        .get::<i32>("clock-rate")
+        .map_err(|_| SdpError::UnsupportedEssence("audio caps missing clock-rate".to_owned()))?;
     let channels: i32 = s
         .get::<&str>("encoding-params")
         .ok()
@@ -2457,9 +2452,7 @@ fn rtp_caps_from_video(
     let (fr_num, fr_den) = s
         .get::<gst::Fraction>("framerate")
         .map(|f| (f.numer() as u32, f.denom() as u32))
-        .map_err(|_| {
-            SdpError::UnsupportedEssence("raw video caps missing framerate".to_owned())
-        })?;
+        .map_err(|_| SdpError::UnsupportedEssence("raw video caps missing framerate".to_owned()))?;
     let exactframerate = format_exact_framerate(fr_num, fr_den);
     let interlace_mode = s.get::<&str>("interlace-mode").unwrap_or("progressive");
     let colorimetry_caps = s.get::<&str>("colorimetry").ok();
@@ -2502,8 +2495,7 @@ fn rtp_caps_from_video(
     // a Flow has no colorimetry tag set and the value our test
     // SDP fixtures use. Callers wanting BT2020 / BT2100 etc.
     // need to set `colorimetry=` upstream of the `nmossink`.
-    let (colorimetry, tcs) =
-        colorimetry_sdp.unwrap_or((defaults::ST2110_20_COLORIMETRY, None));
+    let (colorimetry, tcs) = colorimetry_sdp.unwrap_or((defaults::ST2110_20_COLORIMETRY, None));
     caps_text.push_str(&format!(",colorimetry=(string){colorimetry}"));
     if let Some(tcs_value) = tcs {
         caps_text.push_str(&format!(",tcs=(string){tcs_value}"));
@@ -2631,9 +2623,7 @@ fn rtp_caps_from_video_jxsv(
     let (fr_num, fr_den) = s
         .get::<gst::Fraction>("framerate")
         .map(|f| (f.numer() as u32, f.denom() as u32))
-        .map_err(|_| {
-            SdpError::UnsupportedEssence("JPEG XS caps missing framerate".to_owned())
-        })?;
+        .map_err(|_| SdpError::UnsupportedEssence("JPEG XS caps missing framerate".to_owned()))?;
     let exactframerate = format_exact_framerate(fr_num, fr_den);
 
     // RFC 9134 §7 fmtp: `packetmode=0` (codestream) is the only
@@ -2807,7 +2797,7 @@ fn rtp_caps_from_data(caps: &gst::Caps, payload_type: u8) -> Result<gst::Caps, S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdp_passthrough::{reject_unsupported_multi_media, DualLegPassthroughPolicy};
+    use crate::sdp_passthrough::{DualLegPassthroughPolicy, reject_unsupported_multi_media};
     use crate::test_support::init_gst;
 
     #[test]
@@ -2902,7 +2892,7 @@ mod tests {
     fn gst_sdp_strips_ttl_for_unicast_c_lines() {
         init_gst();
         for (addr, expect_suffix) in [
-            ("239.1.1.1", true), // multicast — TTL required
+            ("239.1.1.1", true),   // multicast — TTL required
             ("192.0.2.10", false), // unicast — TTL must be omitted
         ] {
             let mut msg = SDPMessage::new();
@@ -3007,10 +2997,8 @@ mod tests {
     #[test]
     fn source_filter_absent_yields_none_source_ip() {
         init_gst();
-        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace(
-            "a=source-filter: incl IN IP4 239.1.1.1 192.0.2.20\r\n",
-            "",
-        );
+        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP
+            .replace("a=source-filter: incl IN IP4 239.1.1.1 192.0.2.20\r\n", "");
         let media = parse_sdp(&sdp).expect("parse");
         assert_eq!(media.primary.source_ip, None);
     }
@@ -3029,7 +3017,8 @@ mod tests {
     #[test]
     fn x_nvnmos_iface_ip_absent_yields_none_interface_ip() {
         init_gst();
-        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace("a=x-nvnmos-iface-ip:192.0.2.11\r\n", "");
+        let sdp =
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace("a=x-nvnmos-iface-ip:192.0.2.11\r\n", "");
         let media = parse_sdp(&sdp).expect("parse");
         assert_eq!(media.primary.interface_ip, None);
     }
@@ -3037,10 +3026,8 @@ mod tests {
     #[test]
     fn resource_name_from_transport_reads_session_attribute() {
         init_gst();
-        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace(
-            "t=0 0\r\n",
-            "t=0 0\r\na=x-nvnmos-name:cam-a\r\n",
-        );
+        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP
+            .replace("t=0 0\r\n", "t=0 0\r\na=x-nvnmos-name:cam-a\r\n");
         assert_eq!(
             resource_name_from_transport(&sdp).expect("parse"),
             Some("cam-a".to_owned()),
@@ -3067,7 +3054,8 @@ mod tests {
     #[test]
     fn fractional_framerate_is_supported() {
         init_gst();
-        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace("exactframerate=50;", "exactframerate=30000/1001;");
+        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP
+            .replace("exactframerate=50;", "exactframerate=30000/1001;");
         let media = parse_sdp(&sdp).expect("parse");
         let raw_s = media.caps.structure(0).expect("raw caps");
         assert_eq!(
@@ -3079,12 +3067,19 @@ mod tests {
     /// Round-trip the colorimetry mapping through `parse_sdp` rather
     /// than calling `caps_colorimetry_from_sdp` directly; this keeps the
     /// fmtp-key-name plumbing (`colorimetry` vs `tcs`) covered too.
-    fn colorimetry_via_parse(sdp_colorimetry: &str, depth: u32, tcs: Option<&str>) -> Option<String> {
+    fn colorimetry_via_parse(
+        sdp_colorimetry: &str,
+        depth: u32,
+        tcs: Option<&str>,
+    ) -> Option<String> {
         init_gst();
         let depth_str = depth.to_string();
         let mut sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP
             .replace("depth=10;", &format!("depth={depth_str};"))
-            .replace("colorimetry=BT709;", &format!("colorimetry={sdp_colorimetry};"));
+            .replace(
+                "colorimetry=BT709;",
+                &format!("colorimetry={sdp_colorimetry};"),
+            );
         // The fixture's `TCS=SDR;` lives just before `colorimetry=`,
         // so rewrite the TCS value too (or drop it).
         sdp = match tcs {
@@ -3249,12 +3244,10 @@ mod tests {
     #[test]
     fn dual_leg_both_inactive_parses_with_primary_from_first_m_block() {
         init_gst();
-        let sdp = dual_leg_video_sdp()
-            .replace(
-                "m=video 5004 RTP/AVP 96\r\n",
-                "m=video 5004 RTP/AVP 96\r\na=inactive\r\n",
-            )
-            + "a=inactive\r\n";
+        let sdp = dual_leg_video_sdp().replace(
+            "m=video 5004 RTP/AVP 96\r\n",
+            "m=video 5004 RTP/AVP 96\r\na=inactive\r\n",
+        ) + "a=inactive\r\n";
         let media = parse_sdp(&sdp).expect("parse");
         assert_eq!(media.primary.destination_ip, "239.1.1.1");
         assert!(media.secondary.is_none());
@@ -3296,12 +3289,9 @@ mod tests {
             destination_ip: Some("239.9.9.9"),
             ..Default::default()
         };
-        let out = passthrough_with_overrides(
-            &sdp,
-            &overrides,
-            DualLegPassthroughPolicy::AllowDualLeg,
-        )
-        .expect("splice");
+        let out =
+            passthrough_with_overrides(&sdp, &overrides, DualLegPassthroughPolicy::AllowDualLeg)
+                .expect("splice");
         assert!(
             !out.contains("a=inactive"),
             "leg 0 inactive must be cleared when destination-ip is set: {out}",
@@ -3333,12 +3323,10 @@ mod tests {
             count_active_sdp_legs(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("count"),
             1
         );
-        let both_inactive = dual_leg_video_sdp()
-            .replace(
-                "m=video 5004 RTP/AVP 96\r\n",
-                "m=video 5004 RTP/AVP 96\r\na=inactive\r\n",
-            )
-            + "a=inactive\r\n";
+        let both_inactive = dual_leg_video_sdp().replace(
+            "m=video 5004 RTP/AVP 96\r\n",
+            "m=video 5004 RTP/AVP 96\r\na=inactive\r\n",
+        ) + "a=inactive\r\n";
         assert_eq!(count_active_sdp_legs(&both_inactive).expect("count"), 0);
     }
 
@@ -3546,9 +3534,7 @@ mod tests {
     #[test]
     fn extract_source_ip_from_filter_multi_source_returns_none() {
         assert_eq!(
-            extract_source_ip_from_filter(
-                "incl IN IP4 239.1.1.1 192.0.2.20 192.0.2.21"
-            ),
+            extract_source_ip_from_filter("incl IN IP4 239.1.1.1 192.0.2.20 192.0.2.21"),
             None,
         );
     }
@@ -3592,9 +3578,15 @@ mod tests {
             round_tripped.primary.destination_port,
             original.primary.destination_port,
         );
-        assert_eq!(round_tripped.primary.interface_ip, original.primary.interface_ip);
+        assert_eq!(
+            round_tripped.primary.interface_ip,
+            original.primary.interface_ip
+        );
         assert_eq!(round_tripped.primary.source_ip, original.primary.source_ip);
-        assert_eq!(round_tripped.primary.source_port, original.primary.source_port);
+        assert_eq!(
+            round_tripped.primary.source_port,
+            original.primary.source_port
+        );
 
         let orig_raw = original.caps.structure(0).unwrap();
         let rt_raw = round_tripped.caps.structure(0).unwrap();
@@ -3627,15 +3619,24 @@ mod tests {
             round_tripped.primary.destination_port,
             original.primary.destination_port,
         );
-        assert_eq!(round_tripped.primary.interface_ip, original.primary.interface_ip);
+        assert_eq!(
+            round_tripped.primary.interface_ip,
+            original.primary.interface_ip
+        );
         assert_eq!(round_tripped.primary.source_ip, original.primary.source_ip);
-        assert_eq!(round_tripped.primary.source_port, original.primary.source_port);
+        assert_eq!(
+            round_tripped.primary.source_port,
+            original.primary.source_port
+        );
 
         let orig_raw = original.caps.structure(0).unwrap();
         let rt_raw = round_tripped.caps.structure(0).unwrap();
         assert_eq!(rt_raw.get::<&str>("format"), orig_raw.get::<&str>("format"));
         assert_eq!(rt_raw.get::<i32>("rate"), orig_raw.get::<i32>("rate"));
-        assert_eq!(rt_raw.get::<i32>("channels"), orig_raw.get::<i32>("channels"));
+        assert_eq!(
+            rt_raw.get::<i32>("channels"),
+            orig_raw.get::<i32>("channels")
+        );
     }
 
     #[test]
@@ -3657,10 +3658,8 @@ mod tests {
     #[test]
     fn build_sdp_omits_source_filter_when_source_ip_absent() {
         init_gst();
-        let stripped = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace(
-            "a=source-filter: incl IN IP4 239.1.1.1 192.0.2.20\r\n",
-            "",
-        );
+        let stripped = VIDEO_YCBCR_422_10BIT_1080P50_SDP
+            .replace("a=source-filter: incl IN IP4 239.1.1.1 192.0.2.20\r\n", "");
         let media = parse_sdp(&stripped).expect("parse");
         assert!(media.primary.source_ip.is_none());
         let text = build_sdp(&media, test_session()).expect("build");
@@ -3850,8 +3849,8 @@ mod tests {
     #[test]
     fn reject_unsupported_multi_media_accepts_single_block() {
         init_gst();
-        let msg = SDPMessage::parse_buffer(VIDEO_YCBCR_422_10BIT_1080P50_SDP.as_bytes())
-            .expect("parse");
+        let msg =
+            SDPMessage::parse_buffer(VIDEO_YCBCR_422_10BIT_1080P50_SDP.as_bytes()).expect("parse");
         reject_unsupported_multi_media(&msg, DualLegPassthroughPolicy::RejectDualLeg)
             .expect("single media ok");
     }
@@ -3927,12 +3926,14 @@ mod tests {
     #[test]
     fn passthrough_preserves_unknown_fmtp_keys() {
         init_gst();
-        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace(
-            "PM=2110GPM;",
-            "PM=2110GPM; SomeFutureKey=Value;",
-        );
-        let out =
-            passthrough_with_overrides(&sdp, &SdpOverrides::default(), DualLegPassthroughPolicy::RejectDualLeg).expect("passthrough");
+        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP
+            .replace("PM=2110GPM;", "PM=2110GPM; SomeFutureKey=Value;");
+        let out = passthrough_with_overrides(
+            &sdp,
+            &SdpOverrides::default(),
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )
+        .expect("passthrough");
         assert!(
             out.contains("SomeFutureKey=Value"),
             "vendor/future fmtp keys must survive passthrough:\n{out}",
@@ -3942,9 +3943,14 @@ mod tests {
     #[test]
     fn passthrough_preserves_information_line() {
         init_gst();
-        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace("s=Example\r\n", "s=Example\r\ni=Studio A\r\n");
-        let out =
-            passthrough_with_overrides(&sdp, &SdpOverrides::default(), DualLegPassthroughPolicy::RejectDualLeg).expect("passthrough");
+        let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP
+            .replace("s=Example\r\n", "s=Example\r\ni=Studio A\r\n");
+        let out = passthrough_with_overrides(
+            &sdp,
+            &SdpOverrides::default(),
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )
+        .expect("passthrough");
         assert!(out.contains("i=Studio A"));
     }
 
@@ -3953,7 +3959,10 @@ mod tests {
         init_gst();
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
-            &SdpOverrides { label: Some("new label"), ..Default::default() },
+            &SdpOverrides {
+                label: Some("new label"),
+                ..Default::default()
+            },
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
@@ -3991,7 +4000,10 @@ mod tests {
         //      regression that earlier emitted it at media level.
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
-            &SdpOverrides { name: Some("Camera 1"), ..Default::default() },
+            &SdpOverrides {
+                name: Some("Camera 1"),
+                ..Default::default()
+            },
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
@@ -4004,9 +4016,7 @@ mod tests {
         let name_pos = spliced
             .find("a=x-nvnmos-name:")
             .expect("a=x-nvnmos-name: line must be present");
-        let media_pos = spliced
-            .find("\r\nm=")
-            .expect("m= line must be present");
+        let media_pos = spliced.find("\r\nm=").expect("m= line must be present");
         assert!(
             name_pos < media_pos,
             "a=x-nvnmos-name (offset {name_pos}) must appear before first m= (offset {media_pos}); \
@@ -4019,7 +4029,10 @@ mod tests {
         init_gst();
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
-            &SdpOverrides { group_hint: Some("SDI 1:Video"), ..Default::default() },
+            &SdpOverrides {
+                group_hint: Some("SDI 1:Video"),
+                ..Default::default()
+            },
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
@@ -4039,13 +4052,19 @@ mod tests {
         // splice an unrelated override and assert the hint survives.
         let with_hint = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
-            &SdpOverrides { group_hint: Some("orig:Video"), ..Default::default() },
+            &SdpOverrides {
+                group_hint: Some("orig:Video"),
+                ..Default::default()
+            },
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("seed");
         let spliced = passthrough_with_overrides(
             &with_hint,
-            &SdpOverrides { label: Some("new label"), ..Default::default() },
+            &SdpOverrides {
+                label: Some("new label"),
+                ..Default::default()
+            },
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
@@ -4088,12 +4107,18 @@ mod tests {
     fn passthrough_all_none_preserves_input_legs() {
         init_gst();
         let original = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
-        let spliced =
-            passthrough_with_overrides(VIDEO_YCBCR_422_10BIT_1080P50_SDP, &SdpOverrides::default(), DualLegPassthroughPolicy::RejectDualLeg)
-                .expect("splice");
+        let spliced = passthrough_with_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides::default(),
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )
+        .expect("splice");
         let after = parse_sdp(&spliced).expect("re-parse");
         // Leg fields must round-trip unchanged.
-        assert_eq!(after.primary.destination_ip, original.primary.destination_ip);
+        assert_eq!(
+            after.primary.destination_ip,
+            original.primary.destination_ip
+        );
         assert_eq!(
             after.primary.destination_port,
             original.primary.destination_port
@@ -4114,9 +4139,12 @@ mod tests {
         // leg overrides, the splice must keep the same `o=`
         // address and session-id (the daemon may rely on these
         // being stable across the configuring-SDP lifecycle).
-        let spliced =
-            passthrough_with_overrides(VIDEO_YCBCR_422_10BIT_1080P50_SDP, &SdpOverrides::default(), DualLegPassthroughPolicy::RejectDualLeg)
-                .expect("splice");
+        let spliced = passthrough_with_overrides(
+            VIDEO_YCBCR_422_10BIT_1080P50_SDP,
+            &SdpOverrides::default(),
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )
+        .expect("splice");
         let msg = SDPMessage::parse_buffer(spliced.as_bytes()).expect("re-parse");
         let origin = msg.origin().expect("origin");
         assert_eq!(origin.addr().unwrap(), "192.0.2.10");
@@ -4126,8 +4154,12 @@ mod tests {
     #[test]
     fn passthrough_invalid_input_propagates_parse_error() {
         init_gst();
-        let err = passthrough_with_overrides("not an SDP at all", &SdpOverrides::default(), DualLegPassthroughPolicy::RejectDualLeg)
-            .expect_err("must error");
+        let err = passthrough_with_overrides(
+            "not an SDP at all",
+            &SdpOverrides::default(),
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )
+        .expect_err("must error");
         assert!(matches!(err, SdpError::Parse(_) | SdpError::NoMedia));
     }
 
@@ -4149,15 +4181,24 @@ mod tests {
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
-        assert!(spliced.contains("m=audio 5004 RTP/AVP 99"),
-            "m= must carry new pt 99; got: {spliced}");
-        assert!(spliced.contains("a=rtpmap:99 L24/48000/2"),
-            "a=rtpmap must carry new pt 99; got: {spliced}");
-        assert!(spliced.contains("a=fmtp:99"),
-            "a=fmtp must be re-keyed to new pt 99; got: {spliced}");
+        assert!(
+            spliced.contains("m=audio 5004 RTP/AVP 99"),
+            "m= must carry new pt 99; got: {spliced}"
+        );
+        assert!(
+            spliced.contains("a=rtpmap:99 L24/48000/2"),
+            "a=rtpmap must carry new pt 99; got: {spliced}"
+        );
+        assert!(
+            spliced.contains("a=fmtp:99"),
+            "a=fmtp must be re-keyed to new pt 99; got: {spliced}"
+        );
         // Re-parse to confirm the model round-trips.
         let m = parse_sdp(&spliced).expect("re-parse");
-        let pt = m.rtp_caps.structure(0).and_then(|s| s.get::<i32>("payload").ok());
+        let pt = m
+            .rtp_caps
+            .structure(0)
+            .and_then(|s| s.get::<i32>("payload").ok());
         assert_eq!(pt, Some(99));
     }
 
@@ -4175,10 +4216,14 @@ mod tests {
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
-        assert!(spliced.contains("a=rtpmap:97 L24/96000/2"),
-            "a=rtpmap clock-rate must be 96000; got: {spliced}");
-        assert!(!spliced.contains("L24/48000/"),
-            "old 48000 must be gone; got: {spliced}");
+        assert!(
+            spliced.contains("a=rtpmap:97 L24/96000/2"),
+            "a=rtpmap clock-rate must be 96000; got: {spliced}"
+        );
+        assert!(
+            !spliced.contains("L24/48000/"),
+            "old 48000 must be gone; got: {spliced}"
+        );
     }
 
     /// Audio ptime + maxptime override: GStreamer convention
@@ -4198,12 +4243,18 @@ mod tests {
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
-        assert!(spliced.contains("a=ptime:1\r\n"),
-            "a=ptime must be 1ms; got: {spliced}");
-        assert!(spliced.contains("a=maxptime:2\r\n"),
-            "a=maxptime must be 2ms; got: {spliced}");
-        assert!(!spliced.contains("a=ptime:0.125"),
-            "old 0.125 ms ptime must be gone; got: {spliced}");
+        assert!(
+            spliced.contains("a=ptime:1\r\n"),
+            "a=ptime must be 1ms; got: {spliced}"
+        );
+        assert!(
+            spliced.contains("a=maxptime:2\r\n"),
+            "a=maxptime must be 2ms; got: {spliced}"
+        );
+        assert!(
+            !spliced.contains("a=ptime:0.125"),
+            "old 0.125 ms ptime must be gone; got: {spliced}"
+        );
     }
 
     /// Audio-only slots silently no-op for video raw essence
@@ -4229,12 +4280,13 @@ mod tests {
         // `caps_from_media` upper-cases the rtpmap
         // encoding-name; match both forms.
         assert!(
-            spliced.contains("a=rtpmap:96 RAW/90000")
-                || spliced.contains("a=rtpmap:96 raw/90000"),
+            spliced.contains("a=rtpmap:96 RAW/90000") || spliced.contains("a=rtpmap:96 raw/90000"),
             "video clock-rate must stay 90000 (audio_clock_rate ignored); got: {spliced}",
         );
-        assert!(!spliced.contains("a=ptime:"),
-            "video must have no a=ptime (audio-only slot ignored); got: {spliced}");
+        assert!(
+            !spliced.contains("a=ptime:"),
+            "video must have no a=ptime (audio-only slot ignored); got: {spliced}"
+        );
     }
 
     /// Video pt override: `m=video … 96` → `… 100`. Pt
@@ -4252,8 +4304,10 @@ mod tests {
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
-        assert!(spliced.contains("m=video 5004 RTP/AVP 100"),
-            "m= must carry new pt 100; got: {spliced}");
+        assert!(
+            spliced.contains("m=video 5004 RTP/AVP 100"),
+            "m= must carry new pt 100; got: {spliced}"
+        );
         // `caps_from_media` upper-cases the rtpmap
         // encoding-name via `g_ascii_strup`; the round-trip
         // through caps therefore emits `RAW`, not `raw`. Match
@@ -4313,13 +4367,8 @@ mod tests {
         init_gst();
         let media = parse_sdp(VIDEO_YCBCR_422_10BIT_1080P50_SDP).expect("parse");
         let audio_caps = gst::Caps::builder("audio/x-raw").build();
-        let err = cross_check_essence(
-            &media,
-            Some(&audio_caps),
-            None,
-            EssenceCrossCheckMode::Full,
-        )
-        .expect_err("format-family mismatch must error");
+        let err = cross_check_essence(&media, Some(&audio_caps), None, EssenceCrossCheckMode::Full)
+            .expect_err("format-family mismatch must error");
         match err {
             SdpError::FormatMismatch { caps, sdp } => {
                 assert_eq!(caps, FlowFormat::Audio);
@@ -4340,15 +4389,12 @@ mod tests {
             .field("width", 1280i32)
             .field("height", 720i32)
             .build();
-        let err = cross_check_essence(
-            &media,
-            Some(&caps),
-            None,
-            EssenceCrossCheckMode::Full,
-        )
-        .expect_err("shape mismatch must error");
-        assert!(matches!(err, SdpError::EssenceShapeMismatch { .. }),
-            "got: {err:?}");
+        let err = cross_check_essence(&media, Some(&caps), None, EssenceCrossCheckMode::Full)
+            .expect_err("shape mismatch must error");
+        assert!(
+            matches!(err, SdpError::EssenceShapeMismatch { .. }),
+            "got: {err:?}"
+        );
     }
 
     /// Transport-caps mismatch on a cross-check field
@@ -4360,15 +4406,12 @@ mod tests {
         let transport = gst::Caps::builder("application/x-rtp")
             .field("encoding-name", "L24")
             .build();
-        let err = cross_check_essence(
-            &media,
-            None,
-            Some(&transport),
-            EssenceCrossCheckMode::Full,
-        )
-        .expect_err("encoding-name mismatch must error");
-        assert!(matches!(err, SdpError::TransportCapsMismatch { .. }),
-            "got: {err:?}");
+        let err = cross_check_essence(&media, None, Some(&transport), EssenceCrossCheckMode::Full)
+            .expect_err("encoding-name mismatch must error");
+        assert!(
+            matches!(err, SdpError::TransportCapsMismatch { .. }),
+            "got: {err:?}"
+        );
     }
 
     /// Video clock-rate is cross-check (not override): a
@@ -4381,15 +4424,12 @@ mod tests {
         let transport = gst::Caps::builder("application/x-rtp")
             .field("clock-rate", 48_000i32)
             .build();
-        let err = cross_check_essence(
-            &media,
-            None,
-            Some(&transport),
-            EssenceCrossCheckMode::Full,
-        )
-        .expect_err("video clock-rate mismatch must error");
-        assert!(matches!(err, SdpError::TransportCapsMismatch { .. }),
-            "got: {err:?}");
+        let err = cross_check_essence(&media, None, Some(&transport), EssenceCrossCheckMode::Full)
+            .expect_err("video clock-rate mismatch must error");
+        assert!(
+            matches!(err, SdpError::TransportCapsMismatch { .. }),
+            "got: {err:?}"
+        );
     }
 
     /// Always-override fields (`payload`, `a-ptime`,
@@ -4412,13 +4452,8 @@ mod tests {
             .field("encoding-name", "RAW")
             .field("clock-rate", 90_000i32)
             .build();
-        cross_check_essence(
-            &media,
-            None,
-            Some(&transport),
-            EssenceCrossCheckMode::Full,
-        )
-        .expect("override-only disagreement must pass");
+        cross_check_essence(&media, None, Some(&transport), EssenceCrossCheckMode::Full)
+            .expect("override-only disagreement must pass");
     }
 
     /// Audio essence: the splice has already copied a user-
@@ -4445,13 +4480,8 @@ mod tests {
         let media = parse_sdp(&spliced).expect("re-parse");
         // 2. Cross-check matches because both now agree on
         //    clock-rate=96000.
-        cross_check_essence(
-            &media,
-            None,
-            Some(&transport),
-            EssenceCrossCheckMode::Full,
-        )
-        .expect("audio override + cross-check → pass");
+        cross_check_essence(&media, None, Some(&transport), EssenceCrossCheckMode::Full)
+            .expect("audio override + cross-check → pass");
     }
 
     /// Wide receiver activation: essence shape mismatch is
@@ -4487,7 +4517,10 @@ mod tests {
             EssenceCrossCheckMode::FormatFamilyOnly,
         )
         .expect_err("format-family mismatch must error");
-        assert!(matches!(err, SdpError::FormatMismatch { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, SdpError::FormatMismatch { .. }),
+            "got: {err:?}"
+        );
     }
 
     /// Format-family-only mode ignores transport-caps disagreements.
@@ -4523,7 +4556,7 @@ mod tests {
                     ..Default::default()
                 },
                 DualLegPassthroughPolicy::RejectDualLeg,
-        )
+            )
             .expect_err(&format!("pt={pt} must be rejected"));
             match err {
                 SdpError::InvalidPayloadType(p) => {
@@ -4541,7 +4574,7 @@ mod tests {
                     ..Default::default()
                 },
                 DualLegPassthroughPolicy::RejectDualLeg,
-        )
+            )
             .unwrap_or_else(|e| panic!("pt={pt} must be valid: {e}"));
         }
     }
@@ -4631,7 +4664,10 @@ mod tests {
         init_gst();
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
-            &SdpOverrides { caps_mode: CapsMode::Auto, ..Default::default() },
+            &SdpOverrides {
+                caps_mode: CapsMode::Auto,
+                ..Default::default()
+            },
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
@@ -4646,7 +4682,10 @@ mod tests {
         init_gst();
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_WIDE_SDP,
-            &SdpOverrides { caps_mode: CapsMode::Auto, ..Default::default() },
+            &SdpOverrides {
+                caps_mode: CapsMode::Auto,
+                ..Default::default()
+            },
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
@@ -4661,7 +4700,10 @@ mod tests {
         init_gst();
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_WIDE_SDP,
-            &SdpOverrides { caps_mode: CapsMode::Narrow, ..Default::default() },
+            &SdpOverrides {
+                caps_mode: CapsMode::Narrow,
+                ..Default::default()
+            },
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
@@ -4676,7 +4718,10 @@ mod tests {
         init_gst();
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
-            &SdpOverrides { caps_mode: CapsMode::Narrow, ..Default::default() },
+            &SdpOverrides {
+                caps_mode: CapsMode::Narrow,
+                ..Default::default()
+            },
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
@@ -4691,7 +4736,10 @@ mod tests {
         init_gst();
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_SDP,
-            &SdpOverrides { caps_mode: CapsMode::Wide, ..Default::default() },
+            &SdpOverrides {
+                caps_mode: CapsMode::Wide,
+                ..Default::default()
+            },
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
@@ -4712,7 +4760,10 @@ mod tests {
         init_gst();
         let spliced = passthrough_with_overrides(
             VIDEO_YCBCR_422_10BIT_1080P50_WIDE_SDP,
-            &SdpOverrides { caps_mode: CapsMode::Wide, ..Default::default() },
+            &SdpOverrides {
+                caps_mode: CapsMode::Wide,
+                ..Default::default()
+            },
             DualLegPassthroughPolicy::RejectDualLeg,
         )
         .expect("splice");
@@ -4806,7 +4857,8 @@ mod tests {
     #[test]
     fn anc_smpte291_fractional_exactframerate() {
         init_gst();
-        let sdp = ANC_SMPTE291_1080P60_SDP.replace("exactframerate=60;", "exactframerate=30000/1001;");
+        let sdp =
+            ANC_SMPTE291_1080P60_SDP.replace("exactframerate=60;", "exactframerate=30000/1001;");
         let media = parse_sdp(&sdp).expect("parse");
         let raw_s = media.caps.structure(0).expect("raw caps");
         assert_eq!(
@@ -4822,8 +4874,8 @@ mod tests {
         // Drop the fmtp line entirely — ANC SDPs in the wild often
         // don't carry it because the rate is implicit from the
         // paired video flow.
-        let sdp = ANC_SMPTE291_1080P60_SDP
-            .replace("a=fmtp:100 exactframerate=60; VPID_Code=132\r\n", "");
+        let sdp =
+            ANC_SMPTE291_1080P60_SDP.replace("a=fmtp:100 exactframerate=60; VPID_Code=132\r\n", "");
         let media = parse_sdp(&sdp).expect("parse");
         let raw_s = media.caps.structure(0).expect("raw caps");
         assert!(
@@ -4859,8 +4911,7 @@ mod tests {
         let rt_raw = round_tripped.caps.structure(0).unwrap();
         assert_eq!(rt_raw.name(), orig_raw.name());
         assert!(
-            orig_raw.get::<&str>("alignment").is_err()
-                && rt_raw.get::<&str>("alignment").is_err(),
+            orig_raw.get::<&str>("alignment").is_err() && rt_raw.get::<&str>("alignment").is_err(),
             "ANC raw caps carry no `alignment` on either side of the round-trip",
         );
         assert_eq!(
@@ -4873,7 +4924,10 @@ mod tests {
     fn parse_exact_framerate_integer_and_fraction() {
         assert_eq!(parse_exact_framerate("50"), Some((50, 1)));
         assert_eq!(parse_exact_framerate("30000/1001"), Some((30_000, 1_001)));
-        assert_eq!(parse_exact_framerate("  60000 / 1001 "), Some((60_000, 1_001)));
+        assert_eq!(
+            parse_exact_framerate("  60000 / 1001 "),
+            Some((60_000, 1_001))
+        );
     }
 
     #[test]
@@ -4903,7 +4957,11 @@ mod tests {
     fn format_exact_framerate_round_trips_parse_exact_framerate() {
         for (num, den) in [(25_u32, 1_u32), (50, 1), (30_000, 1_001), (60_000, 1_001)] {
             let s = format_exact_framerate(num, den);
-            assert_eq!(parse_exact_framerate(&s), Some((num, den)), "round-trip {s}");
+            assert_eq!(
+                parse_exact_framerate(&s),
+                Some((num, den)),
+                "round-trip {s}"
+            );
         }
     }
 
@@ -4929,14 +4987,8 @@ mod tests {
 
     #[test]
     fn sdp_colorimetry_from_caps_pins_each_preset() {
-        assert_eq!(
-            sdp_colorimetry_from_caps("bt601"),
-            Some(("BT601", None)),
-        );
-        assert_eq!(
-            sdp_colorimetry_from_caps("bt709"),
-            Some(("BT709", None)),
-        );
+        assert_eq!(sdp_colorimetry_from_caps("bt601"), Some(("BT601", None)),);
+        assert_eq!(sdp_colorimetry_from_caps("bt709"), Some(("BT709", None)),);
         assert_eq!(
             sdp_colorimetry_from_caps("smpte240m"),
             Some(("SMPTE240M", None)),
@@ -4945,10 +4997,7 @@ mod tests {
 
     #[test]
     fn sdp_colorimetry_from_caps_collapses_bt2020_depth_variants_to_one_sdp_value() {
-        assert_eq!(
-            sdp_colorimetry_from_caps("bt2020"),
-            Some(("BT2020", None)),
-        );
+        assert_eq!(sdp_colorimetry_from_caps("bt2020"), Some(("BT2020", None)),);
         assert_eq!(
             sdp_colorimetry_from_caps("bt2020-10"),
             Some(("BT2020", None)),
@@ -5019,7 +5068,10 @@ mod tests {
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.name().as_str(), "application/x-rtp");
         assert_eq!(s.get::<&str>("media").unwrap(), "video");
-        assert_eq!(s.get::<i32>("clock-rate").unwrap(), defaults::VIDEO_CLOCK_RATE);
+        assert_eq!(
+            s.get::<i32>("clock-rate").unwrap(),
+            defaults::VIDEO_CLOCK_RATE
+        );
         // Canonical SDP-form case: RFC 4175 lower-case
         // `raw`, ST 2110-20 upper-case `PM` / `SSN`. See
         // the comment on the caps-text builder in
@@ -5049,13 +5101,7 @@ mod tests {
     #[test]
     fn rtp_caps_from_video_emits_fractional_exactframerate() {
         init_gst();
-        let raw = raw_video_caps(
-            "UYVP",
-            1920,
-            1080,
-            gst::Fraction::new(30_000, 1_001),
-            None,
-        );
+        let raw = raw_video_caps("UYVP", 1920, 1080, gst::Fraction::new(30_000, 1_001), None);
         let rtp = rtp_caps_from_video(&raw, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("exactframerate").unwrap(), "30000/1001");
@@ -5202,10 +5248,7 @@ mod tests {
         // (depth carries the bit-depth distinction) and then
         // expands back to bt2020-10 on the parse side because
         // depth=10 is in the RTP caps.
-        assert_eq!(
-            rt.get::<&str>("colorimetry").unwrap(),
-            "bt2020-10",
-        );
+        assert_eq!(rt.get::<&str>("colorimetry").unwrap(), "bt2020-10",);
     }
 
     // -- rtp_caps_from_audio
@@ -5264,9 +5307,8 @@ mod tests {
     fn rtp_caps_from_audio_emits_a_maxptime_when_supplied() {
         init_gst();
         let raw = raw_audio_caps("S24BE", 48_000, 2);
-        let rtp =
-            rtp_caps_from_audio(&raw, 97, defaults::AUDIO_PTIME_NS, Some(4_000_000), None)
-                .expect("synth");
+        let rtp = rtp_caps_from_audio(&raw, 97, defaults::AUDIO_PTIME_NS, Some(4_000_000), None)
+            .expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("a-maxptime").unwrap(), "4");
     }
@@ -5275,8 +5317,8 @@ mod tests {
     fn rtp_caps_from_audio_rejects_unsupported_format() {
         init_gst();
         let raw = raw_audio_caps("S32LE", 48_000, 2);
-        let err =
-            rtp_caps_from_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect_err("reject");
+        let err = rtp_caps_from_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None)
+            .expect_err("reject");
         assert!(matches!(err, SdpError::UnsupportedEssence(ref m) if m.contains("S32LE")));
     }
 
@@ -5284,9 +5326,8 @@ mod tests {
     fn rtp_caps_from_audio_round_trips_through_caps_from_rtp_audio() {
         init_gst();
         let original = raw_audio_caps("S24BE", 48_000, 2);
-        let rtp =
-            rtp_caps_from_audio(&original, 97, defaults::AUDIO_PTIME_NS, None, None)
-                .expect("synth");
+        let rtp = rtp_caps_from_audio(&original, 97, defaults::AUDIO_PTIME_NS, None, None)
+            .expect("synth");
         let round_tripped = crate::essence_caps::caps_from(
             &caps_from_rtp_audio(&rtp).expect("parse back"),
             Some(&rtp),
@@ -5310,10 +5351,7 @@ mod tests {
         let rtp =
             rtp_caps_from_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect("synth");
         let s = rtp.structure(0).expect("rtp");
-        assert_eq!(
-            s.get::<&str>("channel-order").unwrap(),
-            "SMPTE2110.(U06)",
-        );
+        assert_eq!(s.get::<&str>("channel-order").unwrap(), "SMPTE2110.(U06)",);
     }
 
     // -- rtp_caps_from_data
@@ -5326,7 +5364,10 @@ mod tests {
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("media").unwrap(), "video");
         assert_eq!(s.get::<&str>("encoding-name").unwrap(), "SMPTE291");
-        assert_eq!(s.get::<i32>("clock-rate").unwrap(), defaults::ANC_CLOCK_RATE);
+        assert_eq!(
+            s.get::<i32>("clock-rate").unwrap(),
+            defaults::ANC_CLOCK_RATE
+        );
         assert_eq!(s.get::<i32>("payload").unwrap(), 100);
         assert!(
             s.get::<&str>("exactframerate").is_err(),
@@ -5337,16 +5378,13 @@ mod tests {
     #[test]
     fn rtp_caps_from_data_propagates_framerate() {
         init_gst();
-        let raw = gst::Caps::from_str("meta/x-st-2038,framerate=25/1")
-            .expect("data caps");
+        let raw = gst::Caps::from_str("meta/x-st-2038,framerate=25/1").expect("data caps");
         let rtp = rtp_caps_from_data(&raw, 100).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("exactframerate").unwrap(), "25");
 
-        let fractional = gst::Caps::from_str(
-            "meta/x-st-2038,framerate=30000/1001",
-        )
-        .expect("data caps");
+        let fractional =
+            gst::Caps::from_str("meta/x-st-2038,framerate=30000/1001").expect("data caps");
         let rtp = rtp_caps_from_data(&fractional, 100).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("exactframerate").unwrap(), "30000/1001");
@@ -5363,10 +5401,7 @@ mod tests {
     #[test]
     fn rtp_caps_from_data_round_trips_through_caps_from_rtp_data() {
         init_gst();
-        let original = gst::Caps::from_str(
-            "meta/x-st-2038,framerate=25/1",
-        )
-        .expect("data caps");
+        let original = gst::Caps::from_str("meta/x-st-2038,framerate=25/1").expect("data caps");
         let rtp = rtp_caps_from_data(&original, 100).expect("synth");
         let round_tripped = caps_from_rtp_data(&rtp).expect("parse back");
         let rt = round_tripped.structure(0).expect("rt raw");
@@ -5457,7 +5492,10 @@ mod tests {
     fn resolve_payload_type_honours_transport_caps_override() {
         init_gst();
         let tc = gst::Caps::from_str("application/x-rtp,payload=(int)110").unwrap();
-        assert_eq!(resolve_payload_type(FlowFormat::Video, Some(&tc)).unwrap(), 110);
+        assert_eq!(
+            resolve_payload_type(FlowFormat::Video, Some(&tc)).unwrap(),
+            110
+        );
     }
 
     #[test]
@@ -5477,7 +5515,11 @@ mod tests {
     fn parse_ptime_ms_as_ns_round_trips_format_ptime_ns_as_ms() {
         for ns in [125_000_u64, 250_000, 1_000_000, 4_000_000, 20_000_000] {
             let s = format_ptime_ns_as_ms(ns);
-            assert_eq!(parse_ptime_ms_as_ns(&s), Some(ns), "round-trip {ns}ns -> {s}");
+            assert_eq!(
+                parse_ptime_ms_as_ns(&s),
+                Some(ns),
+                "round-trip {ns}ns -> {s}"
+            );
         }
     }
 
@@ -5498,10 +5540,9 @@ mod tests {
     #[test]
     fn resolve_audio_ptime_reads_override_strings() {
         init_gst();
-        let tc = gst::Caps::from_str(
-            "application/x-rtp,a-ptime=(string)0.125,a-maxptime=(string)4",
-        )
-        .unwrap();
+        let tc =
+            gst::Caps::from_str("application/x-rtp,a-ptime=(string)0.125,a-maxptime=(string)4")
+                .unwrap();
         let (p, m) = resolve_audio_ptime(Some(&tc));
         assert_eq!(p, 125_000);
         assert_eq!(m, Some(4_000_000));
@@ -5596,7 +5637,10 @@ mod tests {
             text.contains("a=ts-refclk:ptp=IEEE1588-2008:traceable"),
             "nvdsudp sender synthesis must emit PTP ts-refclk:\n{text}",
         );
-        assert!(text.contains("TP=2110TPN"), "narrow traffic profile:\n{text}");
+        assert!(
+            text.contains("TP=2110TPN"),
+            "narrow traffic profile:\n{text}"
+        );
     }
 
     #[test]
@@ -5609,7 +5653,10 @@ mod tests {
             !text.contains("a=ts-refclk:"),
             "udp sender synthesis must omit ts-refclk:\n{text}",
         );
-        assert!(!text.contains("TP=2110TPN"), "udp sender must not indicate narrow profile:\n{text}");
+        assert!(
+            !text.contains("TP=2110TPN"),
+            "udp sender must not indicate narrow profile:\n{text}"
+        );
     }
 
     #[test]
@@ -5626,7 +5673,10 @@ mod tests {
         let text = from_caps(&input).expect("synth");
 
         assert!(text.contains("s=test-label"), "s= carries label:\n{text}");
-        assert!(text.contains("i=test-description"), "i= carries description");
+        assert!(
+            text.contains("i=test-description"),
+            "i= carries description"
+        );
         assert!(
             text.contains("a=x-nvnmos-name:test-name"),
             "session-level a=x-nvnmos-name carries the resource name",
@@ -5641,7 +5691,10 @@ mod tests {
             "rtpmap encoding-name + clock-rate (lower-case per \
              RFC 4175 §6.7 BNF; nmos-cpp matches it case-sensitively):\n{text}",
         );
-        assert!(text.contains("sampling=YCbCr-4:2:2"), "fmtp sampling:\n{text}");
+        assert!(
+            text.contains("sampling=YCbCr-4:2:2"),
+            "fmtp sampling:\n{text}"
+        );
         assert!(text.contains("depth=10"), "fmtp depth=10 for UYVP:\n{text}");
         assert!(text.contains("width=1920"));
         assert!(text.contains("height=1080"));
@@ -5657,7 +5710,10 @@ mod tests {
         // compat story (lower-case `raw` + upper-case `PM` /
         // `SSN` is what libnvnmos accepts).
         assert!(text.contains("PM=2110GPM"), "ST 2110-20 PM:\n{text}");
-        assert!(text.contains("SSN=ST2110-20:2017"), "ST 2110-20 SSN:\n{text}");
+        assert!(
+            text.contains("SSN=ST2110-20:2017"),
+            "ST 2110-20 SSN:\n{text}"
+        );
         assert!(
             text.contains("a=source-filter: incl IN IP4 239.0.0.1 192.0.2.10"),
             "Sender source-filter:\n{text}",
@@ -5700,7 +5756,10 @@ mod tests {
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.name().as_str(), "application/x-rtp");
         assert_eq!(s.get::<&str>("media").unwrap(), "video");
-        assert_eq!(s.get::<i32>("clock-rate").unwrap(), defaults::VIDEO_CLOCK_RATE);
+        assert_eq!(
+            s.get::<i32>("clock-rate").unwrap(),
+            defaults::VIDEO_CLOCK_RATE
+        );
         assert_eq!(s.get::<&str>("encoding-name").unwrap(), "jxsv");
         assert_eq!(s.get::<i32>("payload").unwrap(), 96);
         assert_eq!(s.get::<&str>("packetmode").unwrap(), "0");
@@ -5725,7 +5784,10 @@ mod tests {
             s.get::<&str>("colorimetry").is_err(),
             "colorimetry omitted when absent:\n{s:?}",
         );
-        assert!(s.get::<&str>("sampling").is_err(), "sampling omitted:\n{s:?}");
+        assert!(
+            s.get::<&str>("sampling").is_err(),
+            "sampling omitted:\n{s:?}"
+        );
         assert!(s.get::<&str>("depth").is_err(), "depth omitted:\n{s:?}");
         assert!(s.get::<&str>("profile").is_err(), "profile omitted:\n{s:?}");
         assert!(s.get::<&str>("TP").is_err(), "TP omitted when wide:\n{s:?}");
@@ -5801,10 +5863,9 @@ mod tests {
     #[test]
     fn caps_from_rtp_video_jxsv_rejects_non_jxsv_encoding() {
         init_gst();
-        let rtp = gst::Caps::from_str(
-            "application/x-rtp,media=(string)video,encoding-name=(string)raw",
-        )
-        .unwrap();
+        let rtp =
+            gst::Caps::from_str("application/x-rtp,media=(string)video,encoding-name=(string)raw")
+                .unwrap();
         assert!(caps_from_rtp_video_jxsv(&rtp).is_err());
     }
 
@@ -5867,10 +5928,7 @@ mod tests {
         };
         let property = bit_rates_from_properties(120_000, 0);
         let err = cross_check_bit_rates(property, file).unwrap_err();
-        assert!(
-            err.to_string().contains("bit-rate mismatch"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("bit-rate mismatch"), "{err}");
     }
 
     #[test]
@@ -5890,12 +5948,9 @@ mod tests {
             bit_rates: bit_rates_from_properties(110_000, 0),
             ..Default::default()
         };
-        let out = passthrough_with_overrides(
-            sdp,
-            &overrides,
-            DualLegPassthroughPolicy::RejectDualLeg,
-        )
-        .expect("splice");
+        let out =
+            passthrough_with_overrides(sdp, &overrides, DualLegPassthroughPolicy::RejectDualLeg)
+                .expect("splice");
         assert!(out.contains("b=AS:116000"), "bandwidth:\n{out}");
         assert!(
             out.contains("x-nvnmos-format-bit-rate=110000"),
@@ -5920,13 +5975,7 @@ mod tests {
     #[test]
     fn from_caps_jxsv_emits_bitrate_fields_from_format_bit_rate() {
         init_gst();
-        let essence = jxsv_caps(
-            "image/x-jxsc",
-            1920,
-            1080,
-            gst::Fraction::new(50, 1),
-            None,
-        );
+        let essence = jxsv_caps("image/x-jxsc", 1920, 1080, gst::Fraction::new(50, 1), None);
         let mut input = build_input(&essence, Side::Sender, None);
         input.format_bit_rate = 110_000;
         let text = from_caps(&input).expect("synth");
@@ -6078,7 +6127,10 @@ mod tests {
         .unwrap();
         let input = build_input(&essence, Side::Sender, Some(&tc));
         let text = from_caps(&input).expect("synth");
-        assert!(text.contains("m=audio 5004 RTP/AVP 98"), "pt override:\n{text}");
+        assert!(
+            text.contains("m=audio 5004 RTP/AVP 98"),
+            "pt override:\n{text}"
+        );
         assert!(
             text.contains("a=rtpmap:98 L24/96000/2"),
             "audio clock-rate override:\n{text}",
@@ -6090,13 +6142,13 @@ mod tests {
     #[test]
     fn from_caps_data_synthesises_st2110_40_sdp() {
         init_gst();
-        let essence = gst::Caps::from_str(
-            "meta/x-st-2038,framerate=25/1",
-        )
-        .unwrap();
+        let essence = gst::Caps::from_str("meta/x-st-2038,framerate=25/1").unwrap();
         let input = build_input(&essence, Side::Sender, None);
         let text = from_caps(&input).expect("synth");
-        assert!(text.contains("m=video 5004 RTP/AVP 100"), "ANC pt=100:\n{text}");
+        assert!(
+            text.contains("m=video 5004 RTP/AVP 100"),
+            "ANC pt=100:\n{text}"
+        );
         // RFC 8331 §5.1 / SMPTE ST 2110-40 §6 spell the encoding
         // name lower-case (`smpte291`); `nmos-cpp`'s
         // `media_types::video_smpte291` (`U("video/smpte291")`)
@@ -6193,10 +6245,7 @@ mod tests {
     #[test]
     fn from_caps_round_trips_through_parse_sdp_for_data() {
         init_gst();
-        let essence = gst::Caps::from_str(
-            "meta/x-st-2038,framerate=25/1",
-        )
-        .unwrap();
+        let essence = gst::Caps::from_str("meta/x-st-2038,framerate=25/1").unwrap();
         let input = build_input(&essence, Side::Sender, None);
         let text = from_caps(&input).expect("synth");
         let media = parse_sdp(&text).expect("round-trip parse");
@@ -6404,8 +6453,12 @@ mod tests {
             DID_SDID={0x41,0x01};\
             VPID_Code=133;\
             TM=Async\r\n";
-        let spliced =
-            passthrough_with_overrides(raw_sdp, &SdpOverrides::default(), DualLegPassthroughPolicy::RejectDualLeg).expect("splice no-op");
+        let spliced = passthrough_with_overrides(
+            raw_sdp,
+            &SdpOverrides::default(),
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )
+        .expect("splice no-op");
         // rtpmap encoding-name must round-trip lower-case.
         assert!(
             spliced.contains("a=rtpmap:96 raw/90000"),
@@ -6428,9 +6481,20 @@ mod tests {
         // and `tp=` are too short for a `!spliced.contains`
         // check (they'd match `BPM=`, `2110TPW`, etc.), so pin
         // them with explicit leading-`;` / leading-` ` anchors.
-        for &canonical in &["PM", "SSN", "TCS", "RANGE", "PAR", "MAXUDP", "TSMODE",
-                             "TSDELAY", "TROFF", "CMAX", "DID_SDID", "VPID_Code"]
-        {
+        for &canonical in &[
+            "PM",
+            "SSN",
+            "TCS",
+            "RANGE",
+            "PAR",
+            "MAXUDP",
+            "TSMODE",
+            "TSDELAY",
+            "TROFF",
+            "CMAX",
+            "DID_SDID",
+            "VPID_Code",
+        ] {
             let lower = canonical.to_ascii_lowercase();
             let needle = format!(";{lower}=");
             assert!(

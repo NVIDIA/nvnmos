@@ -603,11 +603,7 @@ impl NmosSink {
         Ok(())
     }
 
-    fn activate_inner(
-        &self,
-        bin: &gst::Bin,
-        outcome: &InnerConfig,
-    ) -> Result<(), anyhow::Error> {
+    fn activate_inner(&self, bin: &gst::Bin, outcome: &InnerConfig) -> Result<(), anyhow::Error> {
         match outcome {
             InnerConfig::Real(transport) => {
                 let settings = self.settings.lock().unwrap();
@@ -703,7 +699,11 @@ impl NmosSink {
             .clone()
             .ok_or_else(|| anyhow!("nmossink ghost pad missing"))?;
         let peer_caps = ghost.peer_query_caps(None);
-        gst::debug!(CAT, imp = self, "deferred fake-chain peer_query_caps -> {peer_caps}");
+        gst::debug!(
+            CAT,
+            imp = self,
+            "deferred fake-chain peer_query_caps -> {peer_caps}"
+        );
         let fixated = crate::session::prepare_deferred_peer_caps("nmossink", peer_caps)?;
         gst::info!(CAT, "nmossink pinning deferred fake chain to `{fixated}`");
         let fake = inner::build_fake_sink(Some(&fixated))?;
@@ -768,7 +768,11 @@ impl NmosSink {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("nmossink ghost pad missing"))?;
         let peer_caps = ghost.peer_query_caps(None);
-        gst::debug!(CAT, imp = self, "deferred mode peer_query_caps -> {peer_caps}");
+        gst::debug!(
+            CAT,
+            imp = self,
+            "deferred mode peer_query_caps -> {peer_caps}"
+        );
 
         let common: crate::session::CommonSettings = snapshot.into();
         let outcome = crate::session::add_deferred_sender(
@@ -791,21 +795,23 @@ impl NmosSink {
     /// the bin alive on its own.
     fn activation_handler(&self) -> ActivationHandler {
         let weak: glib::WeakRef<super::NmosSink> = self.obj().downgrade();
-        Arc::new(move |req: ActivationRequest, tx: oneshot::Sender<ActivationOutcome>| {
-            let Some(bin) = weak.upgrade() else {
-                let _ = tx.send(ActivationOutcome::Failed {
-                    reason: "nmossink element was dropped before activation could be applied"
-                        .to_owned(),
+        Arc::new(
+            move |req: ActivationRequest, tx: oneshot::Sender<ActivationOutcome>| {
+                let Some(bin) = weak.upgrade() else {
+                    let _ = tx.send(ActivationOutcome::Failed {
+                        reason: "nmossink element was dropped before activation could be applied"
+                            .to_owned(),
+                    });
+                    return;
+                };
+                // Hop onto the GStreamer thread to inspect state and
+                // touch the bin's children. `call_async` is the
+                // canonical bridge from a tokio worker.
+                bin.call_async(move |bin| {
+                    bin.imp().apply_activation(req, tx);
                 });
-                return;
-            };
-            // Hop onto the GStreamer thread to inspect state and
-            // touch the bin's children. `call_async` is the
-            // canonical bridge from a tokio worker.
-            bin.call_async(move |bin| {
-                bin.imp().apply_activation(req, tx);
-            });
-        })
+            },
+        )
     }
 
     /// Apply an activation. Runs on a GStreamer worker thread (via
@@ -857,9 +863,7 @@ impl NmosSink {
         let bin_ref: &gst::Bin = bin.upcast_ref();
         let settings = self.settings.lock().unwrap().clone();
 
-        if matches!(plan.inner, InnerConfig::Real(_))
-            && self.current_chain_is_real()
-        {
+        if matches!(plan.inner, InnerConfig::Real(_)) && self.current_chain_is_real() {
             gst::debug!(
                 CAT,
                 "nmossink activation is real\u{2192}real; inserting fake hop \
@@ -871,33 +875,27 @@ impl NmosSink {
                 Ok(p) => {
                     if let Err(e) = self.swap_inner(bin_ref, &p) {
                         return ActivationOutcome::Failed {
-                            reason: format!(
-                                "nmossink: intermediate fake-chain swap failed: {e:#}"
-                            ),
+                            reason: format!("nmossink: intermediate fake-chain swap failed: {e:#}"),
                         };
                     }
                 }
                 Err(e) => {
                     return ActivationOutcome::Failed {
-                        reason: format!(
-                            "nmossink: building intermediate fake chain: {e:#}"
-                        ),
+                        reason: format!("nmossink: building intermediate fake chain: {e:#}"),
                     };
                 }
             }
         }
 
         let new_inner = match &plan.inner {
-            InnerConfig::Real(transport) => {
-                match build_real_sink(transport, &settings) {
-                    Ok(bin) => bin,
-                    Err(e) => {
-                        return ActivationOutcome::Failed {
-                            reason: format!("nmossink: building inner transport chain: {e:#}"),
-                        };
-                    }
+            InnerConfig::Real(transport) => match build_real_sink(transport, &settings) {
+                Ok(bin) => bin,
+                Err(e) => {
+                    return ActivationOutcome::Failed {
+                        reason: format!("nmossink: building inner transport chain: {e:#}"),
+                    };
                 }
-            }
+            },
             InnerConfig::Fake { .. } => {
                 // Deactivation, side mismatch, missing config, etc.
                 // The bin may be in PLAYING when this happens, so
@@ -927,10 +925,7 @@ impl NmosSink {
             // is left in a known state even on the failure path.
             if let Ok(p) = build_fake_sink_for_settings(&settings) {
                 if let Err(e2) = self.swap_inner(bin_ref, &p) {
-                    gst::warning!(
-                        CAT,
-                        "nmossink fake-chain restore also failed: {e2:#}",
-                    );
+                    gst::warning!(CAT, "nmossink fake-chain restore also failed: {e2:#}",);
                 }
             }
             return ActivationOutcome::Failed {
@@ -954,7 +949,11 @@ fn build_real_sink(
     settings: &Settings,
 ) -> Result<gst::Element, anyhow::Error> {
     let (bin, transport_sink) = match transport {
-        TransportConfig::Mxl { domain_path, flow_id, .. } => {
+        TransportConfig::Mxl {
+            domain_path,
+            flow_id,
+            ..
+        } => {
             let chain = inner::build_mxlsink(domain_path, flow_id)?;
             inner::apply_mxl_sink_inner_properties(
                 &CAT,
@@ -967,8 +966,10 @@ fn build_real_sink(
         }
         TransportConfig::Udp { variant, media, .. } => {
             let chain = inner::build_udpsink(media, *variant)?;
-            let property =
-                crate::sdp::bit_rates_from_properties(settings.format_bit_rate, settings.transport_bit_rate);
+            let property = crate::sdp::bit_rates_from_properties(
+                settings.format_bit_rate,
+                settings.transport_bit_rate,
+            );
             let bit_rates = crate::sdp::effective_bit_rates(property, media.bit_rates);
             inner::apply_format_bit_rate_to_jxsv_payloader(
                 media,
@@ -985,7 +986,11 @@ fn build_real_sink(
             );
             (chain.bin, chain.transport)
         }
-        TransportConfig::NvDsUdp { media, transport_file, .. } => {
+        TransportConfig::NvDsUdp {
+            media,
+            transport_file,
+            ..
+        } => {
             let sdp = transport_file.as_deref().unwrap_or("");
             let chain = inner::build_nvdsudpsink(media, sdp)?;
             inner::apply_nvdsudp_sink_inner_properties(
@@ -1129,8 +1134,14 @@ mod tests {
         assert_eq!(cs.source_port, 5005);
         assert_eq!(cs.destination_ip, "239.1.1.1");
         assert_eq!(cs.destination_port, 5004);
-        assert_eq!(cs.interface_ip, "", "receiver-only on the Sender side must be empty");
-        assert_eq!(cs.multicast_ip, "", "receiver-only on the Sender side must be empty");
+        assert_eq!(
+            cs.interface_ip, "",
+            "receiver-only on the Sender side must be empty"
+        );
+        assert_eq!(
+            cs.multicast_ip, "",
+            "receiver-only on the Sender side must be empty"
+        );
         assert_eq!(cs.side, crate::session::types::Side::Sender);
     }
 
@@ -1162,7 +1173,10 @@ mod tests {
         let cs: CommonSettings = s.into();
         assert_eq!(cs.node.host_name, "studio-a");
         assert_eq!(cs.node.domain, "local");
-        assert_eq!(cs.node.registration_url, "http://reg:3210/x-nmos/registration/v1.3");
+        assert_eq!(
+            cs.node.registration_url,
+            "http://reg:3210/x-nmos/registration/v1.3"
+        );
         assert_eq!(cs.node.system_url, "http://sys:10641/x-nmos/system/v1.0");
     }
 
@@ -1170,9 +1184,8 @@ mod tests {
     fn from_settings_forwards_transport_caps() {
         use std::str::FromStr;
         init_gst();
-        let caps =
-            gst::Caps::from_str("application/x-rtp,media=audio,payload=99,clock-rate=48000")
-                .expect("valid caps");
+        let caps = gst::Caps::from_str("application/x-rtp,media=audio,payload=99,clock-rate=48000")
+            .expect("valid caps");
         let s = Settings {
             transport_caps: Some(caps.clone()),
             ..Settings::default()
@@ -1210,34 +1223,30 @@ mod tests {
             "a=rtpmap:96 raw/90000\r\n",
             "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=25/1; depth=10\r\n",
         );
-        let activation_caps = intermediate_fake_sink_caps(
-            &udp_activation_plan(NARROW_SDP),
-            &Settings::default(),
-        )
-        .expect("activation caps")
-        .expect("narrow UDP must pin fake-hop caps");
-        let structure = activation_caps
-            .structure(0)
-            .expect("structure");
+        let activation_caps =
+            intermediate_fake_sink_caps(&udp_activation_plan(NARROW_SDP), &Settings::default())
+                .expect("activation caps")
+                .expect("narrow UDP must pin fake-hop caps");
+        let structure = activation_caps.structure(0).expect("structure");
         assert_eq!(structure.name(), "video/x-raw");
         assert_eq!(structure.get::<&str>("format").ok(), Some("UYVP"));
 
-        let stale_element_caps = gst::Caps::from_str(
-            "video/x-raw,format=RGB,width=640,height=480,framerate=30/1",
-        )
-        .expect("stale caps");
+        let stale_element_caps =
+            gst::Caps::from_str("video/x-raw,format=RGB,width=640,height=480,framerate=30/1")
+                .expect("stale caps");
         let settings = Settings {
             caps: Some(stale_element_caps),
             ..Settings::default()
         };
-        let hop_caps = intermediate_fake_sink_caps(
-            &udp_activation_plan(NARROW_SDP),
-            &settings,
-        )
-        .expect("activation caps")
-        .expect("narrow UDP must pin fake-hop caps");
+        let hop_caps = intermediate_fake_sink_caps(&udp_activation_plan(NARROW_SDP), &settings)
+            .expect("activation caps")
+            .expect("narrow UDP must pin fake-hop caps");
         assert_eq!(
-            hop_caps.structure(0).expect("structure").get::<&str>("format").ok(),
+            hop_caps
+                .structure(0)
+                .expect("structure")
+                .get::<&str>("format")
+                .ok(),
             Some("UYVP"),
             "fake-hop caps must follow activation media, not element property",
         );
@@ -1247,10 +1256,9 @@ mod tests {
     fn intermediate_fake_sink_caps_mxl_uses_element_settings() {
         use std::str::FromStr;
         init_gst();
-        let caps = gst::Caps::from_str(
-            "video/x-raw,format=v210,width=1920,height=1080,framerate=25/1",
-        )
-        .expect("caps");
+        let caps =
+            gst::Caps::from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=25/1")
+                .expect("caps");
         let settings = Settings {
             caps: Some(caps.clone()),
             ..Settings::default()
@@ -1269,5 +1277,4 @@ mod tests {
             Some(caps),
         );
     }
-
 }

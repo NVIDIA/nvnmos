@@ -29,7 +29,7 @@ use nvnmos_rpc::v1::{
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
-use tokio::sync::{mpsc as tokio_mpsc, Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore, mpsc as tokio_mpsc};
 use tokio::task::JoinSet;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
@@ -231,9 +231,7 @@ fn cpu_pct_between(
 fn read_proc_cpu_jiffies(pid: u32) -> anyhow::Result<(u64, u64)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .with_context(|| format!("reading /proc/{pid}/stat"))?;
-    let rparen = stat
-        .rfind(')')
-        .context("parsing /proc/stat comm field")?;
+    let rparen = stat.rfind(')').context("parsing /proc/stat comm field")?;
     let fields: Vec<&str> = stat[rparen + 2..].split_whitespace().collect();
     anyhow::ensure!(
         fields.len() > 12,
@@ -320,11 +318,7 @@ impl CpuPhaseSampler {
     }
 }
 
-fn cpu_sampler_loop(
-    pid: u32,
-    interval: Duration,
-    stop: std::sync::mpsc::Receiver<()>,
-) -> Vec<f64> {
+fn cpu_sampler_loop(pid: u32, interval: Duration, stop: std::sync::mpsc::Receiver<()>) -> Vec<f64> {
     let mut samples = Vec::new();
     let Ok((mut prev_utime, mut prev_stime)) = read_proc_cpu_jiffies(pid) else {
         return samples;
@@ -571,10 +565,7 @@ async fn main() -> anyhow::Result<()> {
         args.remove_receivers,
         args.add_receivers,
     );
-    anyhow::ensure!(
-        args.syncs <= MAX_SYNCS,
-        "syncs must be <= {MAX_SYNCS}"
-    );
+    anyhow::ensure!(args.syncs <= MAX_SYNCS, "syncs must be <= {MAX_SYNCS}");
     anyhow::ensure!(
         args.patches <= MAX_PATCHES,
         "patches must be <= {MAX_PATCHES}"
@@ -597,7 +588,10 @@ async fn main() -> anyhow::Result<()> {
         "sessions must be <= {MAX_SESSIONS}"
     );
     if args.add_senders > 0 || args.add_receivers > 0 {
-        anyhow::ensure!(args.sessions >= 1, "sessions must be >= 1 when creating resources");
+        anyhow::ensure!(
+            args.sessions >= 1,
+            "sessions must be >= 1 when creating resources"
+        );
     }
     anyhow::ensure!(
         u32::from(args.base_http_port) + args.nodes as u32 <= u16::MAX as u32,
@@ -615,9 +609,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let mut cpu = CpuMonitor::new(args.daemon_pid, cpu_sample_interval(args.cpu_sample_ms));
 
-    let node_seeds: Vec<String> = (0..args.nodes)
-        .map(|i| format!("bench-node-{i}"))
-        .collect();
+    let node_seeds: Vec<String> = (0..args.nodes).map(|i| format!("bench-node-{i}")).collect();
 
     // -------- Open sessions (one UDS/gRPC client per session, in parallel) --------
     cpu.begin_phase();
@@ -683,16 +675,12 @@ async fn main() -> anyhow::Result<()> {
             sub_set.spawn(async move {
                 let t0 = Instant::now();
                 let (task, hub) = spawn_auto_ack_task(client, session_handle).await?;
-                Ok::<_, anyhow::Error>((
-                    index,
-                    t0.elapsed().as_micros() as u64,
-                    hub,
-                    task,
-                ))
+                Ok::<_, anyhow::Error>((index, t0.elapsed().as_micros() as u64, hub, task))
             });
         }
         while let Some(res) = sub_set.join_next().await {
-            let (index, sample, hub, task) = res.context("SubscribeActivations task panicked")??;
+            let (index, sample, hub, task) =
+                res.context("SubscribeActivations task panicked")??;
             subscribe_samples.push(sample);
             let ctx = &mut sessions[index];
             ctx.activation_hub = Some(hub);
@@ -714,14 +702,10 @@ async fn main() -> anyhow::Result<()> {
         let session_handle = ctx.slot.session_handle.clone();
         let mut client = ctx.client.clone();
         let sender_indices: Vec<usize> = (0..args.add_senders)
-            .filter(|&i| {
-                session_for_resource(i, args.sessions) == session_index
-            })
+            .filter(|&i| session_for_resource(i, args.sessions) == session_index)
             .collect();
         let receiver_indices: Vec<usize> = (0..args.add_receivers)
-            .filter(|&i| {
-                session_for_resource(args.add_senders + i, args.sessions) == session_index
-            })
+            .filter(|&i| session_for_resource(args.add_senders + i, args.sessions) == session_index)
             .collect();
         if sender_indices.is_empty() && receiver_indices.is_empty() {
             continue;
@@ -932,8 +916,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut deactivate_samples = Vec::with_capacity(1);
 
                 let t0 = Instant::now();
-                let (status, _) =
-                    connection_get(&iface_ip, http_port, &staged_path).await?;
+                let (status, _) = connection_get(&iface_ip, http_port, &staged_path).await?;
                 anyhow::ensure!(status == 200, "GET staged returned HTTP {status}");
                 get_samples.push(t0.elapsed().as_micros() as u64);
 
@@ -948,8 +931,7 @@ async fn main() -> anyhow::Result<()> {
                     .await?;
 
                 let t0 = Instant::now();
-                let (status, _) =
-                    connection_get(&iface_ip, http_port, &staged_path).await?;
+                let (status, _) = connection_get(&iface_ip, http_port, &staged_path).await?;
                 anyhow::ensure!(status == 200, "GET staged returned HTTP {status}");
                 get_samples.push(t0.elapsed().as_micros() as u64);
 
@@ -968,8 +950,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         while let Some(res) = patch_set.join_next().await {
-            let (gets, activates, deactivates) =
-                res.context("Connection API task panicked")??;
+            let (gets, activates, deactivates) = res.context("Connection API task panicked")??;
             connection_get_samples.extend(gets);
             patch_activate_samples.extend(activates);
             patch_deactivate_samples.extend(deactivates);
@@ -986,13 +967,12 @@ async fn main() -> anyhow::Result<()> {
 
     if args.remove_senders > 0 || args.remove_receivers > 0 {
         cpu.begin_phase();
-        let (sender_removals, receiver_removals) =
-            resources_to_remove(
-                &senders,
-                &receivers,
-                args.remove_senders,
-                args.remove_receivers,
-            );
+        let (sender_removals, receiver_removals) = resources_to_remove(
+            &senders,
+            &receivers,
+            args.remove_senders,
+            args.remove_receivers,
+        );
         let mut remove_set = JoinSet::new();
         for ctx in &mut sessions {
             let session_index = ctx.index;
@@ -1023,10 +1003,7 @@ async fn main() -> anyhow::Result<()> {
                         })
                         .await
                         .with_context(|| {
-                            format!(
-                                "RemoveResource sender resource_id={}",
-                                resource.resource_id
-                            )
+                            format!("RemoveResource sender resource_id={}", resource.resource_id)
                         })?;
                     sender_samples.push(t0.elapsed().as_micros() as u64);
                 }
@@ -1069,9 +1046,7 @@ async fn main() -> anyhow::Result<()> {
         close_set.spawn(async move {
             let t0 = Instant::now();
             client
-                .close_session(CloseSessionRequest {
-                    session_handle,
-                })
+                .close_session(CloseSessionRequest { session_handle })
                 .await
                 .context("CloseSession")?;
             Ok::<_, anyhow::Error>(t0.elapsed().as_micros() as u64)
@@ -1336,7 +1311,10 @@ mod tests {
 
     #[test]
     fn activation_indices_full_coverage() {
-        assert_eq!(sender_activation_indices(10, 10), (0..10).collect::<Vec<_>>());
+        assert_eq!(
+            sender_activation_indices(10, 10),
+            (0..10).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1358,7 +1336,7 @@ mod tests {
 
     #[test]
     fn resources_to_remove_respects_per_side_counts() {
-        use super::{resources_to_remove, ResourceSlot};
+        use super::{ResourceSlot, resources_to_remove};
 
         let senders: Vec<ResourceSlot> = (0..4)
             .map(|i| ResourceSlot {
@@ -1377,8 +1355,7 @@ mod tests {
             })
             .collect();
 
-        let (removed_senders, removed_receivers) =
-            resources_to_remove(&senders, &receivers, 2, 1);
+        let (removed_senders, removed_receivers) = resources_to_remove(&senders, &receivers, 2, 1);
         assert_eq!(removed_senders.len(), 2);
         assert_eq!(removed_receivers.len(), 1);
         assert_eq!(removed_senders[0].resource_id, "sender-0");

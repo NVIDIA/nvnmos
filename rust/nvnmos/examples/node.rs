@@ -57,17 +57,49 @@ struct Resource {
 // (`sink-N` / `mxl-sink-N`) and NMOS receivers are sources
 // (`source-N` / `mxl-source-N`).
 const SENDERS: &[Resource] = &[
-    Resource { name: "sink-0",       transport: Transport::Rtp, media: Media::Video },
-    Resource { name: "sink-1",       transport: Transport::Rtp, media: Media::Audio },
-    Resource { name: "mxl-sink-0",   transport: Transport::Mxl, media: Media::Video },
-    Resource { name: "mxl-sink-1",   transport: Transport::Mxl, media: Media::Audio },
+    Resource {
+        name: "sink-0",
+        transport: Transport::Rtp,
+        media: Media::Video,
+    },
+    Resource {
+        name: "sink-1",
+        transport: Transport::Rtp,
+        media: Media::Audio,
+    },
+    Resource {
+        name: "mxl-sink-0",
+        transport: Transport::Mxl,
+        media: Media::Video,
+    },
+    Resource {
+        name: "mxl-sink-1",
+        transport: Transport::Mxl,
+        media: Media::Audio,
+    },
 ];
 
 const RECEIVERS: &[Resource] = &[
-    Resource { name: "source-0",     transport: Transport::Rtp, media: Media::Video },
-    Resource { name: "source-1",     transport: Transport::Rtp, media: Media::Audio },
-    Resource { name: "mxl-source-0", transport: Transport::Mxl, media: Media::Video },
-    Resource { name: "mxl-source-1", transport: Transport::Mxl, media: Media::Audio },
+    Resource {
+        name: "source-0",
+        transport: Transport::Rtp,
+        media: Media::Video,
+    },
+    Resource {
+        name: "source-1",
+        transport: Transport::Rtp,
+        media: Media::Audio,
+    },
+    Resource {
+        name: "mxl-source-0",
+        transport: Transport::Mxl,
+        media: Media::Video,
+    },
+    Resource {
+        name: "mxl-source-1",
+        transport: Transport::Mxl,
+        media: Media::Audio,
+    },
 ];
 
 // MXL example UUIDs, lifted verbatim from `src/main.c` so this example
@@ -395,10 +427,7 @@ fn main() -> ExitCode {
             Ok(())
         })
         .on_log(|log| {
-            eprintln!(
-                "[nvnmos {} {}] {}",
-                log.level, log.categories, log.message
-            );
+            eprintln!("[nvnmos {} {}] {}", log.level, log.categories, log.message);
         })
         .build()
     {
@@ -481,8 +510,7 @@ fn main() -> ExitCode {
         }
     }
     for (name, cfg) in &receivers {
-        if let Err(e) =
-            server.activate_connection(Side::Receiver, name, Some(&cfg.transport_file))
+        if let Err(e) = server.activate_connection(Side::Receiver, name, Some(&cfg.transport_file))
         {
             eprintln!("activate receiver({name}) failed: {e}");
             return ExitCode::FAILURE;

@@ -254,9 +254,7 @@ fn parse_ptime_ms_as_ns(value: &str) -> Result<u64, anyhow::Error> {
     if v.is_empty() {
         bail!("empty ptime");
     }
-    let ms: f64 = v
-        .parse()
-        .with_context(|| format!("ptime `{v}`"))?;
+    let ms: f64 = v.parse().with_context(|| format!("ptime `{v}`"))?;
     if !ms.is_finite() || ms <= 0.0 {
         bail!("ptime=`{v}` ms must be a finite positive value");
     }
@@ -318,8 +316,7 @@ pub(crate) fn audio_from_caps(
         );
     }
     let sink_payload_size = src_payload + AUDIO_HEADER_SIZE;
-    let payload_multiple =
-        ((DEFAULT_AUDIO_BUFFER_NS + ptime_ns / 2) / ptime_ns).max(1) as u32;
+    let payload_multiple = ((DEFAULT_AUDIO_BUFFER_NS + ptime_ns / 2) / ptime_ns).max(1) as u32;
 
     Ok(AudioPacketization {
         sink_payload_size,
@@ -370,7 +367,9 @@ pub(crate) fn reconcile_sink_video_packetization(
     if configured_stride == target_stride {
         return Ok(());
     }
-    let s = caps.structure(0).ok_or_else(|| anyhow::anyhow!("raw caps empty"))?;
+    let s = caps
+        .structure(0)
+        .ok_or_else(|| anyhow::anyhow!("raw caps empty"))?;
     let format = s.get::<&str>("format").unwrap_or("?");
     let width = s.get::<i32>("width").unwrap_or(0);
     gst::warning!(
@@ -397,10 +396,9 @@ mod tests {
     #[test]
     fn uyvp_1920x1080_matches_deepstream_table() {
         init_gst();
-        let caps = gst::Caps::from_str(
-            "video/x-raw,format=UYVP,width=1920,height=1080,framerate=60/1",
-        )
-        .unwrap();
+        let caps =
+            gst::Caps::from_str("video/x-raw,format=UYVP,width=1920,height=1080,framerate=60/1")
+                .unwrap();
         let pkt = video_from_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
         assert_eq!(pkt.packets_per_line, 4);
         assert_eq!(pkt.src_payload_size, 1200);
@@ -410,10 +408,9 @@ mod tests {
     #[test]
     fn uyvp_1280x720_matches_rivermax_minimum_packet_size() {
         init_gst();
-        let caps = gst::Caps::from_str(
-            "video/x-raw,format=UYVP,width=1280,height=720,framerate=60/1",
-        )
-        .unwrap();
+        let caps =
+            gst::Caps::from_str("video/x-raw,format=UYVP,width=1280,height=720,framerate=60/1")
+                .unwrap();
         let pkt = video_from_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
         assert_eq!(pkt.packets_per_line, 4);
         assert_eq!(pkt.src_payload_size, 800);
@@ -423,10 +420,9 @@ mod tests {
     #[test]
     fn video_configured_stride_detects_mismatch() {
         init_gst();
-        let caps = gst::Caps::from_str(
-            "video/x-raw,format=UYVP,width=1920,height=1080,framerate=50/1",
-        )
-        .unwrap();
+        let caps =
+            gst::Caps::from_str("video/x-raw,format=UYVP,width=1920,height=1080,framerate=50/1")
+                .unwrap();
         let target = video_target_stride(&caps).unwrap();
         let calculated = video_from_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
         assert_eq!(
@@ -440,10 +436,9 @@ mod tests {
     #[test]
     fn uyvp_3840x2160_10bit_matches_calculated_stride() {
         init_gst();
-        let caps = gst::Caps::from_str(
-            "video/x-raw,format=UYVP,width=3840,height=2160,framerate=60/1",
-        )
-        .unwrap();
+        let caps =
+            gst::Caps::from_str("video/x-raw,format=UYVP,width=3840,height=2160,framerate=60/1")
+                .unwrap();
         let pkt = video_from_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
         assert_eq!(pkt.packets_per_line, 8);
         assert_eq!(pkt.src_payload_size, 1200);
@@ -453,10 +448,9 @@ mod tests {
     #[test]
     fn uyvy_1920x1080_8bit_matches_deepstream_table() {
         init_gst();
-        let caps = gst::Caps::from_str(
-            "video/x-raw,format=UYVY,width=1920,height=1080,framerate=60/1",
-        )
-        .unwrap();
+        let caps =
+            gst::Caps::from_str("video/x-raw,format=UYVY,width=1920,height=1080,framerate=60/1")
+                .unwrap();
         let pkt = video_from_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
         assert_eq!(pkt.packets_per_line, 3);
         assert_eq!(pkt.sink_payload_size, 1300);
@@ -503,8 +497,7 @@ mod tests {
     #[test]
     fn anc_from_meta_st2038_frame_alignment() {
         init_gst();
-        let caps = gst::Caps::from_str("meta/x-st-2038,alignment=frame,framerate=60/1")
-            .unwrap();
+        let caps = gst::Caps::from_str("meta/x-st-2038,alignment=frame,framerate=60/1").unwrap();
         let pkt = from_media(FlowFormat::Data, &caps, &gst::Caps::new_empty())
             .expect("ANC packetization");
         assert!(matches!(pkt, Packetization::Anc));
@@ -532,10 +525,9 @@ mod tests {
     #[test]
     fn unsupported_video_format_errors() {
         init_gst();
-        let caps = gst::Caps::from_str(
-            "video/x-raw,format=v210,width=1920,height=1080,framerate=60/1",
-        )
-        .unwrap();
+        let caps =
+            gst::Caps::from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=60/1")
+                .unwrap();
         assert!(video_from_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).is_err());
     }
 }

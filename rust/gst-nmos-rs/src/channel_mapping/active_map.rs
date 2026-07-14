@@ -26,10 +26,7 @@ pub(crate) enum ActiveMapError {
     #[error("active-map output channel {0} is duplicated")]
     DuplicateOutputChannel(u32),
     #[error("active-map value for output channel {output_channel}: {reason}")]
-    InvalidValue {
-        output_channel: u32,
-        reason: String,
-    },
+    InvalidValue { output_channel: u32, reason: String },
 }
 
 /// Parse `inputId:channel_index` (e.g. `input0:2`).
@@ -62,14 +59,19 @@ pub(crate) fn parse_active_map_structure(
         if !seen_outputs.insert(output_channel) {
             return Err(ActiveMapError::DuplicateOutputChannel(output_channel));
         }
-        let value = structure.get::<Option<String>>(key).map_err(|e| ActiveMapError::InvalidValue {
-            output_channel,
-            reason: format!("field value is not a string: {e}"),
-        })?;
+        let value =
+            structure
+                .get::<Option<String>>(key)
+                .map_err(|e| ActiveMapError::InvalidValue {
+                    output_channel,
+                    reason: format!("field value is not a string: {e}"),
+                })?;
         // `active-map` is intended to be sparse, but allow explicit unrouted channels.
         // Support both 'correct', `(string)NULL` GValue (None), and 'incorrect', `NULL` or `null` string.
         let Some(value) = value else { continue };
-        if value.eq_ignore_ascii_case("null") { continue }
+        if value.eq_ignore_ascii_case("null") {
+            continue;
+        }
         let (input_id, input_channel) =
             parse_input_channel_ref(&value).map_err(|reason| ActiveMapError::InvalidValue {
                 output_channel,
@@ -120,13 +122,7 @@ pub(crate) fn active_map_entries_for_src(
     let routes = if let Some(structure) = src.active_map.as_ref() {
         parse_active_map_structure(structure)?
     } else {
-        default_identity_routes(
-            topology,
-            src_index,
-            output_channels,
-            sinks,
-            src_count,
-        )
+        default_identity_routes(topology, src_index, output_channels, sinks, src_count)
     };
     Ok(active_map_entries_from_routes(output_channels, &routes))
 }
@@ -202,10 +198,7 @@ mod tests {
 
     #[test]
     fn parse_input_channel_ref_valid() {
-        assert_eq!(
-            parse_input_channel_ref("input0:2").unwrap(),
-            ("input0", 2)
-        );
+        assert_eq!(parse_input_channel_ref("input0:2").unwrap(), ("input0", 2));
     }
 
     #[test]

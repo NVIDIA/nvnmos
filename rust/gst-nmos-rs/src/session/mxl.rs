@@ -6,11 +6,11 @@
 use anyhow::{Context, bail};
 use gstreamer as gst;
 
+use super::types::Side;
 use super::{
     ActivationAck, ActivationPlan, CommonSettings, FakeKind, InnerConfig, TransportConfig,
     caps_format,
 };
-use super::types::Side;
 use crate::domain::{self, DomainIdOrigin};
 use crate::flow_def::{self, FlowDefBuildInput, FlowDefOverrides, ValueOrigin};
 use crate::types::FlowFormat;
@@ -109,9 +109,7 @@ pub(super) fn synthesise_deferred_sender_mxl(
         FlowFormat::from_caps(fixated),
         Some(&json),
     )
-    .with_context(|| {
-        format!("{element}: resolving MXL flow id / format for deferred AddSender")
-    })?;
+    .with_context(|| format!("{element}: resolving MXL flow id / format for deferred AddSender"))?;
     let inner = super::apply_auto_activate_policy(
         &crate::CAT,
         element,
@@ -142,7 +140,9 @@ pub(crate) fn property_overrides_mxl<'a>(
 
 pub(super) fn log_flow_origin(cat: &gst::DebugCategory, field: &str, origin: ValueOrigin) {
     match origin {
-        ValueOrigin::Property => gst::debug!(cat, "{field} from property; no transport file constraint"),
+        ValueOrigin::Property => {
+            gst::debug!(cat, "{field} from property; no transport file constraint")
+        }
         ValueOrigin::File => gst::info!(cat, "{field} taken from transport file"),
         ValueOrigin::Both => gst::debug!(cat, "{field} cross-checked against transport file"),
         ValueOrigin::None => gst::debug!(cat, "{field} not supplied by either source"),
@@ -173,8 +173,9 @@ pub(crate) fn decide_inner_config_mxl(
         if transport_file.is_some() {
             return InnerConfig::Fake {
                 kind: FakeKind::NotActive,
-                detail: "`mxl-flow-id` unset; waiting for IS-05 activation to supply the MXL flow id"
-                    .into(),
+                detail:
+                    "`mxl-flow-id` unset; waiting for IS-05 activation to supply the MXL flow id"
+                        .into(),
             };
         }
         return InnerConfig::Fake {
@@ -246,8 +247,13 @@ pub(super) fn resolve_inner_config_mxl(
     // shape and a mismatch is a real error.
     let transport_file = match transport_file {
         Some(text) => Some(
-            flow_def::splice_overrides(&text, &property_overrides_mxl(settings, &domain_resolution.id))
-                .with_context(|| format!("{element}: splicing property overrides into transport file"))?,
+            flow_def::splice_overrides(
+                &text,
+                &property_overrides_mxl(settings, &domain_resolution.id),
+            )
+            .with_context(|| {
+                format!("{element}: splicing property overrides into transport file")
+            })?,
         ),
         None => None,
     };
@@ -343,29 +349,30 @@ pub(super) fn resolve_activation_inner_mxl(
     // cross-check stays because a v210 video activation arriving at
     // an `nmossrc` configured for audio is a real misconfiguration
     // the element must ack-fail.
-    let flow = match flow_def::resolve_mxl_flow_meta(
-        "",
-        caps_format(settings),
-        Some(transport_file),
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(Box::new(ActivationPlan {
-                inner: InnerConfig::Fake {
-                    kind: FakeKind::Misconfigured,
-                    detail: "flow_def resolution failed".into(),
-                },
-                ack: ActivationAck::Failure {
-                    reason: format!(
-                        "{element}: resolving MXL flow id / format from activation \
+    let flow =
+        match flow_def::resolve_mxl_flow_meta("", caps_format(settings), Some(transport_file)) {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(Box::new(ActivationPlan {
+                    inner: InnerConfig::Fake {
+                        kind: FakeKind::Misconfigured,
+                        detail: "flow_def resolution failed".into(),
+                    },
+                    ack: ActivationAck::Failure {
+                        reason: format!(
+                            "{element}: resolving MXL flow id / format from activation \
                          transport file: {e:#}"
-                    ),
-                },
-            }));
-        }
-    };
+                        ),
+                    },
+                }));
+            }
+        };
 
-    Ok(decide_inner_config_mxl(settings, &flow, Some(transport_file)))
+    Ok(decide_inner_config_mxl(
+        settings,
+        &flow,
+        Some(transport_file),
+    ))
 }
 
 #[cfg(test)]
@@ -408,8 +415,7 @@ mod tests {
             ..settings(Side::Sender)
         };
         let overrides = super::property_overrides_mxl(&s, DOMAIN_ID);
-        let spliced =
-            flow_def::splice_overrides(&video_flow_def(FLOW_ID_A), &overrides).unwrap();
+        let spliced = flow_def::splice_overrides(&video_flow_def(FLOW_ID_A), &overrides).unwrap();
         let v: serde_json::Value = serde_json::from_str(&spliced).unwrap();
         assert_eq!(v["id"], FLOW_ID_B);
         // Subsequent resolve_mxl_flow_meta with property==B and
@@ -424,7 +430,12 @@ mod tests {
 
     #[test]
     fn deactivation_is_fake_success() {
-        let plan = make_activation_plan(&cat(), "nmossink", &settings(Side::Sender), &req(Side::Sender, None));
+        let plan = make_activation_plan(
+            &cat(),
+            "nmossink",
+            &settings(Side::Sender),
+            &req(Side::Sender, None),
+        );
         assert!(matches!(plan.inner, InnerConfig::Fake { .. }));
         assert!(matches!(plan.ack, ActivationAck::Success));
     }
@@ -451,8 +462,7 @@ mod tests {
     fn nmossrc_caps_st2038_drives_data_format() {
         use std::str::FromStr;
         init_gst();
-        let caps = gst::Caps::from_str("meta/x-st-2038,framerate=30/1")
-            .expect("static caps parse");
+        let caps = gst::Caps::from_str("meta/x-st-2038,framerate=30/1").expect("static caps parse");
         let s = CommonSettings {
             mxl_flow_id: FLOW_ID_A.to_owned(),
             caps: Some(caps),
@@ -464,7 +474,9 @@ mod tests {
             &s,
             &req(
                 Side::Receiver,
-                Some(r#"{"id":"00000000-0000-0000-0000-000000000001","format":"urn:x-nmos:format:data"}"#),
+                Some(
+                    r#"{"id":"00000000-0000-0000-0000-000000000001","format":"urn:x-nmos:format:data"}"#,
+                ),
             ),
         );
         match plan.inner {
@@ -526,7 +538,10 @@ mod tests {
         );
         match plan.inner {
             InnerConfig::Real(TransportConfig::Mxl {
-                domain_path, flow_id, format, transport_file,
+                domain_path,
+                flow_id,
+                format,
+                transport_file,
             }) => {
                 assert_eq!(domain_path, "/var/lib/mxl/domain-a");
                 assert_eq!(flow_id, FLOW_ID_A);
@@ -639,12 +654,8 @@ mod tests {
             mxl_flow_id: FLOW_ID_A.to_owned(),
             ..settings(Side::Sender)
         };
-        let plan = make_activation_plan(
-            &cat(),
-            "nmossink",
-            &s,
-            &req(Side::Sender, Some("not json")),
-        );
+        let plan =
+            make_activation_plan(&cat(), "nmossink", &s, &req(Side::Sender, Some("not json")));
         assert!(matches!(plan.inner, InnerConfig::Fake { .. }));
         assert!(matches!(plan.ack, ActivationAck::Failure { .. }));
     }
@@ -765,7 +776,8 @@ mod tests {
             init_gst();
             let caps = gst::Caps::from_str("video/x-raw,format=I420,width=1920,height=1080")
                 .expect("static caps parse");
-            let res = add_deferred_sender(&cat(), "nmossink", &sender_settings(), &no_session(), caps);
+            let res =
+                add_deferred_sender(&cat(), "nmossink", &sender_settings(), &no_session(), caps);
             let err = res.expect_err("unsupported caps must be rejected");
             // exact message is owned by from_caps; we just want
             // the synthesis-context wrapper to be present.
@@ -818,7 +830,8 @@ mod tests {
             };
             let out = super::synthesise_or_passthrough_mxl(&cat(), "nmossrc", &s, DOMAIN_ID, None)
                 .expect("synthesis must succeed");
-            let text = out.expect("Receiver synthesis must yield Some(json) when caps + flow id are set");
+            let text =
+                out.expect("Receiver synthesis must yield Some(json) when caps + flow id are set");
             let v = parse(&text);
             assert_eq!(v["id"], FLOW_ID_A);
             assert_eq!(v["format"], "urn:x-nmos:format:video");
@@ -854,10 +867,12 @@ mod tests {
                 caps: Some(video_caps()),
                 ..settings(Side::Receiver)
             };
-            let synth = super::synthesise_or_passthrough_mxl(&cat(), "nmossrc", &s, DOMAIN_ID, None)
-                .expect("synthesis")
-                .expect("some json");
-            let flow = flow_def::resolve_mxl_flow_meta("", FlowFormat::Video, Some(&synth)).unwrap();
+            let synth =
+                super::synthesise_or_passthrough_mxl(&cat(), "nmossrc", &s, DOMAIN_ID, None)
+                    .expect("synthesis")
+                    .expect("some json");
+            let flow =
+                flow_def::resolve_mxl_flow_meta("", FlowFormat::Video, Some(&synth)).unwrap();
             let inner = super::decide_inner_config_mxl(&s, &flow, Some(&synth));
             match inner {
                 InnerConfig::Fake { kind, .. } => assert_eq!(kind, FakeKind::NotActive),
@@ -893,8 +908,14 @@ mod tests {
                 ..settings(Side::Receiver)
             };
             let resolved = Some(video_flow_def(FLOW_ID_A));
-            let out = super::synthesise_or_passthrough_mxl(&cat(), "nmossrc", &s, DOMAIN_ID, resolved.clone())
-                .expect("passthrough must succeed");
+            let out = super::synthesise_or_passthrough_mxl(
+                &cat(),
+                "nmossrc",
+                &s,
+                DOMAIN_ID,
+                resolved.clone(),
+            )
+            .expect("passthrough must succeed");
             assert_eq!(
                 out.as_deref(),
                 resolved.as_deref(),
