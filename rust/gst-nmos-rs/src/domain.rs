@@ -24,8 +24,11 @@
 //!   aware the cross-check was skipped.
 //! * Only the file supplied: use the file's `id` as the resolved
 //!   `mxl-domain-id`.
-//! * Neither: the resolved id is empty — `session.rs` then rejects
-//!   the configuration via the existing required-field check.
+//! * Neither property nor file, but `mxl-domain-path` is set: the
+//!   NMOS tag is application-resolved (`[""]` in the flow_def);
+//!   the data plane still uses the configured path.
+//! * Neither property nor path (so no `domain_def.json` either):
+//!   [`DomainError::Unconfigured`].
 //!
 //! The MXL SDK itself does not require `domain_def.json` so the
 //! file's absence is **not** an error.
@@ -73,28 +76,30 @@ pub(crate) enum DomainError {
     },
     #[error("`{path}` has no `id` field")]
     MissingId { path: PathBuf },
+    #[error("`mxl-domain-id` or `mxl-domain-path` is required")]
+    Unconfigured,
 }
 
-/// Origin of the resolved MXL Domain id. Diagnostic only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DomainIdOrigin {
-    /// User supplied `mxl-domain-id`; no `domain_def.json` consulted
-    /// (either `mxl-domain-path` was empty or the file was missing).
-    Property,
-    /// Read from `domain_def.json`; user did not supply
-    /// `mxl-domain-id`.
-    DomainDef,
-    /// User supplied `mxl-domain-id` and the `domain_def.json` `id`
-    /// field agreed.
-    Both,
-    /// Neither source supplied an id.
-    None,
+/// MXL Domain id carried in the configuring flow_def tag
+/// `urn:x-nvnmos:tag:mxl-domain-id`. May be a concrete UUID or left
+/// unspecified for the element to resolve locally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DomainId {
+    /// A concrete Domain UUID in NMOS / IS-05.
+    Concrete(String),
+    /// No Domain UUID is pinned in NMOS (`[""]` tag); the Domain is
+    /// resolved locally instead — in this element, via `mxl-domain-path`.
+    ApplicationResolved,
 }
 
-#[derive(Debug)]
-pub(crate) struct DomainIdResolution {
-    pub(crate) id: String,
-    pub(crate) origin: DomainIdOrigin,
+impl DomainId {
+    /// JSON tag value for `urn:x-nvnmos:tag:mxl-domain-id`.
+    pub(crate) fn tag_json(&self) -> serde_json::Value {
+        match self {
+            Self::Concrete(id) => serde_json::json!([id]),
+            Self::ApplicationResolved => serde_json::json!([""]),
+        }
+    }
 }
 
 /// Read `<domain_path>/domain_def.json` and extract its `id`. Returns
@@ -124,7 +129,7 @@ pub(crate) fn read_domain_def_id(domain_path: &Path) -> Result<Option<String>, D
 pub(crate) fn resolve_mxl_domain_id(
     property_id: &str,
     domain_path: &str,
-) -> Result<DomainIdResolution, DomainError> {
+) -> Result<DomainId, DomainError> {
     let domain_def_id = if !domain_path.is_empty() {
         read_domain_def_id(Path::new(domain_path))?
     } else {
@@ -132,28 +137,17 @@ pub(crate) fn resolve_mxl_domain_id(
     };
 
     match (property_id.is_empty(), domain_def_id) {
-        (true, Some(file_id)) => Ok(DomainIdResolution {
-            id: file_id,
-            origin: DomainIdOrigin::DomainDef,
-        }),
-        (false, Some(file_id)) if file_id == property_id => Ok(DomainIdResolution {
-            id: file_id,
-            origin: DomainIdOrigin::Both,
-        }),
+        (true, Some(file_id)) => Ok(DomainId::Concrete(file_id)),
+        (false, Some(file_id)) if file_id == property_id => Ok(DomainId::Concrete(file_id)),
         (false, Some(file_id)) => Err(DomainError::Mismatch {
             property: property_id.to_owned(),
             domain_def: file_id,
             path: Path::new(domain_path).join(DOMAIN_DEF_FILE_NAME),
             domain_def_file: DOMAIN_DEF_FILE_NAME,
         }),
-        (false, None) => Ok(DomainIdResolution {
-            id: property_id.to_owned(),
-            origin: DomainIdOrigin::Property,
-        }),
-        (true, None) => Ok(DomainIdResolution {
-            id: String::new(),
-            origin: DomainIdOrigin::None,
-        }),
+        (false, None) => Ok(DomainId::Concrete(property_id.to_owned())),
+        (true, None) if !domain_path.is_empty() => Ok(DomainId::ApplicationResolved),
+        (true, None) => Err(DomainError::Unconfigured),
     }
 }
 
@@ -177,33 +171,37 @@ mod tests {
 
     #[test]
     fn property_only_no_path() {
-        let r = resolve_mxl_domain_id(UUID_A, "").unwrap();
-        assert_eq!(r.id, UUID_A);
-        assert_eq!(r.origin, DomainIdOrigin::Property);
+        let id = resolve_mxl_domain_id(UUID_A, "").unwrap();
+        assert_eq!(id, DomainId::Concrete(UUID_A.to_owned()));
     }
 
     #[test]
     fn property_only_path_without_file() {
         let dir = tempfile::tempdir().unwrap();
-        let r = resolve_mxl_domain_id(UUID_A, dir.path().to_str().unwrap()).unwrap();
-        assert_eq!(r.id, UUID_A);
-        assert_eq!(r.origin, DomainIdOrigin::Property);
+        let id = resolve_mxl_domain_id(UUID_A, dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(id, DomainId::Concrete(UUID_A.to_owned()));
     }
 
     #[test]
     fn file_only() {
         let dir = temp_domain_with_file(&format!(r#"{{"id":"{UUID_A}"}}"#));
-        let r = resolve_mxl_domain_id("", dir.path().to_str().unwrap()).unwrap();
-        assert_eq!(r.id, UUID_A);
-        assert_eq!(r.origin, DomainIdOrigin::DomainDef);
+        let id = resolve_mxl_domain_id("", dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(id, DomainId::Concrete(UUID_A.to_owned()));
+    }
+
+    #[test]
+    fn path_without_property_or_domain_def_is_application_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = resolve_mxl_domain_id("", dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(id, DomainId::ApplicationResolved);
+        assert_eq!(id.tag_json(), serde_json::json!([""]));
     }
 
     #[test]
     fn both_agree() {
         let dir = temp_domain_with_file(&format!(r#"{{"id":"{UUID_A}"}}"#));
-        let r = resolve_mxl_domain_id(UUID_A, dir.path().to_str().unwrap()).unwrap();
-        assert_eq!(r.id, UUID_A);
-        assert_eq!(r.origin, DomainIdOrigin::Both);
+        let id = resolve_mxl_domain_id(UUID_A, dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(id, DomainId::Concrete(UUID_A.to_owned()));
     }
 
     #[test]
@@ -214,11 +212,9 @@ mod tests {
     }
 
     #[test]
-    fn neither_supplies_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let r = resolve_mxl_domain_id("", dir.path().to_str().unwrap()).unwrap();
-        assert!(r.id.is_empty());
-        assert_eq!(r.origin, DomainIdOrigin::None);
+    fn neither_property_nor_path_is_unconfigured() {
+        let err = resolve_mxl_domain_id("", "").unwrap_err();
+        assert!(matches!(err, DomainError::Unconfigured), "got: {err:?}");
     }
 
     #[test]

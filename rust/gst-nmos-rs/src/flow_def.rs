@@ -58,6 +58,7 @@ use gstreamer as gst;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::domain::DomainId;
 use crate::types::{CapsMode, FlowFormat};
 
 #[derive(Debug, Deserialize)]
@@ -134,8 +135,6 @@ pub(crate) enum FlowDefError {
     // without `map_err` between submodules.
     #[error("synthesising flow_def from caps requires a non-empty `sender-name` / `receiver-name`")]
     MissingName,
-    #[error("synthesising flow_def from caps requires a non-empty `mxl-domain-id`")]
-    MissingMxlDomainId,
     #[error("caps are empty or ANY; an essence shape is required to synthesise a flow_def")]
     EmptyCaps,
     #[error(
@@ -154,6 +153,8 @@ pub(crate) enum FlowDefError {
         field: &'static str,
         value: String,
     },
+    #[error("flow_def `urn:x-nvnmos:tag:mxl-domain-id` is invalid: {reason}")]
+    InvalidDomainIdTag { reason: String },
 }
 
 #[derive(Debug)]
@@ -203,6 +204,61 @@ pub(crate) fn read_flow_def_meta(text: &str) -> Result<FlowDefMeta, FlowDefError
 }
 
 const NAME_TAG: &str = "urn:x-nvnmos:tag:name";
+const MXL_DOMAIN_ID_TAG: &str = "urn:x-nvnmos:tag:mxl-domain-id";
+
+fn mxl_domain_id_from_tag_value(value: &serde_json::Value) -> Result<DomainId, FlowDefError> {
+    let Some(arr) = value.as_array() else {
+        return Err(FlowDefError::InvalidDomainIdTag {
+            reason: "tag value is not a JSON array".into(),
+        });
+    };
+    if arr.is_empty() {
+        return Ok(DomainId::ApplicationResolved);
+    }
+    let mut concrete = Vec::new();
+    for entry in arr {
+        let Some(s) = entry.as_str() else {
+            return Err(FlowDefError::InvalidDomainIdTag {
+                reason: "tag array entries must be strings".into(),
+            });
+        };
+        if s.is_empty() {
+            if !concrete.is_empty() {
+                return Err(FlowDefError::InvalidDomainIdTag {
+                    reason: "mixing an empty-string marker with UUID entries is not supported"
+                        .into(),
+                });
+            }
+            return Ok(DomainId::ApplicationResolved);
+        }
+        concrete.push(s.to_owned());
+    }
+    if concrete.len() != 1 {
+        return Err(FlowDefError::InvalidDomainIdTag {
+            reason: format!(
+                "expected one UUID or `[\"\"]`; got {} concrete entries",
+                concrete.len()
+            ),
+        });
+    }
+    Ok(DomainId::Concrete(concrete.remove(0)))
+}
+
+/// Read `tags["urn:x-nvnmos:tag:mxl-domain-id"]` from a configuring or
+/// activation flow_def. A missing tag or an empty array means
+/// application-resolved; `[""]` is the explicit marker for the same
+/// semantics.
+pub(crate) fn mxl_domain_id_from_transport(text: &str) -> Result<DomainId, FlowDefError> {
+    let raw: serde_json::Value =
+        serde_json::from_str(text).map_err(|source| FlowDefError::Parse { source })?;
+    let Some(tags) = raw.get("tags").and_then(|t| t.as_object()) else {
+        return Ok(DomainId::ApplicationResolved);
+    };
+    let Some(value) = tags.get(MXL_DOMAIN_ID_TAG) else {
+        return Ok(DomainId::ApplicationResolved);
+    };
+    mxl_domain_id_from_tag_value(value)
+}
 
 /// `tags["urn:x-nvnmos:tag:name"]` from configuring flow_def JSON.
 pub(crate) fn resource_name_from_transport(text: &str) -> Result<Option<String>, FlowDefError> {
@@ -306,7 +362,7 @@ pub(crate) struct FlowDefOverrides<'a> {
     /// `tags["urn:x-nmos:tag:grouphint/v1.0"]` (the NMOS group hint).
     pub(crate) group_hint: Option<&'a str>,
     /// `tags["urn:x-nvnmos:tag:mxl-domain-id"]`.
-    pub(crate) mxl_domain_id: Option<&'a str>,
+    pub(crate) mxl_domain_id: Option<&'a DomainId>,
     /// Presence of `tags["urn:x-nvnmos:tag:caps"]`. See [`CapsMode`].
     pub(crate) caps_mode: CapsMode,
 }
@@ -379,7 +435,7 @@ pub(crate) fn splice_overrides(
         if let Some(mxl_domain_id) = overrides.mxl_domain_id {
             tags.insert(
                 "urn:x-nvnmos:tag:mxl-domain-id".to_owned(),
-                serde_json::json!([mxl_domain_id]),
+                mxl_domain_id.tag_json(),
             );
         }
         match overrides.caps_mode {
@@ -428,11 +484,10 @@ pub(crate) struct FlowDefBuildInput<'a> {
     /// `urn:x-nvnmos:tag:name` tag (required by `libnvnmos`).
     /// Required non-empty.
     pub(crate) name: &'a str,
-    /// Resolved MXL Domain id (UUID). Emitted as
-    /// `urn:x-nvnmos:tag:mxl-domain-id` — required by `libnvnmos` to
-    /// resolve the IS-05 `mxl_domain_id` transport parameter at
-    /// activation time.
-    pub(crate) mxl_domain_id: &'a str,
+    /// Resolved MXL Domain id for
+    /// `urn:x-nvnmos:tag:mxl-domain-id` (concrete UUID or
+    /// application-resolved `[""]`).
+    pub(crate) mxl_domain_id: &'a DomainId,
     /// NMOS `label`. libnvnmos requires a non-empty `label` field in
     /// the configuring JSON; the builder falls back to `name` when
     /// this is empty.
@@ -461,9 +516,6 @@ pub(crate) struct FlowDefBuildInput<'a> {
 pub(crate) fn from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDefError> {
     if input.name.is_empty() {
         return Err(FlowDefError::MissingName);
-    }
-    if input.mxl_domain_id.is_empty() {
-        return Err(FlowDefError::MissingMxlDomainId);
     }
     let structure = input.caps.structure(0).ok_or(FlowDefError::EmptyCaps)?;
 
@@ -497,7 +549,7 @@ pub(crate) fn from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDef
         // the optional group hint is added below only when supplied.
         "tags": {
             "urn:x-nvnmos:tag:name": [input.name],
-            "urn:x-nvnmos:tag:mxl-domain-id": [input.mxl_domain_id],
+            "urn:x-nvnmos:tag:mxl-domain-id": input.mxl_domain_id.tag_json(),
         },
         "parents": [],
     });
@@ -987,7 +1039,7 @@ mod tests {
             &original,
             &FlowDefOverrides {
                 name: Some("new-name"),
-                mxl_domain_id: Some(DOMAIN_ID),
+                mxl_domain_id: Some(&DomainId::Concrete(DOMAIN_ID.to_owned())),
                 ..FlowDefOverrides::default()
             },
         )
@@ -1138,16 +1190,25 @@ mod tests {
 
     const DOMAIN_ID: &str = "1ac254d9-c9be-475a-93a7-f80b9c1063a8";
 
-    fn input<'a>(flow_id: &'a str, name: &'a str, caps: &'a gst::Caps) -> FlowDefBuildInput<'a> {
+    fn input<'a>(
+        flow_id: &'a str,
+        name: &'a str,
+        domain: &'a DomainId,
+        caps: &'a gst::Caps,
+    ) -> FlowDefBuildInput<'a> {
         FlowDefBuildInput {
             flow_id,
             name,
-            mxl_domain_id: DOMAIN_ID,
+            mxl_domain_id: domain,
             label: "",
             description: "",
             group_hint: "",
             caps,
         }
+    }
+
+    fn concrete_domain() -> DomainId {
+        DomainId::Concrete(DOMAIN_ID.to_owned())
     }
 
     fn parse(json: &str) -> serde_json::Value {
@@ -1158,7 +1219,7 @@ mod tests {
     fn build_video_v210_minimal() {
         let caps =
             caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
-        let json = from_caps(&input(UUID_A, "cam-1", &caps)).unwrap();
+        let json = from_caps(&input(UUID_A, "cam-1", &concrete_domain(), &caps)).unwrap();
         let v = parse(&json);
         assert_eq!(v["id"], UUID_A);
         assert_eq!(v["format"], "urn:x-nmos:format:video");
@@ -1214,7 +1275,7 @@ mod tests {
         let json = from_caps(&FlowDefBuildInput {
             label: "Studio A v210",
             description: "long description goes here",
-            ..input(UUID_A, "cam-1", &caps)
+            ..input(UUID_A, "cam-1", &concrete_domain(), &caps)
         })
         .unwrap();
         let v = parse(&json);
@@ -1230,7 +1291,7 @@ mod tests {
     fn build_audio_f32le_minimal() {
         let caps =
             caps_from_str("audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved");
-        let json = from_caps(&input(UUID_A, "mic-1", &caps)).unwrap();
+        let json = from_caps(&input(UUID_A, "mic-1", &concrete_domain(), &caps)).unwrap();
         let v = parse(&json);
         assert_eq!(v["format"], "urn:x-nmos:format:audio");
         assert_eq!(v["media_type"], "audio/float32");
@@ -1259,7 +1320,7 @@ mod tests {
         let caps = caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=25/1");
         let json = from_caps(&FlowDefBuildInput {
             group_hint: "SDI 1:Video",
-            ..input(UUID_A, "cam-1", &caps)
+            ..input(UUID_A, "cam-1", &concrete_domain(), &caps)
         })
         .unwrap();
         let v = parse(&json);
@@ -1292,7 +1353,7 @@ mod tests {
     #[test]
     fn build_data_st2038_with_framerate() {
         let caps = caps_from_str("meta/x-st-2038,framerate=30/1");
-        let json = from_caps(&input(UUID_A, "anc-1", &caps)).unwrap();
+        let json = from_caps(&input(UUID_A, "anc-1", &concrete_domain(), &caps)).unwrap();
         let v = parse(&json);
         assert_eq!(v["format"], "urn:x-nmos:format:data");
         assert_eq!(v["media_type"], "video/smpte291");
@@ -1307,7 +1368,7 @@ mod tests {
     #[test]
     fn build_data_st2038_without_framerate_is_hard_error() {
         let caps = caps_from_str("meta/x-st-2038");
-        let err = from_caps(&input(UUID_A, "anc-1", &caps)).unwrap_err();
+        let err = from_caps(&input(UUID_A, "anc-1", &concrete_domain(), &caps)).unwrap_err();
         let msg = err.to_string();
         assert!(matches!(
             err,
@@ -1326,7 +1387,8 @@ mod tests {
     fn omitted_flow_id_omits_top_level_id_for_registration() {
         let caps =
             caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
-        let json = from_caps(&input("", "cam-1", &caps)).expect("registration synthesis");
+        let json = from_caps(&input("", "cam-1", &concrete_domain(), &caps))
+            .expect("registration synthesis");
         let v = parse(&json);
         assert!(
             v.get("id").is_none(),
@@ -1339,22 +1401,46 @@ mod tests {
     fn missing_name_is_hard_error() {
         let caps =
             caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
-        let err = from_caps(&input(UUID_A, "", &caps)).unwrap_err();
+        let err = from_caps(&input(UUID_A, "", &concrete_domain(), &caps)).unwrap_err();
         assert!(matches!(err, FlowDefError::MissingName), "got: {err:?}");
     }
 
     #[test]
-    fn missing_mxl_domain_id_is_hard_error() {
+    fn application_resolved_domain_emits_empty_string_marker() {
         let caps =
             caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
-        let err = from_caps(&FlowDefBuildInput {
-            mxl_domain_id: "",
-            ..input(UUID_A, "cam-1", &caps)
-        })
-        .unwrap_err();
-        assert!(
-            matches!(err, FlowDefError::MissingMxlDomainId),
-            "got: {err:?}"
+        let domain = DomainId::ApplicationResolved;
+        let json = from_caps(&input(UUID_A, "cam-1", &domain, &caps)).unwrap();
+        let v = parse(&json);
+        assert_eq!(
+            v["tags"]["urn:x-nvnmos:tag:mxl-domain-id"],
+            serde_json::json!([""]),
+        );
+    }
+
+    #[test]
+    fn mxl_domain_id_from_transport_accepts_omit_empty_and_marker() {
+        let base =
+            r#"{"id":"00000000-0000-0000-0000-000000000001","format":"urn:x-nmos:format:video"}"#;
+        assert!(matches!(
+            mxl_domain_id_from_transport(base).unwrap(),
+            DomainId::ApplicationResolved
+        ));
+        let empty_tag = r#"{"tags":{"urn:x-nvnmos:tag:mxl-domain-id":[]}}"#;
+        assert!(matches!(
+            mxl_domain_id_from_transport(empty_tag).unwrap(),
+            DomainId::ApplicationResolved
+        ));
+        let marker = r#"{"tags":{"urn:x-nvnmos:tag:mxl-domain-id":[""]}}"#;
+        assert!(matches!(
+            mxl_domain_id_from_transport(marker).unwrap(),
+            DomainId::ApplicationResolved
+        ));
+        let concrete =
+            format!(r#"{{"tags":{{"urn:x-nvnmos:tag:mxl-domain-id":["{DOMAIN_ID}"]}}}}"#);
+        assert_eq!(
+            mxl_domain_id_from_transport(&concrete).unwrap(),
+            DomainId::Concrete(DOMAIN_ID.to_owned()),
         );
     }
 
@@ -1362,7 +1448,7 @@ mod tests {
     fn unsupported_video_format_is_hard_error() {
         let caps =
             caps_from_str("video/x-raw,format=I420,width=1920,height=1080,framerate=30000/1001");
-        let err = from_caps(&input(UUID_A, "cam-1", &caps)).unwrap_err();
+        let err = from_caps(&input(UUID_A, "cam-1", &concrete_domain(), &caps)).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1378,7 +1464,7 @@ mod tests {
     #[test]
     fn unsupported_caps_is_hard_error() {
         let caps = caps_from_str("application/x-rtp,media=video");
-        let err = from_caps(&input(UUID_A, "cam-1", &caps)).unwrap_err();
+        let err = from_caps(&input(UUID_A, "cam-1", &concrete_domain(), &caps)).unwrap_err();
         assert!(
             matches!(err, FlowDefError::UnsupportedCaps(_)),
             "got: {err:?}"
@@ -1388,7 +1474,7 @@ mod tests {
     #[test]
     fn missing_video_field_is_hard_error() {
         let caps = caps_from_str("video/x-raw,format=v210,width=1920,height=1080");
-        let err = from_caps(&input(UUID_A, "cam-1", &caps)).unwrap_err();
+        let err = from_caps(&input(UUID_A, "cam-1", &concrete_domain(), &caps)).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1405,7 +1491,7 @@ mod tests {
     fn build_then_parse_round_trips_through_read_flow_def_meta() {
         let caps =
             caps_from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001");
-        let json = from_caps(&input(UUID_B, "cam-1", &caps)).unwrap();
+        let json = from_caps(&input(UUID_B, "cam-1", &concrete_domain(), &caps)).unwrap();
         let meta = read_flow_def_meta(&json).unwrap();
         assert_eq!(meta.id, UUID_B);
         assert_eq!(meta.format, FlowFormat::Video);
@@ -1571,7 +1657,8 @@ mod tests {
             let original_caps = caps_from_str(
                 "video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001",
             );
-            let json = from_caps(&input(UUID_A, "cam-1", &original_caps)).unwrap();
+            let json =
+                from_caps(&input(UUID_A, "cam-1", &concrete_domain(), &original_caps)).unwrap();
             let derived = super::caps_from(&json).unwrap();
             // Both should agree on the structure name + the essence
             // fields the builder emits (framerate, width, height,
@@ -1587,7 +1674,8 @@ mod tests {
             init_gst();
             let original_caps =
                 caps_from_str("audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved");
-            let json = from_caps(&input(UUID_A, "mic-1", &original_caps)).unwrap();
+            let json =
+                from_caps(&input(UUID_A, "mic-1", &concrete_domain(), &original_caps)).unwrap();
             let derived = super::caps_from(&json).unwrap();
             assert!(
                 derived.can_intersect(&original_caps),
@@ -1599,7 +1687,8 @@ mod tests {
         fn round_trip_with_build_from_caps_data() {
             init_gst();
             let original_caps = caps_from_str("meta/x-st-2038,framerate=30/1");
-            let json = from_caps(&input(UUID_A, "anc-1", &original_caps)).unwrap();
+            let json =
+                from_caps(&input(UUID_A, "anc-1", &concrete_domain(), &original_caps)).unwrap();
             let derived = super::caps_from(&json).unwrap();
             assert!(
                 derived.can_intersect(&original_caps),

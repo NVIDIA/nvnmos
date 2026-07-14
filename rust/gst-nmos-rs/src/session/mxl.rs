@@ -3,7 +3,7 @@
 
 //! MXL transport session setup and activation.
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use gstreamer as gst;
 
 use super::types::Side;
@@ -11,7 +11,7 @@ use super::{
     ActivationAck, ActivationPlan, CommonSettings, FakeKind, InnerConfig, TransportConfig,
     caps_format,
 };
-use crate::domain::{self, DomainIdOrigin};
+use crate::domain::{self, DomainId};
 use crate::flow_def::{self, FlowDefBuildInput, FlowDefOverrides, ValueOrigin};
 use crate::types::FlowFormat;
 
@@ -29,7 +29,7 @@ pub(crate) fn synthesise_or_passthrough_mxl(
     cat: &gst::DebugCategory,
     element: &str,
     settings: &CommonSettings,
-    resolved_mxl_domain_id: &str,
+    domain_id: &DomainId,
     resolved: Option<String>,
 ) -> Result<Option<String>, anyhow::Error> {
     match (resolved, settings.caps.as_ref()) {
@@ -45,7 +45,7 @@ pub(crate) fn synthesise_or_passthrough_mxl(
             let json = flow_def::from_caps(&FlowDefBuildInput {
                 flow_id: &settings.mxl_flow_id,
                 name: &settings.name,
-                mxl_domain_id: resolved_mxl_domain_id,
+                mxl_domain_id: domain_id,
                 label: &settings.label,
                 description: &settings.description,
                 group_hint: &settings.group_hint,
@@ -80,23 +80,16 @@ pub(super) fn synthesise_deferred_sender_mxl(
     settings: &CommonSettings,
     fixated: &gst::Caps,
 ) -> Result<(String, InnerConfig), anyhow::Error> {
-    let domain_resolution =
+    let domain_id =
         domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path)
             .with_context(|| {
                 format!("{element}: resolving MXL Domain identity for deferred AddSender")
             })?;
-    if domain_resolution.id.is_empty() {
-        bail!(
-            "{element}: deferred AddSender: `mxl-domain-id` is required \
-             (set the property directly or supply an `mxl-domain-path` whose \
-             `domain_def.json` provides the id)"
-        );
-    }
 
     let json = flow_def::from_caps(&FlowDefBuildInput {
         flow_id: &settings.mxl_flow_id,
         name: &settings.name,
-        mxl_domain_id: &domain_resolution.id,
+        mxl_domain_id: &domain_id,
         label: &settings.label,
         description: &settings.description,
         group_hint: &settings.group_hint,
@@ -122,18 +115,23 @@ pub(super) fn synthesise_deferred_sender_mxl(
 
 pub(crate) fn property_overrides_mxl<'a>(
     settings: &'a CommonSettings,
-    resolved_mxl_domain_id: &'a str,
+    domain_id: &'a domain::DomainId,
 ) -> FlowDefOverrides<'a> {
     fn opt(s: &str) -> Option<&str> {
         if s.is_empty() { None } else { Some(s) }
     }
+    let mxl_domain_id = if settings.mxl_domain_id.is_empty() {
+        None
+    } else {
+        Some(domain_id)
+    };
     FlowDefOverrides {
         flow_id: opt(&settings.mxl_flow_id),
         name: opt(&settings.name),
         label: opt(&settings.label),
         description: opt(&settings.description),
         group_hint: opt(&settings.group_hint),
-        mxl_domain_id: opt(resolved_mxl_domain_id),
+        mxl_domain_id,
         caps_mode: settings.caps_mode,
     }
 }
@@ -204,40 +202,20 @@ pub(super) fn resolve_inner_config_mxl(
     settings: &CommonSettings,
     resolved_transport_file: Option<String>,
 ) -> Result<(InnerConfig, Option<String>), anyhow::Error> {
-    let domain_resolution =
+    let domain_id =
         domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path)
             .with_context(|| format!("{element}: resolving MXL Domain identity"))?;
-    if domain_resolution.id.is_empty() {
-        bail!(
-            "{element}: `mxl-domain-id` is required when transport=mxl \
-             (set the property directly or supply an `mxl-domain-path` whose `domain_def.json` provides the id)"
-        );
-    }
-    match domain_resolution.origin {
-        DomainIdOrigin::Property => gst::debug!(
+    match &domain_id {
+        domain::DomainId::Concrete(id) => gst::info!(cat, "resolved mxl-domain-id `{id}`"),
+        domain::DomainId::ApplicationResolved => gst::info!(
             cat,
-            "mxl-domain-id from property; no `domain_def.json` consulted",
+            "no concrete mxl-domain-id resolved (neither the property nor `domain_def.json` \
+             supplied one); the data plane uses `mxl-domain-path`",
         ),
-        DomainIdOrigin::DomainDef => gst::info!(
-            cat,
-            "mxl-domain-id taken from `domain_def.json` at `{}`",
-            settings.mxl_domain_path,
-        ),
-        DomainIdOrigin::Both => gst::debug!(
-            cat,
-            "mxl-domain-id cross-checked against `domain_def.json` at `{}`",
-            settings.mxl_domain_path,
-        ),
-        DomainIdOrigin::None => unreachable!("empty id rejected above"),
     }
 
-    let transport_file = synthesise_or_passthrough_mxl(
-        cat,
-        element,
-        settings,
-        &domain_resolution.id,
-        resolved_transport_file,
-    )?;
+    let transport_file =
+        synthesise_or_passthrough_mxl(cat, element, settings, &domain_id, resolved_transport_file)?;
 
     // Property-overrides-file: splice any user-set identity/cosmetic
     // properties (name, flow_id, mxl-domain-id, label, description,
@@ -247,16 +225,30 @@ pub(super) fn resolve_inner_config_mxl(
     // shape and a mismatch is a real error.
     let transport_file = match transport_file {
         Some(text) => Some(
-            flow_def::splice_overrides(
-                &text,
-                &property_overrides_mxl(settings, &domain_resolution.id),
-            )
-            .with_context(|| {
-                format!("{element}: splicing property overrides into transport file")
-            })?,
+            flow_def::splice_overrides(&text, &property_overrides_mxl(settings, &domain_id))
+                .with_context(|| {
+                    format!("{element}: splicing property overrides into transport file")
+                })?,
         ),
         None => None,
     };
+    if let Some(text) = transport_file.as_deref() {
+        match flow_def::mxl_domain_id_from_transport(text) {
+            Ok(domain::DomainId::Concrete(id)) => gst::info!(
+                cat,
+                "{element}: configuring transport file carries mxl-domain-id `{id}`",
+            ),
+            Ok(domain::DomainId::ApplicationResolved) => gst::info!(
+                cat,
+                "{element}: configuring transport file leaves mxl-domain-id application-resolved",
+            ),
+            Err(e) => gst::error!(
+                cat,
+                "{element}: configuring transport file has a malformed mxl-domain-id tag \
+                 ({e}); continuing, but activation will reject it",
+            ),
+        }
+    }
 
     let caps_format = caps_format(settings);
     let flow = flow_def::resolve_mxl_flow_meta(
@@ -301,54 +293,88 @@ pub(super) fn resolve_activation_inner_mxl(
     settings: &CommonSettings,
     transport_file: &str,
 ) -> Result<InnerConfig, Box<ActivationPlan>> {
-    let domain_resolution =
-        match domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path) {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(Box::new(ActivationPlan {
-                    inner: InnerConfig::Fake {
-                        kind: FakeKind::Misconfigured,
-                        detail: "mxl-domain-id resolution failed".into(),
-                    },
-                    ack: ActivationAck::Failure {
-                        reason: format!(
-                            "{element}: resolving MXL Domain identity for activation: {e:#}"
-                        ),
-                    },
-                }));
-            }
-        };
-    if domain_resolution.id.is_empty() {
+    // The data plane needs a local Domain path; without it this host
+    // can't bring up mxlsink/mxlsrc, so ack-fail rather than silently
+    // running a fake chain.
+    if settings.mxl_domain_path.is_empty() {
         return Err(Box::new(ActivationPlan {
             inner: InnerConfig::Fake {
                 kind: FakeKind::Misconfigured,
-                detail: "mxl-domain-id unresolved".into(),
+                detail: "`mxl-domain-path` unset".into(),
             },
             ack: ActivationAck::Failure {
                 reason: format!(
-                    "{element}: activation rejected — `mxl-domain-id` is not resolvable on this \
-                     host (neither the property nor `mxl-domain-path`/`domain_def.json` \
-                     supplied an id)",
+                    "{element}: activation rejected — `mxl-domain-path` is required to bring up \
+                     the MXL data plane on this host",
                 ),
             },
         }));
     }
-    match domain_resolution.origin {
-        DomainIdOrigin::Property | DomainIdOrigin::DomainDef | DomainIdOrigin::Both => gst::debug!(
-            cat,
-            "{element}: activation mxl-domain-id resolved (origin={:?})",
-            domain_resolution.origin,
-        ),
-        DomainIdOrigin::None => unreachable!("empty id handled above"),
+
+    // Read the Domain id the daemon put in the activation transport file.
+    let file_domain = match flow_def::mxl_domain_id_from_transport(transport_file) {
+        Ok(domain) => domain,
+        Err(e) => {
+            return Err(Box::new(ActivationPlan {
+                inner: InnerConfig::Fake {
+                    kind: FakeKind::Misconfigured,
+                    detail: "mxl-domain-id tag parse failed".into(),
+                },
+                ack: ActivationAck::Failure {
+                    reason: format!(
+                        "{element}: parsing MXL domain id from activation transport \
+                         file: {e}",
+                    ),
+                },
+            }));
+        }
+    };
+
+    // If both the activation file and this host's `domain_def.json`
+    // name a concrete Domain, they must agree — a mismatch means the
+    // activation targets a different Domain than this host serves.
+    if let DomainId::Concrete(file_id) = &file_domain {
+        if let Ok(Some(path_id)) =
+            domain::read_domain_def_id(std::path::Path::new(&settings.mxl_domain_path))
+        {
+            if path_id != *file_id {
+                return Err(Box::new(ActivationPlan {
+                    inner: InnerConfig::Fake {
+                        kind: FakeKind::Misconfigured,
+                        detail: "activation domain id disagrees with domain_def.json".into(),
+                    },
+                    ack: ActivationAck::Failure {
+                        reason: format!(
+                            "{element}: activation transport file advertises MXL domain id \
+                             `{file_id}`, but `domain_def.json` at `{}` declares `{path_id}`",
+                            settings.mxl_domain_path,
+                        ),
+                    },
+                }));
+            }
+        }
     }
 
-    // Activation: the daemon's transport file is authoritative. Pass
-    // an empty `property_id` so the file always wins silently (the
-    // element's `mxl-flow-id` property is just a NULL→READY default;
-    // an IS-05 PATCH legitimately replaces it). The `caps` format
-    // cross-check stays because a v210 video activation arriving at
-    // an `nmossrc` configured for audio is a real misconfiguration
-    // the element must ack-fail.
+    // Log which Domain the activation resolved to (diagnostic only).
+    match &file_domain {
+        DomainId::ApplicationResolved => gst::debug!(
+            cat,
+            "{element}: activation transport file leaves MXL domain application-resolved; \
+             using `mxl-domain-path` locally",
+        ),
+        DomainId::Concrete(id) => gst::debug!(
+            cat,
+            "{element}: activation transport file advertises MXL domain id `{id}`",
+        ),
+    }
+
+    // Resolve the flow id / format from the transport file, which is
+    // authoritative at activation. Pass an empty `property_id` so the
+    // file always wins silently (the element's `mxl-flow-id` property
+    // is just a NULL→READY default; an IS-05 PATCH legitimately
+    // replaces it). The `caps` format cross-check stays because a v210
+    // video activation arriving at an `nmossrc` configured for audio
+    // is a real misconfiguration the element must ack-fail.
     let flow =
         match flow_def::resolve_mxl_flow_meta("", caps_format(settings), Some(transport_file)) {
             Ok(r) => r,
@@ -368,6 +394,8 @@ pub(super) fn resolve_activation_inner_mxl(
             }
         };
 
+    // Build the real inner chain (or a fake one if the flow is still
+    // incomplete) from the activation-resolved flow.
     Ok(decide_inner_config_mxl(
         settings,
         &flow,
@@ -381,6 +409,15 @@ mod tests {
     use super::super::*;
     use super::*;
     use std::sync::Mutex;
+
+    fn concrete_domain() -> DomainId {
+        DomainId::Concrete(DOMAIN_ID.to_owned())
+    }
+
+    fn domain_id_for(settings: &CommonSettings) -> domain::DomainId {
+        domain::resolve_mxl_domain_id(&settings.mxl_domain_id, &settings.mxl_domain_path)
+            .expect("test settings must resolve MXL domain id")
+    }
 
     mod transport_config {
         use super::*;
@@ -414,7 +451,8 @@ mod tests {
             mxl_flow_id: FLOW_ID_B.to_owned(),
             ..settings(Side::Sender)
         };
-        let overrides = super::property_overrides_mxl(&s, DOMAIN_ID);
+        let domain_id = domain_id_for(&s);
+        let overrides = super::property_overrides_mxl(&s, &domain_id);
         let spliced = flow_def::splice_overrides(&video_flow_def(FLOW_ID_A), &overrides).unwrap();
         let v: serde_json::Value = serde_json::from_str(&spliced).unwrap();
         assert_eq!(v["id"], FLOW_ID_B);
@@ -613,14 +651,45 @@ mod tests {
         }
         match plan.ack {
             ActivationAck::Failure { reason } => assert!(
-                reason.contains("cannot bring up inner data path")
-                    && reason.contains("mxl-domain-path"),
+                reason.contains("mxl-domain-path") && reason.contains("activation rejected"),
                 "expected user-facing failure reason: {reason}",
             ),
             ActivationAck::Success => panic!(
                 "expected failure ack when activation can't be honoured locally; got Success",
             ),
         }
+    }
+
+    #[test]
+    fn application_resolved_activation_uses_domain_path() {
+        let s = CommonSettings {
+            mxl_domain_id: String::new(),
+            mxl_flow_id: FLOW_ID_A.to_owned(),
+            caps: Some(video_caps()),
+            ..settings(Side::Receiver)
+        };
+        let flow_def = format!(
+            r#"{{"id":"{FLOW_ID_A}","format":"urn:x-nmos:format:video","tags":{{"urn:x-nvnmos:tag:mxl-domain-id":[""]}}}}"#
+        );
+        let plan =
+            make_activation_plan(&cat(), "nmossrc", &s, &req(Side::Receiver, Some(&flow_def)));
+        match plan.inner {
+            InnerConfig::Real(TransportConfig::Mxl {
+                domain_path,
+                flow_id,
+                ..
+            }) => {
+                assert_eq!(domain_path, "/var/lib/mxl/domain-a");
+                assert_eq!(flow_id, FLOW_ID_A);
+            }
+            InnerConfig::Fake { kind, detail } => {
+                panic!(
+                    "expected Real(Mxl) for application-resolved domain, got Fake({kind}: {detail})"
+                )
+            }
+            other => panic!("unexpected inner config: {other:?}"),
+        }
+        assert!(matches!(plan.ack, ActivationAck::Success));
     }
 
     #[test]
@@ -639,11 +708,11 @@ mod tests {
         );
         match plan.ack {
             ActivationAck::Failure { reason } => assert!(
-                reason.contains("mxl-domain-id"),
-                "expected mxl-domain-id failure reason: {reason}",
+                reason.contains("mxl-domain-path"),
+                "expected mxl-domain-path failure reason: {reason}",
             ),
             ActivationAck::Success => {
-                panic!("expected failure ack when mxl-domain-id is unresolvable")
+                panic!("expected failure ack when mxl-domain-path is unset")
             }
         }
     }
@@ -734,17 +803,17 @@ mod tests {
         }
 
         #[test]
-        fn missing_domain_id_is_error() {
+        fn missing_domain_path_is_error() {
             let s = CommonSettings {
                 mxl_domain_id: String::new(),
                 mxl_domain_path: String::new(),
                 ..sender_settings()
             };
             let res = add_deferred_sender(&cat(), "nmossink", &s, &no_session(), good_caps());
-            let err = res.expect_err("missing mxl-domain-id must be rejected");
+            let err = res.expect_err("missing mxl-domain-path must be rejected");
             assert!(
-                format!("{err:#}").contains("mxl-domain-id"),
-                "expected mxl-domain-id reason: {err:#}"
+                format!("{err:#}").contains("mxl-domain-path"),
+                "expected mxl-domain-path reason: {err:#}"
             );
         }
 
@@ -758,7 +827,7 @@ mod tests {
             let json = flow_def::from_caps(&FlowDefBuildInput {
                 flow_id: &s.mxl_flow_id,
                 name: &s.name,
-                mxl_domain_id: DOMAIN_ID,
+                mxl_domain_id: &concrete_domain(),
                 label: &s.label,
                 description: &s.description,
                 group_hint: &s.group_hint,
@@ -813,6 +882,27 @@ mod tests {
             serde_json::from_str(json).expect("synthesised JSON must parse")
         }
 
+        /// Empty `mxl-domain-id` with only `mxl-domain-path` advertises
+        /// application-resolved domain (`[""]` tag) in the flow_def.
+        #[test]
+        fn application_resolved_domain_emits_empty_string_marker() {
+            let s = CommonSettings {
+                mxl_domain_id: String::new(),
+                mxl_flow_id: FLOW_ID_A.to_owned(),
+                caps: Some(video_caps()),
+                ..settings(Side::Receiver)
+            };
+            let domain = DomainId::ApplicationResolved;
+            let out = super::synthesise_or_passthrough_mxl(&cat(), "nmossrc", &s, &domain, None)
+                .expect("synthesis must succeed")
+                .expect("caps synthesis must yield json");
+            let v = parse(&out);
+            assert_eq!(
+                v["tags"]["urn:x-nvnmos:tag:mxl-domain-id"],
+                serde_json::json!([""])
+            );
+        }
+
         /// Caps + `mxl-flow-id` on a Receiver synthesises a configuring
         /// flow_def the daemon can use to advertise narrow Receiver
         /// Caps on IS-04. The synthesised shape matches what the
@@ -828,8 +918,14 @@ mod tests {
                 caps: Some(video_caps()),
                 ..settings(Side::Receiver)
             };
-            let out = super::synthesise_or_passthrough_mxl(&cat(), "nmossrc", &s, DOMAIN_ID, None)
-                .expect("synthesis must succeed");
+            let out = super::synthesise_or_passthrough_mxl(
+                &cat(),
+                "nmossrc",
+                &s,
+                &concrete_domain(),
+                None,
+            )
+            .expect("synthesis must succeed");
             let text =
                 out.expect("Receiver synthesis must yield Some(json) when caps + flow id are set");
             let v = parse(&text);
@@ -851,8 +947,14 @@ mod tests {
                 ..settings(Side::Receiver)
             };
             assert!(s.mxl_flow_id.is_empty(), "test precondition");
-            let out = super::synthesise_or_passthrough_mxl(&cat(), "nmossrc", &s, DOMAIN_ID, None)
-                .expect("absent flow id must not error");
+            let out = super::synthesise_or_passthrough_mxl(
+                &cat(),
+                "nmossrc",
+                &s,
+                &concrete_domain(),
+                None,
+            )
+            .expect("absent flow id must not error");
             let text = out.expect("Receiver without flow id must synthesise configuring flow_def");
             let v = parse(&text);
             assert!(v.get("id").is_none());
@@ -867,10 +969,15 @@ mod tests {
                 caps: Some(video_caps()),
                 ..settings(Side::Receiver)
             };
-            let synth =
-                super::synthesise_or_passthrough_mxl(&cat(), "nmossrc", &s, DOMAIN_ID, None)
-                    .expect("synthesis")
-                    .expect("some json");
+            let synth = super::synthesise_or_passthrough_mxl(
+                &cat(),
+                "nmossrc",
+                &s,
+                &concrete_domain(),
+                None,
+            )
+            .expect("synthesis")
+            .expect("some json");
             let flow =
                 flow_def::resolve_mxl_flow_meta("", FlowFormat::Video, Some(&synth)).unwrap();
             let inner = super::decide_inner_config_mxl(&s, &flow, Some(&synth));
@@ -890,8 +997,14 @@ mod tests {
                 caps: Some(video_caps()),
                 ..settings(Side::Sender)
             };
-            let out = super::synthesise_or_passthrough_mxl(&cat(), "nmossink", &s, DOMAIN_ID, None)
-                .expect("Sender synthesis must succeed");
+            let out = super::synthesise_or_passthrough_mxl(
+                &cat(),
+                "nmossink",
+                &s,
+                &concrete_domain(),
+                None,
+            )
+            .expect("Sender synthesis must succeed");
             let v = parse(&out.expect("Sender synthesis yields Some(json)"));
             assert_eq!(v["id"], FLOW_ID_A);
             assert_eq!(v["tags"]["urn:x-nvnmos:tag:name"][0], "video-sender");
@@ -912,7 +1025,7 @@ mod tests {
                 &cat(),
                 "nmossrc",
                 &s,
-                DOMAIN_ID,
+                &concrete_domain(),
                 resolved.clone(),
             )
             .expect("passthrough must succeed");
