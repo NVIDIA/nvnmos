@@ -47,6 +47,11 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$MXL_REPO/build/Linux-Clang-Debug/lib
 `transport={udp,udp2}` needs only the nvnmos build above plus system
 GStreamer plugins (gst-plugins-good; gst-plugins-rs for `udp2`).
 
+JPEG XS examples (`*-udp-jxsv.sh`) also need gst-plugins-rs `rsrtp`
+(`rtpjxsvpay` / `rtpjxsvdepay`) and a JPEG XS codec
+(`svtjpegxsenc` / `svtjpegxsdec` from gst-plugins-bad). JPEG XS
+is not supported on `transport=nvdsudp`.
+
 **Daemon** (terminal 1 — or use the demo script, which starts its own):
 
 ```sh
@@ -117,6 +122,7 @@ prefix. Example scripts and the interactive demo both source this file.
 | `DEMO_{MXL,UDP}_{VIDEO,AUDIO}_LABEL` | Primary essence name for NMOS `label=` (keep in sync with `*_CAPS`) |
 | `DEMO_{MXL,UDP}_{VIDEO,AUDIO}_CAPS_ALT` | Alternate essence (demo Node 4) |
 | `DEMO_{MXL,UDP}_{VIDEO,AUDIO}_LABEL_ALT` | Alternate essence name for NMOS `label=` (keep in sync with `*_CAPS_ALT`) |
+| `DEMO_UDP_VIDEO_JXSV_{CAPS,RAW_CAPS,BIT_RATE,LABEL}` | JPEG XS essence caps (`image/x-jxsc`), encoder input (`video/x-raw`), format bit rate (kbit/s), and NMOS `label=` |
 | `DEMO_UDP_AUDIO_TRANSPORT_CAPS_ALT` | Alt UDP audio `transport-caps` (`a-ptime=0.125` ms; demo Node 4) |
 | `DEMO_UDP_VIDEO_BUFFER_SIZE` | `udpsrc`/`udpsink` socket buffer (`udp`/`udp2` only) |
 | `DEMO_VIDEO_QUEUE_MAX_BUFFERS` | Queue after video `nmossrc` on receiver / flipper paths |
@@ -136,6 +142,7 @@ By default, essence formats are aligned across transports at
 | Flow | MXL caps | UDP caps |
 |------|----------|----------|
 | Video | `DEMO_MXL_VIDEO_CAPS` — 1080p25 `v210` | `DEMO_UDP_VIDEO_CAPS` — 1080p25 `UYVP` |
+| Video (JPEG XS) | — | `DEMO_UDP_VIDEO_JXSV_CAPS` — 1080p25 `image/x-jxsc` |
 | Audio | `DEMO_MXL_AUDIO_CAPS` — 2 ch `F32LE` | `DEMO_UDP_AUDIO_CAPS` — 2 ch `S24BE` |
 | Video (alt) | `DEMO_MXL_VIDEO_CAPS_ALT` — 1080p29.97 `v210` | `DEMO_UDP_VIDEO_CAPS_ALT` — 1080p29.97 `UYVP` |
 | Audio (alt) | `DEMO_MXL_AUDIO_CAPS_ALT` — 8 ch `F32LE` | `DEMO_UDP_AUDIO_CAPS_ALT` — 8 ch `S24BE`; `DEMO_UDP_AUDIO_TRANSPORT_CAPS_ALT` — `ptime=0.125` ms |
@@ -148,8 +155,8 @@ Alternate caps are used by demo **Node 4** for wide-receiver reroute tests
 
 | Scenario | MXL script | UDP script (`udp` / `udp2` / `nvdsudp`) | Demo script node |
 |----------|------------|-------------------------------------------|------------------|
-| 1080p25 sender | [`1080p25-sender-mxl.sh`](scripts/example-pipelines/1080p25-sender-mxl.sh) | [`1080p25-sender-udp.sh`](scripts/example-pipelines/1080p25-sender-udp.sh) | Node 1 video |
-| 1080p25 receiver | [`1080p25-receiver-mxl.sh`](scripts/example-pipelines/1080p25-receiver-mxl.sh) | [`1080p25-receiver-udp.sh`](scripts/example-pipelines/1080p25-receiver-udp.sh) | Node 2 video |
+| 1080p25 sender | [`1080p25-sender-mxl.sh`](scripts/example-pipelines/1080p25-sender-mxl.sh) | [`1080p25-sender-udp.sh`](scripts/example-pipelines/1080p25-sender-udp.sh) · [`1080p25-sender-udp-jxsv.sh`](scripts/example-pipelines/1080p25-sender-udp-jxsv.sh) | Node 1 video |
+| 1080p25 receiver | [`1080p25-receiver-mxl.sh`](scripts/example-pipelines/1080p25-receiver-mxl.sh) | [`1080p25-receiver-udp.sh`](scripts/example-pipelines/1080p25-receiver-udp.sh) · [`1080p25-receiver-udp-jxsv.sh`](scripts/example-pipelines/1080p25-receiver-udp-jxsv.sh) | Node 2 video |
 | Flip / process | [`1080p25-flipper-mxl.sh`](scripts/example-pipelines/1080p25-flipper-mxl.sh) | [`1080p25-flipper-udp.sh`](scripts/example-pipelines/1080p25-flipper-udp.sh) | Node 3 video |
 | Deferred sender | [`1080p25-deferred-sender-mxl.sh`](scripts/example-pipelines/1080p25-deferred-sender-mxl.sh) | [`1080p25-deferred-sender-udp.sh`](scripts/example-pipelines/1080p25-deferred-sender-udp.sh) | — |
 | Multi-flow sender | [`multi-flow-sender-mxl.sh`](scripts/example-pipelines/multi-flow-sender-mxl.sh) | [`multi-flow-sender-udp.sh`](scripts/example-pipelines/multi-flow-sender-udp.sh) | Node 1 (video + audio) |
@@ -157,12 +164,17 @@ Alternate caps are used by demo **Node 4** for wide-receiver reroute tests
 | Minimal receiver (properties) | [`minimal-prop-receiver-mxl.sh`](scripts/example-pipelines/minimal-prop-receiver-mxl.sh) | [`minimal-prop-receiver-udp.sh`](scripts/example-pipelines/minimal-prop-receiver-udp.sh) | — |
 | Minimal sender (transport file) | [`minimal-file-sender-mxl.sh`](scripts/example-pipelines/minimal-file-sender-mxl.sh) | [`minimal-file-sender-udp.sh`](scripts/example-pipelines/minimal-file-sender-udp.sh) | — |
 | Minimal receiver (transport file) | [`minimal-file-receiver-mxl.sh`](scripts/example-pipelines/minimal-file-receiver-mxl.sh) | [`minimal-file-receiver-udp.sh`](scripts/example-pipelines/minimal-file-receiver-udp.sh) | — |
+| Minimal sender (properties, JPEG XS) | — | [`minimal-prop-sender-udp-jxsv.sh`](scripts/example-pipelines/minimal-prop-sender-udp-jxsv.sh) | — |
+| Minimal receiver (properties, JPEG XS) | — | [`minimal-prop-receiver-udp-jxsv.sh`](scripts/example-pipelines/minimal-prop-receiver-udp-jxsv.sh) | — |
+| Minimal sender (transport file, JPEG XS) | — | [`minimal-file-sender-udp-jxsv.sh`](scripts/example-pipelines/minimal-file-sender-udp-jxsv.sh) | — |
+| Minimal receiver (transport file, JPEG XS) | — | [`minimal-file-receiver-udp-jxsv.sh`](scripts/example-pipelines/minimal-file-receiver-udp-jxsv.sh) | — |
 | Full lab + IS-05 | — | — | [`gst-nmos-rs-demo.sh`](scripts/gst-nmos-rs-demo.sh) |
 
 ### 1080p25 Sender
 
 [`1080p25-sender-mxl.sh`](scripts/example-pipelines/1080p25-sender-mxl.sh) ·
-[`1080p25-sender-udp.sh`](scripts/example-pipelines/1080p25-sender-udp.sh)
+[`1080p25-sender-udp.sh`](scripts/example-pipelines/1080p25-sender-udp.sh) ·
+[`1080p25-sender-udp-jxsv.sh`](scripts/example-pipelines/1080p25-sender-udp-jxsv.sh)
 
 **MXL** — caps + `mxl-flow-id` synthesis, eager activation:
 
@@ -190,6 +202,8 @@ gst-launch-1.0 -e \
 ```sh
 export DEMO_NIC_IP=203.0.113.1   # your high-bandwidth network interface
 ./scripts/example-pipelines/1080p25-sender-udp.sh
+# or
+./scripts/example-pipelines/1080p25-sender-udp-jxsv.sh
 ```
 
 Equivalent one-liner (`transport=udp2` also works):
@@ -209,7 +223,8 @@ gst-launch-1.0 -e \
 ### 1080p25 Receiver
 
 [`1080p25-receiver-mxl.sh`](scripts/example-pipelines/1080p25-receiver-mxl.sh) ·
-[`1080p25-receiver-udp.sh`](scripts/example-pipelines/1080p25-receiver-udp.sh)
+[`1080p25-receiver-udp.sh`](scripts/example-pipelines/1080p25-receiver-udp.sh) ·
+[`1080p25-receiver-udp-jxsv.sh`](scripts/example-pipelines/1080p25-receiver-udp-jxsv.sh)
 
 Start a matching sender first (same flow identity / multicast group).
 
@@ -223,6 +238,8 @@ Start a matching sender first (same flow identity / multicast group).
 
 ```sh
 ./scripts/example-pipelines/1080p25-receiver-udp.sh
+# or
+./scripts/example-pipelines/1080p25-receiver-udp-jxsv.sh
 ```
 
 Use `DEMO_VIDEO_SINK=fakesink` on headless hosts (element name only;
@@ -294,6 +311,11 @@ JSON; UDP synthesises configuring SDP).
 [`minimal-file-receiver-mxl.sh`](scripts/example-pipelines/minimal-file-receiver-mxl.sh) ·
 [`minimal-file-receiver-udp.sh`](scripts/example-pipelines/minimal-file-receiver-udp.sh)
 
+[`minimal-prop-sender-udp-jxsv.sh`](scripts/example-pipelines/minimal-prop-sender-udp-jxsv.sh) ·
+[`minimal-prop-receiver-udp-jxsv.sh`](scripts/example-pipelines/minimal-prop-receiver-udp-jxsv.sh) ·
+[`minimal-file-sender-udp-jxsv.sh`](scripts/example-pipelines/minimal-file-sender-udp-jxsv.sh) ·
+[`minimal-file-receiver-udp-jxsv.sh`](scripts/example-pipelines/minimal-file-receiver-udp-jxsv.sh)
+
 Smallest NULL→READY AddSender / AddReceiver paths with
 `auto-activate=false`. Resources register on IS-04 at READY; the controller
 PATCHes `/single/{senders,receivers}/{id}/staged` to bring the data path
@@ -315,10 +337,14 @@ plus `caps` (and `source-ip` / `interface-ip` for RTP/UDP, or
 ```sh
 ./scripts/example-pipelines/minimal-prop-sender-udp.sh
 ./scripts/example-pipelines/minimal-prop-receiver-udp.sh
+# or
+./scripts/example-pipelines/minimal-prop-sender-udp-jxsv.sh
+./scripts/example-pipelines/minimal-prop-receiver-udp-jxsv.sh
 ```
 
 **Transport-file-driven (`minimal-file-*`)** — configuring SDP / flow_def
-from [`fixtures/minimal-video.sdp.in`](scripts/example-pipelines/fixtures/minimal-video.sdp.in)
+from [`fixtures/minimal-video.sdp.in`](scripts/example-pipelines/fixtures/minimal-video.sdp.in),
+[`fixtures/minimal-video-jxsv.sdp.in`](scripts/example-pipelines/fixtures/minimal-video-jxsv.sdp.in),
 and
 [`fixtures/minimal-video.mxl.json.in`](scripts/example-pipelines/fixtures/minimal-video.mxl.json.in)
 via `transport-file-path`. Resource name comes from the file
@@ -342,6 +368,9 @@ addresses via IS-05 PATCH.
 ```sh
 ./scripts/example-pipelines/minimal-file-sender-udp.sh
 ./scripts/example-pipelines/minimal-file-receiver-udp.sh
+# or
+./scripts/example-pipelines/minimal-file-sender-udp-jxsv.sh
+./scripts/example-pipelines/minimal-file-receiver-udp-jxsv.sh
 ```
 
 ### Multi-Flow (Video + Audio on One Node)

@@ -140,7 +140,7 @@ pub(super) fn udp_eager_blocked(side: Side, inner: &InnerConfig) -> Option<&'sta
 /// sender AddSender.
 pub(super) fn sdp_build_input<'a>(
     settings: &'a CommonSettings,
-    essence_caps: &'a gst::Caps,
+    caps: &'a gst::Caps,
 ) -> sdp::SdpBuildInput<'a> {
     let destination_ip = match settings.side {
         Side::Sender => settings.destination_ip.as_str(),
@@ -151,7 +151,7 @@ pub(super) fn sdp_build_input<'a>(
         CapsMode::Wide => true,
     };
     sdp::SdpBuildInput {
-        essence_caps,
+        caps,
         transport_caps: settings.transport_caps.as_ref(),
         side: settings.side,
         name: &settings.name,
@@ -166,6 +166,8 @@ pub(super) fn sdp_build_input<'a>(
         advertise_caps,
         node_seed: &settings.node.node_seed,
         narrow_traffic_profile: settings.transport == Transport::NvDsUdp,
+        format_bit_rate: settings.format_bit_rate,
+        transport_bit_rate: settings.transport_bit_rate,
     }
 }
 
@@ -184,9 +186,9 @@ pub(super) fn synthesise_or_passthrough_udp(
             Ok(Some(text))
         }
         (Some(text), None) => Ok(Some(text)),
-        (None, Some(essence_caps)) => {
+        (None, Some(caps)) => {
             validate_rtp_configuring_minimum(element, settings)?;
-            let text = sdp::from_caps(&sdp_build_input(settings, essence_caps))
+            let text = sdp::from_caps(&sdp_build_input(settings, caps))
                 .with_context(|| format!("{element}: synthesising SDP from caps"))?;
             gst::info!(
                 cat,
@@ -228,10 +230,10 @@ fn gate_deferred_sender_udp(inner: InnerConfig, settings: &CommonSettings) -> In
 pub(super) fn synthesise_deferred_sender_udp(
     element: &str,
     settings: &CommonSettings,
-    essence_caps: &gst::Caps,
+    caps: &gst::Caps,
 ) -> Result<(String, InnerConfig), anyhow::Error> {
     validate_rtp_configuring_minimum(element, settings)?;
-    let text = sdp::from_caps(&sdp_build_input(settings, essence_caps))
+    let text = sdp::from_caps(&sdp_build_input(settings, caps))
         .map_err(anyhow::Error::from)
         .with_context(|| format!("{element}: synthesising SDP from peer caps"))?;
     let inner = match settings.transport {
@@ -321,6 +323,7 @@ pub(crate) fn property_overrides_udp(settings: &CommonSettings) -> SdpOverrides<
         a_ptime,
         a_maxptime,
         caps_mode: settings.caps_mode,
+        bit_rates: sdp::BitRates::UNSET,
     }
 }
 fn finish_udp_inner_config(
@@ -360,7 +363,7 @@ fn finish_udp_inner_config(
     // The SDP cannot carry caps features; re-attach any requested on
     // the `caps` property (e.g. `memory:NVMM`) so the inner element
     // (for example, nvdsudpsrc) sees them and negotiates accordingly.
-    media.raw_caps = crate::essence_caps::overlay_features(&media.raw_caps, settings.caps.as_ref());
+    media.caps = crate::essence_caps::overlay_features(&media.caps, settings.caps.as_ref());
     Ok(build_real(media))
 }
 
@@ -420,6 +423,28 @@ pub(crate) fn decide_inner_config_nvdsudp(
     )
 }
 
+fn passthrough_user_transport_file(
+    element: &str,
+    settings: &CommonSettings,
+    text: &str,
+    policy: DualLegPassthroughPolicy,
+) -> Result<String, anyhow::Error> {
+    let file = sdp::bit_rates_from_sdp_text(text)
+        .with_context(|| format!("{element}: parsing bit rates from transport-file SDP"))?;
+    let property = sdp::bit_rates_from_properties(settings.format_bit_rate, settings.transport_bit_rate);
+    sdp::cross_check_bit_rates(property, file)
+        .with_context(|| format!("{element}: cross-checking bit rates against transport-file"))?;
+
+    let mut overrides = property_overrides_udp(settings);
+    if property != sdp::BitRates::UNSET && file == sdp::BitRates::UNSET {
+        overrides.bit_rates = property;
+    }
+
+    sdp::passthrough_with_overrides(text, &overrides, policy).with_context(|| {
+        format!("{element}: applying property overrides to transport-file SDP")
+    })
+}
+
 pub(super) fn resolve_inner_config_nvdsudp(
     cat: &gst::DebugCategory,
     element: &str,
@@ -431,16 +456,12 @@ pub(super) fn resolve_inner_config_nvdsudp(
         synthesise_or_passthrough_udp(cat, element, settings, resolved_transport_file)?;
 
     let resolved_transport_file = match resolved_transport_file {
-        Some(text) if had_user_transport_file => Some(
-            sdp::passthrough_with_overrides(
-                &text,
-                &property_overrides_udp(settings),
-                DualLegPassthroughPolicy::AllowDualLeg,
-            )
-            .with_context(|| {
-                format!("{element}: applying property overrides to transport-file SDP")
-            })?,
-        ),
+        Some(text) if had_user_transport_file => Some(passthrough_user_transport_file(
+            element,
+            settings,
+            &text,
+            DualLegPassthroughPolicy::AllowDualLeg,
+        )?),
         other => other,
     };
     let inner = gate_deferred_sender_udp(
@@ -499,16 +520,12 @@ pub(super) fn resolve_inner_config_udp(
     // runs at startup only. Synthesised SDPs already bake every
     // property in via [`sdp::from_caps`]; skip the second pass.
     let resolved_transport_file = match resolved_transport_file {
-        Some(text) if had_user_transport_file => Some(
-            sdp::passthrough_with_overrides(
-                &text,
-                &property_overrides_udp(settings),
-                DualLegPassthroughPolicy::RejectDualLeg,
-            )
-            .with_context(|| {
-                format!("{element}: applying property overrides to transport-file SDP")
-            })?,
-        ),
+        Some(text) if had_user_transport_file => Some(passthrough_user_transport_file(
+            element,
+            settings,
+            &text,
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )?),
         other => other,
     };
     let inner = gate_deferred_sender_udp(
@@ -557,10 +574,11 @@ mod tests {
                 "application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,payload=96",
             )
             .expect("static rtp caps parse"),
-            raw_caps: gst::Caps::from_str(
+            caps: gst::Caps::from_str(
                 "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1",
             )
             .expect("static raw caps parse"),
+            bit_rates: sdp::BitRates::UNSET,
         }
     }
 
@@ -641,7 +659,7 @@ mod tests {
             assert_eq!(m.primary.source_port, Some(5004));
             assert!(m.secondary.is_none());
             assert!(!m.rtp_caps.is_empty());
-            assert!(!m.raw_caps.is_empty());
+            assert!(!m.caps.is_empty());
         }
 
         #[test]
@@ -1234,6 +1252,44 @@ mod tests {
                         }
                     }
                 }
+            }
+
+            const JXSV_MCAST_SDP: &str = concat!(
+                "v=0\r\n",
+                "o=- 1 0 IN IP4 192.0.2.10\r\n",
+                "s=test\r\n",
+                "t=0 0\r\n",
+                "m=video 5004 RTP/AVP 96\r\n",
+                "c=IN IP4 239.1.1.1/64\r\n",
+                "a=rtpmap:96 jxsv/90000\r\n",
+                "a=fmtp:96 packetmode=0; profile=High444.12; level=2k-1; sublevel=Sublev3bpp;",
+                " sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=25; depth=10\r\n",
+            );
+
+            /// JPEG XS configuring SDP: property overrides rewrite network
+            /// fields while fmtp profile / level / sublevel survive.
+            #[test]
+            fn receiver_passthrough_jxsv_preserves_fmtp_and_overrides_interface_ip() {
+                let settings = receiver_settings(true, true, false);
+                let spliced = splice(JXSV_MCAST_SDP, &settings);
+                assert_c_contains(&spliced, PROP_MCAST);
+                assert_iface_attr(&spliced, Some(PROP_IFACE));
+                assert!(
+                    spliced.contains("profile=High444.12"),
+                    "profile must survive passthrough:\n{spliced}",
+                );
+                assert!(
+                    spliced.contains("level=2k-1"),
+                    "level must survive passthrough:\n{spliced}",
+                );
+                assert!(
+                    spliced.contains("sublevel=Sublev3bpp"),
+                    "sublevel must survive passthrough:\n{spliced}",
+                );
+                assert!(
+                    spliced.contains("a=rtpmap:96 jxsv/90000"),
+                    "jxsv rtpmap must survive passthrough:\n{spliced}",
+                );
             }
         }
 
@@ -1877,7 +1933,7 @@ mod tests {
                 InnerConfig::Real(TransportConfig::Udp { media, .. }) => {
                     assert_eq!(
                         media
-                            .raw_caps
+                            .caps
                             .structure(0)
                             .and_then(|s| s.get::<i32>("channels").ok()),
                         Some(1),
@@ -2072,7 +2128,7 @@ mod tests {
                     | InnerConfig::Real(TransportConfig::Udp { media, .. }) => {
                         assert_eq!(media.format, FlowFormat::Data);
                         assert_eq!(
-                            media.raw_caps.structure(0).unwrap().name(),
+                            media.caps.structure(0).unwrap().name(),
                             "meta/x-st-2038",
                         );
                     }

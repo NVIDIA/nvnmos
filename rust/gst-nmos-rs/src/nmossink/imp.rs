@@ -85,6 +85,8 @@ struct Settings {
     /// file's `m=` port or
     /// [`crate::sdp::defaults::RTP_PORT`]).
     destination_port: u16,
+    format_bit_rate: u64,
+    transport_bit_rate: u64,
     auto_activate: bool,
     transport_properties: Option<gst::Structure>,
     pay_properties: Option<gst::Structure>,
@@ -116,6 +118,8 @@ impl Default for Settings {
             source_port: 0,
             destination_ip: String::new(),
             destination_port: 0,
+            format_bit_rate: 0,
+            transport_bit_rate: 0,
             auto_activate: false,
             transport_properties: None,
             pay_properties: None,
@@ -330,6 +334,18 @@ impl ObjectImpl for NmosSink {
                     .default_value(0)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecUInt64::builder("format-bit-rate")
+                    .nick("Format bit rate")
+                    .blurb(crate::session::FORMAT_BIT_RATE_BLURB)
+                    .default_value(0)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecUInt64::builder("transport-bit-rate")
+                    .nick("Transport bit rate")
+                    .blurb(crate::session::TRANSPORT_BIT_RATE_BLURB)
+                    .default_value(0)
+                    .mutable_ready()
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -423,6 +439,12 @@ impl ObjectImpl for NmosSink {
                 let v: u32 = value.get().expect("type checked upstream");
                 settings.destination_port = u16::try_from(v).expect("range checked by ParamSpec");
             }
+            "format-bit-rate" => {
+                settings.format_bit_rate = value.get().expect("type checked upstream");
+            }
+            "transport-bit-rate" => {
+                settings.transport_bit_rate = value.get().expect("type checked upstream");
+            }
             _ => unimplemented!("unknown property {}", pspec.name()),
         }
     }
@@ -456,6 +478,8 @@ impl ObjectImpl for NmosSink {
             "source-port" => u32::from(settings.source_port).to_value(),
             "destination-ip" => settings.destination_ip.to_value(),
             "destination-port" => u32::from(settings.destination_port).to_value(),
+            "format-bit-rate" => settings.format_bit_rate.to_value(),
+            "transport-bit-rate" => settings.transport_bit_rate.to_value(),
             _ => unimplemented!("unknown property {}", pspec.name()),
         }
     }
@@ -943,6 +967,15 @@ fn build_real_sink(
         }
         TransportConfig::Udp { variant, media, .. } => {
             let chain = inner::build_udpsink(media, *variant)?;
+            let property =
+                crate::sdp::bit_rates_from_properties(settings.format_bit_rate, settings.transport_bit_rate);
+            let bit_rates = crate::sdp::effective_bit_rates(property, media.bit_rates);
+            inner::apply_format_bit_rate_to_jxsv_payloader(
+                media,
+                &chain.pay,
+                bit_rates.format_bit_rate,
+                settings.pay_properties.as_ref(),
+            );
             inner::apply_udp_sink_inner_properties(
                 &CAT,
                 "nmossink",
@@ -1015,7 +1048,7 @@ fn intermediate_fake_sink_caps(
     match &plan.inner {
         InnerConfig::Real(TransportConfig::Udp { media, .. })
         | InnerConfig::Real(TransportConfig::NvDsUdp { media, .. }) => Ok(Some(
-            crate::essence_caps::caps_from(&media.raw_caps, Some(&media.rtp_caps)),
+            crate::essence_caps::caps_from(&media.caps, Some(&media.rtp_caps)),
         )),
         InnerConfig::Real(TransportConfig::Mxl { .. }) => fake_caps_from_settings(settings),
         _ => fake_caps_from_settings(settings),
@@ -1059,6 +1092,8 @@ impl From<Settings> for CommonSettings {
             source_port: s.source_port,
             destination_ip: s.destination_ip,
             destination_port: s.destination_port,
+            format_bit_rate: s.format_bit_rate,
+            transport_bit_rate: s.transport_bit_rate,
             // Receiver-only slots: empty/0 on the Sender side.
             // `nmossrc::From<Settings>` populates these instead.
             interface_ip: String::new(),

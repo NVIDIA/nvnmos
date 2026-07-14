@@ -12,7 +12,7 @@
 use gstreamer_sdp::{SDPAttribute, SDPMediaRef, SDPConnection, SDPMessage};
 
 use crate::iface;
-use crate::sdp::{self, defaults, SdpError, SdpOverrides};
+use crate::sdp::{self, defaults, BitRates, SdpError, SdpOverrides};
 use crate::types::CapsMode;
 
 /// Whether the configuring passthrough path may carry a dual-`m=` ST 2022-7 SDP.
@@ -83,6 +83,9 @@ pub(crate) fn apply_media_overrides_in_place(
     }
     if let Some(m) = msg.media_mut(0) {
         apply_primary_leg_transport_overrides(m, overrides)?;
+        if overrides.bit_rates != BitRates::UNSET {
+            sdp::apply_bit_rates_to_media(m, overrides.bit_rates);
+        }
     }
     Ok(())
 }

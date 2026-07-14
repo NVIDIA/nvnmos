@@ -115,20 +115,20 @@ fn video_pgroup(format: &str) -> Result<VideoPgroup, anyhow::Error> {
 /// audio) the hoisted `a-ptime` field on `application/x-rtp` caps.
 pub(crate) fn from_media(
     format: FlowFormat,
-    raw_caps: &gst::Caps,
+    caps: &gst::Caps,
     rtp_caps: &gst::Caps,
 ) -> Result<Packetization, anyhow::Error> {
     match format {
         FlowFormat::Video => {
-            let pkt = video_from_raw_caps(raw_caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD)?;
+            let pkt = video_from_caps(caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD)?;
             Ok(Packetization::Video(pkt))
         }
         FlowFormat::Audio => {
             let ptime_ns = ptime_ns_from_rtp_caps(rtp_caps)?;
-            let pkt = audio_from_raw_caps(raw_caps, ptime_ns)?;
+            let pkt = audio_from_caps(caps, ptime_ns)?;
             Ok(Packetization::Audio(pkt))
         }
-        FlowFormat::Data => anc_from_raw_caps(raw_caps),
+        FlowFormat::Data => anc_from_caps(caps),
         FlowFormat::Unspecified => {
             bail!("nvdsudp Mode 3 does not support unspecified essence format");
         }
@@ -144,8 +144,8 @@ pub(crate) fn from_media(
 /// chain is built. An absent alignment is fine —
 /// transport-file caps never carry the field (an explicit one can only appear
 /// when `caps` are applied directly rather than resynthesised).
-pub(crate) fn anc_from_raw_caps(raw_caps: &gst::Caps) -> Result<Packetization, anyhow::Error> {
-    let s = raw_caps
+pub(crate) fn anc_from_caps(caps: &gst::Caps) -> Result<Packetization, anyhow::Error> {
+    let s = caps
         .structure(0)
         .ok_or_else(|| anyhow::anyhow!("ANC raw caps empty"))?;
     if s.name() != "meta/x-st-2038" {
@@ -175,11 +175,11 @@ pub(crate) fn video_line_stride(width: u32, format: &str) -> Result<u32, anyhow:
 }
 
 /// Compute video packetization for a `video/x-raw` caps structure.
-pub(crate) fn video_from_raw_caps(
-    raw_caps: &gst::Caps,
+pub(crate) fn video_from_caps(
+    caps: &gst::Caps,
     max_rtp_payload: u32,
 ) -> Result<VideoPacketization, anyhow::Error> {
-    let s = raw_caps
+    let s = caps
         .structure(0)
         .ok_or_else(|| anyhow::anyhow!("raw video caps empty"))?;
     let format = s
@@ -276,14 +276,14 @@ fn audio_sample_bytes(format: &str) -> Result<u32, anyhow::Error> {
 }
 
 /// Compute audio packetization for an `audio/x-raw` caps structure.
-pub(crate) fn audio_from_raw_caps(
-    raw_caps: &gst::Caps,
+pub(crate) fn audio_from_caps(
+    caps: &gst::Caps,
     ptime_ns: u64,
 ) -> Result<AudioPacketization, anyhow::Error> {
     if ptime_ns == 0 {
         bail!("ptime_ns must be > 0");
     }
-    let s = raw_caps
+    let s = caps
         .structure(0)
         .ok_or_else(|| anyhow::anyhow!("raw audio caps empty"))?;
     let format = s
@@ -338,8 +338,8 @@ pub(crate) fn video_configured_stride(sink_payload_size: u32, packets_per_line: 
 }
 
 /// Target line stride from `video/x-raw` caps.
-pub(crate) fn video_target_stride(raw_caps: &gst::Caps) -> Result<u32, anyhow::Error> {
-    let s = raw_caps
+pub(crate) fn video_target_stride(caps: &gst::Caps) -> Result<u32, anyhow::Error> {
+    let s = caps
         .structure(0)
         .ok_or_else(|| anyhow::anyhow!("raw video caps empty"))?;
     let format = s
@@ -358,19 +358,19 @@ pub(crate) fn video_target_stride(raw_caps: &gst::Caps) -> Result<u32, anyhow::E
 /// (matches `nvds_nmos_bin::configure_nvdsudpsink_for_media_api`).
 pub(crate) fn reconcile_sink_video_packetization(
     sink: &gst::Element,
-    raw_caps: &gst::Caps,
+    caps: &gst::Caps,
     cat: &gst::DebugCategory,
     element: &str,
 ) -> Result<(), anyhow::Error> {
-    let calculated = video_from_raw_caps(raw_caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD)?;
-    let target_stride = video_target_stride(raw_caps)?;
+    let calculated = video_from_caps(caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD)?;
+    let target_stride = video_target_stride(caps)?;
     let user_payload: u32 = sink.property("payload-size");
     let user_ppl: u32 = sink.property("packets-per-line");
     let configured_stride = video_configured_stride(user_payload, user_ppl);
     if configured_stride == target_stride {
         return Ok(());
     }
-    let s = raw_caps.structure(0).ok_or_else(|| anyhow::anyhow!("raw caps empty"))?;
+    let s = caps.structure(0).ok_or_else(|| anyhow::anyhow!("raw caps empty"))?;
     let format = s.get::<&str>("format").unwrap_or("?");
     let width = s.get::<i32>("width").unwrap_or(0);
     gst::warning!(
@@ -401,7 +401,7 @@ mod tests {
             "video/x-raw,format=UYVP,width=1920,height=1080,framerate=60/1",
         )
         .unwrap();
-        let pkt = video_from_raw_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
+        let pkt = video_from_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
         assert_eq!(pkt.packets_per_line, 4);
         assert_eq!(pkt.src_payload_size, 1200);
         assert_eq!(pkt.sink_payload_size, 1220);
@@ -414,7 +414,7 @@ mod tests {
             "video/x-raw,format=UYVP,width=1280,height=720,framerate=60/1",
         )
         .unwrap();
-        let pkt = video_from_raw_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
+        let pkt = video_from_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
         assert_eq!(pkt.packets_per_line, 4);
         assert_eq!(pkt.src_payload_size, 800);
         assert_eq!(pkt.sink_payload_size, 820);
@@ -428,7 +428,7 @@ mod tests {
         )
         .unwrap();
         let target = video_target_stride(&caps).unwrap();
-        let calculated = video_from_raw_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
+        let calculated = video_from_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
         assert_eq!(
             video_configured_stride(calculated.sink_payload_size, calculated.packets_per_line),
             target,
@@ -444,7 +444,7 @@ mod tests {
             "video/x-raw,format=UYVP,width=3840,height=2160,framerate=60/1",
         )
         .unwrap();
-        let pkt = video_from_raw_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
+        let pkt = video_from_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
         assert_eq!(pkt.packets_per_line, 8);
         assert_eq!(pkt.src_payload_size, 1200);
         assert_eq!(pkt.sink_payload_size, 1220);
@@ -457,7 +457,7 @@ mod tests {
             "video/x-raw,format=UYVY,width=1920,height=1080,framerate=60/1",
         )
         .unwrap();
-        let pkt = video_from_raw_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
+        let pkt = video_from_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).unwrap();
         assert_eq!(pkt.packets_per_line, 3);
         assert_eq!(pkt.sink_payload_size, 1300);
         assert_eq!(pkt.src_payload_size, 1280);
@@ -470,7 +470,7 @@ mod tests {
             "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved",
         )
         .unwrap();
-        let pkt = audio_from_raw_caps(&caps, 1_000_000).unwrap();
+        let pkt = audio_from_caps(&caps, 1_000_000).unwrap();
         assert_eq!(pkt.src_payload_size, 288);
         assert_eq!(pkt.sink_payload_size, 300);
         assert_eq!(pkt.payload_multiple, 16);
@@ -483,7 +483,7 @@ mod tests {
             "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved",
         )
         .unwrap();
-        let pkt = audio_from_raw_caps(&caps, 6_000_000).unwrap();
+        let pkt = audio_from_caps(&caps, 6_000_000).unwrap();
         assert_eq!(pkt.payload_multiple, 3, "round(16 ms / 6 ms) = 3");
     }
 
@@ -495,7 +495,7 @@ mod tests {
         )
         .unwrap();
         let ptime_ns = parse_ptime_ms_as_ns("0.125").unwrap();
-        let pkt = audio_from_raw_caps(&caps, ptime_ns).unwrap();
+        let pkt = audio_from_caps(&caps, ptime_ns).unwrap();
         assert_eq!(pkt.src_payload_size, 36);
         assert_eq!(pkt.sink_payload_size, 48);
     }
@@ -536,6 +536,6 @@ mod tests {
             "video/x-raw,format=v210,width=1920,height=1080,framerate=60/1",
         )
         .unwrap();
-        assert!(video_from_raw_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).is_err());
+        assert!(video_from_caps(&caps, DEFAULT_MAX_VIDEO_RTP_PAYLOAD).is_err());
     }
 }

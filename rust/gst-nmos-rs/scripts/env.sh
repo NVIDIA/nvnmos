@@ -43,11 +43,16 @@ export DEMO_UDP_TRANSPORT=${DEMO_UDP_TRANSPORT:-udp}
 # Primary essence: 1080p25 10-bit 4:2:2 video + 2 ch @ 48 kHz audio.
 export DEMO_MXL_VIDEO_CAPS='video/x-raw,format=v210,width=1920,height=1080,framerate=25/1,interlace-mode=progressive'
 export DEMO_UDP_VIDEO_CAPS='video/x-raw,format=UYVP,width=1920,height=1080,framerate=25/1,interlace-mode=progressive'
+export DEMO_UDP_VIDEO_JXSV_RAW_CAPS='video/x-raw,format=I422_10LE,width=1920,height=1080,framerate=25/1,interlace-mode=progressive'
+export DEMO_UDP_VIDEO_JXSV_CAPS='image/x-jxsc,width=1920,height=1080,framerate=25/1,interlace-mode=progressive,sampling=YCbCr-4:2:2,depth=10,profile=High444.12,level=2k-1,sublevel=Sublev3bpp'
+# JPEG XS format bit rate (kbit/s); drives SDP b=AS:/fmtp and rtpjxsvpay ceiling.
+export DEMO_UDP_VIDEO_JXSV_BIT_RATE=110000
 export DEMO_MXL_AUDIO_CAPS='audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved'
 export DEMO_UDP_AUDIO_CAPS='audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved'
 # Truncated human-readable essence name for NMOS `label=` — keep in sync with *_CAPS.
 export DEMO_MXL_VIDEO_LABEL=${DEMO_MXL_VIDEO_LABEL:-1080p25 v210}
 export DEMO_UDP_VIDEO_LABEL=${DEMO_UDP_VIDEO_LABEL:-1080p25 UYVP}
+export DEMO_UDP_VIDEO_JXSV_LABEL=${DEMO_UDP_VIDEO_JXSV_LABEL:-1080p25 JPEG XS}
 export DEMO_MXL_AUDIO_LABEL=${DEMO_MXL_AUDIO_LABEL:-48 kHz F32LE 2ch}
 export DEMO_UDP_AUDIO_LABEL=${DEMO_UDP_AUDIO_LABEL:-48 kHz S24BE 2ch}
 

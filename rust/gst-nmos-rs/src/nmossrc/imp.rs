@@ -89,6 +89,8 @@ struct Settings {
     /// slot). 0 = unset (falls back to the transport file's `m=`
     /// port or [`crate::sdp::defaults::RTP_PORT`]).
     destination_port: u16,
+    format_bit_rate: u64,
+    transport_bit_rate: u64,
     auto_activate: bool,
     transport_properties: Option<gst::Structure>,
     depay_properties: Option<gst::Structure>,
@@ -121,6 +123,8 @@ impl Default for Settings {
             interface_ip: String::new(),
             multicast_ip: String::new(),
             destination_port: 0,
+            format_bit_rate: 0,
+            transport_bit_rate: 0,
             auto_activate: false,
             transport_properties: None,
             depay_properties: None,
@@ -334,6 +338,16 @@ impl ObjectImpl for NmosSrc {
                     .maximum(65535)
                     .default_value(0)
                     .build(),
+                glib::ParamSpecUInt64::builder("format-bit-rate")
+                    .nick("Format bit rate")
+                    .blurb(crate::session::FORMAT_BIT_RATE_BLURB)
+                    .default_value(0)
+                    .build(),
+                glib::ParamSpecUInt64::builder("transport-bit-rate")
+                    .nick("Transport bit rate")
+                    .blurb(crate::session::TRANSPORT_BIT_RATE_BLURB)
+                    .default_value(0)
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -428,6 +442,12 @@ impl ObjectImpl for NmosSrc {
                 let v: u32 = value.get().expect("type checked upstream");
                 settings.destination_port = u16::try_from(v).expect("range checked by ParamSpec");
             }
+            "format-bit-rate" => {
+                settings.format_bit_rate = value.get().expect("type checked upstream");
+            }
+            "transport-bit-rate" => {
+                settings.transport_bit_rate = value.get().expect("type checked upstream");
+            }
             _ => unimplemented!("unknown property {}", pspec.name()),
         }
     }
@@ -462,6 +482,8 @@ impl ObjectImpl for NmosSrc {
             "interface-ip" => settings.interface_ip.to_value(),
             "multicast-ip" => settings.multicast_ip.to_value(),
             "destination-port" => u32::from(settings.destination_port).to_value(),
+            "format-bit-rate" => settings.format_bit_rate.to_value(),
+            "transport-bit-rate" => settings.transport_bit_rate.to_value(),
             _ => unimplemented!("unknown property {}", pspec.name()),
         }
     }
@@ -1016,7 +1038,7 @@ fn intermediate_fake_src_caps(
         }) => Ok(udp_capssetter_caps(transport_file.as_deref(), media)),
         InnerConfig::Real(TransportConfig::NvDsUdp { media, .. }) => {
             // No capssetter hop on nvdsudp — essence caps are set on nvdsudpsrc.
-            Ok(Some(media.raw_caps.clone()))
+            Ok(Some(media.caps.clone()))
         }
         _ => fake_caps_from_settings(snapshot),
     }
@@ -1077,7 +1099,7 @@ fn udp_capssetter_caps(
         );
         return None;
     }
-    Some(media.raw_caps.clone())
+    Some(media.caps.clone())
 }
 
 /// Best-available caps for the bin's fake chain, resolved from
@@ -1142,6 +1164,8 @@ impl From<Settings> for CommonSettings {
             interface_ip: s.interface_ip,
             multicast_ip: s.multicast_ip,
             destination_port: s.destination_port,
+            format_bit_rate: s.format_bit_rate,
+            transport_bit_rate: s.transport_bit_rate,
             // Sender-only slots: empty/0 on the Receiver side.
             // `nmossink::From<Settings>` populates these instead.
             source_port: 0,
