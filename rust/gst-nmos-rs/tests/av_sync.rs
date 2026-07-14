@@ -467,7 +467,9 @@ fn pull_video(sink: &gst_app::AppSink) -> Vec<VideoFrame> {
         let anc = gstavsynctest::analyze::ancillary_indices(buffer, gstavsynctest::signal::ANC_DID);
         let captions = gstavsynctest::analyze::caption_cdps(buffer)
             .iter()
-            .filter_map(|cdp| gstavsynctest::analyze::decode_caption(&mut parser, cdp))
+            .filter_map(|cdp| {
+                gstavsynctest::analyze::decode_caption(&mut parser, cdp).expect("valid CDP")
+            })
             .collect();
         seen_last = idx == last;
         out.push(VideoFrame {

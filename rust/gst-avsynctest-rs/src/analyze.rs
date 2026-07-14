@@ -58,12 +58,13 @@ pub fn f32le_samples(bytes: &[u8]) -> &[f32] {
 /// energy-weighted centroid is skewed by how the burst's samples fall across the
 /// bin edges.
 pub fn detect_pips(audio: &[(u64, f32)]) -> Vec<u64> {
-    if audio.is_empty() {
+    let Some(&(t0, _)) = audio.first() else {
         return Vec::new();
-    }
+    };
+    let Some(&(tn, _)) = audio.last() else {
+        return Vec::new();
+    };
     const BIN_NS: u64 = 5_000_000;
-    let t0 = audio.first().unwrap().0;
-    let tn = audio.last().unwrap().0;
     let nbins = ((tn - t0) / BIN_NS + 1) as usize;
     let mut energy = vec![0.0f64; nbins];
     for &(t, a) in audio {
@@ -129,15 +130,21 @@ pub fn caption_cdp_bytes(buffer: &gst::BufferRef) -> Option<Vec<u8>> {
 }
 
 /// The caption text carried by one frame's CDP (service
-/// [`CC_SERVICE_NO`](captions::CC_SERVICE_NO)), or `None` for a null CDP.
-pub fn decode_caption(parser: &mut CDPParser, cdp: &[u8]) -> Option<String> {
-    parser.parse(cdp).expect("valid CDP");
-    let packet = parser.pop_packet()?;
+/// [`CC_SERVICE_NO`](captions::CC_SERVICE_NO)), or `Ok(None)` for a null CDP
+/// (a valid CDP that carries no caption). `Err` if the CDP fails to parse.
+pub fn decode_caption(
+    parser: &mut CDPParser,
+    cdp: &[u8],
+) -> Result<Option<String>, cdp_types::ParserError> {
+    parser.parse(cdp)?;
+    let Some(packet) = parser.pop_packet() else {
+        return Ok(None);
+    };
     let mut text = String::new();
     for service in packet.services() {
         if service.number() == captions::CC_SERVICE_NO {
             text.extend(service.codes().iter().filter_map(|code| code.char()));
         }
     }
-    (!text.is_empty()).then_some(text)
+    Ok((!text.is_empty()).then_some(text))
 }
