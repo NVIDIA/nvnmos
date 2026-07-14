@@ -60,7 +60,7 @@
 //! `a=ptime:` / `a=maxptime:` are surfaced on the RTP caps as
 //! `a-ptime` / `a-maxptime` so that `set_media_from_caps`
 //! round-trips them as standalone `a=…:` lines on build — see
-//! [`raw_caps_from_rtp_audio`] for the reasoning.
+//! [`caps_from_rtp_audio`] for the reasoning.
 
 
 use std::collections::hash_map::DefaultHasher;
@@ -113,7 +113,7 @@ use crate::types::{CapsMode, FlowFormat};
 /// `destination_ip` → [`UNSPECIFIED_ADDRESS`](self::defaults::UNSPECIFIED_ADDRESS)
 /// on the `c=` line), [`UNSPECIFIED_ADDRESS`] by [`from_caps`]'s
 /// `o=` fallback, and the video / ANC constants by
-/// [`rtp_caps_from_raw_video`] / [`rtp_caps_from_raw_data`].
+/// [`rtp_caps_from_video`] / [`rtp_caps_from_data`].
 pub(crate) mod defaults {
     /// Default RTP payload type for `video/x-raw` (RFC 4175,
     /// ST 2110-20). Matches the nmos-cpp default.
@@ -196,7 +196,7 @@ pub(crate) mod defaults {
 
     // ST 2110-21 §8.1 `TP=` (video traffic profile) is intentionally omitted
     // from caps-only **video** synthesis for now — see
-    // [`rtp_caps_from_raw_video`]. Without `TP=2110TPW` or `TP=2110TPN`
+    // [`rtp_caps_from_video`]. Without `TP=2110TPW` or `TP=2110TPN`
     // the ST 2110-20 video fmtp is not strictly valid per ST 2110-21.
     // We might want to pick the value based on the transport family
     // (e.g. `2110TPW` for `udp` / `udp2`, `2110TPN` for `nvdsudp`) per the
@@ -379,7 +379,7 @@ pub(crate) struct SdpSession<'a> {
     /// format-derived capability constraints omitted, so any
     /// compatible Sender of the same media type can connect);
     /// `false` advertises *narrow* caps (capability constraints
-    /// derived from `media.raw_caps` / `media.rtp_caps`).
+    /// derived from `media.caps` / `media.rtp_caps`).
     ///
     /// Semantics match [`crate::flow_def::FlowDefMeta::caps`] on
     /// the MXL path. The SDP form is canonical per
@@ -623,7 +623,7 @@ pub(crate) fn indicates_wide_receiver_caps(text: &str) -> bool {
 struct ParsedMediaEssence {
     format: FlowFormat,
     rtp_caps: gst::Caps,
-    raw_caps: gst::Caps,
+    caps: gst::Caps,
     bit_rates: BitRates,
 }
 
@@ -720,25 +720,25 @@ fn parse_media_essence(msg: &SDPMessage, media: &SDPMediaRef) -> Result<ParsedMe
         }
     };
 
-    let raw_caps = match format {
+    let parsed_caps = match format {
         // RFC 9134 / ST 2110-22 JPEG XS rides `m=video` with
         // encoding-name `jxsv`; plain RFC 4175 video is `raw`.
         FlowFormat::Video if encoding_name.eq_ignore_ascii_case("jxsv") => {
-            raw_caps_from_rtp_video_jxsv(&rtp_caps)?
+            caps_from_rtp_video_jxsv(&rtp_caps)?
         }
-        FlowFormat::Video => raw_caps_from_rtp_video(&rtp_caps)?,
-        FlowFormat::Audio => raw_caps_from_rtp_audio(&rtp_caps)?,
-        FlowFormat::Data => raw_caps_from_rtp_data(&rtp_caps)?,
+        FlowFormat::Video => caps_from_rtp_video(&rtp_caps)?,
+        FlowFormat::Audio => caps_from_rtp_audio(&rtp_caps)?,
+        FlowFormat::Data => caps_from_rtp_data(&rtp_caps)?,
         FlowFormat::Unspecified => unreachable!(
             "format dispatch above never produces FlowFormat::Unspecified"
         ),
     };
-    let raw_caps = crate::essence_caps::caps_from(&raw_caps, Some(&rtp_caps));
+    let caps = crate::essence_caps::caps_from(&parsed_caps, Some(&rtp_caps));
 
     Ok(ParsedMediaEssence {
         format,
         rtp_caps,
-        raw_caps,
+        caps,
         bit_rates: bit_rates_from_media(media),
     })
 }
@@ -786,7 +786,7 @@ fn dual_leg_essence_equivalent(a: &ParsedMediaEssence, b: &ParsedMediaEssence) -
     if !rtp_match {
         return false;
     }
-    !a.raw_caps.intersect(&b.raw_caps).is_empty()
+    !a.caps.intersect(&b.caps).is_empty()
 }
 
 /// Map **active** legs (in SDP order) onto [`UdpMedia::primary`] /
@@ -813,7 +813,7 @@ fn active_legs_to_udp_media(
         primary,
         secondary,
         rtp_caps: essence.rtp_caps,
-        raw_caps: essence.raw_caps,
+        caps: essence.caps,
         bit_rates: essence.bit_rates,
     }
 }
@@ -844,7 +844,7 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
             primary: leg,
             secondary: None,
             rtp_caps: essence.rtp_caps,
-            raw_caps: essence.raw_caps,
+            caps: essence.caps,
             bit_rates: essence.bit_rates,
         });
     }
@@ -1449,7 +1449,7 @@ pub(crate) use crate::sdp_passthrough::{
 /// [`SdpError::TransportCapsMismatch`].
 ///
 /// Essence-caps cross-check intersects `caps` against
-/// `media.raw_caps`; an empty intersection is
+/// `media.caps`; an empty intersection is
 /// [`SdpError::EssenceShapeMismatch`]. Format-family mismatches
 /// (e.g. audio caps + video SDP) surface as
 /// [`SdpError::FormatMismatch`] before the shape intersect runs
@@ -1526,11 +1526,11 @@ fn cross_check_essence_caps(media: &UdpMedia, caps: &gst::Caps) -> Result<(), Sd
     // a shape mismatch. It is re-attached onto the inner-chain essence caps
     // separately (see `essence_caps::overlay_features`).
     let stripped = crate::essence_caps::without_features(caps);
-    let intersect = stripped.intersect(&media.raw_caps);
+    let intersect = stripped.intersect(&media.caps);
     if intersect.is_empty() {
         return Err(SdpError::EssenceShapeMismatch {
             caps: caps.to_string(),
-            sdp: media.raw_caps.to_string(),
+            sdp: media.caps.to_string(),
         });
     }
     Ok(())
@@ -1594,13 +1594,13 @@ pub(crate) struct SdpBuildInput<'a> {
     /// Essence caps (`video/x-raw,…` / `audio/x-raw,…` /
     /// `meta/x-st-2038,…`). Drives essence-shape fmtp fields and
     /// the `format` field of the returned [`UdpMedia`].
-    pub essence_caps: &'a gst::Caps,
+    pub caps: &'a gst::Caps,
     /// Optional `application/x-rtp,…` caps supplying the
     /// override-class fields (`payload`, audio `clock-rate`,
     /// `a-ptime`, `a-maxptime`). Cross-check-class fields the
     /// caps may also carry (`encoding-name`, video / ANC
     /// `clock-rate`) are ignored on the synthesis side — they're
-    /// derived from `essence_caps` instead.
+    /// derived from `caps` instead.
     pub transport_caps: Option<&'a gst::Caps>,
     /// Sender or Receiver — drives the per-side dispatch on
     /// `source_ip` / `interface_ip` into the produced
@@ -1666,8 +1666,8 @@ pub(crate) struct SdpBuildInput<'a> {
 ///
 /// Sequence:
 ///
-/// 1. Dispatch on `essence_caps`'s structure name to a
-///    [`FlowFormat`] and the matching `rtp_caps_from_raw_*`
+/// 1. Dispatch on `caps`'s structure name to a
+///    [`FlowFormat`] and the matching `rtp_caps_from_*`
 ///    primitive.
 /// 2. Resolve override-class RTP parameters from
 ///    `transport_caps` falling back to [`defaults`]: payload
@@ -1680,13 +1680,13 @@ pub(crate) struct SdpBuildInput<'a> {
 ///    `source_ip` → `o=` `<unicast-address>`).
 /// 4. Serialise via [`build_sdp`].
 ///
-/// Returns [`SdpError::UnsupportedEssence`] when `essence_caps`
+/// Returns [`SdpError::UnsupportedEssence`] when `caps`
 /// is not one of the recognised essence shapes, or
 /// [`SdpError::InvalidPayloadType`] when `transport_caps` carries
 /// a payload-type outside RFC 3551's dynamic range.
 pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
-    let format = essence_caps_format(input.essence_caps).ok_or_else(|| {
-        SdpError::UnsupportedEssence(format!("essence caps `{}`", input.essence_caps))
+    let format = essence_caps_format(input.caps).ok_or_else(|| {
+        SdpError::UnsupportedEssence(format!("essence caps `{}`", input.caps))
     })?;
 
     let payload_type = resolve_payload_type(format, input.transport_caps)?;
@@ -1696,18 +1696,18 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
             // JPEG XS essence (`image/x-jxsc` bare codestream or
             // `video/x-jxsv` picture segment) vs RFC 4175 raw video.
             let is_jxsv = input
-                .essence_caps
+                .caps
                 .structure(0)
                 .is_some_and(|s| matches!(s.name().as_str(), "image/x-jxsc" | "video/x-jxsv"));
             if is_jxsv {
-                rtp_caps_from_raw_video_jxsv(
-                    input.essence_caps,
+                rtp_caps_from_video_jxsv(
+                    input.caps,
                     payload_type,
                     input.narrow_traffic_profile,
                 )?
             } else {
-                rtp_caps_from_raw_video(
-                    input.essence_caps,
+                rtp_caps_from_video(
+                    input.caps,
                     payload_type,
                     input.narrow_traffic_profile,
                 )?
@@ -1715,12 +1715,12 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
         }
         FlowFormat::Audio => {
             let (ptime_ns, maxptime_ns) = resolve_audio_ptime(input.transport_caps);
-            let resolved = resolved_audio_caps(input.essence_caps, input.transport_caps)?;
+            let resolved = resolved_audio_caps(input.caps, input.transport_caps)?;
             let channel_order = input
                 .transport_caps
                 .and_then(|c| c.structure(0))
                 .and_then(crate::essence_caps::channel_order_from_rtp_structure);
-            rtp_caps_from_raw_audio(
+            rtp_caps_from_audio(
                 &resolved,
                 payload_type,
                 ptime_ns,
@@ -1728,13 +1728,13 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
                 channel_order.as_deref(),
             )?
         }
-        FlowFormat::Data => rtp_caps_from_raw_data(input.essence_caps, payload_type)?,
+        FlowFormat::Data => rtp_caps_from_data(input.caps, payload_type)?,
         FlowFormat::Unspecified => {
             unreachable!("essence_caps_format never returns Unspecified")
         }
     };
 
-    let raw_caps = crate::essence_caps::caps_from(input.essence_caps, Some(&rtp_caps));
+    let caps = crate::essence_caps::caps_from(input.caps, Some(&rtp_caps));
     let bit_rates = bit_rates_from_properties(input.format_bit_rate, input.transport_bit_rate);
 
     let media = UdpMedia {
@@ -1742,7 +1742,7 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
         primary: udp_leg_from_input(input),
         secondary: None,
         rtp_caps,
-        raw_caps,
+        caps,
         bit_rates,
     };
 
@@ -1894,7 +1894,7 @@ fn parse_ptime_ms_as_ns(value: &str) -> Option<u64> {
 /// cross-check) — the synthesised SDP advertises the overridden
 /// rate via `a=rtpmap:<pt> L24/<rate>/<n>` even when it differs
 /// from `essence_caps`'s `rate`. The rest of the synthesis chain
-/// (especially [`rtp_caps_from_raw_audio`]) sees the overridden
+/// (especially [`rtp_caps_from_audio`]) sees the overridden
 /// rate on `essence_caps` and emits matching `clock-rate=` /
 /// `rate=` on the produced caps.
 fn resolved_audio_caps(
@@ -2057,7 +2057,7 @@ fn extract_source_ip_from_filter(value: &str) -> Option<String> {
 /// Note that the returned preset always implies the standard
 /// narrow range (`16_235`) of its colorimetry tuple. ST 2110-21
 /// `RANGE=FULL` / `FULLPROTECT` is **not** propagated; see
-/// `raw_caps_from_rtp_video`'s docstring for the rationale (V2
+/// `caps_from_rtp_video`'s docstring for the rationale (V2
 /// doesn't read `RANGE` either, so plumbing it asymmetrically
 /// via the V1 capssetter would diverge V1/V2 output).
 fn caps_colorimetry_from_sdp(sdp: &str, depth: u32, tcs: Option<&str>) -> Option<&'static str> {
@@ -2159,7 +2159,7 @@ fn sdp_colorimetry_from_caps(caps_colorimetry: &str) -> Option<(&'static str, Op
 ///     standard preset's *narrow* range. Honouring `RANGE=FULL`
 ///     would require us to bake an explicit
 ///     `<range>:<matrix>:<transfer>:<primaries>` form (e.g.
-///     `1:3:5:1` for full-range BT.709) into raw_caps. That works
+///     `1:3:5:1` for full-range BT.709) into caps. That works
 ///     for the V1 capssetter (it would actively override the
 ///     depay's narrow preset) but breaks the V2 capsfilter
 ///     intersection, because V2 also emits the narrow preset and
@@ -2175,7 +2175,7 @@ fn sdp_colorimetry_from_caps(caps_colorimetry: &str) -> Option<(&'static str, Op
 ///     content where `videoconvert` will still produce
 ///     visually-correct output (just at the wrong dynamic range
 ///     mapping).
-fn raw_caps_from_rtp_video(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
+fn caps_from_rtp_video(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
     let s = rtp_caps
         .structure(0)
         .ok_or_else(|| SdpError::CapsFromMedia("rtp caps empty".to_owned()))?;
@@ -2266,7 +2266,7 @@ fn raw_caps_from_rtp_video(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> 
 /// `set_media_from_caps` round-trips them back out as standalone
 /// `a=ptime:` / `a=maxptime:` lines. We do not copy them onto
 /// `audio/x-raw` because the format has no native ptime field.
-fn raw_caps_from_rtp_audio(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
+fn caps_from_rtp_audio(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
     let s = rtp_caps
         .structure(0)
         .ok_or_else(|| SdpError::CapsFromMedia("rtp caps empty".to_owned()))?;
@@ -2317,7 +2317,7 @@ fn raw_caps_from_rtp_audio(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> 
 /// is clocked from the paired video flow at runtime and the caller
 /// (typically the element's `caps` property or the caps-merge on the
 /// `nmossrc` ghost src pad) supplies the framerate downstream.
-fn raw_caps_from_rtp_data(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
+fn caps_from_rtp_data(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
     let s = rtp_caps
         .structure(0)
         .ok_or_else(|| SdpError::CapsFromMedia("rtp caps empty".to_owned()))?;
@@ -2401,7 +2401,7 @@ fn format_ptime_ns_as_ms(ns: u64) -> String {
 
 /// Build an `application/x-rtp,...` caps describing an RFC 4175
 /// raw-video media that wraps the supplied `video/x-raw` caps.
-/// Inverse of [`raw_caps_from_rtp_video`]: the synthesised RTP
+/// Inverse of [`caps_from_rtp_video`]: the synthesised RTP
 /// caps round-trip back to an equivalent `video/x-raw` caps via
 /// the parse-direction helper (modulo preset-collapsing
 /// colorimetry — see [`sdp_colorimetry_from_caps`]).
@@ -2425,15 +2425,15 @@ fn format_ptime_ns_as_ms(ns: u64) -> String {
 /// preserved.
 ///
 /// Returns [`SdpError::UnsupportedEssence`] for `format=` values
-/// outside the {`UYVY`, `UYVP`} subset [`raw_caps_from_rtp_video`]
+/// outside the {`UYVY`, `UYVP`} subset [`caps_from_rtp_video`]
 /// understands today; widening the matrix here without widening
 /// the inverse first would break the round-trip contract.
-fn rtp_caps_from_raw_video(
-    raw_caps: &gst::Caps,
+fn rtp_caps_from_video(
+    caps: &gst::Caps,
     payload_type: u8,
     narrow_traffic_profile: bool,
 ) -> Result<gst::Caps, SdpError> {
-    let s = raw_caps
+    let s = caps
         .structure(0)
         .ok_or_else(|| SdpError::UnsupportedEssence("raw video caps empty".to_owned()))?;
     let format = s
@@ -2552,8 +2552,8 @@ fn jxsv_structure_caps(
 /// `application/x-rtp,encoding-name=jxsv` media. Emits both
 /// `image/x-jxsc` (bare codestream) and `video/x-jxsv` (picture
 /// segment) so the `rtpjxsvdepay` negotiates the concrete essence
-/// with its downstream. Inverse of [`rtp_caps_from_raw_video_jxsv`].
-fn raw_caps_from_rtp_video_jxsv(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
+/// with its downstream. Inverse of [`rtp_caps_from_video_jxsv`].
+fn caps_from_rtp_video_jxsv(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
     let s = rtp_caps
         .structure(0)
         .ok_or_else(|| SdpError::CapsFromMedia("rtp caps empty".to_owned()))?;
@@ -2606,7 +2606,7 @@ fn raw_caps_from_rtp_video_jxsv(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpEr
 /// Build an `application/x-rtp,...` caps describing an RFC 9134 /
 /// ST 2110-22 JPEG XS media that wraps the supplied JPEG XS essence
 /// caps (`image/x-jxsc` or `video/x-jxsv`). Inverse of
-/// [`raw_caps_from_rtp_video_jxsv`].
+/// [`caps_from_rtp_video_jxsv`].
 ///
 /// `width` / `height` / `framerate` are required; `sampling` /
 /// `depth` / `profile` / `level` / `sublevel` are passed through
@@ -2614,12 +2614,12 @@ fn raw_caps_from_rtp_video_jxsv(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpEr
 /// [`defaults::ST2110_22_SSN`]) is always emitted; `colorimetry=`
 /// and `tcs=` are emitted only when the essence caps carry a
 /// recognised GStreamer `colorimetry`.
-fn rtp_caps_from_raw_video_jxsv(
-    raw_caps: &gst::Caps,
+fn rtp_caps_from_video_jxsv(
+    caps: &gst::Caps,
     payload_type: u8,
     narrow_traffic_profile: bool,
 ) -> Result<gst::Caps, SdpError> {
-    let s = raw_caps
+    let s = caps
         .structure(0)
         .ok_or_else(|| SdpError::UnsupportedEssence("JPEG XS caps empty".to_owned()))?;
     let width = s
@@ -2683,7 +2683,7 @@ fn rtp_caps_from_raw_video_jxsv(
 
 /// Build an `application/x-rtp,...` caps describing an
 /// ST 2110-30 audio media that wraps the supplied `audio/x-raw`
-/// caps. Inverse of [`raw_caps_from_rtp_audio`].
+/// caps. Inverse of [`caps_from_rtp_audio`].
 ///
 /// | `audio/x-raw` field | `application/x-rtp` field |
 /// |---|---|
@@ -2702,14 +2702,14 @@ fn rtp_caps_from_raw_video_jxsv(
 /// Returns [`SdpError::UnsupportedEssence`] for `format=` values
 /// outside ST 2110-30's {`S16BE`, `S24BE`} restriction. RFC 3551
 /// L8, μ-law, A-law, etc. are out of scope.
-fn rtp_caps_from_raw_audio(
-    raw_caps: &gst::Caps,
+fn rtp_caps_from_audio(
+    caps: &gst::Caps,
     payload_type: u8,
     ptime_ns: u64,
     maxptime_ns: Option<u64>,
     channel_order: Option<&str>,
 ) -> Result<gst::Caps, SdpError> {
-    let s = raw_caps
+    let s = caps
         .structure(0)
         .ok_or_else(|| SdpError::UnsupportedEssence("raw audio caps empty".to_owned()))?;
     let format = s
@@ -2746,21 +2746,21 @@ fn rtp_caps_from_raw_audio(
         let maxptime = format_ptime_ns_as_ms(max);
         caps_text.push_str(&format!(",a-maxptime=(string){maxptime}"));
     }
-    let mut caps = gst::Caps::from_str(&caps_text)
+    let mut rtp_caps = gst::Caps::from_str(&caps_text)
         .map_err(|e| SdpError::UnsupportedEssence(format!("constructing rtp caps: {e}")))?;
     let order = channel_order
         .map(str::to_owned)
         .unwrap_or_else(|| crate::essence_caps::default_smpte2110_channel_order(channels));
-    let caps_mut = caps.make_mut();
+    let caps_mut = rtp_caps.make_mut();
     if let Some(s) = caps_mut.structure_mut(0) {
         s.set("channel-order", &order);
     }
-    Ok(caps)
+    Ok(rtp_caps)
 }
 
 /// Build an `application/x-rtp,...` caps describing an RFC 8331 /
 /// SMPTE ST 2110-40 ancillary-data media that wraps the supplied
-/// `meta/x-st-2038` caps. Inverse of [`raw_caps_from_rtp_data`].
+/// `meta/x-st-2038` caps. Inverse of [`caps_from_rtp_data`].
 ///
 /// | `meta/x-st-2038` field | `application/x-rtp` field |
 /// |---|---|
@@ -2776,8 +2776,8 @@ fn rtp_caps_from_raw_audio(
 /// wants ANC clocked to a specific video frame rate) and
 /// omitted otherwise — RFC 8331 / ST 2110-40 §6.4 makes the
 /// parameter optional and the depayloader does not require it.
-fn rtp_caps_from_raw_data(raw_caps: &gst::Caps, payload_type: u8) -> Result<gst::Caps, SdpError> {
-    let s = raw_caps
+fn rtp_caps_from_data(caps: &gst::Caps, payload_type: u8) -> Result<gst::Caps, SdpError> {
+    let s = caps
         .structure(0)
         .ok_or_else(|| SdpError::UnsupportedEssence("ANC caps empty".to_owned()))?;
     if s.name() != "meta/x-st-2038" {
@@ -2987,7 +2987,7 @@ mod tests {
         assert_eq!(rtp_s.get::<i32>("payload").unwrap(), 96);
         assert_eq!(rtp_s.get::<i32>("clock-rate").unwrap(), 90_000);
 
-        let raw_s = media.raw_caps.structure(0).expect("raw caps");
+        let raw_s = media.caps.structure(0).expect("raw caps");
         assert_eq!(raw_s.name().as_str(), "video/x-raw");
         assert_eq!(raw_s.get::<&str>("format").unwrap(), "UYVP");
         assert_eq!(raw_s.get::<i32>("width").unwrap(), 1920);
@@ -3069,7 +3069,7 @@ mod tests {
         init_gst();
         let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace("exactframerate=50;", "exactframerate=30000/1001;");
         let media = parse_sdp(&sdp).expect("parse");
-        let raw_s = media.raw_caps.structure(0).expect("raw caps");
+        let raw_s = media.caps.structure(0).expect("raw caps");
         assert_eq!(
             raw_s.get::<gst::Fraction>("framerate").unwrap(),
             gst::Fraction::new(30_000, 1_001)
@@ -3093,7 +3093,7 @@ mod tests {
         };
         let media = parse_sdp(&sdp).expect("parse");
         media
-            .raw_caps
+            .caps
             .structure(0)
             .and_then(|s| s.get::<&str>("colorimetry").ok().map(str::to_owned))
     }
@@ -3176,7 +3176,7 @@ mod tests {
         // must NOT smuggle a guess onto the caps; the V1 depay's
         // format-default takes over and the V2 depay also emits
         // nothing. depth=10 here is just to stay inside the
-        // `YCbCr-4:2:2` samplings `raw_caps_from_rtp_video` accepts
+        // `YCbCr-4:2:2` samplings `caps_from_rtp_video` accepts
         // today — the depth value doesn't otherwise affect the
         // `XYZ` / `UNSPECIFIED` arms.
         assert_eq!(colorimetry_via_parse("UNSPECIFIED", 10, Some("SDR")), None);
@@ -3404,7 +3404,7 @@ mod tests {
             "fmtp channel-order lands on rtp caps from parse",
         );
 
-        let raw_s = media.raw_caps.structure(0).expect("raw caps");
+        let raw_s = media.caps.structure(0).expect("raw caps");
         assert_eq!(raw_s.name().as_str(), "audio/x-raw");
         assert_eq!(raw_s.get::<&str>("format").unwrap(), "S24BE");
         assert_eq!(raw_s.get::<i32>("rate").unwrap(), 48_000);
@@ -3444,7 +3444,7 @@ mod tests {
         init_gst();
         let sdp = AUDIO_L24_48K_STEREO_SDP.replace("L24/48000/2", "L16/48000/2");
         let media = parse_sdp(&sdp).expect("parse");
-        let raw_s = media.raw_caps.structure(0).expect("raw caps");
+        let raw_s = media.caps.structure(0).expect("raw caps");
         assert_eq!(raw_s.get::<&str>("format").unwrap(), "S16BE");
         assert_eq!(raw_s.get::<i32>("channels").unwrap(), 2);
     }
@@ -3454,7 +3454,7 @@ mod tests {
         init_gst();
         let sdp = AUDIO_L24_48K_STEREO_SDP.replace("L24/48000/2", "L24/48000");
         let media = parse_sdp(&sdp).expect("parse");
-        let raw_s = media.raw_caps.structure(0).expect("raw caps");
+        let raw_s = media.caps.structure(0).expect("raw caps");
         assert_eq!(
             raw_s.get::<i32>("channels").unwrap(),
             1,
@@ -3488,7 +3488,7 @@ mod tests {
         let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP
             .replace("exactframerate=50;", "exactframerate=25; interlace;");
         let media = parse_sdp(&sdp).expect("parse");
-        let raw_s = media.raw_caps.structure(0).expect("raw caps");
+        let raw_s = media.caps.structure(0).expect("raw caps");
         assert_eq!(
             raw_s.get::<&str>("interlace-mode").unwrap(),
             "interleaved",
@@ -3501,7 +3501,7 @@ mod tests {
         init_gst();
         let sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP.replace("depth=10;", "depth=8;");
         let media = parse_sdp(&sdp).expect("parse");
-        let raw_s = media.raw_caps.structure(0).expect("raw caps");
+        let raw_s = media.caps.structure(0).expect("raw caps");
         assert_eq!(
             raw_s.get::<&str>("format").unwrap(),
             "UYVY",
@@ -3596,8 +3596,8 @@ mod tests {
         assert_eq!(round_tripped.primary.source_ip, original.primary.source_ip);
         assert_eq!(round_tripped.primary.source_port, original.primary.source_port);
 
-        let orig_raw = original.raw_caps.structure(0).unwrap();
-        let rt_raw = round_tripped.raw_caps.structure(0).unwrap();
+        let orig_raw = original.caps.structure(0).unwrap();
+        let rt_raw = round_tripped.caps.structure(0).unwrap();
         assert_eq!(rt_raw.get::<&str>("format"), orig_raw.get::<&str>("format"));
         assert_eq!(rt_raw.get::<i32>("width"), orig_raw.get::<i32>("width"));
         assert_eq!(rt_raw.get::<i32>("height"), orig_raw.get::<i32>("height"));
@@ -3631,8 +3631,8 @@ mod tests {
         assert_eq!(round_tripped.primary.source_ip, original.primary.source_ip);
         assert_eq!(round_tripped.primary.source_port, original.primary.source_port);
 
-        let orig_raw = original.raw_caps.structure(0).unwrap();
-        let rt_raw = round_tripped.raw_caps.structure(0).unwrap();
+        let orig_raw = original.caps.structure(0).unwrap();
+        let rt_raw = round_tripped.caps.structure(0).unwrap();
         assert_eq!(rt_raw.get::<&str>("format"), orig_raw.get::<&str>("format"));
         assert_eq!(rt_raw.get::<i32>("rate"), orig_raw.get::<i32>("rate"));
         assert_eq!(rt_raw.get::<i32>("channels"), orig_raw.get::<i32>("channels"));
@@ -4784,7 +4784,7 @@ mod tests {
         assert_eq!(rtp_s.get::<i32>("clock-rate").unwrap(), 90_000);
         assert_eq!(rtp_s.get::<i32>("payload").unwrap(), 100);
 
-        let raw_s = media.raw_caps.structure(0).expect("raw caps");
+        let raw_s = media.caps.structure(0).expect("raw caps");
         assert_eq!(
             raw_s.name().as_str(),
             "meta/x-st-2038",
@@ -4808,7 +4808,7 @@ mod tests {
         init_gst();
         let sdp = ANC_SMPTE291_1080P60_SDP.replace("exactframerate=60;", "exactframerate=30000/1001;");
         let media = parse_sdp(&sdp).expect("parse");
-        let raw_s = media.raw_caps.structure(0).expect("raw caps");
+        let raw_s = media.caps.structure(0).expect("raw caps");
         assert_eq!(
             raw_s.get::<gst::Fraction>("framerate").unwrap(),
             gst::Fraction::new(30_000, 1_001),
@@ -4825,10 +4825,10 @@ mod tests {
         let sdp = ANC_SMPTE291_1080P60_SDP
             .replace("a=fmtp:100 exactframerate=60; VPID_Code=132\r\n", "");
         let media = parse_sdp(&sdp).expect("parse");
-        let raw_s = media.raw_caps.structure(0).expect("raw caps");
+        let raw_s = media.caps.structure(0).expect("raw caps");
         assert!(
             raw_s.get::<gst::Fraction>("framerate").is_err(),
-            "framerate must be absent on raw_caps when SDP carries no \
+            "framerate must be absent on caps when SDP carries no \
              exactframerate; downstream caps-merge (element property / \
              paired-flow context) fills it in",
         );
@@ -4855,8 +4855,8 @@ mod tests {
             round_tripped.primary.destination_ip,
             original.primary.destination_ip,
         );
-        let orig_raw = original.raw_caps.structure(0).unwrap();
-        let rt_raw = round_tripped.raw_caps.structure(0).unwrap();
+        let orig_raw = original.caps.structure(0).unwrap();
+        let rt_raw = round_tripped.caps.structure(0).unwrap();
         assert_eq!(rt_raw.name(), orig_raw.name());
         assert!(
             orig_raw.get::<&str>("alignment").is_err()
@@ -4974,7 +4974,7 @@ mod tests {
         assert_eq!(sdp_colorimetry_from_caps("sRGB"), None);
     }
 
-    // -- rtp_caps_from_raw_video
+    // -- rtp_caps_from_video
 
     /// Build a synthetic `video/x-raw` caps with the supplied
     /// parameters; helper for the synthesis tests below.
@@ -5012,10 +5012,10 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_uyvy_maps_to_ycbcr422_depth8() {
+    fn rtp_caps_from_video_uyvy_maps_to_ycbcr422_depth8() {
         init_gst();
         let raw = raw_video_caps("UYVY", 1920, 1080, gst::Fraction::new(50, 1), None);
-        let rtp = rtp_caps_from_raw_video(&raw, 96, false).expect("synth");
+        let rtp = rtp_caps_from_video(&raw, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.name().as_str(), "application/x-rtp");
         assert_eq!(s.get::<&str>("media").unwrap(), "video");
@@ -5023,7 +5023,7 @@ mod tests {
         // Canonical SDP-form case: RFC 4175 lower-case
         // `raw`, ST 2110-20 upper-case `PM` / `SSN`. See
         // the comment on the caps-text builder in
-        // `rtp_caps_from_raw_video` for the libnvnmos /
+        // `rtp_caps_from_video` for the libnvnmos /
         // nmos-cpp compatibility rationale.
         assert_eq!(s.get::<&str>("encoding-name").unwrap(), "raw");
         assert_eq!(s.get::<i32>("payload").unwrap(), 96);
@@ -5037,17 +5037,17 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_uyvp_maps_to_ycbcr422_depth10() {
+    fn rtp_caps_from_video_uyvp_maps_to_ycbcr422_depth10() {
         init_gst();
         let raw = raw_video_caps("UYVP", 1920, 1080, gst::Fraction::new(50, 1), None);
-        let rtp = rtp_caps_from_raw_video(&raw, 96, false).expect("synth");
+        let rtp = rtp_caps_from_video(&raw, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("sampling").unwrap(), "YCbCr-4:2:2");
         assert_eq!(s.get::<&str>("depth").unwrap(), "10");
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_emits_fractional_exactframerate() {
+    fn rtp_caps_from_video_emits_fractional_exactframerate() {
         init_gst();
         let raw = raw_video_caps(
             "UYVP",
@@ -5056,13 +5056,13 @@ mod tests {
             gst::Fraction::new(30_000, 1_001),
             None,
         );
-        let rtp = rtp_caps_from_raw_video(&raw, 96, false).expect("synth");
+        let rtp = rtp_caps_from_video(&raw, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("exactframerate").unwrap(), "30000/1001");
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_emits_interlace_only_when_interleaved() {
+    fn rtp_caps_from_video_emits_interlace_only_when_interleaved() {
         init_gst();
         let progressive = raw_video_caps(
             "UYVP",
@@ -5071,7 +5071,7 @@ mod tests {
             gst::Fraction::new(50, 1),
             Some("interlace-mode=progressive"),
         );
-        let rtp = rtp_caps_from_raw_video(&progressive, 96, false).expect("synth");
+        let rtp = rtp_caps_from_video(&progressive, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert!(
             s.get::<&str>("interlace").is_err(),
@@ -5085,7 +5085,7 @@ mod tests {
             gst::Fraction::new(25, 1),
             Some("interlace-mode=interleaved"),
         );
-        let rtp = rtp_caps_from_raw_video(&interleaved, 96, false).expect("synth");
+        let rtp = rtp_caps_from_video(&interleaved, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(
             s.get::<&str>("interlace").unwrap(),
@@ -5095,7 +5095,7 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_emits_colorimetry_for_recognised_preset() {
+    fn rtp_caps_from_video_emits_colorimetry_for_recognised_preset() {
         init_gst();
         let raw = raw_video_caps(
             "UYVP",
@@ -5104,7 +5104,7 @@ mod tests {
             gst::Fraction::new(50, 1),
             Some("colorimetry=bt709"),
         );
-        let rtp = rtp_caps_from_raw_video(&raw, 96, false).expect("synth");
+        let rtp = rtp_caps_from_video(&raw, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("colorimetry").unwrap(), "BT709");
         assert!(
@@ -5114,7 +5114,7 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_emits_tcs_for_bt2100_presets() {
+    fn rtp_caps_from_video_emits_tcs_for_bt2100_presets() {
         init_gst();
         let pq = raw_video_caps(
             "UYVP",
@@ -5123,7 +5123,7 @@ mod tests {
             gst::Fraction::new(50, 1),
             Some("colorimetry=bt2100-pq"),
         );
-        let rtp = rtp_caps_from_raw_video(&pq, 96, false).expect("synth");
+        let rtp = rtp_caps_from_video(&pq, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("colorimetry").unwrap(), "BT2100");
         assert_eq!(s.get::<&str>("tcs").unwrap(), "PQ");
@@ -5135,14 +5135,14 @@ mod tests {
             gst::Fraction::new(50, 1),
             Some("colorimetry=bt2100-hlg"),
         );
-        let rtp = rtp_caps_from_raw_video(&hlg, 96, false).expect("synth");
+        let rtp = rtp_caps_from_video(&hlg, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("colorimetry").unwrap(), "BT2100");
         assert_eq!(s.get::<&str>("tcs").unwrap(), "HLG");
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_falls_back_to_default_on_unrecognised_colorimetry() {
+    fn rtp_caps_from_video_falls_back_to_default_on_unrecognised_colorimetry() {
         init_gst();
         let raw = raw_video_caps(
             "UYVP",
@@ -5151,7 +5151,7 @@ mod tests {
             gst::Fraction::new(50, 1),
             Some("colorimetry=1:3:5:1"),
         );
-        let rtp = rtp_caps_from_raw_video(&raw, 96, false).expect("synth");
+        let rtp = rtp_caps_from_video(&raw, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         // `colorimetry=` is REQUIRED by nmos-cpp's
         // `get_video_raw_parameters`; an unrecognised value on
@@ -5169,15 +5169,15 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_rejects_unsupported_format() {
+    fn rtp_caps_from_video_rejects_unsupported_format() {
         init_gst();
         let raw = raw_video_caps("RGBA", 1920, 1080, gst::Fraction::new(50, 1), None);
-        let err = rtp_caps_from_raw_video(&raw, 96, false).expect_err("must reject");
+        let err = rtp_caps_from_video(&raw, 96, false).expect_err("must reject");
         assert!(matches!(err, SdpError::UnsupportedEssence(ref m) if m.contains("RGBA")));
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_round_trips_through_raw_caps_from_rtp_video() {
+    fn rtp_caps_from_video_round_trips_through_caps_from_rtp_video() {
         init_gst();
         let original = raw_video_caps(
             "UYVP",
@@ -5186,8 +5186,8 @@ mod tests {
             gst::Fraction::new(50, 1),
             Some("interlace-mode=progressive,colorimetry=bt2020-10"),
         );
-        let rtp = rtp_caps_from_raw_video(&original, 96, false).expect("synth");
-        let round_tripped = raw_caps_from_rtp_video(&rtp).expect("parse back");
+        let rtp = rtp_caps_from_video(&original, 96, false).expect("synth");
+        let round_tripped = caps_from_rtp_video(&rtp).expect("parse back");
         let rt = round_tripped.structure(0).expect("rt raw");
         let orig = original.structure(0).expect("orig raw");
         assert_eq!(rt.name(), orig.name());
@@ -5208,7 +5208,7 @@ mod tests {
         );
     }
 
-    // -- rtp_caps_from_raw_audio
+    // -- rtp_caps_from_audio
 
     fn raw_audio_caps(format: &str, rate: i32, channels: i32) -> gst::Caps {
         gst::Caps::from_str(&format!(
@@ -5219,11 +5219,11 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_audio_s24be_maps_to_l24() {
+    fn rtp_caps_from_audio_s24be_maps_to_l24() {
         init_gst();
         let raw = raw_audio_caps("S24BE", 48_000, 2);
         let rtp =
-            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect("synth");
+            rtp_caps_from_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("media").unwrap(), "audio");
         assert_eq!(s.get::<&str>("encoding-name").unwrap(), "L24");
@@ -5238,20 +5238,20 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_audio_s16be_maps_to_l16() {
+    fn rtp_caps_from_audio_s16be_maps_to_l16() {
         init_gst();
         let raw = raw_audio_caps("S16BE", 48_000, 2);
         let rtp =
-            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect("synth");
+            rtp_caps_from_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("encoding-name").unwrap(), "L16");
     }
 
     #[test]
-    fn rtp_caps_from_raw_audio_emits_decimal_ptime_for_sub_millisecond() {
+    fn rtp_caps_from_audio_emits_decimal_ptime_for_sub_millisecond() {
         init_gst();
         let raw = raw_audio_caps("S24BE", 48_000, 2);
-        let rtp = rtp_caps_from_raw_audio(&raw, 97, 125_000, None, None).expect("synth");
+        let rtp = rtp_caps_from_audio(&raw, 97, 125_000, None, None).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(
             s.get::<&str>("a-ptime").unwrap(),
@@ -5261,34 +5261,34 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_audio_emits_a_maxptime_when_supplied() {
+    fn rtp_caps_from_audio_emits_a_maxptime_when_supplied() {
         init_gst();
         let raw = raw_audio_caps("S24BE", 48_000, 2);
         let rtp =
-            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, Some(4_000_000), None)
+            rtp_caps_from_audio(&raw, 97, defaults::AUDIO_PTIME_NS, Some(4_000_000), None)
                 .expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("a-maxptime").unwrap(), "4");
     }
 
     #[test]
-    fn rtp_caps_from_raw_audio_rejects_unsupported_format() {
+    fn rtp_caps_from_audio_rejects_unsupported_format() {
         init_gst();
         let raw = raw_audio_caps("S32LE", 48_000, 2);
         let err =
-            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect_err("reject");
+            rtp_caps_from_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect_err("reject");
         assert!(matches!(err, SdpError::UnsupportedEssence(ref m) if m.contains("S32LE")));
     }
 
     #[test]
-    fn rtp_caps_from_raw_audio_round_trips_through_raw_caps_from_rtp_audio() {
+    fn rtp_caps_from_audio_round_trips_through_caps_from_rtp_audio() {
         init_gst();
         let original = raw_audio_caps("S24BE", 48_000, 2);
         let rtp =
-            rtp_caps_from_raw_audio(&original, 97, defaults::AUDIO_PTIME_NS, None, None)
+            rtp_caps_from_audio(&original, 97, defaults::AUDIO_PTIME_NS, None, None)
                 .expect("synth");
         let round_tripped = crate::essence_caps::caps_from(
-            &raw_caps_from_rtp_audio(&rtp).expect("parse back"),
+            &caps_from_rtp_audio(&rtp).expect("parse back"),
             Some(&rtp),
         );
         let rt = round_tripped.structure(0).expect("rt raw");
@@ -5304,11 +5304,11 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_audio_emits_default_channel_order_for_six_channels() {
+    fn rtp_caps_from_audio_emits_default_channel_order_for_six_channels() {
         init_gst();
         let raw = raw_audio_caps("S24BE", 48_000, 6);
         let rtp =
-            rtp_caps_from_raw_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect("synth");
+            rtp_caps_from_audio(&raw, 97, defaults::AUDIO_PTIME_NS, None, None).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(
             s.get::<&str>("channel-order").unwrap(),
@@ -5316,13 +5316,13 @@ mod tests {
         );
     }
 
-    // -- rtp_caps_from_raw_data
+    // -- rtp_caps_from_data
 
     #[test]
-    fn rtp_caps_from_raw_data_minimal_meta_x_st_2038() {
+    fn rtp_caps_from_data_minimal_meta_x_st_2038() {
         init_gst();
         let raw = gst::Caps::from_str("meta/x-st-2038").expect("data caps");
-        let rtp = rtp_caps_from_raw_data(&raw, 100).expect("synth");
+        let rtp = rtp_caps_from_data(&raw, 100).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("media").unwrap(), "video");
         assert_eq!(s.get::<&str>("encoding-name").unwrap(), "SMPTE291");
@@ -5335,11 +5335,11 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_data_propagates_framerate() {
+    fn rtp_caps_from_data_propagates_framerate() {
         init_gst();
         let raw = gst::Caps::from_str("meta/x-st-2038,framerate=25/1")
             .expect("data caps");
-        let rtp = rtp_caps_from_raw_data(&raw, 100).expect("synth");
+        let rtp = rtp_caps_from_data(&raw, 100).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("exactframerate").unwrap(), "25");
 
@@ -5347,28 +5347,28 @@ mod tests {
             "meta/x-st-2038,framerate=30000/1001",
         )
         .expect("data caps");
-        let rtp = rtp_caps_from_raw_data(&fractional, 100).expect("synth");
+        let rtp = rtp_caps_from_data(&fractional, 100).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("exactframerate").unwrap(), "30000/1001");
     }
 
     #[test]
-    fn rtp_caps_from_raw_data_rejects_non_anc_essence() {
+    fn rtp_caps_from_data_rejects_non_anc_essence() {
         init_gst();
         let raw = gst::Caps::from_str("video/x-raw,format=UYVY").expect("not ANC");
-        let err = rtp_caps_from_raw_data(&raw, 100).expect_err("must reject");
+        let err = rtp_caps_from_data(&raw, 100).expect_err("must reject");
         assert!(matches!(err, SdpError::UnsupportedEssence(ref m) if m.contains("video/x-raw")));
     }
 
     #[test]
-    fn rtp_caps_from_raw_data_round_trips_through_raw_caps_from_rtp_data() {
+    fn rtp_caps_from_data_round_trips_through_caps_from_rtp_data() {
         init_gst();
         let original = gst::Caps::from_str(
             "meta/x-st-2038,framerate=25/1",
         )
         .expect("data caps");
-        let rtp = rtp_caps_from_raw_data(&original, 100).expect("synth");
-        let round_tripped = raw_caps_from_rtp_data(&rtp).expect("parse back");
+        let rtp = rtp_caps_from_data(&original, 100).expect("synth");
+        let round_tripped = caps_from_rtp_data(&rtp).expect("parse back");
         let rt = round_tripped.structure(0).expect("rt raw");
         let orig = original.structure(0).expect("orig");
         assert_eq!(rt.name(), orig.name());
@@ -5412,12 +5412,12 @@ mod tests {
     //    resolved_audio_caps, udp_leg_from_input)
 
     fn build_input<'a>(
-        essence_caps: &'a gst::Caps,
+        caps: &'a gst::Caps,
         side: Side,
         transport_caps: Option<&'a gst::Caps>,
     ) -> SdpBuildInput<'a> {
         SdpBuildInput {
-            essence_caps,
+            caps,
             transport_caps,
             side,
             name: "test-name",
@@ -5653,7 +5653,7 @@ mod tests {
         // = U("PM")`, `smpte_standard_number = U("SSN")`)
         // matches them case-sensitively, so the canonical SDP
         // case has to be set in our caps-text builder. See the
-        // comment on `rtp_caps_from_raw_video` for the full
+        // comment on `rtp_caps_from_video` for the full
         // compat story (lower-case `raw` + upper-case `PM` /
         // `SSN` is what libnvnmos accepts).
         assert!(text.contains("PM=2110GPM"), "ST 2110-20 PM:\n{text}");
@@ -5684,7 +5684,7 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_jxsv_maps_core_fmtp_fields() {
+    fn rtp_caps_from_video_jxsv_maps_core_fmtp_fields() {
         init_gst();
         let essence = jxsv_caps(
             "image/x-jxsc",
@@ -5696,7 +5696,7 @@ mod tests {
                  sublevel=Sublev3bpp",
             ),
         );
-        let rtp = rtp_caps_from_raw_video_jxsv(&essence, 96, false).expect("synth");
+        let rtp = rtp_caps_from_video_jxsv(&essence, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.name().as_str(), "application/x-rtp");
         assert_eq!(s.get::<&str>("media").unwrap(), "video");
@@ -5716,10 +5716,10 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_jxsv_omits_optional_fields() {
+    fn rtp_caps_from_video_jxsv_omits_optional_fields() {
         init_gst();
         let essence = jxsv_caps("video/x-jxsv", 1280, 720, gst::Fraction::new(25, 1), None);
-        let rtp = rtp_caps_from_raw_video_jxsv(&essence, 96, false).expect("synth");
+        let rtp = rtp_caps_from_video_jxsv(&essence, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert!(
             s.get::<&str>("colorimetry").is_err(),
@@ -5732,7 +5732,7 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_jxsv_emits_explicit_colorimetry() {
+    fn rtp_caps_from_video_jxsv_emits_explicit_colorimetry() {
         init_gst();
         let essence = jxsv_caps(
             "image/x-jxsc",
@@ -5741,32 +5741,32 @@ mod tests {
             gst::Fraction::new(50, 1),
             Some("colorimetry=bt2100-pq"),
         );
-        let rtp = rtp_caps_from_raw_video_jxsv(&essence, 96, false).expect("synth");
+        let rtp = rtp_caps_from_video_jxsv(&essence, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("colorimetry").unwrap(), "BT2100");
         assert_eq!(s.get::<&str>("tcs").unwrap(), "PQ");
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_jxsv_narrow_profile_emits_tp() {
+    fn rtp_caps_from_video_jxsv_narrow_profile_emits_tp() {
         init_gst();
         let essence = jxsv_caps("image/x-jxsc", 1920, 1080, gst::Fraction::new(50, 1), None);
-        let rtp = rtp_caps_from_raw_video_jxsv(&essence, 96, true).expect("synth");
+        let rtp = rtp_caps_from_video_jxsv(&essence, 96, true).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert_eq!(s.get::<&str>("TP").unwrap(), "2110TPN");
     }
 
     #[test]
-    fn rtp_caps_from_raw_video_jxsv_requires_width_height_framerate() {
+    fn rtp_caps_from_video_jxsv_requires_width_height_framerate() {
         init_gst();
         let no_width = gst::Caps::from_str("image/x-jxsc,height=1080,framerate=50/1").unwrap();
-        assert!(rtp_caps_from_raw_video_jxsv(&no_width, 96, false).is_err());
+        assert!(rtp_caps_from_video_jxsv(&no_width, 96, false).is_err());
         let no_fr = gst::Caps::from_str("image/x-jxsc,width=1920,height=1080").unwrap();
-        assert!(rtp_caps_from_raw_video_jxsv(&no_fr, 96, false).is_err());
+        assert!(rtp_caps_from_video_jxsv(&no_fr, 96, false).is_err());
     }
 
     #[test]
-    fn raw_caps_from_rtp_video_jxsv_yields_both_essence_structures() {
+    fn caps_from_rtp_video_jxsv_yields_both_essence_structures() {
         init_gst();
         let rtp = gst::Caps::from_str(
             "application/x-rtp,media=(string)video,clock-rate=(int)90000,\
@@ -5775,7 +5775,7 @@ mod tests {
              sampling=(string)YCbCr-4:2:2,depth=(string)10",
         )
         .unwrap();
-        let caps = raw_caps_from_rtp_video_jxsv(&rtp).expect("essence");
+        let caps = caps_from_rtp_video_jxsv(&rtp).expect("essence");
         let names: Vec<String> = (0..caps.size())
             .filter_map(|i| caps.structure(i).map(|s| s.name().to_string()))
             .collect();
@@ -5799,13 +5799,13 @@ mod tests {
     }
 
     #[test]
-    fn raw_caps_from_rtp_video_jxsv_rejects_non_jxsv_encoding() {
+    fn caps_from_rtp_video_jxsv_rejects_non_jxsv_encoding() {
         init_gst();
         let rtp = gst::Caps::from_str(
             "application/x-rtp,media=(string)video,encoding-name=(string)raw",
         )
         .unwrap();
-        assert!(raw_caps_from_rtp_video_jxsv(&rtp).is_err());
+        assert!(caps_from_rtp_video_jxsv(&rtp).is_err());
     }
 
     #[test]
@@ -6009,8 +6009,8 @@ mod tests {
             // gst-sdp upper-cases the rtpmap encoding-name on parse.
             "JXSV",
         );
-        let names: Vec<String> = (0..media.raw_caps.size())
-            .filter_map(|i| media.raw_caps.structure(i).map(|s| s.name().to_string()))
+        let names: Vec<String> = (0..media.caps.size())
+            .filter_map(|i| media.caps.structure(i).map(|s| s.name().to_string()))
             .collect();
         assert!(
             names.iter().any(|n| n == "image/x-jxsc"),
@@ -6020,7 +6020,7 @@ mod tests {
             names.iter().any(|n| n == "video/x-jxsv"),
             "names: {names:?}",
         );
-        let s0 = media.raw_caps.structure(0).unwrap();
+        let s0 = media.caps.structure(0).unwrap();
         assert_eq!(s0.get::<i32>("width").unwrap(), 1920);
         assert_eq!(
             s0.get::<gst::Fraction>("framerate").unwrap(),
@@ -6103,7 +6103,7 @@ mod tests {
         // and `get_format` match it case-sensitively. The
         // canonicaliser at `build_sdp`'s tail lower-cases the
         // gst-uppercased `SMPTE291` that
-        // [`rtp_caps_from_raw_data`] carries in the
+        // [`rtp_caps_from_data`] carries in the
         // `application/x-rtp` caps (gst convention) so the SDP
         // form lands canonical.
         assert!(
@@ -6163,7 +6163,7 @@ mod tests {
         assert_eq!(media.primary.destination_port, 5004);
         assert_eq!(media.primary.source_ip.as_deref(), Some("192.0.2.10"));
         assert_eq!(media.primary.interface_ip.as_deref(), Some("192.0.2.10"));
-        let rt_raw = media.raw_caps.structure(0).unwrap();
+        let rt_raw = media.caps.structure(0).unwrap();
         let orig_raw = essence.structure(0).unwrap();
         assert_eq!(rt_raw.get::<&str>("format"), orig_raw.get::<&str>("format"));
         assert_eq!(rt_raw.get::<i32>("width"), orig_raw.get::<i32>("width"));
@@ -6201,7 +6201,7 @@ mod tests {
         let text = from_caps(&input).expect("synth");
         let media = parse_sdp(&text).expect("round-trip parse");
         assert_eq!(media.format, FlowFormat::Data);
-        let rt_raw = media.raw_caps.structure(0).unwrap();
+        let rt_raw = media.caps.structure(0).unwrap();
         assert_eq!(rt_raw.name().as_str(), "meta/x-st-2038");
         assert_eq!(
             rt_raw.get::<gst::Fraction>("framerate").unwrap(),
@@ -6299,7 +6299,7 @@ mod tests {
         )
         .expect("video caps");
         let input = SdpBuildInput {
-            essence_caps: &essence,
+            caps: &essence,
             transport_caps: None,
             side: Side::Sender,
             name: "video1",

@@ -1038,7 +1038,7 @@ fn intermediate_fake_src_caps(
         }) => Ok(udp_capssetter_caps(transport_file.as_deref(), media)),
         InnerConfig::Real(TransportConfig::NvDsUdp { media, .. }) => {
             // No capssetter hop on nvdsudp — essence caps are set on nvdsudpsrc.
-            Ok(Some(media.raw_caps.clone()))
+            Ok(Some(media.caps.clone()))
         }
         _ => fake_caps_from_settings(snapshot),
     }
@@ -1099,7 +1099,7 @@ fn udp_capssetter_caps(
         );
         return None;
     }
-    Some(media.raw_caps.clone())
+    Some(media.caps.clone())
 }
 
 /// Best-available caps for the bin's fake chain, resolved from

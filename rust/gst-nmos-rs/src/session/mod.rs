@@ -559,9 +559,9 @@ pub(crate) fn caps_from_flow_def(
     let Some(text) = transport_file.filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
-    let raw_caps = crate::flow_def::caps_from(text)
+    let parsed_caps = crate::flow_def::caps_from(text)
         .map_err(|e| anyhow::anyhow!("caps from flow-def transport file: {e}"))?;
-    let caps = crate::essence_caps::caps_from(&raw_caps, None);
+    let caps = crate::essence_caps::caps_from(&parsed_caps, None);
     gst::info!(gst::CAT_DEFAULT, "{element}: caps `{caps}` from transport file");
     Ok(Some(caps))
 }
@@ -579,7 +579,7 @@ fn caps_from_transport_file(
         Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => {
             let media = crate::sdp::parse_sdp(transport_file)
                 .map_err(|e| anyhow::anyhow!("caps from SDP transport file: {e}"))?;
-            let caps = crate::essence_caps::caps_from(&media.raw_caps, Some(&media.rtp_caps));
+            let caps = crate::essence_caps::caps_from(&media.caps, Some(&media.rtp_caps));
             gst::info!(
                 gst::CAT_DEFAULT,
                 "{element}: caps `{caps}` from SDP transport file"
@@ -709,7 +709,7 @@ pub(crate) enum TransportConfig {
         transport_file: Option<String>,
     },
     /// RTP/UDP transport. The inner chain is `rtp*pay ! udpsink` for
-    /// senders and `udpsrc ! rtp*depay [! capssetter(raw_caps)]` for
+    /// senders and `udpsrc ! rtp*depay [! capssetter(caps)]` for
     /// receivers.
     /// Wide receivers (activation SDP carries `a=x-nvnmos-caps:`)
     /// omit `capssetter`; narrow receivers pass configuring essence

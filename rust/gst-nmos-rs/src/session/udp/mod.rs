@@ -140,7 +140,7 @@ pub(super) fn udp_eager_blocked(side: Side, inner: &InnerConfig) -> Option<&'sta
 /// sender AddSender.
 pub(super) fn sdp_build_input<'a>(
     settings: &'a CommonSettings,
-    essence_caps: &'a gst::Caps,
+    caps: &'a gst::Caps,
 ) -> sdp::SdpBuildInput<'a> {
     let destination_ip = match settings.side {
         Side::Sender => settings.destination_ip.as_str(),
@@ -151,7 +151,7 @@ pub(super) fn sdp_build_input<'a>(
         CapsMode::Wide => true,
     };
     sdp::SdpBuildInput {
-        essence_caps,
+        caps,
         transport_caps: settings.transport_caps.as_ref(),
         side: settings.side,
         name: &settings.name,
@@ -186,9 +186,9 @@ pub(super) fn synthesise_or_passthrough_udp(
             Ok(Some(text))
         }
         (Some(text), None) => Ok(Some(text)),
-        (None, Some(essence_caps)) => {
+        (None, Some(caps)) => {
             validate_rtp_configuring_minimum(element, settings)?;
-            let text = sdp::from_caps(&sdp_build_input(settings, essence_caps))
+            let text = sdp::from_caps(&sdp_build_input(settings, caps))
                 .with_context(|| format!("{element}: synthesising SDP from caps"))?;
             gst::info!(
                 cat,
@@ -230,10 +230,10 @@ fn gate_deferred_sender_udp(inner: InnerConfig, settings: &CommonSettings) -> In
 pub(super) fn synthesise_deferred_sender_udp(
     element: &str,
     settings: &CommonSettings,
-    essence_caps: &gst::Caps,
+    caps: &gst::Caps,
 ) -> Result<(String, InnerConfig), anyhow::Error> {
     validate_rtp_configuring_minimum(element, settings)?;
-    let text = sdp::from_caps(&sdp_build_input(settings, essence_caps))
+    let text = sdp::from_caps(&sdp_build_input(settings, caps))
         .map_err(anyhow::Error::from)
         .with_context(|| format!("{element}: synthesising SDP from peer caps"))?;
     let inner = match settings.transport {
@@ -363,7 +363,7 @@ fn finish_udp_inner_config(
     // The SDP cannot carry caps features; re-attach any requested on
     // the `caps` property (e.g. `memory:NVMM`) so the inner element
     // (for example, nvdsudpsrc) sees them and negotiates accordingly.
-    media.raw_caps = crate::essence_caps::overlay_features(&media.raw_caps, settings.caps.as_ref());
+    media.caps = crate::essence_caps::overlay_features(&media.caps, settings.caps.as_ref());
     Ok(build_real(media))
 }
 
@@ -574,7 +574,7 @@ mod tests {
                 "application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,payload=96",
             )
             .expect("static rtp caps parse"),
-            raw_caps: gst::Caps::from_str(
+            caps: gst::Caps::from_str(
                 "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1",
             )
             .expect("static raw caps parse"),
@@ -659,7 +659,7 @@ mod tests {
             assert_eq!(m.primary.source_port, Some(5004));
             assert!(m.secondary.is_none());
             assert!(!m.rtp_caps.is_empty());
-            assert!(!m.raw_caps.is_empty());
+            assert!(!m.caps.is_empty());
         }
 
         #[test]
@@ -1933,7 +1933,7 @@ mod tests {
                 InnerConfig::Real(TransportConfig::Udp { media, .. }) => {
                     assert_eq!(
                         media
-                            .raw_caps
+                            .caps
                             .structure(0)
                             .and_then(|s| s.get::<i32>("channels").ok()),
                         Some(1),
@@ -2128,7 +2128,7 @@ mod tests {
                     | InnerConfig::Real(TransportConfig::Udp { media, .. }) => {
                         assert_eq!(media.format, FlowFormat::Data);
                         assert_eq!(
-                            media.raw_caps.structure(0).unwrap().name(),
+                            media.caps.structure(0).unwrap().name(),
                             "meta/x-st-2038",
                         );
                     }

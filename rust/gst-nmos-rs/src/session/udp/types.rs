@@ -21,7 +21,7 @@ use crate::types::FlowFormat;
 /// ST 2022-7 separate destination addresses mode uses two `m=` lines with
 /// common media attributes; parsing folds these onto one [`UdpMedia`].
 ///
-/// Essence-level state (`format`, `rtp_caps`, `raw_caps`) is shared
+/// Essence-level state (`format`, `rtp_caps`, `caps`) is shared
 /// across legs because both legs of an ST 2022-7 pair carry the
 /// same essence with the same PT / clock-rate / encoding-name; only
 /// the network params differ. Per-leg state lives on [`UdpLeg`].
@@ -75,7 +75,7 @@ pub(crate) struct UdpMedia {
     /// src pad so downstream caps queries see the concrete shape
     /// the flow will carry, mirroring the MXL path's
     /// `advertise_caps` derived from the flow_def.
-    pub(crate) raw_caps: gst::Caps,
+    pub(crate) caps: gst::Caps,
     /// Resolved format / transport bit rates from SDP `b=AS:` and fmtp
     /// `x-nvnmos-*-bit-rate` (kbit/s). [`crate::sdp::BitRates::UNSET`]
     /// when absent.

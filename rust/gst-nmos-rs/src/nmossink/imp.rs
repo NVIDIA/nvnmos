@@ -1048,7 +1048,7 @@ fn intermediate_fake_sink_caps(
     match &plan.inner {
         InnerConfig::Real(TransportConfig::Udp { media, .. })
         | InnerConfig::Real(TransportConfig::NvDsUdp { media, .. }) => Ok(Some(
-            crate::essence_caps::caps_from(&media.raw_caps, Some(&media.rtp_caps)),
+            crate::essence_caps::caps_from(&media.caps, Some(&media.rtp_caps)),
         )),
         InnerConfig::Real(TransportConfig::Mxl { .. }) => fake_caps_from_settings(settings),
         _ => fake_caps_from_settings(settings),

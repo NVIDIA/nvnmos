@@ -10,21 +10,21 @@ use gstreamer as gst;
 /// fields are filled in where absent (audio `channel-mask` and
 /// `channel-order`; video and ANC pass through unchanged).
 ///
-/// `raw_caps` is the minimal essence shape (from [`crate::flow_def::caps_from`]
+/// `caps` is the minimal essence shape (from [`crate::flow_def::caps_from`]
 /// or SDP parse). When `rtp_caps` is supplied, audio `channel-order`
 /// is taken from the fmtp slot on the companion `application/x-rtp`
 /// caps; otherwise audio defaults use channel count (`M` / `ST` / `Uxx`).
-pub(crate) fn caps_from(raw_caps: &gst::Caps, rtp_caps: Option<&gst::Caps>) -> gst::Caps {
-    if raw_caps
+pub(crate) fn caps_from(caps: &gst::Caps, rtp_caps: Option<&gst::Caps>) -> gst::Caps {
+    if caps
         .structure(0)
         .is_some_and(|s| s.name() == "audio/x-raw")
     {
         let channel_order = rtp_caps
             .and_then(|rtp| rtp.structure(0))
             .and_then(channel_order_from_rtp_structure);
-        audio_caps_from(raw_caps, channel_order.as_deref())
+        audio_caps_from(caps, channel_order.as_deref())
     } else {
-        raw_caps.clone()
+        caps.clone()
     }
 }
 

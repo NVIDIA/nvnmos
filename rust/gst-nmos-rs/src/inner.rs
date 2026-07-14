@@ -1444,7 +1444,7 @@ pub(crate) fn build_nvdsudpsink(
     sdp_text: &str,
 ) -> Result<NvDsUdpSinkChain, anyhow::Error> {
     require_nvdsudp_factory("nvdsudpsink")?;
-    let pkt = packetization::from_media(media.format, &media.raw_caps, &media.rtp_caps)?;
+    let pkt = packetization::from_media(media.format, &media.caps, &media.rtp_caps)?;
 
     let sdp_for_sink = if media.secondary.is_none()
         && crate::sdp::sdp_media_block_count(sdp_text).is_ok_and(|n| n > 1)
@@ -1605,8 +1605,8 @@ pub(crate) fn build_nvdsudpsrc(
     // onto the output caps so a downstream `st2038combiner` (which requires the
     // field) sees it — the src-side mirror of the `capsfilter` `build_nvdsudpsink`
     // inserts. Add only when absent; an explicit non-`frame` is left for
-    // `from_media`/`anc_from_raw_caps` to reject rather than silently relabel.
-    let mut caps = media.raw_caps.clone();
+    // `from_media`/`anc_from_caps` to reject rather than silently relabel.
+    let mut caps = media.caps.clone();
     if media.format == FlowFormat::Data
         && let Some(s) = caps.make_mut().structure_mut(0)
         && s.name() == "meta/x-st-2038"
@@ -1891,7 +1891,7 @@ pub(crate) fn apply_nvdsudp_sink_inner_properties(
     if media.format == crate::types::FlowFormat::Video {
         if let Err(e) = crate::nvdsudp::packetization::reconcile_sink_video_packetization(
             &chain.transport,
-            &media.raw_caps,
+            &media.caps,
             cat,
             element,
         ) {
@@ -1955,7 +1955,7 @@ mod tests {
                 "application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,payload=96",
             )
             .expect("static rtp caps parse"),
-            raw_caps: gst::Caps::from_str(
+            caps: gst::Caps::from_str(
                 "video/x-raw,format=UYVP,width=1920,height=1080,framerate=50/1",
             )
             .expect("static raw caps parse"),
@@ -1986,7 +1986,7 @@ mod tests {
                  encoding-name=SMPTE291,payload=100",
             )
             .expect("static rtp caps parse"),
-            raw_caps: gst::Caps::from_str(
+            caps: gst::Caps::from_str(
                 "meta/x-st-2038,framerate=60/1",
             )
             .expect("static raw caps parse"),
@@ -2027,7 +2027,7 @@ mod tests {
                  encoding-name=JXSV,payload=96",
             )
             .expect("static rtp caps parse"),
-            raw_caps: gst::Caps::from_str(
+            caps: gst::Caps::from_str(
                 "image/x-jxsc,width=1920,height=1080,framerate=50/1",
             )
             .expect("static raw caps parse"),
@@ -2067,7 +2067,7 @@ mod tests {
                  encoding-params=(string)2,payload=97,a-ptime=(string)0.125",
             )
             .expect("static rtp caps parse"),
-            raw_caps: gst::Caps::from_str(
+            caps: gst::Caps::from_str(
                 "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved",
             )
             .expect("static raw caps parse"),
@@ -2729,7 +2729,7 @@ mod tests {
         // Even when a narrow receiver supplies advertise_caps,
         // `rtpjxsvdepay` negotiates `image/x-jxsc` vs `video/x-jxsv`
         // with the downstream itself; no `capssetter` tail is inserted.
-        let chain = build_udpsrc(&media, UdpVariant::V1, Some(&media.raw_caps))
+        let chain = build_udpsrc(&media, UdpVariant::V1, Some(&media.caps))
             .expect("JPEG XS receiver chain must construct when rtpjxsvdepay is available");
         let bin = chain.bin.downcast::<gst::Bin>().expect("returned element is a Bin");
         let depay = child(&bin, "nmossrc-depayloader");
@@ -3093,7 +3093,7 @@ mod tests {
         if gst::ElementFactory::find("mxlsrc").is_none() {
             return;
         }
-        let advertise = minimal_udp_media().raw_caps;
+        let advertise = minimal_udp_media().caps;
         let Ok(chain) = build_mxlsrc(
             "/tmp/domain",
             "00000000-0000-0000-0000-000000000003",
