@@ -31,11 +31,27 @@ Both elements:
 | `label`          | string  | optional  | NMOS label for this Sender/Receiver (not the Node). Overrides the transport file when both are supplied (MXL `flow_def` top-level `label`; SDP `s=` line). |
 | `description`    | string  | optional  | NMOS description for this Sender/Receiver. Overrides the transport file when both are supplied (MXL `flow_def` top-level `description`; SDP `i=` line). |
 | `group-hint`     | string  | optional  | NMOS group hint (`urn:x-nmos:tag:grouphint/v1.0`), e.g. `"SDI 1:Video"`, used by controllers to group a device's Senders/Receivers (the related video, audio and ANC flows). Becomes the session-level `a=x-nvnmos-group-hint:` SDP attribute on RTP/UDP, or the grouphint tag in an MXL `flow_def`. Overrides the transport file when both are supplied. Omitted from synthesised files when unset. |
-| `caps`           | GstCaps | required when `transport-file*` is unset | Essence caps. Supported shapes: `video/x-raw,format=…,width=…,height=…,framerate=…[,interlace-mode=…]` (MXL: `v210`; RTP/UDP: RFC 4175 8-bit `UYVY` and 10-bit `UYVP`); `audio/x-raw,format=…,rate=…,channels=…` (MXL: `F32LE`; RTP/UDP: ST 2110-30 `S24BE` (L24) and `S16BE` (L16)); `meta/x-st-2038,framerate=…` (the framerate must be present — set it upstream with a `capsfilter caps="meta/x-st-2038,framerate=30/1"` if needed). On both elements, drives `transport-file` synthesis when `transport-file*` is unset: on `transport=mxl` a MXL `flow_def` JSON document (requires `mxl-flow-id`); on `transport=udp` / `udp2` an SDP description (requires the relevant IS-05 endpoint properties — `destination-ip` etc.). On `nmossrc` the synthesised configuring file describes the essence shape: narrow receivers advertise BCP-004-01 Receiver Caps on IS-04; wide receivers advertise none (`receiver-caps-mode` controls the marker — `urn:x-nvnmos:tag:caps` on MXL, `a=x-nvnmos-caps:` on RTP/UDP). On `nmossrc` with `transport=mxl`, the media-type structure name (`video/x-raw` / `audio/x-raw` / `meta/x-st-2038`) also picks the `mxlsrc.{video,audio,data}-flow-id=` slot. Cross-checked against the transport file's `format` (MXL) / `m=` line (SDP) when both are supplied. |
+| `caps`           | GstCaps | required when `transport-file*` is unset | Essence caps describing the media format. Drives transport file synthesis when `transport-file*` is unset; cross-checked against a supplied transport file when both are set. See [supported essence shapes](#caps-essence-shapes) below. |
 | `transport-caps` | GstCaps | optional  | RTP-only transport-layer overrides applied to the synthesised or supplied SDP, expressed as an `application/x-rtp` caps structure. Recognised fields: `payload` (dynamic RTP payload type, 96–127), `clock-rate` (audio only — video / ANC are pinned to 90000), `ptime` / `maxptime` (audio packetisation interval in ms, packed into SDP `a=ptime:` / `a=maxptime:`). Ignored on `transport=mxl`. |
 | `transport-properties` | GstStructure | optional | Overrides applied to the inner source or sink (`udpsrc` / `udpsink` / `nvdsudpsrc` / `nvdsudpsink` / `mxlsrc` / `mxlsink`) every time the data-path chain is built. Pass a `GstStructure` whose fields are GObject property names on that inner element — for example `properties,buffer-size=26214400` or `properties,gpu-id=0,sync=false`. The structure name is not interpreted. Takes effect on the next chain build, not immediately on the one currently in the chain. Unknown fields log a warning and are skipped. |
 | `mxl-domain-path` | string | required for MXL | Local filesystem path identifying the MXL Domain on this host; fed into the inner `mxlsink` / `mxlsrc` `domain=` property. If a `domain_def.json` is present in the directory its `id` is used to populate or cross-check `mxl-domain-id` (mismatch is an error — this is host-level identity). |
 | `auto-activate`  | boolean | optional, default `false` | When `false` the element adds the Sender or Receiver to the daemon so it appears on IS-04 and IS-05 but leaves the inner data path on the fake chain until an IS-05 PATCH activates it (`master_enable: true` on `/single/{senders,receivers}/{id}/active`). When `true` the element brings the inner transport src/sink up immediately once the configuring transport file has been resolved at NULL→READY (or, for a deferred-mode sender, at READY→PAUSED) *and* calls `SyncResourceState` to push the daemon's IS-04/IS-05 view to active — i.e. it's a no-controller shortcut for development pipelines and for setups where flow identity comes entirely from properties / `transport-file*`. Orthogonal to how the transport file itself becomes available: property override of `mxl-flow-id`, supplied `transport-file*`, and caps-driven synthesis (MXL `flow_def` or SDP) all feed the same gate. |
+
+#### `caps` essence shapes {#caps-essence-shapes}
+
+When `transport-file*` is unset, `caps` drives synthesis of the configuring transport file:
+
+- `transport=mxl` → MXL `flow_def` JSON (also requires `mxl-flow-id`).
+- `transport=udp` / `udp2` / `nvdsudp` → SDP (also requires the relevant IS-05 endpoint properties — `destination-ip` etc.).
+
+On `nmossrc`, the synthesised configuring file describes the essence shape: narrow receivers advertise BCP-004-01 Receiver Caps on IS-04; wide receivers advertise none (`receiver-caps-mode` controls the marker — `urn:x-nvnmos:tag:caps` on MXL, `a=x-nvnmos-caps:` on RTP/UDP). On `nmossrc` with `transport=mxl`, the `caps` media-type structure name also picks the `mxlsrc.{video,audio,data}-flow-id=` slot.
+
+| Media | Caps shape | Transports | Notes |
+| ----- | ---------- | ---------- | ----- |
+| Video (raw) | `video/x-raw,format=…,width=…,height=…,framerate=…[,interlace-mode=…]` | all | MXL: `v210`. RTP/UDP: RFC 4175 8-bit `UYVY` and 10-bit `UYVP`. |
+| Video (JPEG XS) | `image/x-jxsc,…` or `video/x-jxsv,…` | `udp` / `udp2` only | AMWA BCP-006-01 / RFC 9134 / ST 2110-22. `width` / `height` / `framerate` required; `sampling` / `depth` / `profile` / `level` / `sublevel` optional. Both essence caps map to the `video/jxsv` SDP and `rtpjxsvpay` / `rtpjxsvdepay`. Bit rates are element properties (`format-bit-rate` / `transport-bit-rate`), not caps fields — see property tables below. Not supported on `nvdsudp`. |
+| Audio | `audio/x-raw,format=…,rate=…,channels=…` | all | MXL: `F32LE`. RTP/UDP: ST 2110-30 `S24BE` (L24) and `S16BE` (L16). |
+| Data (ANC) | `meta/x-st-2038,framerate=…` | all | `framerate` must be present — set it upstream with a `capsfilter caps="meta/x-st-2038,framerate=30/1"` if needed. |
 
 `nmossink`-only:
 
@@ -48,6 +64,8 @@ Both elements:
 | `source-port` | uint (0–65535) | optional, RTP transports only | IS-05 sender `transport_params.source_port`. Local egress port. Drives `udpsink.bind-port` and the SDP `a=x-nvnmos-src-port:` attribute. `0` (the default) = unset; the OS picks an ephemeral port. RTP-only. |
 | `destination-ip` | string | optional, RTP transports only | IS-05 sender `transport_params.destination_ip`. Remote destination (unicast peer or multicast group). Becomes the configuring SDP `c=` line address and `udpsink.host`. Empty = unset (use the transport file's `c=` line if present; else daemon `auto`). RTP-only. |
 | `destination-port` | uint (0–65535) | optional, RTP transports only | IS-05 sender `transport_params.destination_port`. Remote destination port. Becomes the SDP `m=` port slot and `udpsink.port`. `0` (the default) = unset; falls back to the transport file's `m=` port, else to the canonical RTP default 5004 (`nmos-cpp::auto_rtp_port`). RTP-only. |
+| `format-bit-rate` | uint64 | optional, JPEG XS RTP only | Coded essence (Flow) bit rate in **kilobits per second** (1000 bits/s). Synthesises SDP fmtp `x-nvnmos-format-bit-rate` and sets `rtpjxsvpay max-codestream-bitrate` (×1000 → bit/s) unless `pay-properties` already supplies it. `0` = unset. See [property interaction](#property-interaction-with-transport-file). |
+| `transport-bit-rate` | uint64 | optional, JPEG XS RTP only | Transport (Sender) bit rate in **kilobits per second**, including RTP/UDP/IP overhead. Synthesises SDP `b=AS:` and fmtp `x-nvnmos-transport-bit-rate`. `0` = unset. Derives the other side via the `nvnmosd` 1.05 overhead factor when only one rate is set (transport derived from format is rounded to the nearest Mbit/s). |
 | `pay-properties` | GstStructure | optional | Overrides applied to the inner RTP payloader every time the UDP sender chain is built. Same `GstStructure` syntax as `transport-properties`; ignored on `mxl` and `nvdsudp` (a warning is logged if non-empty). Takes effect on the next chain build. |
 
 `nmossrc`-only:
@@ -62,6 +80,8 @@ Both elements:
 | `interface-ip`    | string | optional, RTP transports only | IS-05 receiver `transport_params.interface_ip`. Local NIC IP used for the IGMP join; resolved to an interface name and fed into `udpsrc.multicast-iface`. Also emitted in the configuring SDP as `a=x-nvnmos-iface-ip:`. Empty = unset (let the kernel pick). RTP-only. |
 | `multicast-ip`    | string | optional, RTP transports only | IS-05 receiver `transport_params.multicast_ip`. Multicast group to join. Becomes `udpsrc.address` and the SDP `c=` line address. Empty = unset (unicast reception). RTP-only. |
 | `destination-port` | uint (0–65535) | optional, RTP transports only | IS-05 receiver `transport_params.destination_port`. **Different semantics from the sender-side property of the same name**: local listen port. Becomes `udpsrc.port` and the SDP `m=` port slot. `0` (the default) = unset; falls back to the transport file's `m=` port, else to 5004. RTP-only. |
+| `format-bit-rate` | uint64 | optional, JPEG XS RTP only | Coded essence (Flow) bit rate in **kilobits per second** for cross-check / splice against a supplied `transport-file*` SDP. `0` = unset. See [property interaction](#property-interaction-with-transport-file). |
+| `transport-bit-rate` | uint64 | optional, JPEG XS RTP only | Transport (Sender) bit rate in **kilobits per second** for cross-check / splice against a supplied `transport-file*` SDP. `0` = unset. |
 | `depay-properties` | GstStructure | optional | Overrides applied to the inner RTP depayloader every time the UDP receiver chain is built. Same `GstStructure` syntax as `transport-properties`; ignored on non-UDP transports (a warning is logged if non-empty). Takes effect on the next chain build. |
 
 ### Property Interaction With `transport-file`
@@ -74,6 +94,7 @@ built with these rules:
 | ------------- | ---------- | ------------------ |
 | Identity / cosmetic | `sender-name` / `receiver-name`, `mxl-flow-id`, `mxl-domain-id`, `label`, `description`, `group-hint`, `receiver-caps-mode` | **Property overrides file.** The element rewrites the file's matching field/tag to the property value before the daemon sees it. |
 | Essence shape | `caps`, `transport-caps` | **Cross-check.** Property must agree with the file's shape (today: `caps` first structure name vs `format`). Mismatch is a hard error at NULL→READY. |
+| Bit rates | `format-bit-rate`, `transport-bit-rate` | **Cross-check when both declare a rate; splice when only the property is set.** Values are kilobits per second (matching NMOS `bit_rate`, SDP `b=AS:`, and fmtp `x-nvnmos-*-bit-rate` per AMWA BCP-006-01 / RFC 9134 / ST 2110-22). When the supplied SDP omits bit rates, non-zero properties are written into the configuring SDP before the daemon sees it. |
 | Activation gate | `auto-activate` | Doesn't appear in the transport file; it gates whether the data path goes live eagerly at NULL→READY (and tells the daemon to flip `/active` to `master_enable: true` via `SyncResourceState`) or waits for an IS-05 PATCH. Orthogonal to where the flow_def came from. |
 | No interaction | `daemon-uri`, `node-seed`, `http-port`, `host-name`, `domain`, `registration-url`, `system-url`, `transport`, `mxl-domain-path`, `transport-properties`, `pay-properties`, `depay-properties` | These don't appear in the transport file at all. Node-identity properties (`host-name`, `domain`, `registration-url`, `system-url`, `http-port`) are forwarded to `OpenSession` as `node_config` and honoured only when that session creates the Node (first opener for a given `node-seed`). `transport-properties` / `pay-properties` / `depay-properties` tune the inner GStreamer elements at chain-build time instead. |
 
@@ -239,7 +260,8 @@ at activation; `nvdsudpsrc` uses comma-separated `st2022-7-streams`,
 `udp` / `udp2` are rejected. Caps-only synthesis still emits one `m=`.
 See [`doc/designs/gst-nmos-rs-st2022-7-dual-leg-plan.md`](../../doc/designs/gst-nmos-rs-st2022-7-dual-leg-plan.md).
 
-**Not yet supported:** `video/x-jxsv`.
+**Not yet supported on `nvdsudp`:** JPEG XS (`image/x-jxsc` / `video/x-jxsv`) —
+available on `udp` / `udp2` only.
 
 Design notes: [`doc/designs/gst-nmos-rs-nvdsudp-plan.md`](../../doc/designs/gst-nmos-rs-nvdsudp-plan.md).
 

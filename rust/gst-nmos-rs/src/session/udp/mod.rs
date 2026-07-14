@@ -166,6 +166,8 @@ pub(super) fn sdp_build_input<'a>(
         advertise_caps,
         node_seed: &settings.node.node_seed,
         narrow_traffic_profile: settings.transport == Transport::NvDsUdp,
+        format_bit_rate: settings.format_bit_rate,
+        transport_bit_rate: settings.transport_bit_rate,
     }
 }
 
@@ -321,6 +323,7 @@ pub(crate) fn property_overrides_udp(settings: &CommonSettings) -> SdpOverrides<
         a_ptime,
         a_maxptime,
         caps_mode: settings.caps_mode,
+        bit_rates: sdp::BitRates::UNSET,
     }
 }
 fn finish_udp_inner_config(
@@ -420,6 +423,28 @@ pub(crate) fn decide_inner_config_nvdsudp(
     )
 }
 
+fn passthrough_user_transport_file(
+    element: &str,
+    settings: &CommonSettings,
+    text: &str,
+    policy: DualLegPassthroughPolicy,
+) -> Result<String, anyhow::Error> {
+    let file = sdp::bit_rates_from_sdp_text(text)
+        .with_context(|| format!("{element}: parsing bit rates from transport-file SDP"))?;
+    let property = sdp::bit_rates_from_properties(settings.format_bit_rate, settings.transport_bit_rate);
+    sdp::cross_check_bit_rates(property, file)
+        .with_context(|| format!("{element}: cross-checking bit rates against transport-file"))?;
+
+    let mut overrides = property_overrides_udp(settings);
+    if property != sdp::BitRates::UNSET && file == sdp::BitRates::UNSET {
+        overrides.bit_rates = property;
+    }
+
+    sdp::passthrough_with_overrides(text, &overrides, policy).with_context(|| {
+        format!("{element}: applying property overrides to transport-file SDP")
+    })
+}
+
 pub(super) fn resolve_inner_config_nvdsudp(
     cat: &gst::DebugCategory,
     element: &str,
@@ -431,16 +456,12 @@ pub(super) fn resolve_inner_config_nvdsudp(
         synthesise_or_passthrough_udp(cat, element, settings, resolved_transport_file)?;
 
     let resolved_transport_file = match resolved_transport_file {
-        Some(text) if had_user_transport_file => Some(
-            sdp::passthrough_with_overrides(
-                &text,
-                &property_overrides_udp(settings),
-                DualLegPassthroughPolicy::AllowDualLeg,
-            )
-            .with_context(|| {
-                format!("{element}: applying property overrides to transport-file SDP")
-            })?,
-        ),
+        Some(text) if had_user_transport_file => Some(passthrough_user_transport_file(
+            element,
+            settings,
+            &text,
+            DualLegPassthroughPolicy::AllowDualLeg,
+        )?),
         other => other,
     };
     let inner = gate_deferred_sender_udp(
@@ -499,16 +520,12 @@ pub(super) fn resolve_inner_config_udp(
     // runs at startup only. Synthesised SDPs already bake every
     // property in via [`sdp::from_caps`]; skip the second pass.
     let resolved_transport_file = match resolved_transport_file {
-        Some(text) if had_user_transport_file => Some(
-            sdp::passthrough_with_overrides(
-                &text,
-                &property_overrides_udp(settings),
-                DualLegPassthroughPolicy::RejectDualLeg,
-            )
-            .with_context(|| {
-                format!("{element}: applying property overrides to transport-file SDP")
-            })?,
-        ),
+        Some(text) if had_user_transport_file => Some(passthrough_user_transport_file(
+            element,
+            settings,
+            &text,
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )?),
         other => other,
     };
     let inner = gate_deferred_sender_udp(
@@ -561,6 +578,7 @@ mod tests {
                 "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1",
             )
             .expect("static raw caps parse"),
+            bit_rates: sdp::BitRates::UNSET,
         }
     }
 
@@ -1234,6 +1252,44 @@ mod tests {
                         }
                     }
                 }
+            }
+
+            const JXSV_MCAST_SDP: &str = concat!(
+                "v=0\r\n",
+                "o=- 1 0 IN IP4 192.0.2.10\r\n",
+                "s=test\r\n",
+                "t=0 0\r\n",
+                "m=video 5004 RTP/AVP 96\r\n",
+                "c=IN IP4 239.1.1.1/64\r\n",
+                "a=rtpmap:96 jxsv/90000\r\n",
+                "a=fmtp:96 packetmode=0; profile=High444.12; level=2k-1; sublevel=Sublev3bpp;",
+                " sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=25; depth=10\r\n",
+            );
+
+            /// JPEG XS configuring SDP: property overrides rewrite network
+            /// fields while fmtp profile / level / sublevel survive.
+            #[test]
+            fn receiver_passthrough_jxsv_preserves_fmtp_and_overrides_interface_ip() {
+                let settings = receiver_settings(true, true, false);
+                let spliced = splice(JXSV_MCAST_SDP, &settings);
+                assert_c_contains(&spliced, PROP_MCAST);
+                assert_iface_attr(&spliced, Some(PROP_IFACE));
+                assert!(
+                    spliced.contains("profile=High444.12"),
+                    "profile must survive passthrough:\n{spliced}",
+                );
+                assert!(
+                    spliced.contains("level=2k-1"),
+                    "level must survive passthrough:\n{spliced}",
+                );
+                assert!(
+                    spliced.contains("sublevel=Sublev3bpp"),
+                    "sublevel must survive passthrough:\n{spliced}",
+                );
+                assert!(
+                    spliced.contains("a=rtpmap:96 jxsv/90000"),
+                    "jxsv rtpmap must survive passthrough:\n{spliced}",
+                );
             }
         }
 

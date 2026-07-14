@@ -232,6 +232,31 @@ pub(crate) const CAPS_BLURB_RECEIVER: &str =
 pub(crate) const TRANSPORT_CAPS_BLURB: &str =
     "Per-transport overrides (SDP fmtp-style). Typically empty for MXL.";
 
+pub(crate) const FORMAT_BIT_RATE_BLURB: &str =
+    "Coded essence (Flow) bit rate in kilobits per second (1000 bits/s), \
+     matching NMOS Flow `bit_rate` and SDP fmtp `x-nvnmos-format-bit-rate`. \
+     On JPEG XS RTP transports, synthesises the configuring SDP \
+     `a=fmtp:… x-nvnmos-format-bit-rate=` attribute and `b=AS:` (via the \
+     derived transport rate) and sets `rtpjxsvpay max-codestream-bitrate` \
+     to this value times 1000 (bit/s) unless `pay-properties` already \
+     supplies it. 0 (the default) = unset. When only one of \
+     `format-bit-rate` and `transport-bit-rate` is set, the other is derived \
+     using the same overhead factor as `nvnmosd` (AMWA BCP-006-01 / VSF \
+     TR-08 style). With a supplied `transport-file*`, cross-checks when both \
+     sides declare a rate and splices when the file omits it. Ignored on \
+     `transport=mxl`.";
+
+pub(crate) const TRANSPORT_BIT_RATE_BLURB: &str =
+    "Transport (Sender) bit rate in kilobits per second (1000 bits/s), \
+     including RTP/UDP/IP overhead, matching NMOS Sender `bit_rate`, SDP \
+     `b=AS:`, and fmtp `x-nvnmos-transport-bit-rate`. On JPEG XS RTP \
+     transports, synthesises the configuring SDP `b=AS:` bandwidth line and \
+     `a=fmtp:… x-nvnmos-transport-bit-rate=` attribute. 0 (the default) = \
+     unset. When only one of `format-bit-rate` and `transport-bit-rate` is \
+     set, the other is derived using the same overhead factor as `nvnmosd`. \
+     With a supplied `transport-file*`, cross-checks when both sides declare \
+     a rate and splices when the file omits it. Ignored on `transport=mxl`.";
+
 pub(crate) const TRANSPORT_PROPERTIES_BLURB: &str =
     "Overrides applied to the inner source or sink (`udpsrc`, `udpsink`, \
      `nvdsudpsrc`, `nvdsudpsink`, `mxlsrc`, or `mxlsink`) every time the \
@@ -362,6 +387,14 @@ pub(crate) struct CommonSettings {
     /// synthesis path (which threads it into
     /// [`sdp::from_caps`]'s `transport_caps` slot).
     pub(crate) transport_caps: Option<gst::Caps>,
+    /// Coded essence (Flow) bit rate in kilobits per second (1000 bits/s),
+    /// excluding RTP/UDP/IP overhead. 0 = unset. On JPEG XS RTP transports,
+    /// threads into SDP synthesis and `rtpjxsvpay` configuration.
+    pub(crate) format_bit_rate: u64,
+    /// Transport (Sender) bit rate in kilobits per second (1000 bits/s),
+    /// including RTP/UDP/IP overhead. 0 = unset. On JPEG XS RTP transports,
+    /// threads into SDP `b=AS:` and fmtp synthesis.
+    pub(crate) transport_bit_rate: u64,
     /// Controls whether the resource advertises narrow or wide caps
     /// in IS-04. See [`CapsMode`] for the full semantics. Honoured
     /// only when `side` is `Receiver` (driven by the
@@ -475,6 +508,8 @@ impl Default for CommonSettings {
             group_hint: String::new(),
             caps: None,
             transport_caps: None,
+            format_bit_rate: 0,
+            transport_bit_rate: 0,
             caps_mode: CapsMode::default(),
             source_ip: String::new(),
             source_port: 0,
@@ -637,6 +672,7 @@ impl FakeKind {
 /// A later step (caps→transport-file synthesis or IS-05 activation)
 /// will supply the missing pieces and the bin will swap from fake to
 /// real.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub(crate) enum InnerConfig {
     Real(TransportConfig),
@@ -676,9 +712,10 @@ pub(crate) enum TransportConfig {
     /// senders and `udpsrc ! rtp*depay [! capssetter(raw_caps)]` for
     /// receivers.
     /// Wide receivers (activation SDP carries `a=x-nvnmos-caps:`)
-    /// omit `capssetter`; narrow receivers pin configuring essence
-    /// caps parsed from the transport file. The exact element factory
-    /// names dispatch on [`UdpVariant`].
+    /// omit `capssetter`; narrow receivers pass configuring essence
+    /// caps parsed from the transport file to the chain builder, which
+    /// appends a capssetter only for depayloaders that need/tolerate
+    /// one. The exact element factory names dispatch on [`UdpVariant`].
     ///
     /// Constructed at runtime by `resolve_inner_config_udp` (in
     /// `validate_and_open`) and `decide_inner_config_udp` (in
@@ -1417,6 +1454,8 @@ mod support {
             group_hint: String::new(),
             caps: None,
             transport_caps: None,
+            format_bit_rate: 0,
+            transport_bit_rate: 0,
             caps_mode: CapsMode::Auto,
             // IS-05 RTP transport_params: unset/0 for MXL
             // tests (transport=Mxl above ignores them anyway);

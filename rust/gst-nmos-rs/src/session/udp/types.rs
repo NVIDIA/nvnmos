@@ -76,6 +76,10 @@ pub(crate) struct UdpMedia {
     /// the flow will carry, mirroring the MXL path's
     /// `advertise_caps` derived from the flow_def.
     pub(crate) raw_caps: gst::Caps,
+    /// Resolved format / transport bit rates from SDP `b=AS:` and fmtp
+    /// `x-nvnmos-*-bit-rate` (kbit/s). [`crate::sdp::BitRates::UNSET`]
+    /// when absent.
+    pub(crate) bit_rates: crate::sdp::BitRates,
 }
 
 /// One network leg of a [`UdpMedia`]. Non-redundant RTP has a single
