@@ -11,8 +11,11 @@ Linux-first NMOS daemon: one process hosts multiple NMOS **Nodes** (by `node_see
 [`nvnmosd.proto`](../nvnmos-rpc/proto/nvnmosd.proto)).
 
 Architecture, element integration, and historical design rationale live in
-[`doc/designs/nvnmosd/README.md`](../../doc/designs/nvnmosd/README.md). This
-file describes the **as-built** daemon surface for operators and client authors.
+[`doc/designs/nvnmosd/README.md`](../../doc/designs/nvnmosd/README.md).
+Concurrency and the no-FFI-under-`state` invariant are documented in
+[`doc/designs/nvnmosd/lock-ordering.md`](../../doc/designs/nvnmosd/lock-ordering.md).
+This file describes the **as-built** daemon surface for operators and client
+authors.
 
 ## Build and Run
 

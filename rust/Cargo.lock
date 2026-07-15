@@ -1332,6 +1332,7 @@ dependencies = [
  "libc",
  "nvnmos",
  "nvnmos-rpc",
+ "serde_json",
  "socket2 0.5.10",
  "tempfile",
  "tokio",
