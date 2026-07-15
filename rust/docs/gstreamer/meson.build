@@ -141,7 +141,8 @@ nmos_doc = hotdoc.generate_doc(
   gst_cache_file: build_plugins_cache,
   gst_plugin_name: 'nmos',
   extra_assets: [rust_root / 'gst-nmos-rs' / 'images'],
-  dependencies: [gst_dep, gst_plugins_doc_dep, gstnmos_plugin],
+  dependencies: gst_dep,
+  depends: [gst_plugins_doc_dep, gstnmos_plugin],
   install: false,
 )
 
@@ -155,7 +156,8 @@ avsynctest_doc = hotdoc.generate_doc(
   gst_c_sources: gst_avsynctest_rs_globs,
   gst_cache_file: build_plugins_cache,
   gst_plugin_name: 'avsynctest',
-  dependencies: [gst_dep, gst_plugins_doc_dep, gstavsynctest_plugin],
+  dependencies: gst_dep,
+  depends: [gst_plugins_doc_dep, gstavsynctest_plugin],
   install: false,
 )
 
@@ -187,7 +189,7 @@ nvnmos_gstreamer_doc = hotdoc.generate_doc(
   syntax_highlighting_activate: true,
   gst_list_plugins_page: 'gst-index',
   subprojects: [nmos_doc, avsynctest_doc],
-  dependencies: [portal_sitemap, nmos_doc, avsynctest_doc],
+  depends: [portal_sitemap, nmos_doc, avsynctest_doc],
   install: false,
 )
 
