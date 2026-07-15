@@ -400,10 +400,10 @@ typedef struct _NvNmosReceiverConfig
         The 'urn:x-nvnmos:tag:caps' tag may be used (presence-only) to
         indicate that the receiver should be advertised with the
         format-derived capabilities omitted.
-        The 'urn:x-nvnmos:tag:mxl-domain-id' tag (single-string array of
-        a UUID, required) specifies the MXL domain for the receiver;
-        the IS-05 transport parameter defaults to 'auto' and is
-        resolved at activation time from this value.
+        The 'urn:x-nvnmos:tag:mxl-domain-id' tag specifies the MXL
+        domain for the receiver when a single UUID is specified; when
+        the tag is omitted, empty, or [""], the IS-05 mxl_domain_id
+        constraint is unconstrained and resolves to null in /active.
         The flow definition's top-level 'id' field is not used by the
         receiver itself (since the MXL flow id is set dynamically by
         IS-05). */
@@ -450,10 +450,10 @@ typedef struct _NvNmosSenderConfig
         the Node.
         A group hint tag may be specified via the standard
         'urn:x-nmos:tag:grouphint/v1.0' tag.
-        The 'urn:x-nvnmos:tag:mxl-domain-id' tag (single-string array of
-        a UUID, required) specifies the MXL domain for the sender;
-        the IS-05 transport parameter defaults to 'auto' and is
-        resolved at activation time from this value.
+        The 'urn:x-nvnmos:tag:mxl-domain-id' tag specifies the MXL
+        domain for the sender when a single UUID is specified; when
+        the tag is omitted, empty, or [""], the IS-05 mxl_domain_id
+        constraint is unconstrained and resolves to null in /active.
         The flow definition's top-level 'id' field (UUID string),
         if present, is used as the MXL flow identity for the sender's
         IS-05 transport parameter 'mxl_flow_id'; if absent, the NMOS

@@ -199,10 +199,11 @@ namespace nvnmos
         // returns true if the urn:x-nvnmos:tag:caps tag asks for a fully-flexible
         // receiver (format-derived capabilities omitted)
         bool has_mxl_flow_def_caps(const web::json::value& flow_def);
-        // extract the (required) MXL domain id from the urn:x-nvnmos:tag:mxl-domain-id tag;
-        // throws std::invalid_argument if absent or empty (the IS-05 transport parameter
-        // defaults to "auto" and is resolved at activation time from this value)
+        // extract the MXL domain id from the urn:x-nvnmos:tag:mxl-domain-id tag;
+        // returns empty when application-resolved (tag absent, empty array, or empty string)
         utility::string_t get_mxl_flow_def_domain_id(const web::json::value& flow_def);
+        // resolve IS-05 mxl_domain_id "auto" from constraint: enum front or null
+        web::json::value resolve_mxl_domain_id(const web::json::value& constraint);
         // extract the top-level 'id' property (or empty)
         utility::string_t get_mxl_flow_def_id(const web::json::value& flow_def);
         // produce a flow definition JSON string with the active MXL transport parameters spliced in
@@ -1143,13 +1144,13 @@ namespace nvnmos
             else if (nmos::types::sender == id_type.second && is_mxl)
             {
                 // BCP-007-03: MXL has a single transport leg per sender
-                nmos::details::resolve_auto(transport_params[0], nmos::fields::mxl_domain_id, [&] { return web::json::front(nmos::fields::constraint_enum(constraints.at(0).at(nmos::fields::mxl_domain_id))); });
+                nmos::details::resolve_auto(transport_params[0], nmos::fields::mxl_domain_id, [&] { return impl::resolve_mxl_domain_id(constraints.at(0).at(nmos::fields::mxl_domain_id)); });
                 nmos::details::resolve_auto(transport_params[0], nmos::fields::mxl_flow_id, [&] { return web::json::front(nmos::fields::constraint_enum(constraints.at(0).at(nmos::fields::mxl_flow_id))); });
             }
             else if (nmos::types::receiver == id_type.second && is_mxl)
             {
                 // BCP-007-03: MXL has a single transport leg per receiver, and mxl_flow_id does not use "auto" (UUID or null only)
-                nmos::details::resolve_auto(transport_params[0], nmos::fields::mxl_domain_id, [&] { return web::json::front(nmos::fields::constraint_enum(constraints.at(0).at(nmos::fields::mxl_domain_id))); });
+                nmos::details::resolve_auto(transport_params[0], nmos::fields::mxl_domain_id, [&] { return impl::resolve_mxl_domain_id(constraints.at(0).at(nmos::fields::mxl_domain_id)); });
             }
         }
     }
@@ -1340,7 +1341,10 @@ namespace nvnmos
                     // hmm, we do not have access to the MXL flow definition of the flow here;
                     // for now, splice the active mxl_domain_id, mxl_flow_id transport parameters
                     // into the original MXL flow definition JSON
-                    const auto& mxl_domain_id = nmos::fields::mxl_domain_id(active_leg).as_string();
+                    // IS-05 uses null for an application-resolved mxl_domain_id; the flow_def tag
+                    // convention is an empty string, so normalise here
+                    const auto& mxl_domain_id_or_null = nmos::fields::mxl_domain_id(active_leg);
+                    const auto mxl_domain_id = !mxl_domain_id_or_null.is_null() ? mxl_domain_id_or_null.as_string() : utility::string_t{};
                     const auto& mxl_flow_id = mxl_flow_id_or_null.as_string();
 
                     const auto& config_flow_def_data = nvnmos::fields::transport_file(config->second);
@@ -1479,9 +1483,11 @@ namespace nvnmos
                 // should deactivate (pass an empty transport_file) instead
                 if (mxl_flow_id.empty()) throw std::invalid_argument("Missing id property in MXL flow definition for activation");
 
+                // IS-05 uses null for an application-resolved mxl_domain_id; the flow_def tag
+                // convention is an empty string, so normalise here
                 active[nmos::fields::transport_params] = value_of({
                     value_of({
-                        { nmos::fields::mxl_domain_id, mxl_domain_id },
+                        { nmos::fields::mxl_domain_id, !mxl_domain_id.empty() ? value::string(mxl_domain_id) : value::null() },
                         { nmos::fields::mxl_flow_id, mxl_flow_id }
                     })
                 });
@@ -2272,14 +2278,19 @@ namespace nvnmos
             return !web::json::empty(nvnmos::fields::caps(flow_def.at(nmos::fields::tags)).as_array());
         }
 
-        // extract the (required) MXL domain id from the urn:x-nvnmos:tag:mxl-domain-id tag;
-        // throws std::invalid_argument if absent or empty (the IS-05 transport parameter
-        // defaults to "auto" and is resolved at activation time from this value)
+        // extract the MXL domain id from the urn:x-nvnmos:tag:mxl-domain-id tag;
+        // returns empty when application-resolved (tag absent, empty array, or empty string)
         utility::string_t get_mxl_flow_def_domain_id(const web::json::value& flow_def)
         {
-            const auto value = get_mxl_flow_def_tag(flow_def, nvnmos::fields::mxl_domain_id);
-            if (value.empty()) throw std::invalid_argument("Missing or empty urn:x-nvnmos:tag:mxl-domain-id tag in MXL flow definition");
-            return value;
+            return get_mxl_flow_def_tag(flow_def, nvnmos::fields::mxl_domain_id);
+        }
+
+        // resolve IS-05 mxl_domain_id "auto" from constraint: enum front or null
+        web::json::value resolve_mxl_domain_id(const web::json::value& constraint)
+        {
+            return constraint.has_field(nmos::fields::constraint_enum)
+                ? web::json::front(nmos::fields::constraint_enum(constraint))
+                : web::json::value::null();
         }
 
         // extract the top-level 'id' property (or empty)

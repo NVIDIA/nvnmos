@@ -113,13 +113,14 @@ pub(crate) const TRANSPORT_BLURB: &str = "Inner data path family. \
 
 pub(crate) const MXL_DOMAIN_ID_BLURB: &str = "MXL Domain identifier (UUID) included as \
      `urn:x-nvnmos:tag:mxl-domain-id` in the transport file. \
-     Required when transport=mxl, but may be omitted if \
-     `mxl-domain-path` points at a directory containing a \
-     `domain_def.json` (AMWA BCP-007-03 WIP): the file's `id` is \
-     then used. Overrides the transport file's tag when both are \
-     supplied. Cross-checked against `domain_def.json` when both \
-     are supplied (mismatch is an error). On `nmossrc`, set before \
-     NULL\u{2192}READY; on `nmossink` it may also be set in READY \
+     Optional when transport=mxl: the path's `domain_def.json` `id` \
+     supplies it when present (for a `caps`-synthesised file; a supplied \
+     `transport-file*` keeps its own tag, cross-checked at activation); \
+     otherwise the tag is left application-resolved (`[\"\"]`) and the \
+     data plane uses `mxl-domain-path` locally. When supplied, overrides \
+     the transport file's tag. Cross-checked against `domain_def.json` \
+     when both are supplied (mismatch is an error). On `nmossrc`, set \
+     before NULL\u{2192}READY; on `nmossink` it may also be set in READY \
      for deferred AddSender.";
 
 pub(crate) const SENDER_NAME_BLURB: &str = "Name for this Sender within the Node (becomes the \
@@ -1675,7 +1676,7 @@ mod tests {
                 &cat(),
                 "nmossink",
                 &s,
-                DOMAIN_ID,
+                &crate::domain::DomainId::Concrete(DOMAIN_ID.to_owned()),
                 None,
             )
             .expect("synthesis must succeed")

@@ -205,10 +205,13 @@ impl ObjectImpl for NmosSrc {
                          this host. If the directory contains a \
                          `domain_def.json` (AMWA BCP-007-03 WIP) its `id` is \
                          used to populate `mxl-domain-id` (or cross-checked \
-                         against it when both are set). Fed into the inner \
-                         `mxlsrc` `domain=` property when the real inner \
-                         chain is installed (after IS-05 activation, or at \
-                         startup when `auto-activate=true`).",
+                         against it when both are set). Without \
+                         `domain_def.json`, an unset `mxl-domain-id` leaves \
+                         the NMOS tag application-resolved while the data plane \
+                         still uses this path. Fed into the inner `mxlsrc` \
+                         `domain=` property when the real inner chain is \
+                         installed (after IS-05 activation, or at startup when \
+                         `auto-activate=true`).",
                     )
                     .mutable_ready()
                     .build(),
