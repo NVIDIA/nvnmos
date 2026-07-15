@@ -1,0 +1,1113 @@
+{
+    "avsynctest": {
+        "description": "Aligned audio/video test sources for sync testing",
+        "elements": {
+            "avsyncaudiotestsrc": {
+                "author": "NVIDIA Corporation",
+                "description": "Emits tone pips phase-locked to avsyncvideotestsrc for A/V sync testing",
+                "hierarchy": [
+                    "GstAvSyncAudioTestSrc",
+                    "GstPushSrc",
+                    "GstBaseSrc",
+                    "GstElement",
+                    "GstObject",
+                    "GInitiallyUnowned",
+                    "GObject"
+                ],
+                "klass": "Source/Audio",
+                "pad-templates": {
+                    "src": {
+                        "caps": "audio/x-raw:\n           rate: [ 1, 2147483647 ]\n       channels: [ 1, 2147483647 ]\n         layout: interleaved\n         format: { F32LE, S24BE, S16BE }\n",
+                        "direction": "src",
+                        "presence": "always"
+                    }
+                },
+                "properties": {
+                    "is-live": {
+                        "blurb": "Whether to pace output against the pipeline clock",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "false",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gboolean",
+                        "writable": true
+                    },
+                    "pip-duration": {
+                        "blurb": "Nanoseconds each tone pip lasts",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "4000000",
+                        "max": "18446744073709551615",
+                        "min": "1",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "guint64",
+                        "writable": true
+                    },
+                    "pip-freq": {
+                        "blurb": "Tone frequency of the pip in Hz",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "1000",
+                        "max": "1.79769e+308",
+                        "min": "1",
+                        "mutable": "playing",
+                        "readable": true,
+                        "type": "gdouble",
+                        "writable": true
+                    },
+                    "pip-interval": {
+                        "blurb": "Nanoseconds between pips (must match the video source)",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "1000000000",
+                        "max": "18446744073709551615",
+                        "min": "1",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "guint64",
+                        "writable": true
+                    },
+                    "pip-volume": {
+                        "blurb": "Peak amplitude of the pip (0.0-1.0)",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0.8",
+                        "max": "1",
+                        "min": "0",
+                        "mutable": "playing",
+                        "readable": true,
+                        "type": "gdouble",
+                        "writable": true
+                    },
+                    "samples-per-buffer": {
+                        "blurb": "Number of samples per output buffer",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "1024",
+                        "max": "-1",
+                        "min": "1",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    }
+                },
+                "rank": "none"
+            },
+            "avsyncvideotestsrc": {
+                "author": "NVIDIA Corporation",
+                "description": "Emits a sweeping bar phase-locked to avsyncaudiotestsrc for A/V sync testing",
+                "hierarchy": [
+                    "GstAvSyncVideoTestSrc",
+                    "GstPushSrc",
+                    "GstBaseSrc",
+                    "GstElement",
+                    "GstObject",
+                    "GInitiallyUnowned",
+                    "GObject"
+                ],
+                "klass": "Source/Video",
+                "pad-templates": {
+                    "src": {
+                        "caps": "video/x-raw:\n         format: { v210, UYVP }\n          width: [ 1, 2147483647 ]\n         height: [ 1, 2147483647 ]\n      framerate: { (fraction)24000/1001, (fraction)24/1, (fraction)25/1, (fraction)30000/1001, (fraction)30/1, (fraction)50/1, (fraction)60000/1001, (fraction)60/1 }\n",
+                        "direction": "src",
+                        "presence": "always"
+                    }
+                },
+                "properties": {
+                    "framerate": {
+                        "blurb": "Default output framerate when downstream leaves it open",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "30000/1001",
+                        "max": "2147483647/1",
+                        "min": "1/1",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "GstFraction",
+                        "writable": true
+                    },
+                    "height": {
+                        "blurb": "Default output height when downstream leaves it open",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "720",
+                        "max": "2147483647",
+                        "min": "1",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gint",
+                        "writable": true
+                    },
+                    "is-live": {
+                        "blurb": "Whether to pace output against the pipeline clock",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "false",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gboolean",
+                        "writable": true
+                    },
+                    "pip-interval": {
+                        "blurb": "Nanoseconds between bar-centre crossings (must match the audio source)",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "1000000000",
+                        "max": "18446744073709551615",
+                        "min": "1",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "guint64",
+                        "writable": true
+                    },
+                    "width": {
+                        "blurb": "Default output width when downstream leaves it open",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "1280",
+                        "max": "2147483647",
+                        "min": "1",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gint",
+                        "writable": true
+                    }
+                },
+                "rank": "none"
+            }
+        },
+        "filename": "gstavsynctest",
+        "license": "Apache-2.0",
+        "other-types": {},
+        "package": "gst-avsynctest-rs",
+        "source": "gst-avsynctest-rs",
+        "tracers": {},
+        "url": "https://github.com/NVIDIA/nvnmos"
+    },
+    "nmos": {
+        "description": "GStreamer NMOS plugin (nmossrc / nmossink) talking to nvnmosd over gRPC",
+        "elements": {
+            "nmosaudiochannelmap": {
+                "author": "NVIDIA Corporation",
+                "description": "IS-08 channel mapping between NMOS audio streams, backed by nvnmosd",
+                "hierarchy": [
+                    "GstNmosAudioChannelMap",
+                    "GstBin",
+                    "GstElement",
+                    "GstObject",
+                    "GInitiallyUnowned",
+                    "GObject"
+                ],
+                "interfaces": [
+                    "GstChildProxy"
+                ],
+                "klass": "Filter/Audio/Network",
+                "pad-templates": {
+                    "sink_%%u": {
+                        "caps": "audio/x-raw:\n",
+                        "direction": "sink",
+                        "presence": "request",
+                        "type": "GstNmosAudioChannelMapSinkPad"
+                    },
+                    "src_%%u": {
+                        "caps": "audio/x-raw:\n",
+                        "direction": "src",
+                        "presence": "request",
+                        "type": "GstNmosAudioChannelMapSrcPad"
+                    }
+                },
+                "properties": {
+                    "channelmapping-name": {
+                        "blurb": "Caller-chosen name for this channel mapping within the Node. Unique per Node; identifies the Input/Output bundle added at NULL→READY. Not an IS-08 Input or Output id.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "daemon-uri": {
+                        "blurb": "gRPC endpoint for nvnmosd. Only `unix:/path/to/sock` URIs are currently supported.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "unix:/tmp/nvnmosd.sock",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "domain": {
+                        "blurb": "DNS domain for NMOS network services (`network_services.domain`). Use `local` to force mDNS. Empty (the default) leaves libnvnmos on automatic discovery. Not to be confused with `mxl-domain-id` / `mxl-domain-path`, which identify an MXL shared-memory Domain. Honoured only by the OpenSession that creates the Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "host-name": {
+                        "blurb": "NMOS Node host name (`node_config.host_name`). Empty (the default) leaves libnvnmos to autodetect. Honoured only by the OpenSession that actually creates the Node; ignored when attaching to a pre-existing Node with the same `node-seed`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "http-port": {
+                        "blurb": "TCP port libnvnmos serves the NMOS HTTP APIs on (node_config.http_port). 0 (the default) asks nvnmosd to allocate from NVNMOSD_HTTP_PORT_MIN..NVNMOSD_HTTP_PORT_MAX. Non-zero selects an explicit port (rejected when unavailable). Honoured only by the OpenSession that actually creates the Node — when attaching to a pre-existing Node (e.g. another nmossink / nmossrc opened first with the same node-seed) this property is ignored. The effective port is returned in OpenSessionResponse.http_port.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "65535",
+                        "min": "0",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    },
+                    "node-seed": {
+                        "blurb": "NvNmos Node seed (node_config.seed). Required. Sessions sharing this seed contribute to the same NMOS Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "registration-url": {
+                        "blurb": "Fixed IS-04 Registration API URL. Format: `http://host[:port]/x-nmos/registration/v<X.Y>[/]`. Parsed into `network_services.registration_*`; invalid URLs are logged and ignored. Empty (the default) leaves libnvnmos on DNS-SD discovery based on `host-name`. Honoured only by the OpenSession that creates the Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "restrict-routable-inputs": {
+                        "blurb": "When true, each Output's IS-08 /caps routable_inputs lists only this element's Input ids. When false (default), routable inputs are unrestricted on the IS-08 Output /caps endpoint.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "false",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gboolean",
+                        "writable": true
+                    },
+                    "system-url": {
+                        "blurb": "Fixed IS-09 System API URL. Format: `http://host[:port]/x-nmos/system/v<X.Y>[/]`. Parsed into `network_services.system_*`; invalid URLs are logged and ignored. Honoured only when `registration-url` is also set (libnvnmos ignores a standalone System API). Honoured only by the OpenSession that creates the Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    }
+                },
+                "rank": "none"
+            },
+            "nmossink": {
+                "author": "NVIDIA Corporation",
+                "description": "NMOS Sender wrapper element backed by nvnmosd",
+                "hierarchy": [
+                    "GstNmosSink",
+                    "GstBin",
+                    "GstElement",
+                    "GstObject",
+                    "GInitiallyUnowned",
+                    "GObject"
+                ],
+                "interfaces": [
+                    "GstChildProxy"
+                ],
+                "klass": "Sink/Network/NMOS",
+                "pad-templates": {
+                    "sink": {
+                        "caps": "ANY",
+                        "direction": "sink",
+                        "presence": "always"
+                    }
+                },
+                "properties": {
+                    "auto-activate": {
+                        "blurb": "When `true`, swap in the real transport sink or source (instead of the fake chain) once the configuring transport file has been resolved at NULL→READY (or READY→PAUSED for deferred senders), and call `SyncResourceState` so IS-04/IS-05 show active without an IS-05 PATCH. Does not force PLAYING — child state still follows the bin. Default `false`: add via AddSender / AddReceiver (visible on IS-04) but keep the fake chain until an external IS-05 controller activates the resource.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "false",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gboolean",
+                        "writable": true
+                    },
+                    "caps": {
+                        "blurb": "Essence caps for this Sender. Synthesises the configuring transport file when `transport-file*` is unset (MXL `flow_def` or SDP depending on `transport`). On `transport=mxl`, requires `mxl-flow-id`; supported shapes: v210 video, F32LE audio, `meta/x-st-2038` data. On RTP transports, requires the relevant IS-05 endpoint properties. When `transport-file*` is also set, the file wins and `caps` are cross-checked against it — mismatch is a hard error.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "GstCaps",
+                        "writable": true
+                    },
+                    "daemon-uri": {
+                        "blurb": "gRPC endpoint for nvnmosd. Only `unix:/path/to/sock` URIs are currently supported.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "unix:/tmp/nvnmosd.sock",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "description": {
+                        "blurb": "NMOS description for the Sender. Optional. Overrides the transport file when both are supplied (top-level `description` in an MXL `flow_def`; SDP `i=` line for RTP/UDP).",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "destination-ip": {
+                        "blurb": "IS-05 sender transport_params `destination_ip`: remote destination (unicast peer or multicast group). Becomes the configuring SDP `c=` line address and `udpsink.host` on the RTP transports. Empty = unset (use the transport file's `c=` line if present; otherwise the daemon fills the IS-05 `auto` sentinel). Honoured only on the RTP transports; ignored on `mxl`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "destination-port": {
+                        "blurb": "IS-05 sender transport_params `destination_port`: remote destination port. Becomes the configuring SDP `m=` line port and `udpsink.port` on the RTP transports. 0 (the default) = unset; falls back to the transport file's `m=` port if present, else to the canonical RTP default 5004 (`nmos-cpp` `auto_rtp_port`). Honoured only on the RTP transports; ignored on `mxl`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "65535",
+                        "min": "0",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    },
+                    "domain": {
+                        "blurb": "DNS domain for NMOS network services (`network_services.domain`). Use `local` to force mDNS. Empty (the default) leaves libnvnmos on automatic discovery. Not to be confused with `mxl-domain-id` / `mxl-domain-path`, which identify an MXL shared-memory Domain. Honoured only by the OpenSession that creates the Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "format-bit-rate": {
+                        "blurb": "Coded essence (Flow) bit rate in kilobits per second (1000 bits/s), matching NMOS Flow `bit_rate` and SDP fmtp `x-nvnmos-format-bit-rate`. On JPEG XS RTP transports, synthesises the configuring SDP `a=fmtp:… x-nvnmos-format-bit-rate=` attribute and `b=AS:` (via the derived transport rate) and sets `rtpjxsvpay max-codestream-bitrate` to this value times 1000 (bit/s) unless `pay-properties` already supplies it. 0 (the default) = unset. When only one of `format-bit-rate` and `transport-bit-rate` is set, the other is derived using the same overhead factor as `nvnmosd` (AMWA BCP-006-01 / VSF TR-08 style). With a supplied `transport-file*`, cross-checks when both sides declare a rate and splices when the file omits it. Ignored on `transport=mxl`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "18446744073709551615",
+                        "min": "0",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "guint64",
+                        "writable": true
+                    },
+                    "group-hint": {
+                        "blurb": "NMOS group hint for the Sender (the `urn:x-nmos:tag:grouphint/v1.0` tag), e.g. `\"SDI 1:Video\"`. Becomes the `x-nvnmos-group-hint` session-level SDP attribute on RTP/UDP or the grouphint tag in an MXL `flow_def`. Overrides the transport file when both are supplied. Optional. Omitted when unset.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "host-name": {
+                        "blurb": "NMOS Node host name (`node_config.host_name`). Empty (the default) leaves libnvnmos to autodetect. Honoured only by the OpenSession that actually creates the Node; ignored when attaching to a pre-existing Node with the same `node-seed`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "http-port": {
+                        "blurb": "TCP port libnvnmos serves the NMOS HTTP APIs on (node_config.http_port). 0 (the default) asks nvnmosd to allocate from NVNMOSD_HTTP_PORT_MIN..NVNMOSD_HTTP_PORT_MAX. Non-zero selects an explicit port (rejected when unavailable). Honoured only by the OpenSession that actually creates the Node — when attaching to a pre-existing Node (e.g. another nmossink / nmossrc opened first with the same node-seed) this property is ignored. The effective port is returned in OpenSessionResponse.http_port.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "65535",
+                        "min": "0",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    },
+                    "label": {
+                        "blurb": "NMOS label for the Sender. Optional. Overrides the transport file when both are supplied (top-level `label` in an MXL `flow_def`; SDP `s=` line for RTP/UDP).",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "mxl-domain-id": {
+                        "blurb": "MXL Domain identifier (UUID) included as `urn:x-nvnmos:tag:mxl-domain-id` in the transport file. Optional when transport=mxl: the path's `domain_def.json` `id` supplies it when present (for a `caps`-synthesised file; a supplied `transport-file*` keeps its own tag, cross-checked at activation); otherwise the tag is left application-resolved (`[\"\"]`) and the data plane uses `mxl-domain-path` locally. When supplied, overrides the transport file's tag. Cross-checked against `domain_def.json` when both are supplied (mismatch is an error). On `nmossrc`, set before NULL→READY; on `nmossink` it may also be set in READY for deferred AddSender.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "mxl-domain-path": {
+                        "blurb": "Local filesystem path identifying the MXL Domain on this host. If the directory contains a `domain_def.json` (AMWA BCP-007-03 WIP) its `id` is used to populate `mxl-domain-id` (or cross-checked against it when both are set). Without `domain_def.json`, an unset `mxl-domain-id` leaves the NMOS tag application-resolved while the data plane still uses this path. The path itself will be consumed by the inner `mxlsink` `domain=` property when the data path is wired up.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "mxl-flow-id": {
+                        "blurb": "MXL flow id (UUID) the inner `mxlsink` should push into. Overrides the transport file's top-level `id` when both are supplied.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "node-seed": {
+                        "blurb": "NvNmos Node seed (node_config.seed). Required. Sessions sharing this seed contribute to the same NMOS Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "pay-properties": {
+                        "blurb": "Overrides applied to the inner RTP payloader every time the UDP sender chain is built. Same `GstStructure` syntax as `transport-properties`; ignored on non-UDP transports (a warning is logged if non-empty). Takes effect on the next chain build.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "GstStructure",
+                        "writable": true
+                    },
+                    "registration-url": {
+                        "blurb": "Fixed IS-04 Registration API URL. Format: `http://host[:port]/x-nmos/registration/v<X.Y>[/]`. Parsed into `network_services.registration_*`; invalid URLs are logged and ignored. Empty (the default) leaves libnvnmos on DNS-SD discovery based on `host-name`. Honoured only by the OpenSession that creates the Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "sender-name": {
+                        "blurb": "Name for this Sender within the Node (becomes the `x-nvnmos-name` SDP attribute or the `urn:x-nvnmos:tag:name` flow-def tag in the transport file). Unique across Senders on the Node; a Receiver on the same Node may share the same name (the daemon scopes names by side). Required unless the name is already carried in `transport-file*`. Overrides the transport file's value when both are supplied. The Sender's IS-04 id is derived from the name and the element's `node-seed`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "source-ip": {
+                        "blurb": "IS-05 sender transport_params `source_ip`: local egress NIC IP. Drives both the SDP `a=source-filter:` include-source (RFC 4607 SSM convention) and the `a=x-nvnmos-iface-ip:` attribute, and `udpsink.bind-address` on the RTP transports (`udp`, `udp2`, `nvdsudp`). Empty = unset (leave the daemon / SDP / IS-05 `auto` resolver to fill at activation time). Honoured only on the RTP transports; ignored on `mxl`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "source-port": {
+                        "blurb": "IS-05 sender transport_params `source_port`: local egress port. Drives `udpsink.bind-port` and the SDP `a=x-nvnmos-src-port:` attribute on the RTP transports. 0 (the default) = unset; the OS picks an ephemeral port. Honoured only on the RTP transports; ignored on `mxl`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "65535",
+                        "min": "0",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    },
+                    "system-url": {
+                        "blurb": "Fixed IS-09 System API URL. Format: `http://host[:port]/x-nmos/system/v<X.Y>[/]`. Parsed into `network_services.system_*`; invalid URLs are logged and ignored. Honoured only when `registration-url` is also set (libnvnmos ignores a standalone System API). Honoured only by the OpenSession that creates the Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "transport": {
+                        "blurb": "Inner data path family. `mxl`: MXL shared-memory transport (`mxlsrc` / `mxlsink`). `udp`: ST 2110 over RTP/UDP via gst-plugins-good (`udpsrc` / `udpsink` + the `rtpvrawpay` / `rtpL24pay` / `rtpsmpte291pay` family). `udp2`: ST 2110 over RTP/UDP via gst-plugins-rs (`udpsrc2` + the `*pay2` / `*depay2` family where available, falling back to gst-plugins-good per-element). `nvdsudp`: ST 2110 via DeepStream's `nvdsudpsrc` / `nvdsudpsink` (Rivermax kernel-bypass, built-in RTP (de)payload, Mode 3). Requires ConnectX-5+ and the Rivermax SDK.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "mxl (0)",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "GstNmosTransport",
+                        "writable": true
+                    },
+                    "transport-bit-rate": {
+                        "blurb": "Transport (Sender) bit rate in kilobits per second (1000 bits/s), including RTP/UDP/IP overhead, matching NMOS Sender `bit_rate`, SDP `b=AS:`, and fmtp `x-nvnmos-transport-bit-rate`. On JPEG XS RTP transports, synthesises the configuring SDP `b=AS:` bandwidth line and `a=fmtp:… x-nvnmos-transport-bit-rate=` attribute. 0 (the default) = unset. When only one of `format-bit-rate` and `transport-bit-rate` is set, the other is derived using the same overhead factor as `nvnmosd`. With a supplied `transport-file*`, cross-checks when both sides declare a rate and splices when the file omits it. Ignored on `transport=mxl`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "18446744073709551615",
+                        "min": "0",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "guint64",
+                        "writable": true
+                    },
+                    "transport-caps": {
+                        "blurb": "Per-transport overrides (SDP fmtp-style). Typically empty for MXL.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "GstCaps",
+                        "writable": true
+                    },
+                    "transport-file": {
+                        "blurb": "Literal contents of the NvNmos transport file: MXL `flow_def` JSON for `transport=mxl`, SDP text for `transport=udp` / `udp2` / `nvdsudp`. The daemon adds the Sender via AddSender and re-publishes the transport file on IS-05 activation. Pass the text, not a path. Convenient for programmatic callers; from gst-launch use `transport-file-path` instead. Mutually exclusive with `transport-file-path`. When unset and `caps` is supplied the element synthesises a configuring transport file from the essence caps (MXL `flow_def` or SDP, depending on `transport`).",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "transport-file-path": {
+                        "blurb": "Filesystem path read at NULL→READY into `transport-file`. Convenience for gst-launch; mutually exclusive with `transport-file`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "transport-properties": {
+                        "blurb": "Overrides applied to the inner source or sink (`udpsrc`, `udpsink`, `nvdsudpsrc`, `nvdsudpsink`, `mxlsrc`, or `mxlsink`) every time the data-path chain is built. Pass a `GstStructure` whose fields are GObject property names on that inner source or sink — for example `properties,buffer-size=26214400`. The structure name is not interpreted. Takes effect on the next chain build, not immediately on the one currently in the chain.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "GstStructure",
+                        "writable": true
+                    }
+                },
+                "rank": "none"
+            },
+            "nmossrc": {
+                "author": "NVIDIA Corporation",
+                "description": "NMOS Receiver wrapper element backed by nvnmosd",
+                "hierarchy": [
+                    "GstNmosSrc",
+                    "GstBin",
+                    "GstElement",
+                    "GstObject",
+                    "GInitiallyUnowned",
+                    "GObject"
+                ],
+                "interfaces": [
+                    "GstChildProxy"
+                ],
+                "klass": "Source/Network/NMOS",
+                "pad-templates": {
+                    "src": {
+                        "caps": "ANY",
+                        "direction": "src",
+                        "presence": "always"
+                    }
+                },
+                "properties": {
+                    "auto-activate": {
+                        "blurb": "When `true`, swap in the real transport sink or source (instead of the fake chain) once the configuring transport file has been resolved at NULL→READY (or READY→PAUSED for deferred senders), and call `SyncResourceState` so IS-04/IS-05 show active without an IS-05 PATCH. Does not force PLAYING — child state still follows the bin. Default `false`: add via AddSender / AddReceiver (visible on IS-04) but keep the fake chain until an external IS-05 controller activates the resource.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "false",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gboolean",
+                        "writable": true
+                    },
+                    "caps": {
+                        "blurb": "Essence caps for this Receiver. Required when `transport-file*` is unset; synthesises the configuring transport file (MXL `flow_def` or SDP depending on `transport`). On `transport=mxl`, requires `mxl-flow-id` (media-type structure name picks the matching `mxlsrc` flow-id slot); supported shapes: v210 video, F32LE audio, `meta/x-st-2038` data. On RTP transports, requires the relevant IS-05 endpoint properties. When `transport-file*` is also set, the file wins and `caps` are cross-checked against it — mismatch is a hard error.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "GstCaps",
+                        "writable": true
+                    },
+                    "daemon-uri": {
+                        "blurb": "gRPC endpoint for nvnmosd. Only `unix:/path/to/sock` URIs are currently supported.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "unix:/tmp/nvnmosd.sock",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "depay-properties": {
+                        "blurb": "Overrides applied to the inner RTP depayloader every time the UDP receiver chain is built. Same `GstStructure` syntax as `transport-properties`; ignored on non-UDP transports (a warning is logged if non-empty). Takes effect on the next chain build.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "GstStructure",
+                        "writable": true
+                    },
+                    "description": {
+                        "blurb": "NMOS description for the Receiver. Optional. Overrides the transport file when both are supplied (top-level `description` in an MXL `flow_def`; SDP `i=` line for RTP/UDP).",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "destination-port": {
+                        "blurb": "IS-05 receiver transport_params `destination_port`: local listen port (becomes `udpsrc.port` and the SDP `m=` port slot). 0 (the default) = unset; falls back to the transport file's `m=` port if present, else to the canonical RTP default 5004 (`nmos-cpp` `auto_rtp_port`). Honoured only on the RTP transports; ignored on `mxl`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "65535",
+                        "min": "0",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    },
+                    "domain": {
+                        "blurb": "DNS domain for NMOS network services (`network_services.domain`). Use `local` to force mDNS. Empty (the default) leaves libnvnmos on automatic discovery. Not to be confused with `mxl-domain-id` / `mxl-domain-path`, which identify an MXL shared-memory Domain. Honoured only by the OpenSession that creates the Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "format-bit-rate": {
+                        "blurb": "Coded essence (Flow) bit rate in kilobits per second (1000 bits/s), matching NMOS Flow `bit_rate` and SDP fmtp `x-nvnmos-format-bit-rate`. On JPEG XS RTP transports, synthesises the configuring SDP `a=fmtp:… x-nvnmos-format-bit-rate=` attribute and `b=AS:` (via the derived transport rate) and sets `rtpjxsvpay max-codestream-bitrate` to this value times 1000 (bit/s) unless `pay-properties` already supplies it. 0 (the default) = unset. When only one of `format-bit-rate` and `transport-bit-rate` is set, the other is derived using the same overhead factor as `nvnmosd` (AMWA BCP-006-01 / VSF TR-08 style). With a supplied `transport-file*`, cross-checks when both sides declare a rate and splices when the file omits it. Ignored on `transport=mxl`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "18446744073709551615",
+                        "min": "0",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "guint64",
+                        "writable": true
+                    },
+                    "group-hint": {
+                        "blurb": "NMOS group hint for the Receiver (the `urn:x-nmos:tag:grouphint/v1.0` tag), e.g. `\"SDI 1:Video\"`. Becomes the `x-nvnmos-group-hint` session-level SDP attribute on RTP/UDP or the grouphint tag in an MXL `flow_def`. Overrides the transport file when both are supplied. Optional. Omitted when unset.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "host-name": {
+                        "blurb": "NMOS Node host name (`node_config.host_name`). Empty (the default) leaves libnvnmos to autodetect. Honoured only by the OpenSession that actually creates the Node; ignored when attaching to a pre-existing Node with the same `node-seed`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "http-port": {
+                        "blurb": "TCP port libnvnmos serves the NMOS HTTP APIs on (node_config.http_port). 0 (the default) asks nvnmosd to allocate from NVNMOSD_HTTP_PORT_MIN..NVNMOSD_HTTP_PORT_MAX. Non-zero selects an explicit port (rejected when unavailable). Honoured only by the OpenSession that actually creates the Node — when attaching to a pre-existing Node (e.g. another nmossink / nmossrc opened first with the same node-seed) this property is ignored. The effective port is returned in OpenSessionResponse.http_port.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "65535",
+                        "min": "0",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    },
+                    "interface-ip": {
+                        "blurb": "IS-05 receiver transport_params `interface_ip`: local NIC IP used for the IGMP join. Resolved to an interface name and fed into `udpsrc.multicast-iface` on the RTP transports. Also emitted in the configuring SDP as `a=x-nvnmos-iface-ip:`. Empty = unset (let the kernel pick). Honoured only on the RTP transports; ignored on `mxl`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "label": {
+                        "blurb": "NMOS label for the Receiver. Optional. Overrides the transport file when both are supplied (top-level `label` in an MXL `flow_def`; SDP `s=` line for RTP/UDP).",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "multicast-ip": {
+                        "blurb": "IS-05 receiver transport_params `multicast_ip`: multicast group to join. Becomes `udpsrc.address` and the SDP `c=` line address on the RTP transports. Empty = unset (unicast reception). Honoured only on the RTP transports; ignored on `mxl`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "mxl-domain-id": {
+                        "blurb": "MXL Domain identifier (UUID) included as `urn:x-nvnmos:tag:mxl-domain-id` in the transport file. Optional when transport=mxl: the path's `domain_def.json` `id` supplies it when present (for a `caps`-synthesised file; a supplied `transport-file*` keeps its own tag, cross-checked at activation); otherwise the tag is left application-resolved (`[\"\"]`) and the data plane uses `mxl-domain-path` locally. When supplied, overrides the transport file's tag. Cross-checked against `domain_def.json` when both are supplied (mismatch is an error). On `nmossrc`, set before NULL→READY; on `nmossink` it may also be set in READY for deferred AddSender.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "mxl-domain-path": {
+                        "blurb": "Local filesystem path identifying the MXL Domain on this host. If the directory contains a `domain_def.json` (AMWA BCP-007-03 WIP) its `id` is used to populate `mxl-domain-id` (or cross-checked against it when both are set). Without `domain_def.json`, an unset `mxl-domain-id` leaves the NMOS tag application-resolved while the data plane still uses this path. Fed into the inner `mxlsrc` `domain=` property when the real inner chain is installed (after IS-05 activation, or at startup when `auto-activate=true`).",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "mxl-flow-id": {
+                        "blurb": "MXL flow id (UUID) the inner `mxlsrc` should pull. An NMOS Receiver is normally configured by IS-05 PATCH activation, so this is mainly a development convenience: combined with `auto-activate=true` (plus `caps` and `mxl-domain-path`) the receiver starts up pre-bound to a known flow without an external controller. Overrides the transport file's top-level `id` when both are supplied.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "node-seed": {
+                        "blurb": "NvNmos Node seed (node_config.seed). Required. Sessions sharing this seed contribute to the same NMOS Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "receiver-caps-mode": {
+                        "blurb": "Whether the Receiver advertises BCP-004-01 Receiver Caps on IS-04 (narrow) or none (wide). On MXL, wide is encoded via `urn:x-nvnmos:tag:caps`; on RTP/UDP via media-level `a=x-nvnmos-caps:`. `auto` (default) leaves the marker untouched in the spliced transport file — narrow when absent (or with no transport file), wide when present. `narrow` strips it; `wide` ensures it is present (libnvnmos: present + non-empty = wide).",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "auto (0)",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "GstNmosCapsMode",
+                        "writable": true
+                    },
+                    "receiver-name": {
+                        "blurb": "Name for this Receiver within the Node (becomes the `x-nvnmos-name` SDP attribute or the `urn:x-nvnmos:tag:name` flow-def tag in the transport file). Unique across Receivers on the Node; a Sender on the same Node may share the same name (the daemon scopes names by side). Required unless the name is already carried in `transport-file*`. Overrides the transport file's value when both are supplied. The Receiver's IS-04 id is derived from the name and the element's `node-seed`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "registration-url": {
+                        "blurb": "Fixed IS-04 Registration API URL. Format: `http://host[:port]/x-nmos/registration/v<X.Y>[/]`. Parsed into `network_services.registration_*`; invalid URLs are logged and ignored. Empty (the default) leaves libnvnmos on DNS-SD discovery based on `host-name`. Honoured only by the OpenSession that creates the Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "source-ip": {
+                        "blurb": "IS-05 receiver transport_params `source_ip`: SSM include-source — the remote sender's IP. Drives the configuring SDP `a=source-filter:` include-source. On the `udp2` (gst-plugins-rs `udpsrc2`) variant this translates to `source-filter`; on the `udp` (gst-plugins-good `udpsrc`) variant it translates to `multicast-source`. Empty = unset (any-source multicast / unicast). Honoured only on the RTP transports; ignored on `mxl`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "system-url": {
+                        "blurb": "Fixed IS-09 System API URL. Format: `http://host[:port]/x-nmos/system/v<X.Y>[/]`. Parsed into `network_services.system_*`; invalid URLs are logged and ignored. Honoured only when `registration-url` is also set (libnvnmos ignores a standalone System API). Honoured only by the OpenSession that creates the Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "transport": {
+                        "blurb": "Inner data path family. `mxl`: MXL shared-memory transport (`mxlsrc` / `mxlsink`). `udp`: ST 2110 over RTP/UDP via gst-plugins-good (`udpsrc` / `udpsink` + the `rtpvrawpay` / `rtpL24pay` / `rtpsmpte291pay` family). `udp2`: ST 2110 over RTP/UDP via gst-plugins-rs (`udpsrc2` + the `*pay2` / `*depay2` family where available, falling back to gst-plugins-good per-element). `nvdsudp`: ST 2110 via DeepStream's `nvdsudpsrc` / `nvdsudpsink` (Rivermax kernel-bypass, built-in RTP (de)payload, Mode 3). Requires ConnectX-5+ and the Rivermax SDK.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "mxl (0)",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "GstNmosTransport",
+                        "writable": true
+                    },
+                    "transport-bit-rate": {
+                        "blurb": "Transport (Sender) bit rate in kilobits per second (1000 bits/s), including RTP/UDP/IP overhead, matching NMOS Sender `bit_rate`, SDP `b=AS:`, and fmtp `x-nvnmos-transport-bit-rate`. On JPEG XS RTP transports, synthesises the configuring SDP `b=AS:` bandwidth line and `a=fmtp:… x-nvnmos-transport-bit-rate=` attribute. 0 (the default) = unset. When only one of `format-bit-rate` and `transport-bit-rate` is set, the other is derived using the same overhead factor as `nvnmosd`. With a supplied `transport-file*`, cross-checks when both sides declare a rate and splices when the file omits it. Ignored on `transport=mxl`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "18446744073709551615",
+                        "min": "0",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "guint64",
+                        "writable": true
+                    },
+                    "transport-caps": {
+                        "blurb": "Per-transport overrides (SDP fmtp-style). Typically empty for MXL.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "GstCaps",
+                        "writable": true
+                    },
+                    "transport-file": {
+                        "blurb": "Literal contents of the NvNmos transport file: MXL `flow_def` JSON for `transport=mxl`, SDP text for `transport=udp` / `udp2` / `nvdsudp`. The daemon adds the Receiver via AddReceiver and re-publishes the transport file on IS-05 activation. Pass the text, not a path. Convenient for programmatic callers; from gst-launch use `transport-file-path` instead. Mutually exclusive with `transport-file-path`. Required unless `caps` is provided.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "transport-file-path": {
+                        "blurb": "Filesystem path read at NULL→READY into `transport-file`. Convenience for gst-launch; mutually exclusive with `transport-file`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "transport-properties": {
+                        "blurb": "Overrides applied to the inner source or sink (`udpsrc`, `udpsink`, `nvdsudpsrc`, `nvdsudpsink`, `mxlsrc`, or `mxlsink`) every time the data-path chain is built. Pass a `GstStructure` whose fields are GObject property names on that inner source or sink — for example `properties,buffer-size=26214400`. The structure name is not interpreted. Takes effect on the next chain build, not immediately on the one currently in the chain.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "GstStructure",
+                        "writable": true
+                    }
+                },
+                "rank": "none"
+            }
+        },
+        "filename": "gstnmos",
+        "license": "Apache-2.0",
+        "other-types": {},
+        "package": "gst-nmos-rs",
+        "source": "gst-nmos-rs",
+        "tracers": {},
+        "url": "https://github.com/NVIDIA/nvnmos"
+    }
+}
