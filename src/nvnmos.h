@@ -62,6 +62,12 @@
 #ifndef NVNMOS_H
 #define NVNMOS_H
 
+/**
+ * @def NVNMOS_API
+ * Marks a symbol as part of the public NvNmos library ABI, expanding to the
+ * appropriate import, export or visibility attribute for the platform.
+ */
+
 #if defined(NVNMOS_EXPORTS)
 
 #if defined(_WIN32) || defined(__CYGWIN__)
@@ -660,14 +666,10 @@ typedef enum _NvNmosChannelMappingParentType
     NVNMOS_CHANNELMAPPING_PARENT_TYPE_SOURCE = 1
 } NvNmosChannelMappingParentType;
 
-typedef struct _NvNmosChannelMappingInput NvNmosChannelMappingInput;
-typedef struct _NvNmosChannelMappingOutput NvNmosChannelMappingOutput;
-typedef struct _NvNmosChannelMappingConfig NvNmosChannelMappingConfig;
-
 /**
  * IS-08 Input geometry for @ref add_nmos_channelmapping_to_node_server.
  */
-struct _NvNmosChannelMappingInput
+typedef struct _NvNmosChannelMappingInput
 {
     /** IS-08 input id; must not be NULL or empty. */
     const char *id;
@@ -687,12 +689,12 @@ struct _NvNmosChannelMappingInput
     bool reordering;
     /** Input /caps block_size; defaults to @c 1 when zero (unset). */
     unsigned int block_size;
-};
+} NvNmosChannelMappingInput;
 
 /**
  * IS-08 Output geometry for @ref add_nmos_channelmapping_to_node_server.
  */
-struct _NvNmosChannelMappingOutput
+typedef struct _NvNmosChannelMappingOutput
 {
     /** IS-08 output id; must not be NULL or empty. */
     const char *id;
@@ -710,31 +712,35 @@ struct _NvNmosChannelMappingOutput
     const char **routable_inputs;
     /** Length of @p routable_inputs when non-NULL. */
     size_t num_routable_inputs;
-};
+} NvNmosChannelMappingOutput;
 
 /**
  * One output channel entry in an IS-08 active map.
  *
  * Array index is the output channel index (0 .. num_channel_labels-1 on that Output).
  */
-struct _NvNmosChannelMappingActiveMapEntry
+typedef struct _NvNmosChannelMappingActiveMapEntry
 {
     /** IS-08 input id; NULL for an unrouted output channel. */
     const char *input_id;
     /** Input channel index; ignored when @p input_id is NULL. */
     unsigned int input_channel;
-};
+} NvNmosChannelMappingActiveMapEntry;
 
 /**
  * Input/output bundle for @ref add_nmos_channelmapping_to_node_server.
  */
-struct _NvNmosChannelMappingConfig
+typedef struct _NvNmosChannelMappingConfig
 {
+    /** IS-08 Inputs; length must equal @p num_inputs. */
     const NvNmosChannelMappingInput *inputs;
+    /** Number of Inputs. */
     size_t num_inputs;
+    /** IS-08 Outputs; length must equal @p num_outputs. */
     const NvNmosChannelMappingOutput *outputs;
+    /** Number of Outputs. */
     size_t num_outputs;
-};
+} NvNmosChannelMappingConfig;
 
 /**
  * Add channel mapping I/O to a running Node server.

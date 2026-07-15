@@ -7,6 +7,16 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    paths:
+      - '.github/workflows/pages.yml'
+      - 'Doxyfile'
+      - 'README.md'
+      - 'src/**'
+      - 'rust/docs/**'
+      - 'rust/gst-nmos-rs/**'
+      - 'rust/gst-avsynctest-rs/**'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -27,6 +37,7 @@ jobs:
         sudo apt-get install -y \
           meson ninja-build \
           libgstreamer1.0-dev \
+          libgstreamer-plugins-base1.0-dev \
           python3-dev libxml2-dev libxslt1-dev cmake libyaml-dev \
           libjson-glib-dev flex
         python3 -m venv .venv-hotdoc
@@ -48,12 +59,33 @@ jobs:
         mkdir -p "$GITHUB_WORKSPACE/public/gstreamer"
         cp -a build/NvNmos-GStreamer-doc/html/* "$GITHUB_WORKSPACE/public/gstreamer/"
 
-    - name: Upload Documentation Artifact
+    - name: Upload Pages artifact
+      if: github.event_name == 'push'
       uses: actions/upload-pages-artifact@v4
       with:
         path: public
 
+    # Hotdoc search names fragment/token files after GObject properties and
+    # keywords, so the output contains ':' and case-only-distinct paths. Those
+    # are fine for the tar-based Pages artifact but rejected by the raw preview
+    # upload, so package the preview as a single tarball to keep it lossless.
+    - name: Package preview artifact
+      if: github.event_name != 'push'
+      run: |
+        name="docs-${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+        echo "artifact_name=${name//\//-}" >> "$GITHUB_ENV"
+        tar -C public -czf "$RUNNER_TEMP/docs-preview.tar.gz" .
+
+    - name: Upload preview artifact
+      if: github.event_name != 'push'
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ env.artifact_name }}
+        path: ${{ runner.temp }}/docs-preview.tar.gz
+        retention-days: 14
+
   deploy:
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
 
