@@ -106,7 +106,7 @@ impl SessionGc {
         let watchdogs = self.watchdogs.clone();
         let join = tokio::spawn(async move {
             tokio::time::sleep(timeout).await;
-            let outcome = {
+            let (outcome, ffi) = {
                 let mut guard = state.lock().expect("daemon state mutex poisoned");
                 if !guard.sessions_contains(&handle) {
                     return;
@@ -114,13 +114,19 @@ impl SessionGc {
                 if guard.has_any_activation_subscription(&handle) {
                     return;
                 }
-                let outcome = match guard.close_session(&handle) {
-                    Ok(outcome) => outcome,
+                match guard.close_session(&handle) {
+                    Ok(outcome_ffi) => outcome_ffi,
                     Err(_) => return,
-                };
-                malloc_trim::maybe_after_close_session(&guard, &outcome);
-                outcome
+                }
             };
+            // Run the libnvnmos removals / NodeServer destroy outside the
+            // lock so a parked activation thread can take `state` and let
+            // the destroy thread-joins return.
+            ffi.run();
+            {
+                let guard = state.lock().expect("daemon state mutex poisoned");
+                malloc_trim::maybe_after_close_session(&guard, &outcome);
+            }
             tracing::info!(
                 session_handle = %handle,
                 node_seed = %outcome.node_seed,

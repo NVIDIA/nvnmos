@@ -4,8 +4,8 @@
 //! Daemon-wide state: Nodes, sessions, resources, and the operations
 //! that mutate them.
 //!
-//! Shape (formalised in the design doc, "Daemon internal state"
-//! section of `doc/designs/nvnmosd/README.md`):
+//! **Shape:** (formalised in the design doc, "Daemon internal state"
+//! section of `doc/designs/nvnmosd/README.md`)
 //!
 //! * **Nodes** are keyed by `node_seed`. The daemon holds at most one
 //!   [`nvnmos::NodeServer`] per seed; multiple sessions may attach to the
@@ -42,16 +42,22 @@
 //!   [`State::add_node`]. Survive every [`State::close_session`]; only
 //!   [`State::remove_node`] tears them down, and only when no sessions
 //!   are currently attached.
+//!
+//! **Locking:** no libnvnmos FFI while `state` is held. Mutations use
+//! prepare / deferred `*Ffi` or `*Prep::run_ffi` / commit phases; see
+//! `doc/designs/nvnmosd/lock-ordering.md`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use nvnmos::{
-    AssetConfig, ChannelMappingActiveMapEntry, ChannelMappingConfig, ChannelMappingInput,
-    ChannelMappingOutput, ChannelMappingParentType, NetworkServicesConfig, NodeConfig, NodeServer,
-    ReceiverConfig, SenderConfig, Side as WrapperSide, Transport,
+    Activation, AssetConfig, ChannelMappingActivation, ChannelMappingActiveMapEntry,
+    ChannelMappingConfig, ChannelMappingInput, ChannelMappingOutput, ChannelMappingParentType,
+    NetworkServicesConfig, NodeConfig, NodeServer, ReceiverConfig, SenderConfig,
+    Side as WrapperSide, Transport,
 };
 use nvnmos_rpc::v1::{
     ActivationEvent, ActiveMapEntry as ProtoActiveMapEntry, AssetConfig as ProtoAssetConfig,
@@ -219,12 +225,11 @@ struct ResourceEntry {
 
 /// A live Node owned by the daemon.
 struct NodeEntry {
-    /// The C node server itself. Dropped when the entry is removed,
-    /// which calls `destroy_nmos_node_server` via the wrapper's `Drop`.
-    /// `#[allow(dead_code)]` because the field is held purely for its
-    /// `Drop` side effect — Rust can't see the FFI-level usage.
-    #[allow(dead_code)]
-    server: NodeServer,
+    /// The C node server itself, behind an [`Arc`] so an RPC handler can
+    /// clone a reference, drop the `state` lock, and then run libnvnmos
+    /// FFI (or the `Drop` that calls `destroy_nmos_node_server`) with no
+    /// daemon lock held. Dropping the last clone tears down the server.
+    server: Arc<NodeServer>,
     /// NMOS `/self` UUID cached at create time so RPC handlers that hold
     /// the state lock don't drop back into FFI for every read. Stable for
     /// the lifetime of the entry — libnvnmos derives it from the seed.
@@ -408,6 +413,9 @@ pub enum ChannelMappingActivationDispatch {
         activation_handle: String,
         ack_rx: std_mpsc::Receiver<AckOutcome>,
     },
+    /// No channel mapping entry exists for `(node_seed, output_id)` —
+    /// stray or not yet committed. The router NACKs; it does not remove
+    /// the libnvnmos mapping.
     NoChannelMapping,
     NoSubscriber,
     SubscriberBusy,
@@ -425,10 +433,10 @@ pub enum ActivationDispatch {
         activation_handle: String,
         ack_rx: std_mpsc::Receiver<AckOutcome>,
     },
-    /// No resource is created for `(node_seed, name)`. Either
-    /// the activation is for a stray (a resource that survived the
-    /// `AddSender`/`AddReceiver` mismatch path) or for one that was
-    /// removed between the IS-05 PATCH arriving and the callback firing.
+    /// No resource entry exists for `(node_seed, side, name)` — either a
+    /// stray (libnvnmos object with no daemon map entry) or a resource
+    /// removed between the IS-05 PATCH and the callback. The router NACKs;
+    /// it does not remove the libnvnmos object.
     NoResource,
     /// The owning session has no `SubscribeActivations` stream attached.
     /// (Either the client never subscribed or its earlier stream was
@@ -440,9 +448,371 @@ pub enum ActivationDispatch {
     SubscriberBusy,
 }
 
+/// Deferred libnvnmos work returned by a `State::*` bookkeeping phase so
+/// the RPC handler can run it **after** dropping the `state` lock.
+///
+/// Every FFI call takes libnvnmos's internal `model` lock, and the
+/// in-band activation callback path takes `model` then `state`; running
+/// FFI while `state` is held would be an AB-BA deadlock. These `*Ffi` /
+/// `*Prep` types are the seam that keeps FFI off the locked path.
+///
+/// This one drops a session's resources (and, when the Node is being
+/// destroyed, the last [`NodeServer`] reference) with no daemon lock
+/// held, so a parked activation thread can take `state`, finish, and let
+/// `destroy_nmos_node_server`'s thread-joins return.
+#[must_use = "close_session FFI must run outside the state lock"]
+pub struct CloseSessionFfi {
+    server: Arc<NodeServer>,
+    resource_removals: Vec<(Side, String)>,
+    channelmapping_removals: Vec<String>,
+    session_handle: String,
+}
+
+impl CloseSessionFfi {
+    pub fn run(self) {
+        for (side, name) in &self.resource_removals {
+            if let Err(e) = side.remove_from_server(&self.server, name) {
+                tracing::warn!(
+                    session_handle = %self.session_handle,
+                    side = side.label(),
+                    name = %name,
+                    error = %e,
+                    "close_session: libnvnmos remove_sender/remove_receiver failed; \
+                     continuing"
+                );
+            }
+        }
+        for name in &self.channelmapping_removals {
+            if let Err(e) = self.server.remove_channelmapping(name) {
+                tracing::warn!(
+                    session_handle = %self.session_handle,
+                    name = %name,
+                    error = %e,
+                    "close_session: libnvnmos remove_channelmapping failed; continuing"
+                );
+            }
+        }
+        // Dropping the last reference runs `destroy_nmos_node_server`
+        // (shutdown + thread-join + listener close) here, outside the
+        // lock. If the entry was retained (sessions remain), this is not
+        // the last reference and only decrements the count.
+        drop(self.server);
+    }
+}
+
+/// Drops the last [`NodeServer`] reference for a torn-down persistent
+/// Node outside the `state` lock. See [`CloseSessionFfi`].
+#[must_use = "remove_node FFI must run outside the state lock"]
+pub struct RemoveNodeFfi {
+    server: Arc<NodeServer>,
+}
+
+impl RemoveNodeFfi {
+    pub fn run(self) {
+        drop(self.server);
+    }
+}
+
+/// Best-effort libnvnmos removal of one resource, run after the daemon
+/// bookkeeping is already consistent. See [`CloseSessionFfi`].
+#[must_use = "remove_resource FFI must run outside the state lock"]
+pub struct RemoveResourceFfi {
+    /// `None` when the Node had already gone (nothing to remove).
+    server: Option<Arc<NodeServer>>,
+    side: Side,
+    name: String,
+}
+
+impl RemoveResourceFfi {
+    pub fn run(self) {
+        let Some(server) = self.server else { return };
+        if let Err(e) = self.side.remove_from_server(&server, &self.name) {
+            tracing::warn!(
+                side = self.side.label(),
+                name = %self.name,
+                error = %e,
+                "remove_resource: libnvnmos remove_sender/remove_receiver failed; \
+                 daemon state already cleared"
+            );
+        }
+    }
+}
+
+/// Pushes a resource (re)activation / deactivation into libnvnmos. Runs
+/// after the `state` lock is dropped; its result is the RPC result. See
+/// [`CloseSessionFfi`].
+#[must_use = "sync_resource_state FFI must run outside the state lock"]
+pub struct SyncResourceFfi {
+    server: Arc<NodeServer>,
+    side: Side,
+    name: String,
+    transport_file: Option<String>,
+}
+
+impl SyncResourceFfi {
+    pub fn run(self) -> Result<(), Status> {
+        self.server
+            .activate_connection(
+                self.side.to_wrapper(),
+                &self.name,
+                self.transport_file.as_deref(),
+            )
+            .map_err(|e| {
+                let verb = if self.transport_file.is_some() {
+                    "activate"
+                } else {
+                    "deactivate"
+                };
+                Status::invalid_argument(format!(
+                    "libnvnmos {verb} for {} {:?} failed (transport_file \
+                     parse error or libnvnmos state mismatch): {e}",
+                    self.side.label(),
+                    self.name,
+                ))
+            })
+    }
+}
+
+/// First phase of `AddSender` / `AddReceiver`: daemon bookkeeping is
+/// validated under `state`, then the lock is dropped and
+/// [`AddResourcePrep::run_ffi`] performs the libnvnmos add + name-match
+/// lookup with no lock held. [`State::commit_add_resource`] finishes the
+/// bookkeeping. See [`CloseSessionFfi`].
+#[must_use = "add_resource must proceed through run_ffi + commit_add_resource"]
+pub struct AddResourcePrep {
+    server: Arc<NodeServer>,
+    side: Side,
+    transport: Transport,
+    transport_file: String,
+    name: String,
+    node_seed: String,
+    session_handle: String,
+}
+
+/// Output of [`AddResourcePrep::run_ffi`], fed to
+/// [`State::commit_add_resource`].
+pub struct AddResourceReady {
+    side: Side,
+    name: String,
+    node_seed: String,
+    session_handle: String,
+    resource_id: String,
+}
+
+impl AddResourcePrep {
+    pub fn run_ffi(self) -> Result<AddResourceReady, Status> {
+        self.side
+            .add_to_server(&self.server, self.transport, &self.transport_file)
+            .map_err(|e| {
+                Status::invalid_argument(format!(
+                    "libnvnmos add_{} failed (transport_file parse error or \
+                     duplicate): {e}",
+                    self.side.label(),
+                ))
+            })?;
+
+        let resource_id = match self.side.lookup_id(&self.server, &self.name) {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                tracing::error!(
+                    side = self.side.label(),
+                    claimed_name = %self.name,
+                    node_seed = %self.node_seed,
+                    "AddSender/AddReceiver: libnvnmos accepted the transport \
+                     file but its embedded name does not match the claimed \
+                     name; left as a stray until the Node is destroyed"
+                );
+                return Err(Status::invalid_argument(format!(
+                    "{}'s transport_file embeds a different name than {:?}",
+                    self.side.label(),
+                    self.name,
+                )));
+            }
+            Err(e) => {
+                return Err(Status::internal(format!(
+                    "querying {} id from libnvnmos failed after add: {e}",
+                    self.side.label(),
+                )));
+            }
+        };
+
+        Ok(AddResourceReady {
+            side: self.side,
+            name: self.name,
+            node_seed: self.node_seed,
+            session_handle: self.session_handle,
+            resource_id,
+        })
+    }
+}
+
+/// Best-effort libnvnmos removal of one channel mapping. See
+/// [`CloseSessionFfi`].
+#[must_use = "remove_channelmapping FFI must run outside the state lock"]
+pub struct RemoveChannelMappingFfi {
+    server: Option<Arc<NodeServer>>,
+    name: String,
+}
+
+impl RemoveChannelMappingFfi {
+    pub fn run(self) {
+        let Some(server) = self.server else { return };
+        if let Err(e) = server.remove_channelmapping(&self.name) {
+            tracing::warn!(
+                name = %self.name,
+                error = %e,
+                "remove_channelmapping: libnvnmos remove failed; daemon state already cleared"
+            );
+        }
+    }
+}
+
+/// Pushes an IS-08 activation into libnvnmos. See [`SyncResourceFfi`].
+#[must_use = "sync_channelmapping_state FFI must run outside the state lock"]
+pub struct SyncChannelMappingFfi {
+    server: Arc<NodeServer>,
+    name: String,
+    output_id: String,
+    active_map: Vec<ChannelMappingActiveMapEntry>,
+}
+
+impl SyncChannelMappingFfi {
+    pub fn run(self) -> Result<(), Status> {
+        self.server
+            .activate_channelmapping(&self.name, &self.output_id, &self.active_map)
+            .map_err(|e| {
+                Status::invalid_argument(format!(
+                    "libnvnmos nmos_channelmapping_activate failed: {e}"
+                ))
+            })
+    }
+}
+
+/// First phase of `AddChannelMapping` (parallel to [`AddResourcePrep`]).
+#[must_use = "add_channelmapping must proceed through run_ffi + commit_add_channelmapping"]
+pub struct AddChannelMappingPrep {
+    server: Arc<NodeServer>,
+    name: String,
+    mapping: ChannelMappingConfig,
+    node_seed: String,
+    session_handle: String,
+    effective_input_ids: Vec<String>,
+    effective_output_ids: Vec<String>,
+}
+
+/// Output of [`AddChannelMappingPrep::run_ffi`], fed to
+/// [`State::commit_add_channelmapping`].
+pub struct AddChannelMappingReady {
+    name: String,
+    node_seed: String,
+    session_handle: String,
+    effective_input_ids: Vec<String>,
+    effective_output_ids: Vec<String>,
+}
+
+impl AddChannelMappingPrep {
+    pub fn run_ffi(self) -> Result<AddChannelMappingReady, Status> {
+        self.server
+            .add_channelmapping(&self.name, &self.mapping)
+            .map_err(|e| {
+                Status::invalid_argument(format!(
+                    "libnvnmos add_channelmapping failed (duplicate or invalid geometry): {e}"
+                ))
+            })?;
+        Ok(AddChannelMappingReady {
+            name: self.name,
+            node_seed: self.node_seed,
+            session_handle: self.session_handle,
+            effective_input_ids: self.effective_input_ids,
+            effective_output_ids: self.effective_output_ids,
+        })
+    }
+}
+
+/// First phase of `OpenSession(Create)` / `AddNode`: a pending node whose
+/// port and seed are recorded in daemon state. The caller must
+/// [`CreateNodePrep::run_ffi`] outside the `state` lock (supplying
+/// daemon-specific activation callbacks), then
+/// [`State::commit_open_session`] / [`State::commit_add_node`] (or
+/// [`State::abort_pending_node`] on build failure).
+#[must_use = "node create must proceed through run_ffi + commit_*"]
+pub struct CreateNodePrep {
+    pub seed: String,
+    pub config: Box<NodeConfig>,
+    pub http_port: u16,
+}
+
+/// Output of [`CreateNodePrep::run_ffi`], fed to
+/// [`State::commit_open_session`] or [`State::commit_add_node`].
+pub struct CreateNodeReady {
+    pub seed: String,
+    pub http_port: u16,
+    pub server: Arc<NodeServer>,
+    pub node_id: String,
+}
+
+impl CreateNodePrep {
+    /// Second phase of `OpenSession(Create)` / `AddNode`: build a
+    /// [`NodeServer`] via `create_nmos_node_server` with no `state` lock
+    /// held, then query its `node_id`. Activation callbacks are supplied
+    /// by the daemon because they route into
+    /// [`State::dispatch_activation`].
+    pub fn run_ffi<A, C>(
+        self,
+        on_activation: A,
+        on_channelmapping_activation: C,
+    ) -> Result<CreateNodeReady, Status>
+    where
+        A: Fn(&Activation<'_>) -> std::result::Result<(), String> + Send + Sync + 'static,
+        C: Fn(&ChannelMappingActivation<'_>) -> std::result::Result<(), String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let server = NodeServer::builder(self.config.as_ref())
+            .on_log(log_bridge::forward)
+            .on_activation(on_activation)
+            .on_channelmapping_activation(on_channelmapping_activation)
+            .build()
+            .map_err(|e| Status::internal(format!("create_nmos_node_server failed: {e}")))?;
+
+        let node_id = server.node_id().map_err(|e| {
+            Status::internal(format!(
+                "querying node_id from the new NodeServer failed: {e}"
+            ))
+        })?;
+
+        Ok(CreateNodeReady {
+            seed: self.seed,
+            http_port: self.http_port,
+            server: Arc::new(server),
+            node_id,
+        })
+    }
+}
+
+/// Result of [`State::prepare_open_session`].
+pub enum OpenSessionPlan {
+    /// A Node already existed for the seed; the session was allocated and
+    /// attached entirely under `state`. No FFI needed.
+    Attached(OpenOutcome),
+    /// No Node existed: a pending node now owns the HTTP port and seed.
+    /// The handler must [`CreateNodePrep::run_ffi`] outside the `state`
+    /// lock, then call [`State::commit_open_session`] (or
+    /// [`State::abort_pending_node`] on failure).
+    Create(CreateNodePrep),
+}
+
 /// All daemon state. Wrapped in `Arc<Mutex<…>>` by the gRPC service.
 pub struct State {
     nodes: HashMap<String, NodeEntry>,
+    /// Seeds of pending nodes: nodes prepared but not yet committed. The
+    /// port is already in [`State::http_ports`] and the seed is here, but
+    /// the [`NodeEntry`] is not yet in [`State::nodes`] — its
+    /// [`NodeServer`] is being built outside the `state` lock. Guards
+    /// against a second concurrent create for the same seed while the
+    /// first is still pending.
+    pending_nodes: HashSet<String>,
     sessions: HashMap<String, SessionEntry>,
     /// Live resources keyed by daemon-allocated `resource_handle`.
     resources: HashMap<String, ResourceEntry>,
@@ -477,6 +847,7 @@ impl State {
     pub fn new() -> Self {
         Self {
             nodes: HashMap::new(),
+            pending_nodes: HashSet::new(),
             sessions: HashMap::new(),
             resources: HashMap::new(),
             by_name: HashMap::new(),
@@ -496,88 +867,133 @@ impl State {
         }
     }
 
-    /// Open a session, attaching to or creating a Node for `seed`.
+    /// First phase of `OpenSession`: attach to an existing Node or record
+    /// a new pending node for `seed`.
     ///
     /// If a Node already exists for `seed` (either [`Lifetime::Persistent`]
-    /// or [`Lifetime::SessionRefcounted`]), this attaches to it and
-    /// increments its session count; `build_node_server` is *not* invoked
-    /// and any `node_config` the caller supplied is ignored. If no Node
-    /// exists, this constructs a new [`Lifetime::SessionRefcounted`] Node
-    /// via `build_node_server`.
+    /// or [`Lifetime::SessionRefcounted`]), this attaches to it,
+    /// increments its session count, allocates the session, and returns
+    /// [`OpenSessionPlan::Attached`] — no FFI needed, so there is no
+    /// commit phase. If no Node exists, this records a pending node (its
+    /// HTTP port and seed) and returns [`OpenSessionPlan::Create`]; the
+    /// caller must [`CreateNodePrep::run_ffi`] outside the `state` lock
+    /// and then call
+    /// [`State::commit_open_session`] (or [`State::abort_pending_node`]
+    /// on build failure).
     ///
     /// Errors:
     /// * `INVALID_ARGUMENT` if `seed` is empty (the empty seed would
     ///   collapse every "default" session onto the same Node and lose
     ///   determinism of the NMOS UUIDs).
-    /// * Whatever `build_node_server` returns, surfaced verbatim.
-    pub fn open_session(
+    /// * `ABORTED` if a create for the same seed is already pending.
+    /// * Whatever [`State::resolve_http_port`] returns.
+    pub fn prepare_open_session(
         &mut self,
         mut config: NodeConfig,
         port_range: &PortRange,
-        build_node_server: impl FnOnce(&NodeConfig) -> Result<NodeServer, Status>,
-    ) -> Result<OpenOutcome, Status> {
+    ) -> Result<OpenSessionPlan, Status> {
         let seed = config.seed.clone();
         require_non_empty_seed(&seed)?;
 
-        let (created_node, node_id, lifetime, http_port) = match self.nodes.get_mut(&seed) {
-            Some(entry) => {
-                entry.attached_sessions += 1;
-                (
-                    false,
-                    entry.node_id.clone(),
-                    entry.lifetime,
-                    entry.http_port,
-                )
-            }
-            None => {
-                let http_port = self.resolve_http_port(config.http_port, port_range)?;
-                config.http_port = http_port;
-                let server = build_node_server(&config)?;
-                let node_id = server.node_id().map_err(|e| {
-                    Status::internal(format!(
-                        "querying node_id from the new NodeServer failed: {e}"
-                    ))
-                })?;
-                self.http_ports.insert(http_port, seed.clone());
-                self.nodes.insert(
-                    seed.clone(),
-                    NodeEntry {
-                        server,
-                        node_id: node_id.clone(),
-                        lifetime: Lifetime::SessionRefcounted,
-                        attached_sessions: 1,
-                        http_port,
-                    },
-                );
-                (true, node_id, Lifetime::SessionRefcounted, http_port)
-            }
-        };
+        if let Some(entry) = self.nodes.get_mut(&seed) {
+            entry.attached_sessions += 1;
+            let node_id = entry.node_id.clone();
+            let lifetime = entry.lifetime;
+            let http_port = entry.http_port;
+            let session_handle = self.allocate_session_handle();
+            self.sessions.insert(
+                session_handle.clone(),
+                SessionEntry {
+                    node_seed: seed,
+                    resources: HashSet::new(),
+                    channelmappings: HashSet::new(),
+                },
+            );
+            return Ok(OpenSessionPlan::Attached(OpenOutcome {
+                session_handle,
+                node_id,
+                lifetime,
+                created_node: false,
+                http_port,
+            }));
+        }
 
+        if self.pending_nodes.contains(&seed) {
+            return Err(Status::aborted(format!(
+                "a Node for seed {seed:?} is already being created; retry"
+            )));
+        }
+
+        let http_port = self.resolve_http_port(config.http_port, port_range)?;
+        config.http_port = http_port;
+        self.http_ports.insert(http_port, seed.clone());
+        self.pending_nodes.insert(seed.clone());
+        Ok(OpenSessionPlan::Create(CreateNodePrep {
+            seed,
+            config: Box::new(config),
+            http_port,
+        }))
+    }
+
+    /// Third phase of `OpenSession`: commit the pending node built for
+    /// [`OpenSessionPlan::Create`] into a live [`NodeEntry`], and allocate
+    /// the first session attached to it.
+    pub fn commit_open_session(&mut self, ready: CreateNodeReady) -> OpenOutcome {
+        self.pending_nodes.remove(&ready.seed);
+        self.nodes.insert(
+            ready.seed.clone(),
+            NodeEntry {
+                server: ready.server,
+                node_id: ready.node_id.clone(),
+                lifetime: Lifetime::SessionRefcounted,
+                attached_sessions: 1,
+                http_port: ready.http_port,
+            },
+        );
         let session_handle = self.allocate_session_handle();
         self.sessions.insert(
             session_handle.clone(),
             SessionEntry {
-                node_seed: seed,
+                node_seed: ready.seed,
                 resources: HashSet::new(),
                 channelmappings: HashSet::new(),
             },
         );
-        Ok(OpenOutcome {
+        OpenOutcome {
             session_handle,
-            node_id,
-            lifetime,
-            created_node,
-            http_port,
-        })
+            node_id: ready.node_id,
+            lifetime: Lifetime::SessionRefcounted,
+            created_node: true,
+            http_port: ready.http_port,
+        }
     }
 
-    /// Close a session, detaching from the backing Node. Drops every
-    /// resource the session contributed (through libnvnmos) before
-    /// detaching, so a subsequent destroy of the Node never has to
-    /// reckon with stale resources. For [`Lifetime::SessionRefcounted`]
-    /// Nodes, also destroys the Node when the last session detaches.
-    /// [`Lifetime::Persistent`] Nodes are never destroyed by this call.
-    pub fn close_session(&mut self, session_handle: &str) -> Result<CloseOutcome, Status> {
+    /// Abort a pending node ([`OpenSessionPlan::Create`] / [`CreateNodePrep`])
+    /// when the FFI build failed: its seed and its port are removed.
+    pub fn abort_pending_node(&mut self, seed: &str, http_port: u16) {
+        self.pending_nodes.remove(seed);
+        if self.http_ports.get(&http_port).is_some_and(|s| s == seed) {
+            self.http_ports.remove(&http_port);
+        }
+    }
+
+    /// Close a session, detaching from the backing Node.
+    ///
+    /// All daemon bookkeeping (removing the session, its resources and
+    /// channel mappings, its subscriptions, and aborting its in-flight
+    /// activations) happens under the `state` lock. The libnvnmos work —
+    /// removing each resource / channel mapping and, when this was the
+    /// last session on a [`Lifetime::SessionRefcounted`] Node, destroying
+    /// the [`NodeServer`] — is deferred to the returned [`CloseSessionFfi`]
+    /// so it runs with no daemon lock held. That is what lets a parked
+    /// activation thread take `state`, finish, and let
+    /// `destroy_nmos_node_server`'s thread-joins return (otherwise the
+    /// HTTP listener is stranded in `LISTEN`). [`Lifetime::Persistent`]
+    /// Nodes are never destroyed by this call.
+    pub fn close_session(
+        &mut self,
+        session_handle: &str,
+    ) -> Result<(CloseOutcome, CloseSessionFfi), Status> {
         let session = self.sessions.remove(session_handle).ok_or_else(|| {
             Status::not_found(format!(
                 "session_handle {session_handle:?} is not known to this daemon"
@@ -610,17 +1026,22 @@ impl State {
         }
 
         let seed = session.node_seed;
-        let node = self.nodes.get(&seed).ok_or_else(|| {
-            Status::internal(format!(
-                "session {session_handle:?} referenced seed {seed:?} but no Node entry exists"
-            ))
-        })?;
+        let server = self
+            .nodes
+            .get(&seed)
+            .ok_or_else(|| {
+                Status::internal(format!(
+                    "session {session_handle:?} referenced seed {seed:?} but no Node entry exists"
+                ))
+            })?
+            .server
+            .clone();
 
-        // Drop the session's resources via libnvnmos before we touch the
-        // Node's lifetime. Errors are logged but not fatal — the session
-        // is going away regardless, and leaking a libnvnmos resource is
-        // less bad than refusing to close. Resources are dropped from
-        // daemon state whether or not libnvnmos's removal succeeded.
+        // Clear the session's resources from daemon state and collect the
+        // libnvnmos removals to run after the lock is dropped. Resources
+        // are dropped from daemon state regardless of the deferred FFI
+        // outcome — the session is going away.
+        let mut resource_removals: Vec<(Side, String)> = Vec::new();
         for resource_handle in session.resources {
             let Some(resource) = self.resources.remove(&resource_handle) else {
                 tracing::warn!(
@@ -635,22 +1056,10 @@ impl State {
                 resource.side,
                 resource.name.clone(),
             ));
-            if let Err(e) = resource
-                .side
-                .remove_from_server(&node.server, &resource.name)
-            {
-                tracing::warn!(
-                    %resource_handle,
-                    session_handle,
-                    side = resource.side.label(),
-                    name = %resource.name,
-                    error = %e,
-                    "close_session: libnvnmos remove_sender/remove_receiver failed; \
-                     continuing"
-                );
-            }
+            resource_removals.push((resource.side, resource.name));
         }
 
+        let mut channelmapping_removals: Vec<String> = Vec::new();
         for channelmapping_handle in session.channelmappings {
             if let Some(entry) = self.channelmappings.remove(&channelmapping_handle) {
                 self.channelmappings_by_name
@@ -659,15 +1068,7 @@ impl State {
                     self.outputs_by_id
                         .remove(&(entry.node_seed.clone(), output_id.clone()));
                 }
-                if let Err(e) = node.server.remove_channelmapping(&entry.name) {
-                    tracing::warn!(
-                        %channelmapping_handle,
-                        session_handle,
-                        name = %entry.name,
-                        error = %e,
-                        "close_session: libnvnmos remove_channelmapping failed; continuing"
-                    );
-                }
+                channelmapping_removals.push(entry.name);
             }
         }
 
@@ -695,13 +1096,20 @@ impl State {
             self.http_ports.remove(&entry.http_port);
             self.nodes.remove(&seed);
         }
-        Ok(CloseOutcome {
+        let outcome = CloseOutcome {
             node_seed: seed,
             node_id,
             lifetime,
             remaining_sessions,
             node_destroyed,
-        })
+        };
+        let ffi = CloseSessionFfi {
+            server,
+            resource_removals,
+            channelmapping_removals,
+            session_handle: session_handle.to_string(),
+        };
+        Ok((outcome, ffi))
     }
 
     /// Count live senders/receivers created on `node_seed`.
@@ -712,19 +1120,23 @@ impl State {
             .count()
     }
 
-    /// Create a persistent Node for `seed`.
+    /// First phase of `AddNode`: record a pending node (its HTTP port and
+    /// seed) for a persistent Node and return a [`CreateNodePrep`]. The
+    /// caller must [`CreateNodePrep::run_ffi`] outside the `state` lock
+    /// and then call
+    /// [`State::commit_add_node`] (or [`State::abort_pending_node`] on
+    /// build failure).
     ///
     /// Errors:
     /// * `INVALID_ARGUMENT` if `seed` is empty.
     /// * `ALREADY_EXISTS` if any Node (persistent or session-refcounted)
-    ///   currently exists for `seed`.
-    /// * Whatever `build_node_server` returns, surfaced verbatim.
-    pub fn add_node(
+    ///   currently exists for `seed`, or a create for it is already pending.
+    /// * Whatever [`State::resolve_http_port`] returns.
+    pub fn prepare_add_node(
         &mut self,
         mut config: NodeConfig,
         port_range: &PortRange,
-        build_node_server: impl FnOnce(&NodeConfig) -> Result<NodeServer, Status>,
-    ) -> Result<AddNodeOutcome, Status> {
+    ) -> Result<CreateNodePrep, Status> {
         let seed = config.seed.clone();
         require_non_empty_seed(&seed)?;
         if let Some(entry) = self.nodes.get(&seed) {
@@ -733,26 +1145,40 @@ impl State {
                 entry.lifetime.label(),
             )));
         }
+        if self.pending_nodes.contains(&seed) {
+            return Err(Status::already_exists(format!(
+                "a Node for seed {seed:?} is already being created"
+            )));
+        }
         let http_port = self.resolve_http_port(config.http_port, port_range)?;
         config.http_port = http_port;
-        let server = build_node_server(&config)?;
-        let node_id = server.node_id().map_err(|e| {
-            Status::internal(format!(
-                "querying node_id from the new NodeServer failed: {e}"
-            ))
-        })?;
         self.http_ports.insert(http_port, seed.clone());
-        self.nodes.insert(
+        self.pending_nodes.insert(seed.clone());
+        Ok(CreateNodePrep {
             seed,
+            config: Box::new(config),
+            http_port,
+        })
+    }
+
+    /// Third phase of `AddNode`: commit the pending node built for a
+    /// [`CreateNodePrep`] into a live persistent [`NodeEntry`].
+    pub fn commit_add_node(&mut self, ready: CreateNodeReady) -> AddNodeOutcome {
+        self.pending_nodes.remove(&ready.seed);
+        self.nodes.insert(
+            ready.seed,
             NodeEntry {
-                server,
-                node_id: node_id.clone(),
+                server: ready.server,
+                node_id: ready.node_id.clone(),
                 lifetime: Lifetime::Persistent,
                 attached_sessions: 0,
-                http_port,
+                http_port: ready.http_port,
             },
         );
-        Ok(AddNodeOutcome { node_id, http_port })
+        AddNodeOutcome {
+            node_id: ready.node_id,
+            http_port: ready.http_port,
+        }
     }
 
     /// Tear down a persistent Node.
@@ -763,7 +1189,10 @@ impl State {
     /// * `FAILED_PRECONDITION` if the Node is [`Lifetime::SessionRefcounted`]
     ///   (the caller must close sessions instead) or if any sessions are
     ///   currently attached (the caller must close them first).
-    pub fn remove_node(&mut self, seed: &str) -> Result<RemoveNodeOutcome, Status> {
+    pub fn remove_node(
+        &mut self,
+        seed: &str,
+    ) -> Result<(RemoveNodeOutcome, RemoveNodeFfi), Status> {
         require_non_empty_seed(seed)?;
         let entry = self
             .nodes
@@ -788,71 +1217,44 @@ impl State {
         // we still hold the &mut self lock.
         let entry = self.nodes.remove(seed).expect("checked above");
         self.http_ports.remove(&entry.http_port);
-        Ok(RemoveNodeOutcome {
-            node_id: entry.node_id,
-        })
+        // Defer the `NodeServer` drop (destroy + thread-join) to run
+        // outside the `state` lock; see [`RemoveNodeFfi`].
+        Ok((
+            RemoveNodeOutcome {
+                node_id: entry.node_id,
+            },
+            RemoveNodeFfi {
+                server: entry.server,
+            },
+        ))
     }
 
-    /// Create a sender. Thin wrapper around [`State::add_resource`].
-    pub fn add_sender(
-        &mut self,
-        session_handle: &str,
-        transport: Transport,
-        transport_file: &str,
-        claimed_name: &str,
-    ) -> Result<AddResourceOutcome, Status> {
-        self.add_resource(
-            Side::Sender,
-            session_handle,
-            transport,
-            transport_file,
-            claimed_name,
-        )
-    }
-
-    /// Create a receiver. Thin wrapper around [`State::add_resource`].
-    pub fn add_receiver(
-        &mut self,
-        session_handle: &str,
-        transport: Transport,
-        transport_file: &str,
-        claimed_name: &str,
-    ) -> Result<AddResourceOutcome, Status> {
-        self.add_resource(
-            Side::Receiver,
-            session_handle,
-            transport,
-            transport_file,
-            claimed_name,
-        )
-    }
-
-    /// Implementation shared by [`State::add_sender`] /
-    /// [`State::add_receiver`]. The two only differ in which libnvnmos
-    /// add/lookup APIs `side` dispatches to.
+    /// First phase of `AddSender` / `AddReceiver`: validate daemon-side
+    /// bookkeeping and hand back an [`AddResourcePrep`] carrying an
+    /// [`Arc<NodeServer>`] for the FFI add.
     ///
-    /// The validation flow:
+    /// The full validation flow (spanning the three phases):
     ///
-    /// 1. Pre-check in daemon state — refuses a duplicate `name`
-    ///    on the same Node before any FFI happens.
-    /// 2. `add_{sender,receiver}` into libnvnmos. libnvnmos parses the
-    ///    transport file and creates the resource under its embedded
-    ///    resource name.
-    /// 3. `{sender,receiver}_id(claimed_name)` — uses libnvnmos
-    ///    itself as the oracle: success proves the transport file's id
-    ///    equalled the claim. Failure means a mismatch.
-    /// 4. On mismatch, error `INVALID_ARGUMENT` and log. The libnvnmos
-    ///    resource exists as a stray; the activation router will reap
-    ///    it on first activation. See the proto's "Resource lifecycle"
+    /// 1. Pre-check in daemon state — refuses a duplicate `name` on the
+    ///    same Node before any FFI happens (here).
+    /// 2. `add_{sender,receiver}` into libnvnmos, then
+    ///    `{sender,receiver}_id(claimed_name)` — libnvnmos is the oracle:
+    ///    success proves the transport file's id equalled the claim
+    ///    ([`AddResourcePrep::run_ffi`], no lock held).
+    /// 3. On success, finalise the maps ([`State::commit_add_resource`]).
+    ///    On a name mismatch the libnvnmos resource is left as a stray
+    ///    (no compensating remove); activations NACK with
+    ///    [`ActivationDispatch::NoResource`]; the stray is torn down when
+    ///    the Node is destroyed. See the proto's "Resource lifecycle"
     ///    section.
-    fn add_resource(
+    pub fn prepare_add_resource(
         &mut self,
         side: Side,
         session_handle: &str,
         transport: Transport,
         transport_file: &str,
         claimed_name: &str,
-    ) -> Result<AddResourceOutcome, Status> {
+    ) -> Result<AddResourcePrep, Status> {
         if claimed_name.is_empty() {
             return Err(Status::invalid_argument("name must be non-empty"));
         }
@@ -881,62 +1283,77 @@ impl State {
             )));
         }
 
-        let node = self.nodes.get(&node_seed).ok_or_else(|| {
-            Status::internal(format!(
-                "session {session_handle:?} referenced seed {node_seed:?} \
-                 but no Node entry exists"
-            ))
-        })?;
-
-        side.add_to_server(&node.server, transport, transport_file)
-            .map_err(|e| {
-                Status::invalid_argument(format!(
-                    "libnvnmos add_{} failed (transport_file parse error or \
-                     duplicate): {e}",
-                    side.label(),
+        let server = self
+            .nodes
+            .get(&node_seed)
+            .ok_or_else(|| {
+                Status::internal(format!(
+                    "session {session_handle:?} referenced seed {node_seed:?} \
+                     but no Node entry exists"
                 ))
-            })?;
+            })?
+            .server
+            .clone();
 
-        let resource_id = match side.lookup_id(&node.server, claimed_name) {
-            Ok(Some(id)) => id,
-            Ok(None) => {
-                tracing::error!(
-                    side = side.label(),
-                    claimed_name,
-                    %node_seed,
-                    "AddSender/AddReceiver: libnvnmos accepted the transport \
-                     file but its embedded name does not match the \
-                     claimed name; left as stray, will be reaped at \
-                     first activation"
-                );
-                return Err(Status::invalid_argument(format!(
-                    "{}'s transport_file embeds a different name than \
-                     {claimed_name:?}",
-                    side.label(),
-                )));
-            }
-            Err(e) => {
-                return Err(Status::internal(format!(
-                    "querying {} id from libnvnmos failed after add: {e}",
-                    side.label(),
-                )));
-            }
-        };
+        Ok(AddResourcePrep {
+            server,
+            side,
+            transport,
+            transport_file: transport_file.to_string(),
+            name: claimed_name.to_string(),
+            node_seed,
+            session_handle: session_handle.to_string(),
+        })
+    }
+
+    /// Third phase of `AddSender` / `AddReceiver`: record the resource in
+    /// daemon state after the libnvnmos add + name-match lookup succeeded.
+    ///
+    /// The session must still exist; if it was closed while the FFI ran
+    /// (a concurrent `CloseSession`), the libnvnmos resource is left as a
+    /// stray (no compensating remove; torn down when the Node is destroyed)
+    /// and this returns `NOT_FOUND`.
+    pub fn commit_add_resource(
+        &mut self,
+        ready: AddResourceReady,
+    ) -> Result<AddResourceOutcome, Status> {
+        let AddResourceReady {
+            side,
+            name,
+            node_seed,
+            session_handle,
+            resource_id,
+        } = ready;
+
+        if !self.sessions.contains_key(&session_handle) {
+            tracing::warn!(
+                session_handle,
+                side = side.label(),
+                name = %name,
+                %node_seed,
+                "AddSender/AddReceiver: session closed while libnvnmos add was \
+                 in flight; libnvnmos resource left as stray"
+            );
+            return Err(Status::not_found(format!(
+                "session {session_handle:?} closed before the add completed"
+            )));
+        }
 
         let resource_handle = self.allocate_resource_handle();
         self.resources.insert(
             resource_handle.clone(),
             ResourceEntry {
-                name: claimed_name.to_string(),
+                name: name.clone(),
                 node_seed: node_seed.clone(),
-                session_handle: session_handle.to_string(),
+                session_handle: session_handle.clone(),
                 side,
             },
         );
-        self.by_name.insert(key, resource_handle.clone());
+        self.by_name
+            .insert((node_seed.clone(), side, name), resource_handle.clone());
         self.sessions
-            .get_mut(session_handle)
-            .expect("session existed at the start of this method")
+            .get_mut(&session_handle)
+            .expect("checked above")
             .resources
             .insert(resource_handle.clone());
 
@@ -955,7 +1372,7 @@ impl State {
         &mut self,
         session_handle: &str,
         resource_handle: &str,
-    ) -> Result<RemoveResourceOutcome, Status> {
+    ) -> Result<(RemoveResourceOutcome, RemoveResourceFfi), Status> {
         let session = self.sessions.get(session_handle).ok_or_else(|| {
             Status::not_found(format!(
                 "session_handle {session_handle:?} is not known to this daemon"
@@ -985,30 +1402,27 @@ impl State {
             .resources
             .remove(resource_handle);
 
-        // Daemon state is consistent at this point. libnvnmos
-        // removal is best-effort — a failure here would leak a resource
-        // in libnvnmos's IS-04 model, but our state stays clean.
-        if let Some(node) = self.nodes.get(&resource.node_seed) {
-            if let Err(e) = resource
-                .side
-                .remove_from_server(&node.server, &resource.name)
-            {
-                tracing::warn!(
-                    resource_handle,
-                    side = resource.side.label(),
-                    name = %resource.name,
-                    error = %e,
-                    "remove_resource: libnvnmos remove_sender/remove_receiver failed; \
-                     daemon state already cleared"
-                );
-            }
-        }
-
-        Ok(RemoveResourceOutcome {
-            node_seed: resource.node_seed,
-            name: resource.name,
+        // Daemon state is consistent at this point. The libnvnmos removal
+        // is best-effort and deferred to run outside the lock — a failure
+        // there would leak a resource in libnvnmos's IS-04 model, but our
+        // state stays clean.
+        let server = self
+            .nodes
+            .get(&resource.node_seed)
+            .map(|n| n.server.clone());
+        let ffi = RemoveResourceFfi {
+            server,
             side: resource.side,
-        })
+            name: resource.name.clone(),
+        };
+        Ok((
+            RemoveResourceOutcome {
+                node_seed: resource.node_seed,
+                name: resource.name,
+                side: resource.side,
+            },
+            ffi,
+        ))
     }
 
     /// Push an out-of-band data-plane state change through libnvnmos so
@@ -1026,7 +1440,7 @@ impl State {
         session_handle: &str,
         resource_handle: &str,
         transport_file: Option<&str>,
-    ) -> Result<SyncResourceStateOutcome, Status> {
+    ) -> Result<(SyncResourceStateOutcome, SyncResourceFfi), Status> {
         let session = self.sessions.get(session_handle).ok_or_else(|| {
             Status::not_found(format!(
                 "session_handle {session_handle:?} is not known to this daemon"
@@ -1045,36 +1459,32 @@ impl State {
                  {resource_handle:?} but no resource entry exists"
             ))
         })?;
-        let node = self.nodes.get(&resource.node_seed).ok_or_else(|| {
-            Status::internal(format!(
-                "resource {resource_handle:?} references seed {:?} but no \
-                 Node entry exists",
-                resource.node_seed,
-            ))
-        })?;
-
-        node.server
-            .activate_connection(resource.side.to_wrapper(), &resource.name, transport_file)
-            .map_err(|e| {
-                let verb = if transport_file.is_some() {
-                    "activate"
-                } else {
-                    "deactivate"
-                };
-                Status::invalid_argument(format!(
-                    "libnvnmos {verb} for {} {:?} failed (transport_file \
-                     parse error or libnvnmos state mismatch): {e}",
-                    resource.side.label(),
-                    resource.name,
+        let server = self
+            .nodes
+            .get(&resource.node_seed)
+            .ok_or_else(|| {
+                Status::internal(format!(
+                    "resource {resource_handle:?} references seed {:?} but no \
+                     Node entry exists",
+                    resource.node_seed,
                 ))
-            })?;
+            })?
+            .server
+            .clone();
 
-        Ok(SyncResourceStateOutcome {
+        let outcome = SyncResourceStateOutcome {
             node_seed: resource.node_seed.clone(),
             name: resource.name.clone(),
             side: resource.side,
             activated: transport_file.is_some(),
-        })
+        };
+        let ffi = SyncResourceFfi {
+            server,
+            side: resource.side,
+            name: resource.name.clone(),
+            transport_file: transport_file.map(str::to_string),
+        };
+        Ok((outcome, ffi))
     }
 
     /// Register a `SubscribeActivations` stream for `session_handle`.
@@ -1424,24 +1834,30 @@ impl State {
             && !self.has_any_activation_subscription(session_handle)
     }
 
-    /// Add a channel mapping. Parallel to [`State::add_resource`].
+    /// First phase of `AddChannelMapping`, the IS-08 analogue of
+    /// [`State::prepare_add_resource`].
     ///
-    /// The validation flow:
+    /// The validation flow (spanning the phases):
     ///
     /// 1. Pre-check in daemon state — refuses a duplicate channel mapping
-    ///    `name` on the same Node before any FFI happens.
+    ///    `name` on the same Node before any FFI happens (here).
     /// 2. Assign default IS-08 ids when proto `id` is empty (nvnmosd
-    ///    policy). `routable_inputs` is forwarded like libnvnmos C
-    ///    (empty → unrestricted caps).
-    /// 3. `add_channelmapping` into libnvnmos. Geometry, duplicate ids,
-    ///    labels, and parent/sender linkage are validated there.
-    pub fn add_channelmapping(
+    ///    policy); `routable_inputs` is forwarded like libnvnmos C
+    ///    (empty → unrestricted caps) (here).
+    /// 3. `add_channelmapping` into libnvnmos, which validates geometry,
+    ///    duplicate ids, labels, and parent/sender linkage
+    ///    ([`AddChannelMappingPrep::run_ffi`], no lock held); then record
+    ///    it in daemon state ([`State::commit_add_channelmapping`]). If
+    ///    the session closed during FFI, commit returns `NOT_FOUND` and
+    ///    the libnvnmos mapping is left as a stray (no compensating
+    ///    remove; torn down when the Node is destroyed).
+    pub fn prepare_add_channelmapping(
         &mut self,
         session_handle: &str,
         name: &str,
         inputs: &[ProtoChannelMappingInput],
         outputs: &[ProtoChannelMappingOutput],
-    ) -> Result<AddChannelMappingOutcome, Status> {
+    ) -> Result<AddChannelMappingPrep, Status> {
         if name.is_empty() {
             return Err(Status::invalid_argument("name must be non-empty"));
         }
@@ -1478,22 +1894,62 @@ impl State {
         let effective_output_ids =
             effective_channelmapping_output_ids(name, outputs, first_on_node);
         let mapping =
-            build_channel_mapping(inputs, outputs, &effective_input_ids, &effective_output_ids);
+            build_channelmapping(inputs, outputs, &effective_input_ids, &effective_output_ids);
 
-        let node = self.nodes.get(&node_seed).ok_or_else(|| {
-            Status::internal(format!(
-                "session {session_handle:?} referenced seed {node_seed:?} but no Node entry \
-                 exists"
-            ))
-        })?;
-
-        node.server
-            .add_channelmapping(name, &mapping)
-            .map_err(|e| {
-                Status::invalid_argument(format!(
-                    "libnvnmos add_channelmapping failed (duplicate or invalid geometry): {e}"
+        let server = self
+            .nodes
+            .get(&node_seed)
+            .ok_or_else(|| {
+                Status::internal(format!(
+                    "session {session_handle:?} referenced seed {node_seed:?} but no Node entry \
+                     exists"
                 ))
-            })?;
+            })?
+            .server
+            .clone();
+
+        Ok(AddChannelMappingPrep {
+            server,
+            name: name.to_string(),
+            mapping,
+            node_seed,
+            session_handle: session_handle.to_string(),
+            effective_input_ids,
+            effective_output_ids,
+        })
+    }
+
+    /// Third phase of `AddChannelMapping`: record the channel mapping in
+    /// daemon state after the libnvnmos add succeeded.
+    ///
+    /// The session must still exist; if it was closed while the FFI ran
+    /// (a concurrent `CloseSession`), the libnvnmos mapping is left as a
+    /// stray (no compensating remove; torn down when the Node is destroyed)
+    /// and this returns `NOT_FOUND`.
+    pub fn commit_add_channelmapping(
+        &mut self,
+        ready: AddChannelMappingReady,
+    ) -> Result<AddChannelMappingOutcome, Status> {
+        let AddChannelMappingReady {
+            name,
+            node_seed,
+            session_handle,
+            effective_input_ids,
+            effective_output_ids,
+        } = ready;
+
+        if !self.sessions.contains_key(&session_handle) {
+            tracing::warn!(
+                session_handle,
+                name = %name,
+                %node_seed,
+                "AddChannelMapping: session closed while libnvnmos add was in \
+                 flight; libnvnmos channel mapping left as stray"
+            );
+            return Err(Status::not_found(format!(
+                "session {session_handle:?} closed before the add completed"
+            )));
+        }
 
         let channelmapping_handle = self.allocate_channelmapping_handle();
         let output_id_set: HashSet<String> = effective_output_ids.iter().cloned().collect();
@@ -1507,19 +1963,17 @@ impl State {
         self.channelmappings.insert(
             channelmapping_handle.clone(),
             ChannelMappingEntry {
-                name: name.to_string(),
+                name: name.clone(),
                 node_seed: node_seed.clone(),
-                session_handle: session_handle.to_string(),
+                session_handle: session_handle.clone(),
                 output_ids: output_id_set,
             },
         );
-        self.channelmappings_by_name.insert(
-            (node_seed.clone(), name.to_string()),
-            channelmapping_handle.clone(),
-        );
+        self.channelmappings_by_name
+            .insert((node_seed.clone(), name), channelmapping_handle.clone());
         self.sessions
-            .get_mut(session_handle)
-            .expect("session existed at start")
+            .get_mut(&session_handle)
+            .expect("checked above")
             .channelmappings
             .insert(channelmapping_handle.clone());
 
@@ -1535,7 +1989,7 @@ impl State {
         &mut self,
         session_handle: &str,
         channelmapping_handle: &str,
-    ) -> Result<RemoveChannelMappingOutcome, Status> {
+    ) -> Result<(RemoveChannelMappingOutcome, RemoveChannelMappingFfi), Status> {
         let session = self.sessions.get(session_handle).ok_or_else(|| {
             Status::not_found(format!(
                 "session_handle {session_handle:?} is not known to this daemon"
@@ -1569,21 +2023,18 @@ impl State {
             .channelmappings
             .remove(channelmapping_handle);
 
-        if let Some(node) = self.nodes.get(&entry.node_seed) {
-            if let Err(e) = node.server.remove_channelmapping(&entry.name) {
-                tracing::warn!(
-                    channelmapping_handle,
-                    name = %entry.name,
-                    error = %e,
-                    "remove_channelmapping: libnvnmos remove failed; daemon state already cleared"
-                );
-            }
-        }
-
-        Ok(RemoveChannelMappingOutcome {
-            node_seed: entry.node_seed,
-            name: entry.name,
-        })
+        let server = self.nodes.get(&entry.node_seed).map(|n| n.server.clone());
+        let ffi = RemoveChannelMappingFfi {
+            server,
+            name: entry.name.clone(),
+        };
+        Ok((
+            RemoveChannelMappingOutcome {
+                node_seed: entry.node_seed,
+                name: entry.name,
+            },
+            ffi,
+        ))
     }
 
     pub fn sync_channelmapping_state(
@@ -1592,7 +2043,7 @@ impl State {
         channelmapping_handle: &str,
         output_id: &str,
         active_map: &[ProtoActiveMapEntry],
-    ) -> Result<SyncChannelMappingStateOutcome, Status> {
+    ) -> Result<(SyncChannelMappingStateOutcome, SyncChannelMappingFfi), Status> {
         let session = self.sessions.get(session_handle).ok_or_else(|| {
             Status::not_found(format!(
                 "session_handle {session_handle:?} is not known to this daemon"
@@ -1614,28 +2065,30 @@ impl State {
                  {channelmapping_handle:?} but no entry exists"
                 ))
             })?;
-        let node = self.nodes.get(&entry.node_seed).ok_or_else(|| {
-            Status::internal(format!(
-                "channelmapping {channelmapping_handle:?} references seed {:?} but no Node \
-                 entry exists",
-                entry.node_seed,
-            ))
-        })?;
-
-        let mapped = active_map_from_proto(active_map);
-
-        node.server
-            .activate_channelmapping(&entry.name, output_id, &mapped)
-            .map_err(|e| {
-                Status::invalid_argument(format!(
-                    "libnvnmos nmos_channelmapping_activate failed: {e}"
+        let server = self
+            .nodes
+            .get(&entry.node_seed)
+            .ok_or_else(|| {
+                Status::internal(format!(
+                    "channelmapping {channelmapping_handle:?} references seed {:?} but no Node \
+                     entry exists",
+                    entry.node_seed,
                 ))
-            })?;
+            })?
+            .server
+            .clone();
 
-        Ok(SyncChannelMappingStateOutcome {
+        let outcome = SyncChannelMappingStateOutcome {
             node_seed: entry.node_seed.clone(),
             name: entry.name.clone(),
-        })
+        };
+        let ffi = SyncChannelMappingFfi {
+            server,
+            name: entry.name.clone(),
+            output_id: output_id.to_string(),
+            active_map: active_map_from_proto(active_map),
+        };
+        Ok((outcome, ffi))
     }
 
     pub fn dispatch_channelmapping_activation(
@@ -1815,7 +2268,7 @@ fn channelmapping_parent_type(raw: i32) -> ChannelMappingParentType {
     }
 }
 
-fn build_channel_mapping(
+fn build_channelmapping(
     inputs: &[ProtoChannelMappingInput],
     outputs: &[ProtoChannelMappingOutput],
     effective_input_ids: &[String],

@@ -40,8 +40,10 @@ libc = "0.2"
 [dev-dependencies]
 hyper-util = { workspace = true }
 nvnmos-rpc = { path = "../nvnmos-rpc" }
+serde_json.workspace = true
 tempfile = { workspace = true }
 tonic.workspace = true
 tokio = { workspace = true, features = ["time"] }
+tokio-stream.workspace = true
 tower.workspace = true
 
