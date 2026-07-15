@@ -19,6 +19,9 @@ These callbacks can be used to update running DeepStream pipelines with new tran
 
 NvNmos currently supports Senders and Receivers for video, audio, and ancillary data flows over RTP (i.e., SMPTE ST 2110-20, -22, -30, and -40 streams) and over the Media eXchange Layer (MXL).
 
+The GStreamer plugin and element reference is published at
+[https://nvidia.github.io/nvnmos/gstreamer/](https://nvidia.github.io/nvnmos/gstreamer/).
+
 The NvNmos library supports the following specifications, using the [Sony nmos-cpp](https://github.com/sony/nmos-cpp) implementation internally:
 - [AMWA IS-04 NMOS Discovery and Registration Specification](https://specs.amwa.tv/is-04/) v1.3
 - [AMWA IS-05 NMOS Device Connection Management Specification](https://specs.amwa.tv/is-05/) v1.1 and v1.2-dev (for MXL)
@@ -46,8 +49,8 @@ The following operating systems and compilers have been tested.
 
 ## Usage
 
-NvNmos consists of a single shared library (_libnvnmos.so_ on Linux, _nvnmos.dll_ on Windows).
-The API is specified by the _nvnmos.h_ header file.
+NvNmos consists of a single shared library (`libnvnmos.so` on Linux, `nvnmos.dll` on Windows).
+The API is specified by the `nvnmos.h` header file.
 
 The nvnmos-example application demonstrates use of the library.
 
@@ -132,7 +135,7 @@ All write a null-terminated UUID into a buffer of at least `NVNMOS_ID_LEN` bytes
 
 For `NVNMOS_TRANSPORT_MXL` the transport file is an MXL flow definition JSON (the form consumed by the MXL SDK), with NvNmos extensions carried as entries in the standard `tags` property keyed by `urn:x-nvnmos:tag:*` URN strings. See *NvNmos Extensions to the Transport File* above for the full set.
 
-For the full per-field documentation see [`src/nvnmos.h`](src/nvnmos.h).
+For the full per-field documentation see [`src/nvnmos.h`](https://github.com/NVIDIA/nvnmos/blob/main/src/nvnmos.h).
 
 ## API Changes for RTP Sender IS-05 Defaults
 
@@ -145,11 +148,11 @@ On IS-05 activation, `"auto"` values for RTP Senders are now resolved based on t
 
 ## Container Images
 
-Container definitions live under [`docker/`](docker/). Build context is always the repository root.
+Container definitions live under [`docker/`](https://github.com/NVIDIA/nvnmos/tree/main/docker). Build context is always the repository root.
 
-### Library Package Image (`docker/nvnmos`)
+### nvnmos Library Package Image
 
-Builds and packages the C++ library and Rust workspace from source (see [`docker/nvnmos/README.md`](docker/nvnmos/README.md) for build arguments and runtime behaviour). With the defaults (`ubuntu:24.04`, `src/conan.lock`) the image produces **`nvnmos-ubuntu-24.04.tar.gz`**:
+Builds and packages the C++ library and Rust workspace from source (see [`docker/nvnmos/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/docker/nvnmos/README.md) for build arguments and runtime behaviour). With the defaults (`ubuntu:24.04`, `src/conan.lock`) the image produces `nvnmos-ubuntu-24.04.tar.gz`:
 
 ```sh
 docker build -f docker/nvnmos/Dockerfile -t nvnmos .
@@ -158,9 +161,9 @@ docker cp nvnmos-test:/nvnmos-ubuntu-24.04.tar.gz .
 docker rm nvnmos-test
 ```
 
-### gst-nmos-rs Operator Image (`docker/gst-nmos-rs`)
+### gst-nmos-rs Operator Image
 
-Combined runtime for `nvnmosd` + `gst-nmos-rs`, intended for `gst-launch-1.0` pipelines (`transport=mxl` via gst-mxl-rs, `udp` via gst-plugins-good, `udp2` via gst-plugins-rs). See [`docker/gst-nmos-rs/README.md`](docker/gst-nmos-rs/README.md) for build arguments, run, and Kubernetes notes.
+Combined runtime for `nvnmosd` + `gst-nmos-rs`, intended for `gst-launch-1.0` pipelines (`transport=mxl` via gst-mxl-rs, `udp` via gst-plugins-good, `udp2` via gst-plugins-rs). See [`docker/gst-nmos-rs/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/docker/gst-nmos-rs/README.md) for build arguments, run, and Kubernetes notes.
 
 ```sh
 docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst .
@@ -317,7 +320,7 @@ os=Windows
 
 **Linux**
 
-Prepare a _build_ directory adjacent to the _src_ directory.
+Prepare a `build` directory adjacent to the `src` directory.
 
 ```sh
 mkdir build
@@ -327,7 +330,7 @@ To install the dependencies using Conan, use the following command.
 
 > 💬 **Note:**
 > Replace `<Release-or-Debug>` with the necessary value.
-> Passing `--lockfile=src/conan.lock` pins dependency versions per _src/conan.lock_ (Conan Center `nmos-cpp` package graph).
+> Passing `--lockfile=src/conan.lock` pins dependency versions per `src/conan.lock` (Conan Center `nmos-cpp` package graph).
 > Do not pass `-g CMakeToolchain` or `-g CMakeDeps`; `src/conanfile.py` already generates them, and Conan fails if they are duplicated (for example when copying older command lines).
 
 ```sh
@@ -342,7 +345,7 @@ Use the following CMake command to configure the build.
 
 > 💬 **Note:**
 > Replace `<Release-or-Debug>` with the necessary value.
-> The `CMAKE_TOOLCHAIN_FILE` path is resolved relative to the top-level _src_ directory passed as the last argument.
+> The `CMAKE_TOOLCHAIN_FILE` path is resolved relative to the top-level `src` directory passed as the last argument.
 
 ```sh
 cmake -B build \
@@ -359,7 +362,7 @@ cmake --build build --parallel
 
 **Windows**
 
-Prepare a _build_ directory adjacent to the _src_ directory.
+Prepare a `build` directory adjacent to the `src` directory.
 
 ```PowerShell
 mkdir build
@@ -370,7 +373,7 @@ To install the dependencies using Conan, use the following command.
 > 💬 **Note:**
 > The `` ` `` is the PowerShell line continuation character. In the Windows command prompt, use `^` instead.
 > Replace `<Release-or-Debug>` with the necessary value.
-> Passing `--lockfile=src/conan.lock` pins dependency versions per _src/conan.lock_ (Conan Center `nmos-cpp` package graph).
+> Passing `--lockfile=src/conan.lock` pins dependency versions per `src/conan.lock` (Conan Center `nmos-cpp` package graph).
 > Do not pass `-g CMakeToolchain` or `-g CMakeDeps`; `src/conanfile.py` already generates them, and Conan fails if they are duplicated (for example when copying older command lines).
 
 ```PowerShell

@@ -1,0 +1,2 @@
+	c-api.md
+	gst-nmos-rs.md

@@ -1,0 +1,15 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* #extra-menu raises specificity above Bootstrap's `.navbar-nav > li > a`,
+   which otherwise forces `display: block` and drops the icon to the baseline. */
+#extra-menu .nvnmos-github-link {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35em;
+}
+
+#extra-menu .nvnmos-github-icon {
+	flex-shrink: 0;
+}

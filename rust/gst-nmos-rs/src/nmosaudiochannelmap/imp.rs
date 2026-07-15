@@ -232,8 +232,8 @@ impl ElementImpl for NmosAudioChannelMap {
             gst::subclass::ElementMetadata::new(
                 "NMOS IS-08 audio channel map",
                 "Filter/Audio/Network",
-                "IS-08 channel mapping between NMOS audio streams",
-                "NVIDIA",
+                "IS-08 channel mapping between NMOS audio streams, backed by nvnmosd",
+                "NVIDIA Corporation",
             )
         });
         Some(&*ELEMENT_METADATA)

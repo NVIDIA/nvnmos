@@ -137,6 +137,8 @@
 //! synthesised `flow_def` omits top-level `id`) but keeps the fake
 //! inner chain until IS-05 activation supplies the MXL flow id.
 
+#![allow(unused_doc_comments)]
+
 use std::sync::LazyLock;
 
 use gst::glib;
@@ -193,6 +195,13 @@ fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     Ok(())
 }
 
+/**
+ * plugin-nmos:
+ *
+ * NMOS Sender and Receiver elements (`nmossrc`, `nmossink`) and IS-08 audio
+ * channel mapping (`nmosaudiochannelmap`), talking to the `nvnmosd` NMOS daemon
+ * over gRPC.
+ */
 gst::plugin_define!(
     nmos,
     env!("CARGO_PKG_DESCRIPTION"),
