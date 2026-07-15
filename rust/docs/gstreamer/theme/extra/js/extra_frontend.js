@@ -13,10 +13,18 @@
 		' 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67-.01-.27.41 0 .59.34.19.73.9.82 1.13.16.39.68 1.31 2.69.94' +
 		' 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"></path></svg>';
 
+	// The theme's styleswitcher eagerly persists 'hotdoc.style' on load, so a
+	// missing key cannot be used to detect a first visit. Track our own marker
+	// instead: apply light once, then leave the user's later choice alone.
 	function defaultToLightMode() {
-		if (window.localStorage && !localStorage.getItem('hotdoc.style')) {
-			setActiveStyleSheet('light');
+		if (!window.localStorage || typeof setActiveStyleSheet !== 'function') {
+			return;
 		}
+		if (localStorage.getItem('nvnmos.default-style') === 'applied') {
+			return;
+		}
+		localStorage.setItem('nvnmos.default-style', 'applied');
+		setActiveStyleSheet('light');
 	}
 
 	function addGitHubNavLink() {
