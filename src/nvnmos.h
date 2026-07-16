@@ -850,7 +850,7 @@ bool nmos_make_sender_id(
  * the receiver with the given @p receiver_name.
  *
  * Pure function of (@p seed, @p receiver_name). See
- * @ref nmos_make_node_id for the contract.
+ * @ref nmos_make_node_id for the contract; the same notes apply.
  *
  * @param[in]  seed          Seed string. Must not be null.
  * @param[in]  receiver_name The caller-chosen name of the receiver (see
@@ -870,15 +870,16 @@ bool nmos_make_receiver_id(
 /**
  * Compute the NMOS Source resource id that an @ref NvNmosNodeServer created
  * with the given @p seed will use for the Source paired with a sender
- * named @p source_name.
+ * named @p sender_name.
  *
- * Pure function of (@p seed, @p source_name). See @ref nmos_make_node_id
- * for the contract. This is the IS-04 **Source** id (used for IS-08
- * `/sourceid`), not the Sender id from @ref nmos_make_sender_id — both
- * use the same name string from the transport file.
+ * Pure function of (@p seed, @p sender_name). See @ref nmos_make_node_id
+ * for the contract; the same notes apply. This is the IS-04 **Source** id
+ * (used for IS-08 `/sourceid`), not the Sender id from
+ * @ref nmos_make_sender_id — both are based on the same caller-chosen name
+ * used in the transport file.
  *
  * @param[in]  seed        Seed string. Must not be null.
- * @param[in]  source_name The caller-chosen name of the sender (see
+ * @param[in]  sender_name The caller-chosen name of the sender (see
  *                         @ref NvNmosSenderConfig::transport_file).
  *                         Must not be null.
  * @param[out] out         Buffer to receive the id.
@@ -888,7 +889,34 @@ bool nmos_make_receiver_id(
 NVNMOS_API
 bool nmos_make_source_id(
     const char *seed,
-    const char *source_name,
+    const char *sender_name,
+    char *out,
+    size_t out_len);
+
+/**
+ * Compute the NMOS Flow resource id that an @ref NvNmosNodeServer created
+ * with the given @p seed will use for the Flow paired with a sender named
+ * @p sender_name.
+ *
+ * Pure function of (@p seed, @p sender_name). See @ref nmos_make_node_id
+ * for the contract; the same notes apply. This is the IS-04 **Flow** id
+ * (the Sender's `flow_id` property), not the Sender id from
+ * @ref nmos_make_sender_id — both are based on the same caller-chosen name
+ * used in the transport file. The MXL `mxl_flow_id` IS-05 transport
+ * parameter may be overridden but is the same by default.
+ *
+ * @param[in]  seed        Seed string. Must not be null.
+ * @param[in]  sender_name The caller-chosen name of the sender (see
+ *                         @ref NvNmosSenderConfig::transport_file).
+ *                         Must not be null.
+ * @param[out] out         Buffer to receive the id.
+ * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_make_flow_id(
+    const char *seed,
+    const char *sender_name,
     char *out,
     size_t out_len);
 
@@ -960,14 +988,14 @@ bool nmos_get_receiver_id(
  *
  * Looks the Source up by the caller-chosen sender name (the same
  * string passed to @ref add_nmos_sender_to_node_server). Returns false
- * (without writing to @p out) if no sender with the given @p source_name
+ * (without writing to @p out) if no sender with the given @p sender_name
  * has been added to the server.
  *
  * This is the IS-04 **Source** id (used for IS-08 `/sourceid`), not the
  * Sender id from @ref nmos_get_sender_id.
  *
  * @param[in]  server      Pointer to the server.
- * @param[in]  source_name The caller-chosen name of the sender (see
+ * @param[in]  sender_name The caller-chosen name of the sender (see
  *                         @ref NvNmosSenderConfig::transport_file).
  *                         Must not be null.
  * @param[out] out         Buffer to receive the id.
@@ -977,7 +1005,35 @@ bool nmos_get_receiver_id(
 NVNMOS_API
 bool nmos_get_source_id(
     const NvNmosNodeServer *server,
-    const char *source_name,
+    const char *sender_name,
+    char *out,
+    size_t out_len);
+
+/**
+ * Get the NMOS Flow resource id paired with a sender currently
+ * registered with the specified server.
+ *
+ * Looks the Flow up by the caller-chosen sender name (the same
+ * string passed to @ref add_nmos_sender_to_node_server). Returns false
+ * (without writing to @p out) if no sender with the given @p sender_name
+ * has been added to the server.
+ *
+ * This is the IS-04 **Flow** id (the Sender's `flow_id` property), not
+ * the Sender id from @ref nmos_get_sender_id. The MXL `mxl_flow_id` IS-05
+ * transport parameter may be overridden but is the same by default.
+ *
+ * @param[in]  server      Pointer to the server.
+ * @param[in]  sender_name The caller-chosen name of the sender (see
+ *                         @ref NvNmosSenderConfig::transport_file).
+ *                         Must not be null.
+ * @param[out] out         Buffer to receive the id.
+ * @param[in]  out_len     Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_get_flow_id(
+    const NvNmosNodeServer *server,
+    const char *sender_name,
     char *out,
     size_t out_len);
 

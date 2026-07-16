@@ -196,6 +196,7 @@ namespace nvnmos
         nmos::id sender_id(const std::string& sender_name) const;
         nmos::id receiver_id(const std::string& receiver_name) const;
         nmos::id source_id(const std::string& source_name) const;
+        nmos::id flow_id(const std::string& sender_name) const;
 
     private:
         static nmos::settings make_settings(const NvNmosNodeConfig& config);
@@ -696,6 +697,14 @@ namespace nvnmos
         if (node_model.node_resources.end() == nmos::find_resource(node_model.node_resources, { candidate, nmos::types::source })) return {};
         return candidate;
     }
+
+    nmos::id server::flow_id(const std::string& sender_name) const
+    {
+        auto lock = node_model.read_lock();
+        const auto candidate = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::flow, utility::s2us(sender_name));
+        if (node_model.node_resources.end() == nmos::find_resource(node_model.node_resources, { candidate, nmos::types::flow })) return {};
+        return candidate;
+    }
 }
 
 NVNMOS_API
@@ -978,15 +987,34 @@ bool nmos_make_receiver_id(
 NVNMOS_API
 bool nmos_make_source_id(
     const char* seed,
-    const char* source_name,
+    const char* sender_name,
     char* out,
     size_t out_len)
 {
-    if (!seed || !source_name) return false;
+    if (!seed || !sender_name) return false;
     try
     {
         const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
-        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::source, utility::s2us(source_name)), out, out_len);
+        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::source, utility::s2us(sender_name)), out, out_len);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
+bool nmos_make_flow_id(
+    const char* seed,
+    const char* sender_name,
+    char* out,
+    size_t out_len)
+{
+    if (!seed || !sender_name) return false;
+    try
+    {
+        const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
+        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::flow, utility::s2us(sender_name)), out, out_len);
     }
     catch (...)
     {
@@ -1056,16 +1084,36 @@ bool nmos_get_receiver_id(
 NVNMOS_API
 bool nmos_get_source_id(
     const NvNmosNodeServer* server,
-    const char* source_name,
+    const char* sender_name,
     char* out,
     size_t out_len)
 {
-    if (!server || !source_name) return false;
+    if (!server || !sender_name) return false;
     auto impl = (nvnmos::server*)server->impl;
     if (!impl) return false;
     try
     {
-        return nvnmos::copy_id_to_buffer(impl->source_id(source_name), out, out_len);
+        return nvnmos::copy_id_to_buffer(impl->source_id(sender_name), out, out_len);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
+bool nmos_get_flow_id(
+    const NvNmosNodeServer* server,
+    const char* sender_name,
+    char* out,
+    size_t out_len)
+{
+    if (!server || !sender_name) return false;
+    auto impl = (nvnmos::server*)server->impl;
+    if (!impl) return false;
+    try
+    {
+        return nvnmos::copy_id_to_buffer(impl->flow_id(sender_name), out, out_len);
     }
     catch (...)
     {

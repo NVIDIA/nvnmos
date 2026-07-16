@@ -16,11 +16,12 @@
 //!   (mirrors the `nmos_connection_activate` C function).
 //! * [`NodeServer::node_id`] / [`sender_id`](NodeServer::sender_id) /
 //!   [`receiver_id`](NodeServer::receiver_id) /
-//!   [`source_id`](NodeServer::source_id) — look up NMOS resource UUIDs on a
+//!   [`source_id`](NodeServer::source_id) /
+//!   [`flow_id`](NodeServer::flow_id) — look up NMOS resource UUIDs on a
 //!   running server.
 //! * [`make_node_id`] / [`make_sender_id`] / [`make_receiver_id`] /
-//!   [`make_source_id`] — pure functions that compute the same UUIDs
-//!   deterministically from a seed, without needing a running server.
+//!   [`make_source_id`] / [`make_flow_id`] — pure functions that compute the
+//!   same UUIDs deterministically from a seed, without needing a running server.
 //! * [`NodeServer::builder`] — opt into IS-05 [`Activation`] handling and / or
 //!   forward libnvnmos's slog output via [`LogMessage`]. Both knobs are
 //!   chainable on the returned [`NodeServerBuilder`]; the bare
@@ -525,10 +526,10 @@ pub fn make_receiver_id(seed: &str, receiver_name: &str) -> Result<String> {
     capture_id(&buf)
 }
 
-/// Compute the IS-04 Source resource id for a seed and source name.
-pub fn make_source_id(seed: &str, source_name: &str) -> Result<String> {
+/// Compute the IS-04 Source resource id for a seed and sender name.
+pub fn make_source_id(seed: &str, sender_name: &str) -> Result<String> {
     let cseed = CString::new(seed)?;
-    let cname = CString::new(source_name)?;
+    let cname = CString::new(sender_name)?;
     let mut buf = [0u8; ID_BUF_LEN];
     let ok = unsafe {
         sys::nmos_make_source_id(
@@ -540,6 +541,28 @@ pub fn make_source_id(seed: &str, source_name: &str) -> Result<String> {
     };
     if !ok {
         return Err(Error::Failed("nmos_make_source_id"));
+    }
+    capture_id(&buf)
+}
+
+/// Compute the IS-04 Flow resource id for a seed and sender name.
+///
+/// This is the Flow id (the Sender's `flow_id` property), not the MXL
+/// `mxl_flow_id` IS-05 transport parameter.
+pub fn make_flow_id(seed: &str, sender_name: &str) -> Result<String> {
+    let cseed = CString::new(seed)?;
+    let cname = CString::new(sender_name)?;
+    let mut buf = [0u8; ID_BUF_LEN];
+    let ok = unsafe {
+        sys::nmos_make_flow_id(
+            cseed.as_ptr(),
+            cname.as_ptr(),
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len(),
+        )
+    };
+    if !ok {
+        return Err(Error::Failed("nmos_make_flow_id"));
     }
     capture_id(&buf)
 }
@@ -1466,14 +1489,38 @@ impl NodeServer {
 
     /// Look up the IS-04 Source UUID paired with a sender by its name.
     ///
-    /// Returns `Ok(None)` if no sender with the given `source_name`
+    /// Returns `Ok(None)` if no sender with the given `sender_name`
     /// currently exists on this server. This is the Source id (IS-08
     /// `/sourceid`), not the Sender id from [`sender_id`](Self::sender_id).
-    pub fn source_id(&self, source_name: &str) -> Result<Option<String>> {
-        let cname = CString::new(source_name)?;
+    pub fn source_id(&self, sender_name: &str) -> Result<Option<String>> {
+        let cname = CString::new(sender_name)?;
         let mut buf = [0u8; ID_BUF_LEN];
         let ok = unsafe {
             sys::nmos_get_source_id(
+                &*self.raw,
+                cname.as_ptr(),
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len(),
+            )
+        };
+        if !ok {
+            return Ok(None);
+        }
+        Ok(Some(capture_id(&buf)?))
+    }
+
+    /// Look up the IS-04 Flow UUID paired with a sender by its name.
+    ///
+    /// Returns `Ok(None)` if no sender with the given `sender_name`
+    /// currently exists on this server. This is the Flow id (the Sender's
+    /// `flow_id` property), not the Sender id from [`sender_id`](Self::sender_id).
+    /// The MXL `mxl_flow_id` IS-05 transport parameter may be overridden
+    /// but is the same by default.
+    pub fn flow_id(&self, sender_name: &str) -> Result<Option<String>> {
+        let cname = CString::new(sender_name)?;
+        let mut buf = [0u8; ID_BUF_LEN];
+        let ok = unsafe {
+            sys::nmos_get_flow_id(
                 &*self.raw,
                 cname.as_ptr(),
                 buf.as_mut_ptr() as *mut c_char,
@@ -1564,6 +1611,15 @@ mod tests {
         assert_uuid_shape(&source);
         assert_ne!(sender, source, "sender and source ids must not collide");
         assert_eq!(source, make_source_id("seed", "video").unwrap());
+    }
+
+    #[test]
+    fn sender_and_flow_ids_diverge() {
+        let sender = make_sender_id("seed", "video").unwrap();
+        let flow = make_flow_id("seed", "video").unwrap();
+        assert_uuid_shape(&flow);
+        assert_ne!(sender, flow, "sender and flow ids must not collide");
+        assert_eq!(flow, make_flow_id("seed", "video").unwrap());
     }
 
     #[test]
