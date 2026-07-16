@@ -132,6 +132,110 @@ pub fn libnvnmos_dir() -> Option<PathBuf> {
     dirs.into_iter().find(|d| d.join("libnvnmos.so").exists())
 }
 
+const SHM_MXL_HINT: &str = "MXL uses mkdtemp(3) under /dev/shm; run integration tests \
+    on Linux with tmpfs (/dev/shm)";
+
+/// `Some(reason)` when MXL's `mkdtemp(3)` domains under `/dev/shm` are
+/// unavailable (non-Linux, or a sandbox blocking tmpfs); `None` when usable.
+pub fn dev_shm_mkdtemp_skip_reason() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CStr;
+
+        let mut path = b"/dev/shm/nvnmos_mxl_shm_probeXXXXXX\0".to_vec();
+        let created = unsafe {
+            unsafe extern "C" {
+                fn mkdtemp(template: *mut i8) -> *mut i8;
+            }
+            mkdtemp(path.as_mut_ptr() as *mut i8)
+        };
+        if created.is_null() {
+            let err = std::io::Error::last_os_error();
+            return Some(format!(
+                "mkdtemp(3) on /dev/shm failed: {err}; {SHM_MXL_HINT}"
+            ));
+        }
+        let dir = unsafe { CStr::from_ptr(created) };
+        std::fs::remove_dir_all(dir.to_str().expect("mkdtemp path")).ok();
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Some(format!("not Linux; {SHM_MXL_HINT}"))
+    }
+}
+
+/// Search `LD_LIBRARY_PATH` (and `NVNMOS_LIB_DIR` when set) for `libmxl.so`.
+fn libmxl_so_path() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(paths) = std::env::var("LD_LIBRARY_PATH") {
+        dirs.extend(
+            paths
+                .split(':')
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+        );
+    }
+    if let Ok(dir) = std::env::var("NVNMOS_LIB_DIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+    dirs.into_iter()
+        .map(|d| d.join("libmxl.so"))
+        .find(|p| p.exists())
+}
+
+/// `Some(reason)` when `libmxl.so` cannot be loaded (missing from the loader
+/// search path, or present but not dlopen-able — e.g. `internal/` libraries not
+/// found). `None` when the MXL runtime is loadable.
+pub fn libmxl_skip_reason() -> Option<String> {
+    let Some(so_path) = libmxl_so_path() else {
+        return Some(
+            "libmxl.so not found via LD_LIBRARY_PATH or NVNMOS_LIB_DIR; \
+             build MXL and export its lib dir (and lib/internal) on LD_LIBRARY_PATH"
+                .into(),
+        );
+    };
+    let dir = so_path.parent().expect("libmxl.so parent");
+    let internal = dir.join("internal");
+    let mut ld_path = format!("{}:{}", internal.display(), dir.display());
+    if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
+        if !existing.is_empty() {
+            ld_path = format!("{ld_path}:{existing}");
+        }
+    }
+    // SAFETY: single-threaded skip probe before any MXL threads exist.
+    unsafe { std::env::set_var("LD_LIBRARY_PATH", &ld_path) };
+
+    let cpath = match std::ffi::CString::new(so_path.to_string_lossy().into_owned()) {
+        Ok(p) => p,
+        Err(_) => return Some("libmxl.so path contains an interior NUL byte".into()),
+    };
+    unsafe {
+        unsafe extern "C" {
+            fn dlopen(filename: *const i8, flag: i32) -> *mut std::ffi::c_void;
+            fn dlclose(handle: *mut std::ffi::c_void) -> i32;
+        }
+        const RTLD_LAZY: i32 = 1;
+        let handle = dlopen(cpath.as_ptr(), RTLD_LAZY);
+        if handle.is_null() {
+            let err = std::io::Error::last_os_error();
+            return Some(format!(
+                "dlopen `{}` failed: {err}; ensure LD_LIBRARY_PATH includes the libmxl \
+                 directory and its internal/ backend dir",
+                so_path.display()
+            ));
+        }
+        dlclose(handle);
+    }
+    None
+}
+
+/// Combined MXL runtime prerequisites for integration tests that reach PLAYING
+/// with `mxlsink` / `mxlsrc` (not just element-factory registration).
+pub fn mxl_runtime_skip_reason() -> Option<String> {
+    dev_shm_mkdtemp_skip_reason().or_else(libmxl_skip_reason)
+}
+
 /// Reason the `nvnmosd`-backed integration tests cannot run, or `None` when the
 /// prerequisites are present. `nvnmosd` itself is built by `cargo test`, but it
 /// links `libnvnmos.so` from the C build, which CI exposes on `LD_LIBRARY_PATH`.
