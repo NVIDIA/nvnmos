@@ -405,6 +405,8 @@ static void print_expected_ids(const char *seed)
         print_id("sender", sender_names[i], sender_success ? id : "<error>");
         const bool source_success = nmos_make_source_id(seed, sender_names[i], id, sizeof id);
         print_id("source", sender_names[i], source_success ? id : "<error>");
+        const bool flow_success = nmos_make_flow_id(seed, sender_names[i], id, sizeof id);
+        print_id("flow", sender_names[i], flow_success ? id : "<error>");
     }
 
     static const char *const receiver_names[] = {
@@ -440,6 +442,8 @@ static void print_actual_ids(const NvNmosNodeServer *server)
         print_id("sender", sender_names[i], sender_success ? id : "<missing>");
         const bool source_success = nmos_get_source_id(server, sender_names[i], id, sizeof id);
         print_id("source", sender_names[i], source_success ? id : "<missing>");
+        const bool flow_success = nmos_get_flow_id(server, sender_names[i], id, sizeof id);
+        print_id("flow", sender_names[i], flow_success ? id : "<missing>");
     }
 
     static const char *const receiver_names[] = {
