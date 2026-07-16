@@ -257,7 +257,7 @@ Each value names the inner GStreamer element family the user is signing up for, 
 
 | `transport` value | Inner src element | Inner sink element | Phase | Notes |
 |---|---|---|---|---|
-| `mxl` | `mxlsrc` | `mxlsink` | 1 | MXL shared-memory; requires `mxl-domain-id`. |
+| `mxl` | `mxlsrc` | `mxlsink` | 1 | MXL shared-memory; optional `mxl-domain-id` (application-resolved when unset); `mxl-domain-path` required at inner build. |
 | `nvdsudp` | `nvdsudpsrc` | `nvdsudpsink` | 2 | RFC 4175 / ST 2110 via the DeepStream `nvdsudp*` elements (built on Rivermax SDK); high-precision packet pacing. Required for ST 2022-7. |
 | `udp` | `udpsrc` + `rtp*depay` | `rtp*pay` + `udpsink` | 3 | RFC 4175 / ST 2110 via GStreamer RTP/UDP plugins; no perfect pacing. Cannot support ST 2022-7. |
 
@@ -276,8 +276,8 @@ There are three ways to fully describe a sender or receiver. Each is sufficient 
 | `caps` | essence pad caps (`video/x-raw,...`, `audio/x-raw,...`, `meta/x-st-2038,...`) | Required on `nmossrc`; on `nmossink` may be omitted in deferred mode (see below) | Both |
 | `transport-caps` | SDP `a=fmtp:`-equivalent extras as a GstCaps blob. Almost everything is synthesised by the element from essence caps + per-format defaults + per-transport defaults (see *Defaults the element synthesises* below); set this only to **override** a default or to carry an SDP extra the element doesn't know (e.g. non-default PT, `2110BPM` instead of `2110GPM`, audio `ptime`, `TCS`, …). Conventionally `application/x-rtp,...` but the element only consults fields, not the structure name. | Optional; typically empty even for RTP, usually empty for MXL. | Both |
 | `sender-name` (on `nmossink`), `receiver-name` (on `nmossrc`) | `x-nvnmos-name` SDP attribute (RTP) or `urn:x-nvnmos:tag:name` flow-def tag (MXL) — NvNmos name for this sender or receiver. Names are unique within a side on the Node: a Sender and a Receiver may share the same name (the daemon's `by_name` is keyed on `(node_seed, side, name)` and `ActivationEvent.side` disambiguates the activation callback). | Required (either as a property, or carried in `transport-file`) | Per element (split to avoid collision with `GstObject.name`) |
-| `iface-ip` | `x-nvnmos-iface-ip` — interface IP for SDP `o=` / `c=` lines | Required for RTP, ignored for MXL | Both |
-| `mxl-domain-id` | `urn:x-nvnmos:tag:mxl-domain-id` flow-def tag | Required for MXL, ignored for RTP | Both |
+| `source-ip` / `interface-ip` | `x-nvnmos-iface-ip` — interface IP for SDP `o=` / `c=` lines | Required for RTP, ignored for MXL | Both |
+| `mxl-domain-id` | `urn:x-nvnmos:tag:mxl-domain-id` flow-def tag | Optional for MXL (application-resolved when unset), ignored for RTP | Both |
 | `mxl-flow-id` | flow_def top-level `id` (sender side; receiver side comes from activation) | Optional; defaults to derived from the sender's name | `nmossink` (MXL) |
 | `label` | NMOS label — SDP `s=` line for RTP, `label` for MXL flow_def | Optional | Both |
 | `description` | NMOS description — SDP `i=` line for RTP, `description` for MXL flow_def | Optional | Both |
@@ -285,7 +285,7 @@ There are three ways to fully describe a sender or receiver. Each is sufficient 
 
 **Route C — `transport-file` + property overrides / cross-checks.** Provide a baseline `transport-file` and combine it with any of the Route B properties. The rule depends on the property:
 
-- **Identity / cosmetic properties** (`sender-name` / `receiver-name`, `mxl-flow-id`, `mxl-domain-id`, `label`, `description`, `receiver-caps-mode`) — **override** the matching field/tag in the file. This is the natural "I have a template SDP or flow_def, but the per-instance bits (`sender-name` or `receiver-name`, `iface-ip`, port, label, ...) change" workflow, and nvdsnmosbin already worked this way.
+- **Identity / cosmetic properties** (`sender-name` / `receiver-name`, `mxl-flow-id`, `mxl-domain-id`, `label`, `description`, `receiver-caps-mode`) — **override** the matching field/tag in the file. This is the natural "I have a template SDP or flow_def, but the per-instance bits (`sender-name` or `receiver-name`, `source-ip` or `interface-ip`, port, label, ...) change" workflow, and nvdsnmosbin already worked this way.
 - **Essence-shape properties** (`caps`, `transport-caps`) — **cross-check** against the file's shape. Mismatch is a hard error at NULL→READY; the application is asked to align the two rather than have one silently win over the other.
 
 The full matrix (including which properties have no transport file interaction at all) lives in the gst-nmos-rs crate README under "Property interaction with `transport-file`".
@@ -307,7 +307,7 @@ For MXL the per-format mapping to `flow_def.json` is derivable from essence caps
 
 #### Deferred mode (`nmossink` only)
 
-If neither `transport-file` nor `caps` is provided, `nmossink` defers AddSender to **READY → PAUSED** and derives `caps` from a `gst_pad_peer_query_caps` against upstream. Standard GStreamer caps negotiation does the work; the user can constrain with `capsfilter ! nmossink` the way they would with any other sink. `sender-name` (and `iface-ip` or `mxl-domain-id` as relevant) is still required as a property because it's not derivable from the pipeline. `nmossrc` cannot use deferred mode — there is no peer to query.
+If neither `transport-file` nor `caps` is provided, `nmossink` defers AddSender to **READY → PAUSED** and derives `caps` from a `gst_pad_peer_query_caps` against upstream. Standard GStreamer caps negotiation does the work; the user can constrain with `capsfilter ! nmossink` the way they would with any other sink. `sender-name` is still required as a property because it's not derivable from the pipeline (and `source-ip` for RTP/UDP transports). For MXL, `mxl-domain-path` is required at inner build; `mxl-domain-id` remains optional. `nmossrc` cannot use deferred mode — there is no peer to query.
 
 **No data needs to flow for the sender to be added.** Caps negotiation in GStreamer is a query-based mechanism (pad template caps + `peer_query_caps`), not a buffer-driven one. For a typical flow-transform pipeline `nmossrc ! transform ! nmossink`:
 
@@ -358,7 +358,7 @@ gst-launch-1.0 \
     daemon-uri=unix:/var/run/nvnmosd.sock \
     node-seed=my-node \
     sender-name=cam-1 \
-    iface-ip=10.0.0.1 \
+    source-ip=10.0.0.1 \
     label='Camera 1'
 ```
 
@@ -372,7 +372,7 @@ gst-launch-1.0 \
     daemon-uri=unix:/var/run/nvnmosd.sock \
     node-seed=my-node \
     sender-name=cam-1 \
-    iface-ip=10.0.0.1 \
+    source-ip=10.0.0.1 \
     label='Camera 1' \
     transport-caps='application/x-rtp, payload=99, PM=(string)2110BPM'
 ```
@@ -387,7 +387,7 @@ gst-launch-1.0 \
     node-seed=my-node \
     transport-file="$(cat template.sdp)" \
     receiver-name=cam-rx-1 \
-    iface-ip=10.0.0.1 \
+    interface-ip=10.0.0.1 \
     label='Receiver 1' ! \
   ...downstream...
 ```

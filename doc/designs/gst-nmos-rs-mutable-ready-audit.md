@@ -94,7 +94,7 @@ PLAYING
 
 ## `nmossrc` properties
 
-*Open-session and add-resource rows:* no `mutable_ready()` — set in **NULL** (eager add-resource only). `mxl-domain-id` is the registration requirement (UUID, not filesystem path). `mxl-flow-id` property is ignored at activation-event (PATCH transport file wins). *Inner build rows:* `mutable_ready`, NULL or READY. `mxl-domain-path` is optional at add-resource; first required at inner build for `mxlsrc domain=`. `depay-properties` applies when `transport` is `udp` or `udp2`.
+*Open-session and add-resource rows:* no `mutable_ready()` — set in **NULL** (eager add-resource only). `mxl-domain-id` is optional at add-resource (UUID tag when set; application-resolved when unset). `mxl-flow-id` property is ignored at activation-event (PATCH transport file wins). *Inner build rows:* `mutable_ready`, NULL or READY. `mxl-domain-path` is optional at add-resource; first required at inner build for `mxlsrc domain=`. `depay-properties` applies when `transport` is `udp` or `udp2`.
 
 | Property | First step |
 |----------|------------|

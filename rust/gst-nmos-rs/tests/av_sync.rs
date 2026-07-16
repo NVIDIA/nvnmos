@@ -55,7 +55,7 @@ use std::path::PathBuf;
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use common::{DaemonGuard, init, nvnmosd_skip_reason};
+use common::{DaemonGuard, init, mxl_runtime_skip_reason, nvnmosd_skip_reason};
 use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_app as gst_app;
@@ -757,11 +757,8 @@ fn skip_reason(t: Transport) -> Option<String> {
             );
         }
         Transport::Mxl => {
-            if !cfg!(target_os = "linux") {
-                return Some("MXL domains use /dev/shm (Linux only)".into());
-            }
-            if !std::path::Path::new("/dev/shm").is_dir() {
-                return Some("/dev/shm is not available".into());
+            if let Some(why) = mxl_runtime_skip_reason() {
+                return Some(why);
             }
         }
     }
