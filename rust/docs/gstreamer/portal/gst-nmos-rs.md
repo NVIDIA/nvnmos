@@ -1,5 +1,5 @@
 ---
-short-description: Operator runbooks and example pipelines
+short-description: Build instructions, pipeline examples, and interactive demo
 ...
 
 <!--
@@ -9,4 +9,4 @@ SPDX-License-Identifier: Apache-2.0
 
 <meta http-equiv="refresh" content="0; url=https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/README.md">
 
-# gst-nmos-rs
+# Usage Guide

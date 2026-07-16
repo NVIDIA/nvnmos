@@ -37,7 +37,7 @@ Both elements:
 | `mxl-domain-path` | string | required for MXL | Local filesystem path identifying the MXL Domain on this host; fed into the inner `mxlsink` / `mxlsrc` `domain=` property. If a `domain_def.json` is present in the directory its `id` is used to populate or cross-check `mxl-domain-id` (mismatch is an error — this is host-level identity). |
 | `auto-activate`  | boolean | optional, default `false` | When `false` the element adds the Sender or Receiver to the daemon so it appears on IS-04 and IS-05 but leaves the inner data path on the fake chain until an IS-05 PATCH activates it (`master_enable: true` on `/single/{senders,receivers}/{id}/active`). When `true` the element brings the inner transport src/sink up immediately once the configuring transport file has been resolved at NULL→READY (or, for a deferred-mode sender, at READY→PAUSED) *and* calls `SyncResourceState` to push the daemon's IS-04/IS-05 view to active — i.e. it's a no-controller shortcut for development pipelines and for setups where flow identity comes entirely from properties / `transport-file*`. Orthogonal to how the transport file itself becomes available: property override of `mxl-flow-id`, supplied `transport-file*`, and caps-driven synthesis (MXL `flow_def` or SDP) all feed the same gate. |
 
-#### `caps` essence shapes {#caps-essence-shapes}
+#### `caps` essence shapes
 
 When `transport-file*` is unset, `caps` drives synthesis of the configuring transport file:
 
