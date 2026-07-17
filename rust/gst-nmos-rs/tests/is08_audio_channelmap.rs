@@ -86,9 +86,6 @@ fn pull_mono_samples(appsink: &gst_app::AppSink, timeout: Duration) -> Vec<f32> 
     let deadline = std::time::Instant::now() + timeout;
     while mono.len() < SAMPLE_RATE as usize / 5 {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
         let remaining_ms = u64::try_from(remaining.as_millis()).unwrap_or(0);
         if remaining_ms == 0 {
             break;
@@ -108,6 +105,50 @@ fn pull_mono_samples(appsink: &gst_app::AppSink, timeout: Duration) -> Vec<f32> 
         mono.len()
     );
     mono
+}
+
+fn sample_has_signal(sample: &gst::Sample) -> bool {
+    let Some(buffer) = sample.buffer() else {
+        return false;
+    };
+    let Ok(map) = buffer.map_readable() else {
+        return false;
+    };
+
+    map.as_slice().chunks_exact(4).any(|sample| {
+        let sample = f32::from_le_bytes(sample.try_into().unwrap());
+        sample != 0.0
+    })
+}
+
+/// Pull and drop samples from each appsink until it has yielded non-silence, so
+/// the caller measures steady-state output rather than the startup transient
+/// where audiomixer can emit silence for an input leg that has not delivered yet.
+fn settle(appsinks: &[(&str, &gst_app::AppSink)], timeout: Duration) {
+    for (name, appsink) in appsinks {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut saw_signal = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let remaining_ms = u64::try_from(remaining.as_millis()).unwrap_or(0);
+            if remaining_ms == 0 {
+                break;
+            }
+            let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(remaining_ms))
+            else {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            if sample_has_signal(&sample) {
+                saw_signal = true;
+                break;
+            }
+        }
+        assert!(
+            saw_signal,
+            "{name}: did not produce non-silent audio during settle"
+        );
+    }
 }
 
 fn set_playing_or_panic(pipeline: &gst::Pipeline) {
@@ -243,6 +284,15 @@ fn run_routing_case(daemon_uri: &str, node_seed: &str, case: &RoutingCase, decla
 
     set_playing_or_panic(&pipeline);
 
+    // Discard the startup transient before measuring: audiomixer
+    // (ignore-inactive-pads=true) can emit silence for an input leg that has not
+    // delivered yet. Once both outputs have yielded non-silence, the dominance
+    // checks below measure steady-state routing rather than startup timing.
+    settle(
+        &[("src_0", &out0), ("src_1", &out1)],
+        Duration::from_secs(3),
+    );
+
     let samples0 = pull_mono_samples(&out0, Duration::from_secs(3));
     let samples1 = pull_mono_samples(&out1, Duration::from_secs(3));
 
@@ -259,10 +309,12 @@ fn run_routing_case(daemon_uri: &str, node_seed: &str, case: &RoutingCase, decla
     );
     assert!(
         case.expect_src1.dominant_in(&samples1, SAMPLE_RATE as f32),
-        "{}: src_1 expected {:?} Hz dominant; case={}",
+        "{}: src_1 expected {:?} Hz dominant; case={} p_low={} p_high={}",
         case.name,
         case.expect_src1.hz(),
         case.name,
+        common::goertzel_power(&samples1, SAMPLE_RATE as f32, A4_HZ),
+        common::goertzel_power(&samples1, SAMPLE_RATE as f32, perfect_fifth_hz(A4_HZ)),
     );
 }
 
