@@ -115,7 +115,7 @@ namespace nvnmos
         // get the optional capabilities from the custom attribute
         bool has_session_description_caps(const web::json::value& session_description);
 
-        // whether the IS-04 receiver has no BCP-004-01 constraint_sets (wide caps)
+        // whether the IS-04 receiver has no BCP-004-01 constraint_sets (unconstrained)
         bool has_no_receiver_caps(const web::json::value& receiver);
 
         // get the format bit rate from the custom attribute if present or calculate an approximate value
@@ -196,7 +196,7 @@ namespace nvnmos
         nvnmos::name get_mxl_flow_def_name(const web::json::value& flow_def);
         // extract an optional group hint from the urn:x-nmos:tag:grouphint/v1.0 tag (or empty)
         utility::string_t get_mxl_flow_def_group_hint(const web::json::value& flow_def);
-        // returns true if the urn:x-nvnmos:tag:caps tag asks for a fully-flexible
+        // returns true if the urn:x-nvnmos:tag:caps tag asks for an unconstrained
         // receiver (format-derived capabilities omitted)
         bool has_mxl_flow_def_caps(const web::json::value& flow_def);
         // extract the MXL domain id from the urn:x-nvnmos:tag:mxl-domain-id tag;
@@ -795,15 +795,15 @@ namespace nvnmos
         }
         else if (impl::format::audio == format)
         {
-            // sample_rate, channel_count and bit_depth are required; let nmos::fields::* throw if absent
-            const auto sample_rate = nmos::parse_rational(nmos::fields::sample_rate(flow_def));
-            const auto channel_count = nvnmos::fields::channel_count(flow_def);
-            const auto bit_depth = nmos::fields::bit_depth(flow_def);
-
             receiver = nmos::make_receiver(receiver_id, device_id, nmos::transports::mxl, {}, nmos::formats::audio, { media_type }, settings);
 
             if (want_caps)
             {
+                // sample_rate, channel_count and bit_depth are required; let nmos::fields::* throw if absent
+                const auto sample_rate = nmos::parse_rational(nmos::fields::sample_rate(flow_def));
+                const auto channel_count = nvnmos::fields::channel_count(flow_def);
+                const auto bit_depth = nmos::fields::bit_depth(flow_def);
+
                 receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({
                     value_of({
                         { nmos::caps::format::media_type, nmos::make_caps_string_constraint({ media_type.name }) },
@@ -1799,7 +1799,7 @@ namespace nvnmos
             }
         }
 
-        // whether the IS-04 receiver has no BCP-004-01 constraint_sets (wide caps)
+        // whether the IS-04 receiver has no BCP-004-01 constraint_sets (unconstrained)
         bool has_no_receiver_caps(const web::json::value& receiver)
         {
             return !nmos::fields::constraint_sets(nmos::fields::caps(receiver)).is_array();
@@ -2270,7 +2270,7 @@ namespace nvnmos
             return get_mxl_flow_def_tag(flow_def, nmos::fields::group_hint);
         }
 
-        // returns true if the urn:x-nvnmos:tag:caps tag asks for a fully-flexible
+        // returns true if the urn:x-nvnmos:tag:caps tag asks for an unconstrained
         // receiver (format-derived capabilities omitted)
         bool has_mxl_flow_def_caps(const web::json::value& flow_def)
         {
