@@ -9,9 +9,12 @@ SPDX-License-Identifier: Apache-2.0
 
 NvNmos can be integrated in three ways:
 
-1. **C library (`libnvnmos`)** — embed the NMOS control plane directly in a Media Node application. The API is in `nvnmos.h`; see [Usage](#usage) and the `nvnmos-example` application below.
-2. **Daemon and gRPC API (`nvnmosd`)** — run the control plane out-of-process; Media Node applications attach as clients over gRPC. See [`rust/nvnmosd/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/nvnmosd/README.md), the Rust workspace quick start in [`rust/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md), and [`doc/designs/nvnmosd/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/doc/designs/nvnmosd/README.md).
-3. **GStreamer elements (`gst-nmos-rs`)** — `nmossrc` and `nmossink` talk to `nvnmosd` and wire up the data path (MXL, RTP/UDP, DeepStream). See the published element reference at [https://nvidia.github.io/nvnmos/gstreamer/](https://nvidia.github.io/nvnmos/gstreamer/), [`rust/gst-nmos-rs/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/README.md), and the Rust workspace quick start in [`rust/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md).
+1. **C library** (`libnvnmos`) — embed the NMOS control plane directly in a Media Node application.
+   - The API is in `nvnmos.h`; see [Usage](#usage) and the `nvnmos-example` application below.
+2. **Daemon and gRPC API** (`nvnmosd`) — run the control plane out-of-process; Media Node applications attach as clients over gRPC.
+   - See [`rust/nvnmosd/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/nvnmosd/README.md), the Rust workspace quick start in [`rust/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md), and the design record in [`doc/designs/nvnmosd/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/doc/designs/nvnmosd/README.md).
+3. **GStreamer elements** (`gst-nmos-rs`) — `nmossrc` and `nmossink` talk to `nvnmosd` and wire up the data path (MXL, RTP/UDP, DeepStream).
+   - See the published element reference at [https://nvidia.github.io/nvnmos/gstreamer/](https://nvidia.github.io/nvnmos/gstreamer/), the usage guide in [`rust/gst-nmos-rs/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/README.md), and the Rust workspace quick start in [`rust/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md).
 
 ## Introduction
 
