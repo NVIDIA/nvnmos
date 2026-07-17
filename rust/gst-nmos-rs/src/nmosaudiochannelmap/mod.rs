@@ -48,7 +48,7 @@
  *     transport=mxl \
  *     node-seed=demo-node3 \
  *     receiver-name=audio-in1 \
- *     receiver-caps-mode=wide \
+ *     receiver-caps-mode=unconstrained \
  *     mxl-domain-path=/dev/shm/gst-nmos-rs-examples \
  *     caps="audio/x-raw,format=F32LE,rate=48000,channels=8" ! map.sink_1 \
  *   map.src_0 ! volume volume=0.3 ! nmossink \

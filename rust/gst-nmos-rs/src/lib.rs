@@ -105,13 +105,13 @@
 //! out of scope (no peer to query).
 //!
 //! `nmossrc` pins essence caps on its ghost source pad from the
-//! configuring transport file when the Receiver is *narrow* (BCP-004-01:
-//! Receiver Caps are advertised on IS-04). *Wide* receivers advertise
+//! configuring transport file when the Receiver is *constrained* (BCP-004-01:
+//! Receiver Caps are advertised on IS-04). *Unconstrained* receivers advertise
 //! no Receiver Caps; on MXL the `urn:x-nvnmos:tag:caps` flow_def tag
-//! marks wide and bare `mxlsrc` is used so runtime caps come from the
-//! filesystem flow_def; on RTP/UDP `a=x-nvnmos-caps:` marks wide and the
+//! marks unconstrained and bare `mxlsrc` is used so runtime caps come from the
+//! filesystem flow_def; on RTP/UDP `a=x-nvnmos-caps:` marks unconstrained and the
 //! inner chain omits `capssetter` so runtime caps come from the live RTP
-//! depay. Narrow receivers reverse-map the configuring file and pin
+//! depay. Constrained receivers reverse-map the configuring file and pin
 //! essence caps via an internal `capssetter` so downstream caps queries
 //! see the concrete shape — the canonical `nmossrc ! transform !
 //! nmossink` pipeline then resolves end-to-end at READY→PAUSED: the
@@ -121,9 +121,9 @@
 //! Receiver-side caps-driven synthesis is symmetric with the Sender
 //! path: `nmossrc` with `caps` (no transport file) builds a
 //! configuring transport file — MXL `flow_def` or SDP depending on
-//! `transport`. For narrow receivers the daemon advertises BCP-004-01
-//! Receiver Caps on IS-04 from that file; for wide receivers none are
-//! advertised. `receiver-caps-mode` splices the wide/narrow marker:
+//! `transport`. For constrained receivers the daemon advertises BCP-004-01
+//! Receiver Caps on IS-04 from that file; for unconstrained receivers none are
+//! advertised. `receiver-caps-mode` splices the constrained/unconstrained marker:
 //! `urn:x-nvnmos:tag:caps` on MXL, `a=x-nvnmos-caps:` on RTP/UDP.
 //! The configuring file describes the Receiver at AddReceiver time;
 //! IS-05 activation then supplies the real config. On MXL, the

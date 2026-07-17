@@ -904,7 +904,7 @@ mod tests {
         }
 
         /// Caps + `mxl-flow-id` on a Receiver synthesises a configuring
-        /// flow_def the daemon can use to advertise narrow Receiver
+        /// flow_def the daemon can use to advertise constrained Receiver
         /// Caps on IS-04. The synthesised shape matches what the
         /// equivalent Sender call would produce — `from_caps`
         /// is symmetric.

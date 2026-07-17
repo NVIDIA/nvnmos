@@ -1,0 +1,9 @@
+{
+  "label": "@LABEL@",
+  "description": "",
+  "media_type": "video/v210",
+  "tags": {
+    "urn:x-nvnmos:tag:name": ["@NAME@"],
+    "urn:x-nvnmos:tag:caps": [""]
+  }
+}

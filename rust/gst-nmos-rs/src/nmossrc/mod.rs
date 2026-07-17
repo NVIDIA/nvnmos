@@ -105,7 +105,7 @@
  *
  * * **From caps.** Set `caps` to the essence you want to receive and the
  *   element synthesises the file; `receiver-caps-mode` chooses whether the
- *   Receiver is advertised as narrow (these specific caps) or wide (accepts
+ *   Receiver is advertised as constrained (these specific caps) or unconstrained (accepts
  *   any compatible stream).
  * * **From a transport file.** Set `transport-file-path` (or, for programmatic
  *   callers, `transport-file`) to a ready-made SDP or `flow_def`.

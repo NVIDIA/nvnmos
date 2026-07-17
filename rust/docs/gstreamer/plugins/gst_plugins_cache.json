@@ -967,7 +967,7 @@
                         "writable": true
                     },
                     "receiver-caps-mode": {
-                        "blurb": "Whether the Receiver advertises BCP-004-01 Receiver Caps on IS-04 (narrow) or none (wide). On MXL, wide is encoded via `urn:x-nvnmos:tag:caps`; on RTP/UDP via media-level `a=x-nvnmos-caps:`. `auto` (default) leaves the marker untouched in the spliced transport file — narrow when absent (or with no transport file), wide when present. `narrow` strips it; `wide` ensures it is present (libnvnmos: present + non-empty = wide).",
+                        "blurb": "Whether the Receiver advertises BCP-004-01 Receiver Caps on IS-04. `constrained` publishes caps with a `constraint_set` derived from the transport file; `unconstrained` publishes none. On MXL, the marker is `urn:x-nvnmos:tag:caps`; on RTP/UDP, media-level `a=x-nvnmos-caps:`. `auto` (default) leaves the marker untouched in the spliced transport file — constrained when absent (or with no transport file), unconstrained when present. `constrained` strips the marker; `unconstrained` ensures it is present (libnvnmos: present + non-empty = unconstrained).",
                         "conditionally-available": false,
                         "construct": false,
                         "construct-only": false,

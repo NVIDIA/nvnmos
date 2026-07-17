@@ -375,8 +375,8 @@ pub(crate) struct FlowDefOverrides<'a> {
 /// property is empty.
 ///
 /// libnvnmos's [BCP-007-03 WIP] reading rule for the caps tag is
-/// "present + non-empty array means wide"; `CapsMode::Wide` writes
-/// `[""]` to satisfy that rule, `CapsMode::Narrow` removes the tag,
+/// "present + non-empty array means unconstrained"; `CapsMode::Unconstrained` writes
+/// `[""]` to satisfy that rule, `CapsMode::Constrained` removes the tag,
 /// and `CapsMode::Auto` leaves the file's existing presence alone.
 pub(crate) fn splice_overrides(
     text: &str,
@@ -440,10 +440,10 @@ pub(crate) fn splice_overrides(
         }
         match overrides.caps_mode {
             CapsMode::Auto => {}
-            CapsMode::Narrow => {
+            CapsMode::Constrained => {
                 tags.remove("urn:x-nvnmos:tag:caps");
             }
-            CapsMode::Wide => {
+            CapsMode::Unconstrained => {
                 tags.insert("urn:x-nvnmos:tag:caps".to_owned(), serde_json::json!([""]));
             }
         }
@@ -455,9 +455,9 @@ pub(crate) fn splice_overrides(
 const CAPS_TAG: &str = "urn:x-nvnmos:tag:caps";
 
 /// Whether a transport file's `urn:x-nvnmos:tag:caps` tag indicates
-/// wide Receiver Caps per libnvnmos's BCP-007-03 rule: present with a
+/// unconstrained Receiver Caps per libnvnmos's BCP-007-03 rule: present with a
 /// non-empty JSON array (including `[""]`).
-pub(crate) fn indicates_wide_receiver_caps(text: &str) -> Result<bool, FlowDefError> {
+pub(crate) fn indicates_unconstrained_receiver_caps(text: &str) -> Result<bool, FlowDefError> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|source| FlowDefError::Parse { source })?;
     let Some(tags) = value.get("tags").and_then(|t| t.as_object()) else {
@@ -1079,14 +1079,14 @@ mod tests {
     }
 
     #[test]
-    fn splice_caps_mode_narrow_removes_tag() {
+    fn splice_caps_mode_constrained_removes_tag() {
         let original = format!(
             r#"{{"id":"{UUID_A}","format":"urn:x-nmos:format:video","tags":{{"urn:x-nvnmos:tag:caps":[""]}}}}"#
         );
         let spliced = splice_overrides(
             &original,
             &FlowDefOverrides {
-                caps_mode: CapsMode::Narrow,
+                caps_mode: CapsMode::Constrained,
                 ..FlowDefOverrides::default()
             },
         )
@@ -1103,12 +1103,12 @@ mod tests {
     }
 
     #[test]
-    fn splice_caps_mode_wide_inserts_non_empty_array() {
+    fn splice_caps_mode_unconstrained_inserts_non_empty_array() {
         let original = video_flow_def(UUID_A);
         let spliced = splice_overrides(
             &original,
             &FlowDefOverrides {
-                caps_mode: CapsMode::Wide,
+                caps_mode: CapsMode::Unconstrained,
                 ..FlowDefOverrides::default()
             },
         )
@@ -1117,28 +1117,28 @@ mod tests {
         let arr = v["tags"]["urn:x-nvnmos:tag:caps"]
             .as_array()
             .expect("caps tag must be an array");
-        // libnvnmos's rule is "present + non-empty array means wide";
+        // libnvnmos's rule is "present + non-empty array means unconstrained";
         // assert that's what we wrote.
         assert!(
             !arr.is_empty(),
-            "wide-mode array must be non-empty; got {v}"
+            "unconstrained-mode array must be non-empty; got {v}"
         );
     }
 
     #[test]
-    fn indicates_wide_receiver_caps_matches_libnvnmos_rule() {
-        let wide = format!(
+    fn indicates_unconstrained_receiver_caps_matches_libnvnmos_rule() {
+        let unconstrained = format!(
             r#"{{"id":"{UUID_A}","format":"urn:x-nmos:format:video","tags":{{"urn:x-nvnmos:tag:caps":[""]}}}}"#
         );
-        assert!(indicates_wide_receiver_caps(&wide).unwrap());
+        assert!(indicates_unconstrained_receiver_caps(&unconstrained).unwrap());
 
-        let narrow = video_flow_def(UUID_A);
-        assert!(!indicates_wide_receiver_caps(&narrow).unwrap());
+        let constrained = video_flow_def(UUID_A);
+        assert!(!indicates_unconstrained_receiver_caps(&constrained).unwrap());
 
         let empty_tag = format!(
             r#"{{"id":"{UUID_A}","format":"urn:x-nmos:format:video","tags":{{"urn:x-nvnmos:tag:caps":[]}}}}"#
         );
-        assert!(!indicates_wide_receiver_caps(&empty_tag).unwrap());
+        assert!(!indicates_unconstrained_receiver_caps(&empty_tag).unwrap());
     }
 
     #[test]

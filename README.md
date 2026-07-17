@@ -5,11 +5,19 @@ SPDX-License-Identifier: Apache-2.0
 
 # NVIDIA Networked Media Open Specifications Library
 
+## Ways To Use NvNmos
+
+NvNmos can be integrated in three ways:
+
+1. **C library (`libnvnmos`)** — embed the NMOS control plane directly in a Media Node application. The API is in `nvnmos.h`; see [Usage](#usage) and the `nvnmos-example` application below.
+2. **Daemon and gRPC API (`nvnmosd`)** — run the control plane out-of-process; Media Node applications attach as clients over gRPC. See [`rust/nvnmosd/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/nvnmosd/README.md), the Rust workspace quick start in [`rust/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md), and [`doc/designs/nvnmosd/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/doc/designs/nvnmosd/README.md).
+3. **GStreamer elements (`gst-nmos-rs`)** — `nmossrc` and `nmossink` talk to `nvnmosd` and wire up the data path (MXL, RTP/UDP, DeepStream). See the published element reference at [https://nvidia.github.io/nvnmos/gstreamer/](https://nvidia.github.io/nvnmos/gstreamer/), [`rust/gst-nmos-rs/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/README.md), and the Rust workspace quick start in [`rust/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md).
+
 ## Introduction
 
 The [Networked Media Open Specifications (NMOS)](https://www.amwa.tv/nmos-overview) enable the registration, discovery and management of Media Nodes.
 
-The NVIDIA NMOS control plane library, NvNmos, provides the APIs to create, destroy and internally manage an [NMOS](https://specs.amwa.tv/nmos) Node for a Media Node application.
+At its core, NvNmos is a C control-plane library that provides the APIs to create, destroy and internally manage an [NMOS](https://specs.amwa.tv/nmos) Node for a Media Node application.
 It is intended to be integrated with an ST 2110 data plane library such as [NVIDIA Rivermax](https://developer.nvidia.com/networking/rivermax) or [NVIDIA DeepStream](https://developer.nvidia.com/deepstream-sdk).
 
 The library can automatically discover and register with an NMOS Registry on the network using the [AMWA IS-04](https://specs.amwa.tv/is-04/) Registration API.
@@ -17,10 +25,7 @@ The library can automatically discover and register with an NMOS Registry on the
 The library provides callbacks for NMOS events such as [AMWA IS-05](https://specs.amwa.tv/is-05/) Connection API requests from an NMOS Controller.
 These callbacks can be used to update running DeepStream pipelines with new transport parameters, for example.
 
-NvNmos currently supports Senders and Receivers for video, audio, and ancillary data flows over RTP (i.e., SMPTE ST 2110-20, -22, -30, and -40 streams) and over the Media eXchange Layer (MXL).
-
-The GStreamer plugin and element reference is published at
-[https://nvidia.github.io/nvnmos/gstreamer/](https://nvidia.github.io/nvnmos/gstreamer/).
+NvNmos currently supports Senders and Receivers for video, audio, and ancillary data flows over RTP/UDP (i.e., SMPTE ST 2110-20, -22, -30, and -40 streams) and over the Media eXchange Layer (MXL).
 
 The NvNmos library supports the following specifications, using the [Sony nmos-cpp](https://github.com/sony/nmos-cpp) implementation internally:
 - [AMWA IS-04 NMOS Discovery and Registration Specification](https://specs.amwa.tv/is-04/) v1.3
@@ -67,17 +72,17 @@ Each `NvNmosSenderConfig` and `NvNmosReceiverConfig` includes a `transport` fiel
 
 NvNmos uses a small set of extensions in the transport file to convey configuration that the standard transport file format does not carry. The same conceptual extensions are carried differently in the two transport file formats:
 
-- For RTP (SDP), as custom `a=x-nvnmos-*:<value>` attributes.
+- For RTP/UDP (SDP), as custom `a=x-nvnmos-*:<value>` attributes.
 - For MXL flow definitions (JSON), as entries in the standard `tags` property keyed by `urn:x-nvnmos:tag:*` URN strings. The tag's value is an array of strings; the first element is used.
 
 | Concept                  | SDP attribute (RTP)        | MXL flow_def tag key (MXL)              | Applies to                                | Description                                                                                                                |
 | ---                      | ---                        | ---                                     | ---                                       | ---                                                                                                                        |
 | Name                     | `a=x-nvnmos-name:<v>`      | `urn:x-nvnmos:tag:name`                 | Senders and Receivers (required)          | The application's caller-chosen name for the Sender or Receiver, unique within the Node for the given side (Sender or Receiver). A Sender and a Receiver may share the same name. Used in all NvNmos API callbacks (paired with the `NvNmosSide`) |
 | Group hint               | `a=x-nvnmos-group-hint:<v>`| standard `urn:x-nmos:tag:grouphint/v1.0`| Senders and Receivers (optional)          | A group hint tag advertised via `urn:x-nmos:tag:grouphint/v1.0` on the NMOS resource                                       |
-| Suppress narrow Receiver Caps | `a=x-nvnmos-caps:<v>` (media-level) | `urn:x-nvnmos:tag:caps` | Receivers (optional) | An empty string value selects a fully-flexible Receiver, with format-derived Capabilities omitted. Non-empty strings are reserved for future capability; today any value is treated the same.                                                                                                                                  |
-| Interface IP             | `a=x-nvnmos-iface-ip:<v>`  | n/a                                     | Senders and Receivers (RTP only)          | The interface IP address used for IS-05 transport parameters (`source_ip` / `interface_ip`)                                |
-| Interface metadata     | `a=x-nvnmos-iface:<name> [<chassis-id>] <port-id> [<attached-chassis-id> <attached-port-id>]` | n/a | Senders and Receivers (RTP only) | IS-04 `nmos::node_interface` fields for `interface_bindings` and Node `interfaces`; used when present in the transport file, otherwise the library derives the binding from host interfaces ([design](https://github.com/NVIDIA/nvnmos/blob/main/doc/designs/x-nvnmos-iface.md)) |
-| Source port              | `a=x-nvnmos-src-port:<v>`  | n/a                                     | Senders (RTP only)                        | The source port from which the stream is transmitted                                                                       |
+| Unconstrained Receiver Caps | `a=x-nvnmos-caps:<v>` (media-level) | `urn:x-nvnmos:tag:caps` | Receivers (optional) | An empty string value selects an unconstrained Receiver, with format-derived Capabilities omitted. Non-empty strings are reserved for future capability; today any value is treated the same.                                                                                                                                  |
+| Interface IP             | `a=x-nvnmos-iface-ip:<v>`  | n/a                                     | Senders and Receivers (RTP/UDP only)      | The interface IP address used for IS-05 transport parameters (`source_ip` / `interface_ip`)                                |
+| Interface metadata       | `a=x-nvnmos-iface:<name> [<chassis-id>] <port-id> [<attached-chassis-id> <attached-port-id>]` | n/a | Senders and Receivers (RTP/UDP only) | IS-04 `nmos::node_interface` fields for `interface_bindings` and Node `interfaces`; used when present in the transport file, otherwise the library derives the binding from host interfaces ([design](https://github.com/NVIDIA/nvnmos/blob/main/doc/designs/x-nvnmos-iface.md)) |
+| Source port              | `a=x-nvnmos-src-port:<v>`  | n/a                                     | Senders (RTP/UDP only)                    | The source port from which the stream is transmitted                                                                       |
 | MXL domain id            | n/a                        | `urn:x-nvnmos:tag:mxl-domain-id`        | Senders and Receivers (MXL only, optional)| When present, a single UUID pins the MXL domain for IS-05 (`mxl_domain_id` resolves from the tag at activation). When the tag is omitted, empty, or `[""]`, the domain is application-resolved: the IS-05 constraint is unconstrained and `/active` carries `mxl_domain_id: null` while the data plane uses the host's local MXL domain path |
 
 For an MXL flow definition, the tag entries are stored alongside (and follow the same shape as) the standard `urn:x-nmos:tag:grouphint/v1.0` tag, e.g.:
@@ -94,9 +99,140 @@ NvNmos also publishes the `urn:x-nvnmos:tag:name` tag on the corresponding NMOS 
 
 For MXL Senders, the top-level `id` field of the flow definition (if present, a UUID) is used as the MXL flow identity (i.e. the `mxl_flow_id` IS-05 transport parameter); if absent, the generated NMOS Flow id is used in its place. The NMOS Flow id itself is always derived from the `seed` and the name (`urn:x-nvnmos:tag:name` value) and is independent of the flow definition's `id` field. For MXL Receivers, the MXL flow identity is supplied dynamically through IS-05 Connection Management, so the `id` field of the flow definition is ignored.
 
+### Minimal Transport Files for Unconstrained Receivers
+
+An unconstrained Receiver publishes no BCP-004-01 Receiver Caps on IS-04; constrained Receivers publish caps with a `constraint_set` derived from the transport file. The GStreamer element still pins its inner chain to the essence shape from the transport file (or from `caps` when synthesised).
+
+| Transport | Unconstrained marker | Meaning |
+| --- | --- | --- |
+| RTP/UDP (SDP) | media-level `a=x-nvnmos-caps:<pt>` | Presence-only; value ignored today |
+| MXL (JSON) | `tags["urn:x-nvnmos:tag:caps"]` non-empty, e.g. `[""]` | Present + non-empty array means unconstrained |
+
+**Always required:**
+
+| Field | RTP/UDP | MXL |
+| --- | --- | --- |
+| Receiver name | `a=x-nvnmos-name:<name>` (session-level) | `tags["urn:x-nvnmos:tag:name"]` |
+| Label | `s=` session name | top-level `"label"` |
+| Description | `i=` (optional; omitted → empty) | `"description"` (required; may be `""`) |
+| Format | `a=rtpmap:` (per `m=` line) | top-level `"media_type"` |
+| ST 2022-7 support | one `m=` line for a single-legged Receiver; two for an ST 2022-7-capable Receiver with primary/secondary paths | n/a |
+| Interface(s) | `a=x-nvnmos-iface-ip:<address>` or the full `a=x-nvnmos-iface` (media-level, per leg) | n/a |
+
+**Required only for constrained Receivers** (may be omitted when the unconstrained marker is present):
+
+| Format | RTP/UDP (from SDP/fmtp) | MXL (from flow_def) |
+| --- | --- | --- |
+| Video | `a=fmtp:` `width`, `height`, `exactframerate`, `sampling`, … | `grain_rate`, `frame_width`, `frame_height`, `components`, … |
+| Audio | `a=rtpmap:` clock rate, channel count | `sample_rate`, `channel_count`, `bit_depth` |
+| Data | none | none |
+
+**RTP/UDP audio caveat:** even for an unconstrained Receiver, libnvnmos still reads `a=rtpmap:` (`L24/48000/2`, etc.) to build the IS-04 Receiver resource `media_type`. Those values are not published as Receiver Caps when unconstrained, but they must still be present in the configuring SDP.
+
+Reference fixtures live under [`rust/gst-nmos-rs/scripts/example-pipelines/fixtures/`](https://github.com/NVIDIA/nvnmos/tree/main/rust/gst-nmos-rs/scripts/example-pipelines/fixtures). Substitute `@NAME@` (caller-chosen receiver identity), `@LABEL@` (IS-04 label), and `@NIC_IP@` (RTP/UDP interface binding only) for your deployment.
+
+#### Minimal unconstrained video — RTP/UDP
+
+```sdp
+v=0
+o=- 1 0 IN IP4 0.0.0.0
+s=@LABEL@
+t=0 0
+a=x-nvnmos-name:@NAME@
+m=video 5004 RTP/AVP 96
+c=IN IP4 0.0.0.0
+a=rtpmap:96 raw/90000
+a=x-nvnmos-caps:96
+a=x-nvnmos-iface-ip:@NIC_IP@
+```
+
+No `a=fmtp:` — format family comes from `a=rtpmap:96 raw/90000`. Compare with the constrained fixture `minimal-video.sdp.in`, which needs the full ST 2110 fmtp line.
+
+#### Minimal unconstrained audio — RTP/UDP
+
+```sdp
+v=0
+o=- 1 0 IN IP4 0.0.0.0
+s=@LABEL@
+t=0 0
+a=x-nvnmos-name:@NAME@
+m=audio 5004 RTP/AVP 97
+c=IN IP4 0.0.0.0
+a=rtpmap:97 L24/48000/2
+a=x-nvnmos-caps:97
+a=x-nvnmos-iface-ip:@NIC_IP@
+```
+
+`a=rtpmap:` carries encoding (`L24`), clock rate, and channel count. No `a=fmtp:` needed when unconstrained (constrained receivers would also derive caps from rtpmap here).
+
+#### Minimal unconstrained data (ANC) — RTP/UDP
+
+```sdp
+v=0
+o=- 1 0 IN IP4 0.0.0.0
+s=@LABEL@
+t=0 0
+a=x-nvnmos-name:@NAME@
+m=video 5004 RTP/AVP 100
+c=IN IP4 0.0.0.0
+a=rtpmap:100 smpte291/90000
+a=x-nvnmos-caps:100
+a=x-nvnmos-iface-ip:@NIC_IP@
+```
+
+ST 2110-40 ANC uses an `m=video` line with `a=rtpmap:… smpte291/90000`. No `a=fmtp:` needed when unconstrained (constrained receivers derive `grain_rate` from `exactframerate` when present).
+
+#### Minimal unconstrained video — MXL
+
+```json
+{
+  "label": "@LABEL@",
+  "description": "",
+  "media_type": "video/v210",
+  "tags": {
+    "urn:x-nvnmos:tag:name": ["@NAME@"],
+    "urn:x-nvnmos:tag:caps": [""]
+  }
+}
+```
+
+Compare with `minimal-video.mxl.json.in`, which also needs `grain_rate`, `frame_width`, `frame_height`, `components`, etc. for constrained caps.
+
+#### Minimal unconstrained audio — MXL
+
+```json
+{
+  "label": "@LABEL@",
+  "description": "",
+  "media_type": "audio/L24",
+  "tags": {
+    "urn:x-nvnmos:tag:name": ["@NAME@"],
+    "urn:x-nvnmos:tag:caps": [""]
+  }
+}
+```
+
+No `sample_rate`, `channel_count`, or `bit_depth` when the caps tag is present.
+
+#### Minimal unconstrained data (ANC) — MXL
+
+See `minimal-unconstrained-data.mxl.json.in` and `minimal-unconstrained-data.sdp.in`.
+
+```json
+{
+  "label": "@LABEL@",
+  "description": "",
+  "media_type": "video/smpte291",
+  "tags": {
+    "urn:x-nvnmos:tag:name": ["@NAME@"],
+    "urn:x-nvnmos:tag:caps": [""]
+  }
+}
+```
+
 ### Connection Activations
 
-When an IS-05 Connection API activation occurs, the library invokes the application's `connection_activated` callback with an `NvNmosSide` (Sender or Receiver), the application's `name`, and an updated `transport_file` reflecting the new active transport parameters. For an RTP Sender or Receiver, the callback receives an SDP file; for an MXL Sender or Receiver, the callback receives an MXL flow definition (JSON) with the new active `mxl_domain_id` and `mxl_flow_id` spliced in (as the `urn:x-nvnmos:tag:mxl-domain-id` tag value and the top-level `id` field, respectively). The application is expected to dispatch on `(side, name)` to identify the Sender or Receiver and react accordingly (for example, by reconfiguring its data plane). Conversely, if an activation (or deactivation) has already occurred in the application's data plane by some other means, outside the NMOS API, the application calls `nmos_connection_activate` (also passing the `side`) to update the IS-04 and IS-05 model to reflect it. The library does not initiate any activation on the application's behalf.
+When an IS-05 Connection API activation occurs, the library invokes the application's `connection_activated` callback with an `NvNmosSide` (Sender or Receiver), the application's `name`, and an updated `transport_file` reflecting the new active transport parameters. For an RTP/UDP Sender or Receiver, the callback receives an SDP file; for an MXL Sender or Receiver, the callback receives an MXL flow definition (JSON) with the new active `mxl_domain_id` and `mxl_flow_id` spliced in (as the `urn:x-nvnmos:tag:mxl-domain-id` tag value and the top-level `id` field, respectively). The application is expected to dispatch on `(side, name)` to identify the Sender or Receiver and react accordingly (for example, by reconfiguring its data plane). Conversely, if an activation (or deactivation) has already occurred in the application's data plane by some other means, outside the NMOS API, the application calls `nmos_connection_activate` (also passing the `side`) to update the IS-04 and IS-05 model to reflect it. The library does not initiate any activation on the application's behalf.
 
 ## API Changes for MXL Support
 
@@ -139,9 +275,9 @@ For `NVNMOS_TRANSPORT_MXL` the transport file is an MXL flow definition JSON (th
 
 For the full per-field documentation see [`src/nvnmos.h`](https://github.com/NVIDIA/nvnmos/blob/main/src/nvnmos.h).
 
-## API Changes for RTP Sender IS-05 Defaults
+## API Changes for RTP/UDP Sender IS-05 Defaults
 
-On IS-05 activation, `"auto"` values for RTP Senders are now resolved based on the config SDP:
+On IS-05 activation, `"auto"` values for RTP/UDP Senders are now resolved based on the config SDP:
 
 - `source_ip` is resolved to the SDP `a=x-nvnmos-iface-ip:` or `a=source-filter:` source address as before.
 - `destination_ip` is resolved to the SDP `c=` connection address if not `0.0.0.0`; otherwise, a source-specific multicast address is generated as before.
@@ -483,7 +619,7 @@ When a fully-qualified domain name is specified, e.g. "api.example.com", the NMO
 
 The port is used to serve the HTTP APIs.
 
-The IP address identifies the local interface to be used for the mock RTP Senders and Receivers.
+The IP address identifies the local interface to be used for the mock RTP/UDP Senders and Receivers.
 When omitted, the example uses documentation addresses and also emits `a=x-nvnmos-iface` interface metadata to populate Node interfaces.
 
 The log level ranges between -40 (most verbose) and 40 (least verbose), as per the NvNmos API.
@@ -508,7 +644,7 @@ Continue ([y]/n)?
 If the app runs successfully to completion, the process exits with code 0.
 If any step fails, or the user responds negatively to a prompt, the process exits immediately with code 1.
 
-The example application also creates two MXL Senders and two MXL Receivers (uncompressed `video/v210` and `audio/float32`) and exercises the same add/remove/activate/deactivate cycle for them, alongside the RTP Senders and Receivers.
+The example application also creates two MXL Senders and two MXL Receivers (uncompressed `video/v210` and `audio/float32`) and exercises the same add/remove/activate/deactivate cycle for them, alongside the RTP/UDP Senders and Receivers.
 
 ### Accessing the NMOS APIs
 

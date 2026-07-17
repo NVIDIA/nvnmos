@@ -147,8 +147,8 @@ pub(super) fn sdp_build_input<'a>(
         Side::Receiver => receiver_connection_address(settings),
     };
     let advertise_caps = match settings.caps_mode {
-        CapsMode::Auto | CapsMode::Narrow => false,
-        CapsMode::Wide => true,
+        CapsMode::Auto | CapsMode::Constrained => false,
+        CapsMode::Unconstrained => true,
     };
     sdp::SdpBuildInput {
         caps,
@@ -476,7 +476,7 @@ pub(super) fn resolve_inner_config_nvdsudp(
     Ok((inner, resolved_transport_file))
 }
 
-/// Cross-check strictness for [`decide_inner_config_udp`]: wide
+/// Cross-check strictness for [`decide_inner_config_udp`]: unconstrained
 /// receivers (activation SDP carries `a=x-nvnmos-caps:`) relax
 /// essence shape on activation only.
 pub(crate) fn udp_essence_cross_check_mode(
@@ -486,7 +486,7 @@ pub(crate) fn udp_essence_cross_check_mode(
 ) -> sdp::EssenceCrossCheckMode {
     if activation
         && settings.side == Side::Receiver
-        && transport_file.is_some_and(sdp::indicates_wide_receiver_caps)
+        && transport_file.is_some_and(sdp::indicates_unconstrained_receiver_caps)
     {
         sdp::EssenceCrossCheckMode::FormatFamilyOnly
     } else {
@@ -1877,12 +1877,12 @@ mod tests {
             );
         }
 
-        /// Wide receiver activation: stereo `caps` must not
+        /// Unconstrained receiver activation: stereo `caps` must not
         /// block mono activation SDP when the SDP carries
         /// `a=x-nvnmos-caps:` (essence shape is not cross-checked;
         /// format family still matches).
         #[test]
-        fn activation_udp_wide_receiver_skips_essence_shape_cross_check() {
+        fn activation_udp_unconstrained_receiver_skips_essence_shape_cross_check() {
             init_gst();
             const AUDIO_MONO_ACTIVATION_SDP: &str = concat!(
                 "v=0\r\n",
@@ -1919,16 +1919,18 @@ mod tests {
                         "activation SDP is authoritative for channel count",
                     );
                 }
-                other => panic!("expected Real(Udp) inner on wide activation; got {other:?}"),
+                other => {
+                    panic!("expected Real(Udp) inner on unconstrained activation; got {other:?}")
+                }
             }
             assert!(matches!(plan.ack, ActivationAck::Success));
         }
 
-        /// `receiver-caps-mode=wide` alone does not relax activation
+        /// `receiver-caps-mode=unconstrained` alone does not relax activation
         /// cross-check — the activation SDP must carry
-        /// `a=x-nvnmos-caps:` (libnvnmos adds it for wide receivers).
+        /// `a=x-nvnmos-caps:` (libnvnmos adds it for unconstrained receivers).
         #[test]
-        fn activation_udp_property_wide_without_sdp_marker_still_cross_checks() {
+        fn activation_udp_property_unconstrained_without_sdp_marker_still_cross_checks() {
             init_gst();
             const AUDIO_MONO_ACTIVATION_SDP: &str = concat!(
                 "v=0\r\n",
@@ -1945,7 +1947,7 @@ mod tests {
                         .field("channels", 2i32)
                         .build(),
                 ),
-                caps_mode: CapsMode::Wide,
+                caps_mode: CapsMode::Unconstrained,
                 ..udp_settings(Side::Receiver, Transport::Udp)
             };
             let plan = make_activation_plan(

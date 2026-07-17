@@ -1229,7 +1229,7 @@ mod tests {
         let activation_caps =
             intermediate_fake_sink_caps(&udp_activation_plan(NARROW_SDP), &Settings::default())
                 .expect("activation caps")
-                .expect("narrow UDP must pin fake-hop caps");
+                .expect("constrained UDP must pin fake-hop caps");
         let structure = activation_caps.structure(0).expect("structure");
         assert_eq!(structure.name(), "video/x-raw");
         assert_eq!(structure.get::<&str>("format").ok(), Some("UYVP"));
@@ -1243,7 +1243,7 @@ mod tests {
         };
         let hop_caps = intermediate_fake_sink_caps(&udp_activation_plan(NARROW_SDP), &settings)
             .expect("activation caps")
-            .expect("narrow UDP must pin fake-hop caps");
+            .expect("constrained UDP must pin fake-hop caps");
         assert_eq!(
             hop_caps
                 .structure(0)

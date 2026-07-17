@@ -50,45 +50,45 @@ pub enum Transport {
     NvDsUdp = 3,
 }
 
-/// How a resource should advertise its capabilities in NMOS.
+/// How a Receiver advertises BCP-004-01 Receiver Caps on IS-04.
 ///
-/// NMOS BCP-004-01 ("Receiver Capabilities") distinguishes "narrow"
-/// Receivers — which advertise a finite set of formats they will
-/// accept — from "wide" Receivers — which advertise no constraints
-/// and accept anything compatible with their declared media type.
-/// NvNmos encodes the wide/narrow split with the
-/// `urn:x-nvnmos:tag:caps` flow-def tag: presence (even with an
-/// empty value) means wide, absence means narrow. Today only
-/// `nmossrc` exposes this enum, as `receiver-caps-mode`.
+/// A **constrained** Receiver publishes `constraint_sets` derived
+/// from the configuring transport file. An **unconstrained**
+/// Receiver publishes none and accepts any compatible Sender of the
+/// same format family. NvNmos encodes unconstrained receivers with
+/// the `urn:x-nvnmos:tag:caps` flow-def tag (MXL) or media-level
+/// `a=x-nvnmos-caps:` (SDP): presence means unconstrained, absence
+/// means constrained. Today only `nmossrc` exposes this enum, as
+/// `receiver-caps-mode`.
 ///
-/// [`CapsMode::Auto`] is the default: it leaves the
-/// `urn:x-nvnmos:tag:caps` tag untouched in the spliced transport
-/// file. The result is therefore narrow when the transport file is
-/// present and doesn't carry the tag (and similarly narrow when no
-/// transport file is in play, e.g. the caps-synthesis path), and
-/// wide when the file already carries the tag. [`CapsMode::Narrow`]
-/// and [`CapsMode::Wide`] force the corresponding shape regardless,
-/// i.e. they override the file's `urn:x-nvnmos:tag:caps` tag
-/// presence.
+/// [`CapsMode::Auto`] is the default: it leaves the transport-file
+/// marker untouched. The result is constrained when the file is
+/// present and the marker is absent (and similarly constrained when
+/// no transport file is in play, e.g. the caps-synthesis path), and
+/// unconstrained when the marker is already present.
+/// [`CapsMode::Constrained`] and [`CapsMode::Unconstrained`] force
+/// the corresponding shape regardless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, glib::Enum)]
 #[repr(i32)]
 #[enum_type(name = "GstNmosCapsMode")]
 pub enum CapsMode {
-    /// Leave the `urn:x-nvnmos:tag:caps` tag presence untouched —
-    /// narrow when the transport file is present and the tag is
-    /// absent (or no transport file is in play), wide when the tag
-    /// is already there.
+    /// Leave the transport-file caps marker untouched — constrained
+    /// when the marker is absent (or no transport file is in play),
+    /// unconstrained when the marker is present.
     #[default]
-    #[enum_value(name = "Leave the transport file's caps tag untouched", nick = "auto")]
+    #[enum_value(
+        name = "Leave the transport file's caps marker untouched",
+        nick = "auto"
+    )]
     Auto = 0,
-    /// Force narrow caps (strip `urn:x-nvnmos:tag:caps` from the
-    /// transport file if present).
-    #[enum_value(name = "Narrow caps", nick = "narrow")]
-    Narrow = 1,
-    /// Force wide caps (ensure `urn:x-nvnmos:tag:caps` is present on
-    /// the transport file with an empty value).
-    #[enum_value(name = "Wide caps", nick = "wide")]
-    Wide = 2,
+    /// Force constrained caps (strip the unconstrained marker from
+    /// the transport file if present).
+    #[enum_value(name = "Constrained Receiver Caps", nick = "constrained")]
+    Constrained = 1,
+    /// Force unconstrained caps (ensure the unconstrained marker is
+    /// present on the transport file).
+    #[enum_value(name = "Unconstrained Receiver Caps", nick = "unconstrained")]
+    Unconstrained = 2,
 }
 
 /// NMOS Flow format family carried in `flow_def.format`.
