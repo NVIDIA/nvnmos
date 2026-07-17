@@ -219,8 +219,6 @@ No `sample_rate`, `channel_count`, or `bit_depth` when the caps tag is present.
 
 #### Minimal unconstrained data (ANC) — MXL
 
-See `minimal-unconstrained-data.mxl.json.in` and `minimal-unconstrained-data.sdp.in`.
-
 ```json
 {
   "label": "@LABEL@",
