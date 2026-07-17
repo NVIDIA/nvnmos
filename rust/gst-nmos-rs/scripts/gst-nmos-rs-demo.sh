@@ -44,7 +44,7 @@
 #                       and `autovideosink` (override DEMO_AUDIO_SINK /
 #                       DEMO_VIDEO_SINK via env for WSL / headless setups).
 #                       Set
-#                       `DEMO_RECEIVER_CAPS_MODE` to `wide` or `narrow`
+#                       `DEMO_RECEIVER_CAPS_MODE` to `constrained` or `unconstrained`
 #                       (default `auto`) on both receivers.
 #
 #   Node 3 (processor): two separate gst-launch-1.0 processes sharing
@@ -52,7 +52,7 @@
 #                         a) nmossrc → videoflip horizontal → nmossink
 #                         b) 2× nmossrc → nmosaudiochannelmap → volume
 #                            → 2× nmossink (IS-08: audio-in0/1, -out0/1;
-#                            audio-in1 is a "wide" receiver)
+#                            audio-in1 is an unconstrained receiver)
 #                       Both Receivers pull Node 1's flows; both Senders
 #                       publish processed flows that Node 2 can switch to
 #                       via IS-05 PATCH. Menu 9–12 drive IS-08 /map/active
@@ -191,20 +191,20 @@ NODE4_SEED=demo-node4; NODE4_PORT=18041
 
 # Node 2 IS-04 Receiver Caps policy (`nmossrc` `receiver-caps-mode`).
 # `auto` (default) leaves the configuring transport file untouched;
-# `wide` / `narrow` force the wide-caps marker in or out. Use `wide`
+# `constrained` / `unconstrained` force the unconstrained marker marker in or out. Use `unconstrained`
 # when exercising downstream CAPS renegotiation on essence-shape change
 # (switch Node 2 between Node 1 and Node 4 via menu action 4).
 DEMO_RECEIVER_CAPS_MODE=${DEMO_RECEIVER_CAPS_MODE:-auto}
 case "$DEMO_RECEIVER_CAPS_MODE" in
-    auto|wide|narrow) ;;
+    auto|constrained|unconstrained) ;;
     *)
-        echo "[error] DEMO_RECEIVER_CAPS_MODE=$DEMO_RECEIVER_CAPS_MODE; use auto, wide, or narrow"
+        echo "[error] DEMO_RECEIVER_CAPS_MODE=$DEMO_RECEIVER_CAPS_MODE; use auto, constrained, or unconstrained"
         exit 1
         ;;
 esac
 
 # Essence caps — local aliases from env.sh (`DEMO_MXL_*` / `DEMO_UDP_*`).
-# *_ALT shapes are used by Node 4 and the wide audio-in1 receiver path.
+# *_ALT shapes are used by Node 4 and the unconstrained audio-in1 receiver path.
 case "$DEMO_TRANSPORT" in
     mxl)
         VIDEO_CAPS=$DEMO_MXL_VIDEO_CAPS
@@ -683,7 +683,7 @@ launch_node1() {
 # ---- Node 4: alternate producer (one pipeline, 2 nmossinks) ------
 #
 # Second producer with different essence shape (frame rate + audio
-# channels) so Node 2 wide receivers can be switched between Node 1
+# channels) so Node 2 unconstrained receivers can be switched between Node 1
 # and Node 4 via menu action 4 and downstream CAPS renegotiation
 # exercised. Same auto-activate=true policy as Node 1.
 launch_node4() {
@@ -743,9 +743,9 @@ launch_node4() {
 # POST /map/activations/ works before IS-05 wiring; inactive mixer
 # inputs stay silent so one live Receiver is enough to exercise routing.
 #
-# audio-in1 is wide (receiver-caps-mode=wide, caps=$AUDIO_CAPS_ALT) so
+# audio-in1 is unconstrained (receiver-caps-mode=unconstrained, caps=$AUDIO_CAPS_ALT) so
 # IS-05 can accept e.g. 2ch or 8ch senders. Map sink_1 is fixed at 8ch
-# (IS08_IN1_CH). demo_wide_receiver_to_map upmixes narrower activations
+# (IS08_IN1_CH). demo_unconstrained_receiver_to_map upmixes narrower activations
 # (audioconvert → capsfilter → queue) before map.sink_1; channel-mask is
 # not fixated because 8ch depayloaders may emit unpositioned PCM.
 
@@ -792,7 +792,7 @@ launch_node3_audio() {
         echo "[node3-audio] already running (pid $NODE3_AUDIO_PID)"
         return 1
     fi
-    echo "[node3-audio] starting audio matrix router (2× nmossrc → map → 2× nmossink; wide audio-in1)"
+    echo "[node3-audio] starting audio matrix router (2× nmossrc → map → 2× nmossink; unconstrained audio-in1)"
     _rotate_log "$LOG_DIR/node3-audio.log"
     pipeline_dots_prepare_launch node3-audio
     GST_DEBUG=${GST_DEBUG:-nmossrc:3,nmossink:3,nmosaudiochannelmap:3} \
@@ -831,12 +831,12 @@ launch_node3_audio() {
                 http-port="$NODE3_PORT" \
                 node-seed="$NODE3_SEED" \
                 receiver-name=audio-in1 \
-                receiver-caps-mode=wide \
+                receiver-caps-mode=unconstrained \
                 $(transport_receiver_props audio4) \
                 caps="$AUDIO_CAPS_ALT" \
                 label="Node 3 / audio-in1 (IS-08 $IS08_INPUT_1)" \
                 auto-activate=false ! \
-            $(demo_wide_receiver_to_map "$AUDIO_CAPS_ALT" n3-a-in1) ! map.sink_1 \
+            $(demo_unconstrained_receiver_to_map "$AUDIO_CAPS_ALT" n3-a-in1) ! map.sink_1 \
             map.src_0 ! volume volume=0.3 ! audioconvert ! \
                 nmossink \
                     daemon-uri="unix:$SOCK" \
@@ -1174,7 +1174,7 @@ Topology:
   Node 3 (port $NODE3_PORT, seed $NODE3_SEED): processor (two gst processes)
     Receiver video-in  → videoflip h-flip →   Sender video-out ($LABEL_FLOW_VIDEO_OUT)
     Receivers audio-in0 + audio-in1 → nmosaudiochannelmap ($IS08_CHANNELMAPPING_NAME)
-      (audio-in0: queue; audio-in1 wide: demo_wide_receiver_to_map) →
+      (audio-in0: queue; audio-in1 unconstrained: demo_unconstrained_receiver_to_map) →
       volume → Senders audio-out0 + audio-out1
     IS-08 menu 10: identity (all channels); 11: swap (cross-route); 12: unrouted
 
@@ -1305,9 +1305,9 @@ Example PATCHes (copy/paste):
 
   # ---- Switch Node 2 between Node 1 and Node 4 (essence-shape change) ----
   # Use menu action 4 (PATCHes transport_params + sender /transportfile).
-  # With DEMO_TRANSPORT=udp and DEMO_RECEIVER_CAPS_MODE=narrow, a Node 2
+  # With DEMO_TRANSPORT=udp and DEMO_RECEIVER_CAPS_MODE=constrained, a Node 2
   # → Node 4 switch should fail activation when sender essence differs.
-  # With DEMO_RECEIVER_CAPS_MODE=wide, check node2-consumer.log for
+  # With DEMO_RECEIVER_CAPS_MODE=unconstrained, check node2-consumer.log for
   # \`downstream caps renegotiation: pushed\` after each switch
   # (GST_DEBUG=nmossrc:5 recommended).
 
@@ -1568,7 +1568,7 @@ subscription_transport_params() {
 # RTP/UDP: GET `$sender_url/transportfile`, copy the response body
 # into `data` and the base media type from the `Content-Type` header
 # (parameters stripped) into `type` — typically `application/sdp`.
-# libnvnmos validates the staged SDP against narrow Receiver Caps when
+# libnvnmos validates the staged SDP against constrained Receiver Caps when
 # `transport_file.data` is present; omitting it lets the daemon
 # synthesise activation SDP from the receiver's configuring transport
 # file instead (masking sender/receiver essence mismatches).

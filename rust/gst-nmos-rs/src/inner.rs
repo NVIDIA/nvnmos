@@ -1066,7 +1066,7 @@ fn package_hint_for_stem(stem: &str) -> &'static str {
 }
 
 /// Decide whether an `nmossrc` UDP receiver should append a `capssetter`
-/// after the depayloader when the caller has narrow Receiver Caps to
+/// after the depayloader when the caller has constrained Receiver Caps to
 /// advertise.
 ///
 /// Raw RFC 4175 video keeps the capssetter because V1 `rtpvrawdepay`
@@ -2786,7 +2786,7 @@ mod tests {
             return;
         }
         let media = jxsv_media();
-        // Even when a narrow receiver supplies advertise_caps,
+        // Even when a constrained receiver supplies advertise_caps,
         // `rtpjxsvdepay` negotiates `image/x-jxsc` vs `video/x-jxsv`
         // with the downstream itself; no `capssetter` tail is inserted.
         let chain = build_udpsrc(&media, UdpVariant::V1, Some(&media.caps))

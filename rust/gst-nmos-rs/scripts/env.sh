@@ -56,7 +56,7 @@ export DEMO_UDP_VIDEO_JXSV_LABEL=${DEMO_UDP_VIDEO_JXSV_LABEL:-1080p25 JPEG XS}
 export DEMO_MXL_AUDIO_LABEL=${DEMO_MXL_AUDIO_LABEL:-48 kHz F32LE 2ch}
 export DEMO_UDP_AUDIO_LABEL=${DEMO_UDP_AUDIO_LABEL:-48 kHz S24BE 2ch}
 
-# Alternate essence (demo Node 4 / wide-receiver CAPS renegotiation tests).
+# Alternate essence (demo Node 4 / unconstrained-receiver CAPS renegotiation tests).
 export DEMO_MXL_VIDEO_CAPS_ALT='video/x-raw,format=v210,width=1920,height=1080,framerate=30000/1001,interlace-mode=progressive'
 export DEMO_UDP_VIDEO_CAPS_ALT='video/x-raw,format=UYVP,width=1920,height=1080,framerate=30000/1001,interlace-mode=progressive'
 export DEMO_MXL_AUDIO_CAPS_ALT='audio/x-raw,format=F32LE,rate=48000,channels=8,layout=interleaved'
@@ -157,16 +157,16 @@ demo_audio_queue() {
 # not leave sticky queue caps when channel count matches but depayload
 # layout differs. Channel-mask is not fixated: 8ch depayloaders may emit
 # unpositioned PCM; nmosaudiochannelmap sink caps fixate count only.
-demo_wide_audio_map_input() {
+demo_unconstrained_audio_map_input() {
     local caps=${1:-${AUDIO_CAPS_ALT:-$DEMO_UDP_AUDIO_CAPS_ALT}}
     printf 'audioconvert ! capsfilter caps="%s"' "$caps"
 }
 
-# Wide nmossrc → nmosaudiochannelmap sink_1: normalize then bounded audio queue.
-demo_wide_receiver_to_map() {
+# Unconstrained nmossrc → nmosaudiochannelmap sink_1: normalize then bounded audio queue.
+demo_unconstrained_receiver_to_map() {
     local caps=${1:-${AUDIO_CAPS_ALT:-$DEMO_UDP_AUDIO_CAPS_ALT}}
     local qname=${2:-}
-    printf '%s ! %s' "$(demo_wide_audio_map_input "$caps")" "$(demo_audio_queue "$qname")"
+    printf '%s ! %s' "$(demo_unconstrained_audio_map_input "$caps")" "$(demo_audio_queue "$qname")"
 }
 
 udp_video_buffer_props() {
@@ -221,16 +221,22 @@ bootstrap_mxl_domain() {
         >"$def"
 }
 
-# Substitute @NIC_IP@, @MXL_DOMAIN_ID@, and @LABEL@ in example-pipeline fixtures.
+# Substitute @NIC_IP@, @MXL_DOMAIN_ID@, @LABEL@, and optionally @NAME@ in example-pipeline fixtures.
 render_transport_fixture() {
     local template=$1
     local output=$2
     local label=${3-}
-    local escaped_label
+    local name=${4-}
+    local escaped_label escaped_name
+    local sed_args=()
     # Prepare label for sed substitution (escape slashes and ampersands).
     escaped_label=$(printf '%s' "$label" | sed 's/[\/&]/\\&/g')
-    sed -e "s/@NIC_IP@/${DEMO_NIC_IP}/g" \
-        -e "s/@MXL_DOMAIN_ID@/${DEMO_MXL_DOMAIN_ID}/g" \
-        -e "s/@LABEL@/${escaped_label}/g" \
-        "$template" >"$output"
+    sed_args+=(-e "s/@NIC_IP@/${DEMO_NIC_IP}/g")
+    sed_args+=(-e "s/@MXL_DOMAIN_ID@/${DEMO_MXL_DOMAIN_ID}/g")
+    sed_args+=(-e "s/@LABEL@/${escaped_label}/g")
+    if [[ -n "$name" ]]; then
+        escaped_name=$(printf '%s' "$name" | sed 's/[\/&]/\\&/g')
+        sed_args+=(-e "s/@NAME@/${escaped_name}/g")
+    fi
+    sed "${sed_args[@]}" "$template" >"$output"
 }

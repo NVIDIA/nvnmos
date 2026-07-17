@@ -1,0 +1,9 @@
+{
+  "label": "@LABEL@",
+  "description": "",
+  "media_type": "audio/L24",
+  "tags": {
+    "urn:x-nvnmos:tag:name": ["@NAME@"],
+    "urn:x-nvnmos:tag:caps": [""]
+  }
+}

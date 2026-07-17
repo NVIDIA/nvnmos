@@ -180,10 +180,10 @@ fn apply_primary_leg_transport_overrides(
 fn apply_caps_mode_override(m: &mut SDPMediaRef, caps_mode: CapsMode) {
     match caps_mode {
         CapsMode::Auto => {}
-        CapsMode::Narrow => {
+        CapsMode::Constrained => {
             remove_media_attributes_by_key(m, "x-nvnmos-caps");
         }
-        CapsMode::Wide => {
+        CapsMode::Unconstrained => {
             if m.attribute_val("x-nvnmos-caps").is_none() {
                 let pt = m.format(0).unwrap_or("96").to_owned();
                 upsert_media_attribute(m, "x-nvnmos-caps", Some(&pt), false);

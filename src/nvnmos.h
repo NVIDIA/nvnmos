@@ -40,8 +40,8 @@
  * for example.
  *
  * NvNmos currently supports Senders and Receivers for video, audio, and
- * ancillary data flows over RTP (i.e., SMPTE ST 2110-20, -22, -30, and -40
- * streams) and over the Media eXchange Layer (MXL).
+ * ancillary data flows over RTP/UDP (i.e., SMPTE ST 2110-20, -22, -30,
+ * and -40 streams) and over the Media eXchange Layer (MXL).
  *
  * The NvNmos library supports the following specifications, using the <a href="https://github.com/sony/nmos-cpp">Sony nmos-cpp</a> implementation:
  * - <a href="https://specs.amwa.tv/is-04/">AMWA IS-04 NMOS Discovery and Registration Specification</a> v1.3
@@ -120,7 +120,7 @@ typedef struct _NvNmosNodeServer NvNmosNodeServer;
  */
 typedef enum _NvNmosTransport
 {
-    /** RTP, as used by SMPTE ST 2110.
+    /** RTP/UDP, as used by SMPTE ST 2110.
         The associated transport file is a Session Description Protocol
         (SDP) file. This is the default for a zero-initialised configuration. */
     NVNMOS_TRANSPORT_RTP = 0,
@@ -165,7 +165,7 @@ typedef enum _NvNmosSide
  *                           sender or receiver, or a null pointer when
  *                           the sender or receiver is being deactivated.
  *
- *                           For an RTP sender or receiver this is an SDP
+ *                           For an RTP/UDP sender or receiver this is an SDP
  *                           file. The 'inactive' media-level attribute is
  *                           used to indicate a disabled leg. The
  *                           'x-nvnmos-name' session-level attribute specifies

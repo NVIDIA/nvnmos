@@ -275,13 +275,16 @@ impl ObjectImpl for NmosSrc {
                     .nick("Receiver caps mode")
                     .blurb(
                         "Whether the Receiver advertises BCP-004-01 Receiver Caps \
-                         on IS-04 (narrow) or none (wide). On MXL, wide is \
-                         encoded via `urn:x-nvnmos:tag:caps`; on RTP/UDP via \
-                         media-level `a=x-nvnmos-caps:`. `auto` (default) \
-                         leaves the marker untouched in the spliced transport \
-                         file — narrow when absent (or with no transport file), \
-                         wide when present. `narrow` strips it; `wide` ensures \
-                         it is present (libnvnmos: present + non-empty = wide).",
+                         on IS-04. `constrained` publishes caps with a \
+                         `constraint_set` derived from the transport file; \
+                         `unconstrained` publishes none. On MXL, the marker is \
+                         `urn:x-nvnmos:tag:caps`; on RTP/UDP, media-level \
+                         `a=x-nvnmos-caps:`. `auto` (default) leaves the marker \
+                         untouched in the spliced transport file — constrained \
+                         when absent (or with no transport file), unconstrained \
+                         when present. `constrained` strips the marker; \
+                         `unconstrained` ensures it is present (libnvnmos: \
+                         present + non-empty = unconstrained).",
                     )
                     .default_value(CapsMode::Auto)
                     .build(),
@@ -1010,8 +1013,8 @@ fn build_fake_src_for_settings(settings: &Settings) -> Result<gst::Element, anyh
 /// Caps for the intermediate fake `appsrc` on real→real activations.
 ///
 /// For [`InnerConfig::Real`] plans, use the incoming activation transport
-/// file the same way as the real inner chain (wide receivers skip
-/// `capssetter`; narrow ones advertise caps from the file). Otherwise
+/// file the same way as the real inner chain (unconstrained receivers skip
+/// `capssetter`; constrained ones advertise caps from the file). Otherwise
 /// fall back to [`fake_caps_from_settings`].
 ///
 /// Keeps the fake hop aligned with activation transport policy when
@@ -1039,32 +1042,32 @@ fn intermediate_fake_src_caps(
     }
 }
 
-/// Whether an MXL `flow_def` transport file carries the wide Receiver
-/// Caps tag (`urn:x-nvnmos:tag:caps`). Mirrors
-/// [`crate::sdp::indicates_wide_receiver_caps`] for SDP.
-fn mxl_indicates_wide_receiver_caps(text: &str) -> bool {
-    crate::flow_def::indicates_wide_receiver_caps(text)
+/// Whether an MXL `flow_def` transport file carries the unconstrained
+/// Receiver Caps marker (`urn:x-nvnmos:tag:caps`). Mirrors
+/// [`crate::sdp::indicates_unconstrained_receiver_caps`] for SDP.
+fn mxl_indicates_unconstrained_receiver_caps(text: &str) -> bool {
+    crate::flow_def::indicates_unconstrained_receiver_caps(text)
         .map_err(|e| {
             gst::warning!(
                 CAT,
-                "nmossrc: could not read wide caps tag from transport file: {e:#}",
+                "nmossrc: could not read unconstrained caps marker from transport file: {e:#}",
             );
         })
         .unwrap_or(false)
 }
 
 /// Caps for the optional MXL inner `capssetter`. When the effective
-/// transport file indicates wide Receiver Caps, return `None` so runtime
+/// transport file indicates an unconstrained Receiver, return `None` so runtime
 /// caps come from the filesystem flow via bare `mxlsrc`; otherwise pin
 /// configuring essence caps from the same file.
 fn mxl_capssetter_caps(transport_file: Option<&str>) -> Result<Option<gst::Caps>, anyhow::Error> {
     if transport_file
         .filter(|s| !s.is_empty())
-        .is_some_and(mxl_indicates_wide_receiver_caps)
+        .is_some_and(mxl_indicates_unconstrained_receiver_caps)
     {
         gst::debug!(
             CAT,
-            "nmossrc: wide MXL receiver — bare mxlsrc (no capssetter); \
+            "nmossrc: unconstrained MXL receiver — bare mxlsrc (no capssetter); \
              runtime caps from MXL flow on disk",
         );
         return Ok(None);
@@ -1083,11 +1086,11 @@ fn udp_capssetter_caps(
 ) -> Option<gst::Caps> {
     if transport_file
         .filter(|s| !s.is_empty())
-        .is_some_and(crate::sdp::indicates_wide_receiver_caps)
+        .is_some_and(crate::sdp::indicates_unconstrained_receiver_caps)
     {
         gst::debug!(
             CAT,
-            "nmossrc: wide UDP receiver — depay only (no capssetter); \
+            "nmossrc: unconstrained UDP receiver — depay only (no capssetter); \
              runtime caps from activation SDP",
         );
         return None;
@@ -1237,18 +1240,18 @@ mod tests {
     }
 
     #[test]
-    fn mxl_wide_receiver_skips_capssetter() {
+    fn mxl_unconstrained_receiver_skips_capssetter() {
         use crate::flow_def::{FlowDefOverrides, splice_overrides};
         use crate::types::CapsMode;
         init_gst();
-        let narrow_file = r#"{
+        let constrained_file = r#"{
             "format":"urn:x-nmos:format:video",
             "media_type":"video/v210",
             "grain_rate":{"numerator":25,"denominator":1},
             "frame_width":1920,
             "frame_height":1080
         }"#;
-        let wide_file = r#"{
+        let unconstrained_file = r#"{
             "format":"urn:x-nmos:format:video",
             "media_type":"video/v210",
             "grain_rate":{"numerator":25,"denominator":1},
@@ -1256,46 +1259,52 @@ mod tests {
             "frame_height":1080,
             "tags":{"urn:x-nvnmos:tag:caps":[""]}
         }"#;
-        let spliced_wide = splice_overrides(
-            narrow_file,
+        let spliced_unconstrained = splice_overrides(
+            constrained_file,
             &FlowDefOverrides {
-                caps_mode: CapsMode::Wide,
+                caps_mode: CapsMode::Unconstrained,
                 ..FlowDefOverrides::default()
             },
         )
-        .expect("wide splice");
+        .expect("unconstrained splice");
         assert!(
-            mxl_capssetter_caps(Some(&spliced_wide)).unwrap().is_none(),
-            "post-splice wide transport file must skip capssetter",
+            mxl_capssetter_caps(Some(&spliced_unconstrained))
+                .unwrap()
+                .is_none(),
+            "post-splice unconstrained transport file must skip capssetter",
         );
         assert!(
-            mxl_capssetter_caps(Some(wide_file)).unwrap().is_none(),
-            "activation/configuring file with wide caps tag must skip capssetter",
+            mxl_capssetter_caps(Some(unconstrained_file))
+                .unwrap()
+                .is_none(),
+            "activation/configuring file with unconstrained marker must skip capssetter",
         );
         assert!(
-            mxl_capssetter_caps(Some(narrow_file)).unwrap().is_some(),
-            "narrow transport file still uses capssetter",
-        );
-        let spliced_narrow = splice_overrides(
-            wide_file,
-            &FlowDefOverrides {
-                caps_mode: CapsMode::Narrow,
-                ..FlowDefOverrides::default()
-            },
-        )
-        .expect("narrow splice");
-        assert!(
-            mxl_capssetter_caps(Some(&spliced_narrow))
+            mxl_capssetter_caps(Some(constrained_file))
                 .unwrap()
                 .is_some(),
-            "post-splice narrow transport file must use capssetter",
+            "constrained transport file still uses capssetter",
+        );
+        let spliced_constrained = splice_overrides(
+            unconstrained_file,
+            &FlowDefOverrides {
+                caps_mode: CapsMode::Constrained,
+                ..FlowDefOverrides::default()
+            },
+        )
+        .expect("constrained splice");
+        assert!(
+            mxl_capssetter_caps(Some(&spliced_constrained))
+                .unwrap()
+                .is_some(),
+            "post-splice constrained transport file must use capssetter",
         );
     }
 
     #[test]
-    fn udp_wide_receiver_skips_capssetter() {
+    fn udp_unconstrained_receiver_skips_capssetter() {
         init_gst();
-        const NARROW_SDP: &str = concat!(
+        const CONSTRAINED_SDP: &str = concat!(
             "v=0\r\n",
             "o=- 1 0 IN IP4 192.0.2.10\r\n",
             "s=Example\r\n",
@@ -1305,7 +1314,7 @@ mod tests {
             "a=rtpmap:96 raw/90000\r\n",
             "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=25/1; depth=10\r\n",
         );
-        const WIDE_SDP: &str = concat!(
+        const UNCONSTRAINED_SDP: &str = concat!(
             "v=0\r\n",
             "o=- 1 0 IN IP4 192.0.2.10\r\n",
             "s=Example\r\n",
@@ -1316,15 +1325,16 @@ mod tests {
             "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=25/1; depth=10\r\n",
             "a=x-nvnmos-caps:96\r\n",
         );
-        let narrow_media = crate::sdp::parse_sdp(NARROW_SDP).expect("parse narrow");
-        let wide_media = crate::sdp::parse_sdp(WIDE_SDP).expect("parse wide");
+        let constrained_media = crate::sdp::parse_sdp(CONSTRAINED_SDP).expect("parse constrained");
+        let unconstrained_media =
+            crate::sdp::parse_sdp(UNCONSTRAINED_SDP).expect("parse unconstrained");
         assert!(
-            udp_capssetter_caps(Some(NARROW_SDP), &narrow_media).is_some(),
-            "narrow SDP must pin capssetter",
+            udp_capssetter_caps(Some(CONSTRAINED_SDP), &constrained_media).is_some(),
+            "constrained SDP must pin capssetter",
         );
         assert!(
-            udp_capssetter_caps(Some(WIDE_SDP), &wide_media).is_none(),
-            "wide SDP (a=x-nvnmos-caps) must skip capssetter",
+            udp_capssetter_caps(Some(UNCONSTRAINED_SDP), &unconstrained_media).is_none(),
+            "unconstrained SDP (a=x-nvnmos-caps) must skip capssetter",
         );
     }
 
@@ -1353,20 +1363,20 @@ mod tests {
     }
 
     /// Real→real: fake-hop caps follow the activation transport file for
-    /// `Real` plans (wide vs narrow inner-chain policy), not stale element
+    /// `Real` plans (unconstrained vs constrained inner-chain policy), not stale element
     /// `caps` from an earlier chain.
     #[test]
     fn intermediate_fake_src_caps_follows_activation_not_element_property() {
         use std::str::FromStr;
         init_gst();
-        const NARROW_MXL: &str = r#"{
+        const CONSTRAINED_MXL: &str = r#"{
             "format":"urn:x-nmos:format:video",
             "media_type":"video/v210",
             "grain_rate":{"numerator":25,"denominator":1},
             "frame_width":1920,
             "frame_height":1080
         }"#;
-        const WIDE_MXL: &str = r#"{
+        const UNCONSTRAINED_MXL: &str = r#"{
             "format":"urn:x-nmos:format:video",
             "media_type":"video/v210",
             "grain_rate":{"numerator":25,"denominator":1},
@@ -1374,35 +1384,35 @@ mod tests {
             "frame_height":1080,
             "tags":{"urn:x-nvnmos:tag:caps":[""]}
         }"#;
-        let narrow_element_caps =
+        let constrained_element_caps =
             gst::Caps::from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=25/1")
-                .expect("narrow caps");
+                .expect("constrained caps");
         let snapshot = Settings {
-            caps: Some(narrow_element_caps),
+            caps: Some(constrained_element_caps),
             ..Settings::default()
         };
 
-        let wide_plan = mxl_activation_plan(WIDE_MXL);
+        let unconstrained_plan = mxl_activation_plan(UNCONSTRAINED_MXL);
         assert!(
-            intermediate_fake_src_caps(&wide_plan, &snapshot)
-                .expect("wide activation")
+            intermediate_fake_src_caps(&unconstrained_plan, &snapshot)
+                .expect("unconstrained activation")
                 .is_none(),
-            "wide activation must not pin fake-hop caps from the element property",
+            "unconstrained activation must not pin fake-hop caps from the element property",
         );
 
-        let narrow_plan = mxl_activation_plan(NARROW_MXL);
+        let constrained_plan = mxl_activation_plan(CONSTRAINED_MXL);
         assert!(
-            intermediate_fake_src_caps(&narrow_plan, &snapshot)
-                .expect("narrow activation")
+            intermediate_fake_src_caps(&constrained_plan, &snapshot)
+                .expect("constrained activation")
                 .is_some(),
-            "narrow activation must still advertise caps on the fake hop",
+            "constrained activation must still advertise caps on the fake hop",
         );
     }
 
     #[test]
-    fn intermediate_fake_src_caps_udp_wide_follows_sdp_marker() {
+    fn intermediate_fake_src_caps_udp_unconstrained_follows_sdp_marker() {
         init_gst();
-        const NARROW_SDP: &str = concat!(
+        const CONSTRAINED_SDP: &str = concat!(
             "v=0\r\n",
             "o=- 1 0 IN IP4 192.0.2.10\r\n",
             "s=Example\r\n",
@@ -1412,7 +1422,7 @@ mod tests {
             "a=rtpmap:96 raw/90000\r\n",
             "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=25/1; depth=10\r\n",
         );
-        const WIDE_SDP: &str = concat!(
+        const UNCONSTRAINED_SDP: &str = concat!(
             "v=0\r\n",
             "o=- 1 0 IN IP4 192.0.2.10\r\n",
             "s=Example\r\n",
@@ -1426,13 +1436,13 @@ mod tests {
         let snapshot = Settings::default();
 
         assert!(
-            intermediate_fake_src_caps(&udp_activation_plan(WIDE_SDP), &snapshot)
-                .expect("wide udp")
+            intermediate_fake_src_caps(&udp_activation_plan(UNCONSTRAINED_SDP), &snapshot)
+                .expect("unconstrained udp")
                 .is_none(),
         );
         assert!(
-            intermediate_fake_src_caps(&udp_activation_plan(NARROW_SDP), &snapshot)
-                .expect("narrow udp")
+            intermediate_fake_src_caps(&udp_activation_plan(CONSTRAINED_SDP), &snapshot)
+                .expect("constrained udp")
                 .is_some(),
         );
     }

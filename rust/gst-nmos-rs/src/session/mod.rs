@@ -368,7 +368,8 @@ pub(crate) struct CommonSettings {
     /// including RTP/UDP/IP overhead. 0 = unset. On JPEG XS RTP transports,
     /// threads into SDP `b=AS:` and fmtp synthesis.
     pub(crate) transport_bit_rate: u64,
-    /// Controls whether the resource advertises narrow or wide caps
+    /// Controls whether the resource advertises constrained or unconstrained
+    /// Receiver Caps on IS-04.
     /// in IS-04. See [`CapsMode`] for the full semantics. Honoured
     /// only when `side` is `Receiver` (driven by the
     /// `receiver-caps-mode` property on `nmossrc`); `nmossink` leaves
@@ -687,8 +688,8 @@ pub(crate) enum TransportConfig {
     /// RTP/UDP transport. The inner chain is `rtp*pay ! udpsink` for
     /// senders and `udpsrc ! rtp*depay [! capssetter(caps)]` for
     /// receivers.
-    /// Wide receivers (activation SDP carries `a=x-nvnmos-caps:`)
-    /// omit `capssetter`; narrow receivers pass configuring essence
+    /// Unconstrained receivers (activation SDP carries `a=x-nvnmos-caps:`)
+    /// omit `capssetter`; constrained receivers pass configuring essence
     /// caps parsed from the transport file to the chain builder, which
     /// appends a capssetter only for depayloaders that need/tolerate
     /// one. The exact element factory names dispatch on [`UdpVariant`].
