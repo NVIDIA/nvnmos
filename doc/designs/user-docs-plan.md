@@ -1,563 +1,299 @@
-## Overall assessment
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
-The documentation is technically strong and unusually complete for a project still evolving quickly. The top-level README now explains the three consumption models—C library, daemon/gRPC, and GStreamer—so a visitor can identify the relevant entry point without first understanding the repository layout. ([GitHub][1])
+**Audience:** contributors and maintainers  
+**Status:** plan (not a user guide)  
+**Not a user guide:** start from the top-level README “Ways To Use NvNmos”
 
-The main usability problem is no longer missing information. It is **information hierarchy**:
+# User documentation plan
 
-* The first material users encounter is often the complete configuration surface.
-* Essential properties, advanced overrides, daemon internals, transport-specific details, and implementation diagnostics are presented at roughly the same level.
-* Property blurbs are sometimes trying to serve simultaneously as command-line help, API reference, design documentation, and troubleshooting guidance.
+Make NvNmos documentation easier for the three primary consumption models:
 
-The most valuable changes would therefore be editorial rather than adding much more content.
+| Audience | Entry surface today | Pain |
+| --- | --- | --- |
+| (a) GStreamer elements | `rust/gst-nmos-rs/README.md`, Hotdoc at `/gstreamer/`, `gst-inspect` blurbs | Property catalogue and implementation mapping come before a minimal pipeline |
+| (b) C API (`libnvnmos`) | Top-level README + Doxygen from `nvnmos.h` | Usage jumps into transport-file extensions and API-change history before a minimal embed walkthrough |
+| (c) Daemon (`nvnmosd`) | `rust/nvnmosd/README.md` + design record | Operator summary exists; no generated gRPC reference beyond proto comments and a short RPC table |
 
-# Highest-impact changes
+The first commit of this file captured a GStreamer-centric editorial review. This revision keeps the useful GStreamer guidance, widens scope to all three audiences, and records how generated docs should fit the existing Pages site.
 
-## 1. Put a minimal working pipeline before the property catalogue
+## Goals
 
-The `gst-nmos-rs` README currently moves directly from its one-sentence description to “Property Surface.” The first executable guidance appears much later under building, loading, demos, and pipeline examples. ([GitHub][2])
+1. **Examples first** — every audience gets a minimal working path before catalogues, enums, and edge cases.
+2. **“Why” and “how” live in guides** — READMEs and Hotdoc/Doxygen prose explain configuration models, lifecycle, and trade-offs. Property blurbs and short API summaries do not.
+3. **Blurbs describe outcomes** — for `gst-nmos-rs`, say what the property achieves for the pipeline / NMOS resource. Do not name daemon RPCs, struct fields, or detailed IS-05/SDP mappings in the blurb. It is enough that the element participates in NMOS; exact field mappings belong in long-form docs.
+4. **gRPC API reference** — publish generated docs from `nvnmosd.proto` as a third documentation product (not folded into Doxygen or Hotdoc).
 
-A new user first wants to know:
+## Non-goals
 
-1. What processes must be running?
-2. What is the smallest sender pipeline?
-3. What is the smallest receiver pipeline?
-4. Does it require an NMOS controller, or can it start immediately?
-5. Which transport should they choose?
+- Merging C, GStreamer, and gRPC into one documentation generator or one theme.
+- Rewriting design records as user guides (keep them contributor-facing; mark status clearly).
+- Changing runtime defaults (e.g. `transport=mxl`) in this docs work — call out surprises in guides; decide defaults separately if needed.
+- Duplicating the full property catalogue in three places — Hotdoc/`gst-inspect` remain authoritative for element properties; Markdown guides summarise patterns and link out.
 
-I would put a **Quick start** immediately after the introduction, perhaps using `transport=udp`, since that has the least NVIDIA-specific infrastructure:
+## Current documentation map
 
-```markdown
-## Quick start
+| Product | Generator / source | Published location |
+| --- | --- | --- |
+| C API | Doxygen (`Doxyfile`: `README.md` + `nvnmos.h`) | GitHub Pages root (`nvidia.github.io/nvnmos/`) |
+| GStreamer plugins | Hotdoc (`rust/docs/gstreamer/`) | Pages `/gstreamer/` |
+| Daemon / gRPC | Markdown summary + rich comments in `rust/nvnmos-rpc/proto/nvnmosd.proto` | Not on Pages yet |
+| Workspace quick start | `rust/README.md` | GitHub only (already has a UDP sender/receiver example) |
+| Element usage | `rust/gst-nmos-rs/README.md` | GitHub; Hotdoc portal deep-links here |
+| Daemon operator | `rust/nvnmosd/README.md` | GitHub |
+| Design | `doc/designs/**` | GitHub |
 
-`nmossink` creates an NMOS Sender and `nmossrc` creates an NMOS Receiver.
-Both connect to a running `nvnmosd`.
+CI: `.github/workflows/pages.yml` builds Doxygen then Hotdoc into `public/` and `/public/gstreamer/`.
 
-Terminal 1:
+Important existing assets to build on rather than replace:
 
-    cargo run -p nvnmosd
+- Top-level **Ways To Use NvNmos** already names the three models.
+- **`rust/README.md` Quick Start** already runs `nvnmosd` + `nmossink`/`nmossrc` with `transport=udp` and `auto-activate=true`.
+- **`nvnmosd.proto`** already has solid service/RPC/message comments suitable for generation.
+- Shared blurb strings live in `rust/gst-nmos-rs/src/session/mod.rs` (and a few element-local blurbs) — that is the rewrite surface for `gst-inspect` / Hotdoc property text.
 
-Terminal 2:
+---
 
-    gst-launch-1.0 -v \
-      videotestsrc is-live=true ! \
-      video/x-raw,format=UYVP,width=1920,height=1080,framerate=25/1 ! \
-      nmossink transport=udp \
-        node-seed=example-node \
-        sender-name=video \
-        interface-ip=192.168.1.10 \
-        destination-ip=239.100.0.1 \
-        destination-port=5004 \
-        auto-activate=true
+# Principles
 
-Use `auto-activate=true` for standalone testing. In a managed NMOS
-system, leave it false and activate the Sender or Receiver through IS-05.
-```
+## Layering
 
-Then link to one equally small receiver example and the full pipeline examples.
+| Layer | Answers | Examples |
+| --- | --- | --- |
+| Quick start | How do I see something work in five minutes? | Minimal pipeline, minimal C create/add/destroy, `cargo run -p nvnmosd` |
+| User guide | Why these knobs? Which pattern do I pick? | Configuration patterns, lifecycle, activation model, troubleshooting |
+| Generated reference | Exact surface | Doxygen symbols, Hotdoc property tables, gRPC message/RPC pages |
+| Design record | Why the implementation looks like this | `doc/designs/nvnmosd/`, plans, audits |
 
-This would do more for usability than almost any expansion of the property reference.
+## Property / field blurb rules (`gst-nmos-rs`)
 
-## 2. Add a configuration-model explanation before listing properties
+A blurb should usually answer only:
 
-The most important conceptual fact is that there are several ways to configure a resource:
+1. What outcome does this configure?
+2. Default / unset behaviour (briefly).
+3. Which element or transport it applies to (when not obvious).
+4. Simple exclusivity or override rules that prevent misuse (`transport-file` vs `transport-file-path`).
 
-* supply a complete transport file;
-* supply a transport file path;
-* synthesize one from caps and endpoint properties;
-* let an IS-05 controller activate it later;
-* use `auto-activate` for development.
+A blurb should **not**:
 
-The current table explains these individually, but users must reconstruct the model themselves. For example, `transport-file` says it may be replaced by `caps`, `mxl-flow-id`, `transport-caps`, and endpoint properties, while `transport-file-path` is described separately. ([GitHub][2])
+- Name `OpenSession`, `AddSender`, `AddReceiver`, `SyncResourceState`, or other gRPC RPCs.
+- Lead with IS-05 `transport_params.*` or SDP attribute grammar.
+- List inner element chains, fallback tables, or Rivermax Mode details.
+- Duplicate the configuration-model essay (that belongs once in the README / Hotdoc intro).
 
-Add a short section such as:
+NMOS may be mentioned at outcome level (“joins the same NMOS Node”, “presented to controllers as the Sender label”) without explaining the control-plane mapping.
 
-```markdown
-## Choosing how to configure a resource
+**Long-form docs** then cover: IS-05/SDP/MXL tag mappings, inner-element wiring, precedence tables, mutability, and troubleshooting.
 
-Most applications should use one of these patterns:
+Illustrative rewrite direction (not final copy):
+
+| Property | Prefer | Avoid in blurb |
+| --- | --- | --- |
+| `node-seed` | Stable id so elements join the same NMOS Node | `node_config.seed`, session refcounting jargon alone |
+| `transport` | Which data-plane family to use (`mxl` / `udp` / `udp2` / `nvdsudp`) | Full payloader matrix and Mode 3 |
+| `transport-file` | SDP or MXL flow definition text; exclusive with path | `AddSender` / re-publish behaviour |
+| `auto-activate` | Start media without waiting for a controller | `SyncResourceState`, fake-chain swap internals |
+| `source-ip` (receiver) | Optional remote source filter for multicast | `udpsrc` vs `udpsrc2` property name mapping |
+
+---
+
+# Workstream A — GStreamer users
+
+## A1. Examples before the property catalogue
+
+`rust/gst-nmos-rs/README.md` currently opens on **Property Surface**. Move a short **Quick start** (or a prominent link) above it:
+
+- Point at the workspace quick start in `rust/README.md` for build + first pipelines, **or** inline one minimal sender and one minimal receiver (UDP + `auto-activate=true` is the lowest-infra path).
+- Answer immediately: daemon must be running; controller optional when `auto-activate=true`; which `transport` values exist.
+
+Keep `pipeline-examples.md` as the full catalogue.
+
+## A2. Configuration model once, centrally
+
+Before listing properties, document the patterns:
 
 | Pattern | Set initially | Intended use |
-|---|---|---|
-| Controller-managed | identity, transport, caps | Production NMOS system; IS-05 supplies network parameters |
-| Self-starting | identity, caps, endpoint properties, `auto-activate=true` | Development and fixed pipelines |
-| Complete transport file | `transport-file-path` | Existing SDP or MXL flow definition |
-| Programmatic transport file | `transport-file` | Applications constructing SDP or JSON in memory |
-```
+| --- | --- | --- |
+| Controller-managed | identity, transport, caps (as needed) | Production; IS-05 supplies network parameters |
+| Self-starting | identity, caps / endpoints, `auto-activate=true` | Development and fixed pipelines |
+| Complete transport file | `transport-file-path` or `transport-file` | Existing SDP or MXL flow definition |
 
-Also state precedence once, centrally:
+State precedence once:
 
 > Explicit element properties override corresponding values from the transport file. `transport-file` and `transport-file-path` are mutually exclusive.
 
-That would eliminate repeated precedence explanations from many blurbs.
+Remove repeated precedence essays from individual blurbs where the central section covers them.
 
-## 3. Separate “common”, “transport-specific”, and “advanced” properties
+## A3. Reorder property documentation by intent
 
-The current property surface begins with low-frequency Node configuration properties such as `http-port`, `host-name`, `domain`, `registration-url`, and `system-url`, before the user reaches the Sender/Receiver identity and media configuration they are much more likely to need. ([GitHub][2])
+Group Markdown (and Hotdoc intro prose where practical) as:
 
-I would order the documentation around user intent:
+1. Essential — `node-seed`, names, `transport`, `caps`, `auto-activate`
+2. RTP/UDP network endpoints
+3. MXL domain / flow
+4. Identity presentation (`label`, `description`, `group-hint`, receiver caps mode)
+5. Advanced Node/session (`daemon-uri`, `http-port`, host/domain/URLs)
+6. Inner-element overrides (`transport-properties`, `pay-properties`, `depay-properties`)
 
-### Essential
+GObject property registration order need not change solely for docs; Hotdoc follows introspection / cache order. Prefer README section order and Hotdoc **plugin intro** pages for hierarchy; blurbs stay short regardless of order.
 
-* `node-seed`
-* `sender-name` / `receiver-name`
-* `transport`
-* `caps`
-* `auto-activate`
+## A4. Shorten blurbs; move mappings to guides
 
-### RTP/UDP network configuration
+Rewrite constants in `session/mod.rs` (and element-local blurbs) per the principles above. Refresh `rust/docs/gstreamer/plugins/gst_plugins_cache.json` after blurb changes so Hotdoc stays in sync.
 
-* `interface-ip`
-* `destination-ip`
-* `destination-port`
-* `source-ip`
-* `source-port`
-* `multicast-ip`
-* `transport-caps`
+Put IS-05 / SDP / inner-element mapping tables in:
 
-### MXL configuration
+- `rust/gst-nmos-rs/README.md` subsections, and/or
+- Hotdoc markdown under `rust/docs/gstreamer/plugins/nmos/` (preferred for “long form next to the element”).
 
-* `mxl-domain-path`
-* `mxl-domain-id`
-* `mxl-flow-id`
+## A5. Lifecycle, mutability, troubleshooting
 
-### Identity and controller presentation
+Add compact user-facing sections (verify against implementation when writing):
 
-* `label`
-* `description`
-* `group-hint`
-* receiver capabilities mode
+| Transition | User-visible effect |
+| --- | --- |
+| NULL → READY | Read transport file path; connect to daemon; add NMOS resource (as applicable) |
+| READY → PAUSED / activation | Build or swap real data path |
+| READY → NULL | Remove resource; leave Node when last user |
 
-### Advanced Node/session configuration
+Document mutability (“many settings only until READY”) in the guide, not only via `gst-inspect` flags.
 
-* `daemon-uri`
-* `http-port`
-* `host-name`
-* `domain`
-* `registration-url`
-* `system-url`
+Troubleshooting starters: plugin not found, cannot connect to daemon, Node without Sender/Receiver, no media until activation, `nmossrc` caps negotiation, registry discovery, MXL domain/flow, Rivermax prerequisites checklist.
 
-### Inner-element overrides
+## A6. Move contributor-only material
 
-* `transport-properties`
-* `pay-properties`
-* `depay-properties`
+Relocate **Sync Testing** detail from the main gst-nmos-rs README to a testing doc (`tests/README.md` or `doc/testing/…`). Leave a one-line link for contributors.
 
-This ordering should also be reflected in the generated element reference where practical.
+## A7. Hotdoc portal polish
 
-## 4. Make each property blurb answer only four questions
+Portal pages today mostly redirect (C API → Doxygen root, usage → GitHub README). After guides improve, consider short in-portal intros (still examples-first) instead of bare redirects, and add a link to the future gRPC docs from the GStreamer portal and top-level README.
 
-A useful `gst-inspect` blurb should usually answer:
+---
 
-1. What does this configure?
-2. What is the default or unset behaviour?
-3. Which transports or element does it apply to?
-4. What overrides what?
+# Workstream B — C API users
 
-Several current blurbs go considerably beyond that. For example, the receiver `source-ip` description explains the IS-05 field, SSM behaviour, generated SDP, and the different property mappings for `udpsrc2` and `udpsrc`. ([GitHub][3])
+## B1. C quick start before the encyclopaedia
 
-That information is correct and valuable, but the implementation mapping belongs in detailed reference documentation, not necessarily in `gst-inspect`.
+The top-level README **Usage** section currently leads with transport enums and `x-nvnmos-*` extensions. Restructure toward:
 
-I would use a two-layer approach:
+1. **Minimal embed** — create Node, add one Sender or Receiver, run until callback or destroy (point at `nvnmos-example` symbols / steps).
+2. **When to use the C API** vs daemon vs GStreamer (one short paragraph; Ways To Use already frames this).
+3. **Transports and transport files** — keep the existing tables, but after the minimal path.
+4. **Extensions** — retain as reference, not cold open.
+5. **API changes** — keep as appendix / changelog style, not the first reading path.
 
-**Blurb**
+Doxygen already ingests `README.md` + `nvnmos.h`. Prefer README restructuring over inventing a parallel guide, unless the README becomes too long — then split `doc/user/c-api.md` (or similar) and point Doxygen `INPUT` at it.
 
-> Remote source address used for source-specific multicast reception. Empty accepts any source. Applies to `udp`, `udp2`, and `nvdsudp`; ignored for `mxl`.
+## B2. Align C and daemon vocabulary carefully
 
-**Long-form documentation**
+C API docs must not grow daemon/gRPC concepts. Shared ideas (Node seed, caller-chosen resource `name`, transport file, activation callback) should use the same user terms as GStreamer guides where accurate, without mentioning `nvnmosd` RPCs in `nvnmos.h` comments.
 
-> Maps to IS-05 `source_ip`, the SDP `a=source-filter` attribute, and the selected UDP source element’s corresponding source-filter property.
+## B3. Example application as the tutorial spine
 
-The same principle applies to `destination-port`, whose current sink blurb includes the generated SDP location, `udpsink` mapping, transport-file fallback, the canonical port 5004, and the `nmos-cpp` symbolic name. ([GitHub][4])
+Treat `nvnmos-example` output steps as the authoritative walkthrough; ensure the README’s “Running the Example Application” section stays early in the C journey (link from the new quick start).
 
-The `nmos-cpp` implementation name is useful for developers debugging behaviour, but it is not needed in normal element help.
+---
 
-# Property blurb recommendations
+# Workstream C — Daemon users and gRPC API docs
 
-## `node-seed`
+## C1. Operator guide stays Markdown
 
-Current wording is approximately:
+Keep `rust/nvnmosd/README.md` as the operator entry: build/run, UDS, env vars, session GC contract, Node flavours. Lead with a **minimal client sequence** (open session → subscribe activations → add resource → ack loop → close) before the env-var catalogue.
 
-> NvNmos Node seed; sessions sharing this seed share a Node.
+Link out to design docs for lock ordering and history; do not require reading the design record to run the daemon.
 
-That is accurate but assumes users understand both “seed” and “session.” The daemon design explains that this value is the daemon lookup key and deterministically controls the NMOS Node ID. ([GitHub][5])
+## C2. Generated gRPC reference (third documentation product)
 
-Suggested blurb:
+Integrating protobuf HTML into Doxygen or Hotdoc is a poor fit (different object model, separate toolchain, little shared navigation). Prefer a **third generator** publishing beside the existing Pages artifacts, e.g. `public/grpc/` or `public/nvnmosd/`.
 
-> Stable identifier used to derive the NMOS Node ID. Elements using the same value and daemon join the same NMOS Node.
+**Recommended approach (to confirm at implementation time):**
 
-This tells users both why it matters and when values should match.
+| Option | Pros | Cons |
+| --- | --- | --- |
+| **sabledocs** | Built for gRPC + messages; Markdown in comments; static HTML | Extra Python tool in Pages CI |
+| **protoc-gen-doc** | Common, simple HTML/Markdown from comments | Historically weaker gRPC-service presentation unless templated |
+| **Buf / BSR** | Hosted polish | External dependency / org setup; less “in-tree Pages” |
 
-The detailed docs should add:
+Default recommendation: **sabledocs** (or protoc-gen-doc if CI wants a single `protoc` plugin and no Python), fed by `nvnmosd.proto` with `--include_source_info`. The proto comments are already the source of truth — generation should not require rewriting them into a second manual.
 
-* It need not necessarily be written in UUID syntax, if that is true.
-* It should remain stable across restarts when stable NMOS resource identity is desired.
-* Sender and Receiver names must be unique per side within that Node.
+Pages job sketch:
 
-## `transport`
+1. Existing Doxygen → `public/`
+2. Existing Hotdoc → `public/gstreamer/`
+3. New: generate gRPC HTML → `public/grpc/` (name TBD)
+4. Cross-link from top-level README, `rust/nvnmosd/README.md`, and optionally Hotdoc portal / Doxygen header
 
-The current description is thorough but too dense for one enum blurb, listing internal element chains, fallback behaviour, Rivermax capabilities, hardware requirements, and Mode 3. ([GitHub][2])
+## C3. What the gRPC docs should emphasise
 
-Suggested blurb:
+- Session lifecycle and the subscribe-before-add rule (already in proto + operator README).
+- Persistent vs session-refcounted Nodes.
+- `name` vs NMOS UUID (`resource_id`) vs daemon `*_handle`.
+- Activation stream + `AckActivation`.
+- Error / precondition expectations that clients hit first.
 
-> Data-plane implementation: `mxl` for MXL shared memory, `udp` for gst-plugins-good RTP/UDP, `udp2` for gst-plugins-rs RTP/UDP where available, or `nvdsudp` for DeepStream/Rivermax ST 2110.
+Hand-written “why” stays in the operator README; generated pages are the RPC/message reference.
 
-Move these details to the transport section:
+---
 
-* precise payloader/depayloader selection;
-* per-element fallback in `udp2`;
-* Mode 3;
-* ConnectX and Rivermax prerequisites.
+# Cross-cutting
 
-Also document prominently that the enum currently defaults to `mxl`, as shown by the property declaration. ([GitHub][3]) This default could surprise users without MXL installed. Consider whether `udp` would be a friendlier default, or whether forcing the user to set `transport` explicitly would be safer.
+## Discoverability
 
-## `transport-file`
+Expand the top-level Ways To Use table into an explicit task map:
 
-Suggested blurb:
+| Goal | Start here |
+| --- | --- |
+| Embed NMOS in a C/C++ application | C API quick start (README) + Doxygen |
+| Run NMOS out of process | `nvnmosd` README + gRPC reference |
+| Add NMOS to a GStreamer pipeline | `rust/README.md` Quick Start → gst-nmos-rs guide → Hotdoc |
+| Run in Docker / Kubernetes | container sections |
+| Understand implementation decisions | `doc/designs/` |
 
-> Literal SDP (`udp`, `udp2`, `nvdsudp`) or MXL flow-definition JSON (`mxl`). Mutually exclusive with `transport-file-path`. Explicit element properties override corresponding values in the file.
+Add a one-line audience/status header to substantial Markdown guides and to design docs (as on this file).
 
-Avoid discussing `AddSender` and `AddReceiver` in the blurb. Those are daemon implementation details.
+## Design plans vs supported behaviour
 
-## `transport-file-path`
+Files named `*-plan.md` linked from user READMEs confuse “what works today.” Prefer:
 
-Suggested blurb:
-
-> Path to an SDP or MXL flow-definition file, read when the element changes from NULL to READY. Mutually exclusive with `transport-file`.
-
-The NULL-to-READY timing is important because it tells the user when file changes are observed. The explanation about the `gst-launch` parser belongs in the README, perhaps as a note:
-
-> Prefer this property in `gst-launch-1.0`, because literal multiline SDP is awkward to quote.
-
-## `caps`
-
-The nickname “Essence caps” is good. ([GitHub][3])
-
-The blurb should distinguish its two roles:
-
-> GStreamer caps describing the unpacketized media. Used to advertise or constrain the NMOS resource and, when no complete transport file is supplied, to synthesize its transport description.
-
-It should also answer:
-
-* Is it required for both elements when a complete file is supplied?
-* For `nmossink`, can it be inferred from incoming negotiated caps?
-* For `nmossrc`, must it be set before activation to expose a useful source pad template or placeholder caps?
-* What happens if controller-supplied SDP disagrees with it?
-
-The current source code warns that downstream negotiation may fail until either `caps` or a transport file is set. ([GitHub][3]) That consequence should be stated directly in the user documentation, not merely logged.
-
-## `auto-activate`
-
-This property needs especially clear language because it changes the operating model.
-
-Suggested blurb:
-
-> Activate immediately from the configured transport parameters instead of waiting for an IS-05 controller. Intended mainly for development, fixed pipelines, and tests.
-
-The README should explain whether the resource is still exposed through IS-05 afterward and whether subsequent controller activations replace the startup configuration.
-
-## `mxl-domain-path`
-
-The current blurbs contain useful but highly detailed behaviour around `domain_def.json`, cross-checking IDs, application-resolved tags, and the inner `mxlsrc` or `mxlsink` property. ([GitHub][3])
-
-Suggested blurb:
-
-> Local path to the MXL domain. If it contains `domain_def.json`, the domain ID is loaded from that file and checked against `mxl-domain-id` when both are set.
-
-The remaining data-plane wiring details belong in the MXL section.
-
-## `mxl-flow-id`
-
-The source and sink descriptions are asymmetrical. The source version gives a detailed explanation of controller activation and development use; the sink version simply describes the inner flow target and precedence. ([GitHub][3])
-
-Use parallel language:
-
-For `nmossink`:
-
-> MXL flow UUID produced by this Sender. Overrides the flow ID in the transport file.
-
-For `nmossrc`:
-
-> MXL flow UUID consumed by this Receiver. Normally supplied by IS-05; set it with `auto-activate=true` for a fixed or development pipeline. Overrides the flow ID in the transport file.
-
-## Endpoint IP and port properties
-
-These should use consistently user-oriented terminology.
-
-For a Sender:
-
-* `interface-ip`: local interface from which packets are sent;
-* `source-ip`: local source address advertised in IS-05/SDP, if distinct;
-* `destination-ip`: remote unicast address or multicast group;
-* `destination-port`: remote RTP port.
-
-For a Receiver:
-
-* `interface-ip`: local interface on which packets are received;
-* `source-ip`: optional remote source filter for SSM;
-* `multicast-ip` or `destination-ip`: multicast group to join;
-* `destination-port`: local RTP listen port.
-
-Avoid starting each blurb with:
-
-> IS-05 sender transport_params `destination_ip`...
-
-That is specification-first rather than task-first. Put the IS-05 field at the end:
-
-> Corresponds to IS-05 `destination_ip`.
-
-## `transport-properties`, `pay-properties`, and `depay-properties`
-
-These are powerful escape hatches and need:
-
-* one concrete syntax example;
-* a warning that property names depend on the selected inner element;
-* the point at which they are applied;
-* behaviour for unknown properties;
-* whether automatically calculated values override these fields or vice versa.
-
-The README gives one `transport-properties` example for `gpu-id` and `sync`, but only in the DeepStream section. ([GitHub][2]) Put a generic example adjacent to the property:
-
-```text
-transport-properties="properties,buffer-size=4194304"
-pay-properties="properties,pt=96"
-```
-
-Also state whether the structure name must literally be `properties`.
-
-# Markdown structure and discoverability
-
-## 5. Give every README a declared audience
-
-There are several documentation layers:
-
-* repository README;
-* Rust workspace README;
-* daemon README;
-* GStreamer README;
-* Docker READMEs;
-* design documents;
-* pipeline examples.
-
-The repository links these reasonably well, but some documents still mix user guide, implementation reference, test specification, and design record. The Rust README, for example, contains detailed discussion of every RPC exercised by an example, internal index keys, activation acknowledgement, and HTTP API construction. ([GitHub][6])
-
-Add a small header to each substantial document:
-
-```markdown
-**Audience:** users building GStreamer NMOS pipelines  
-**Status:** functional preview; interfaces may change  
-**Start here if:** you want to run `nmossrc` or `nmossink`  
-```
-
-For design documents:
-
-```markdown
-**Audience:** contributors and maintainers  
-**Not a user guide:** see ...
-```
-
-That prevents users from treating a design plan as current operational documentation.
-
-## 6. Create a single “Which guide do I need?” page or table
-
-The top-level “Ways To Use NvNmos” is already a good foundation. ([GitHub][1]) Expand it slightly into a task-oriented table:
-
-| Goal                                    | Start here                |
-| --------------------------------------- | ------------------------- |
-| Embed NMOS in a C/C++ application       | C API quick start         |
-| Run NMOS out of process                 | `nvnmosd` user guide      |
-| Add NMOS Senders/Receivers to GStreamer | `gst-nmos-rs` quick start |
-| Run in Docker or Kubernetes             | container guide           |
-| Understand implementation decisions     | design documents          |
-| Run an end-to-end controller demo       | interactive demo          |
-
-Users should not need to understand the repository’s C/Rust division before selecting a guide.
-
-## 7. Move test-suite detail out of the main GStreamer guide
-
-The `gst-nmos-rs` README contains a substantial “Sync Testing” section describing the test media, caption alignment, ST 2038 extraction and combination, test names, transport-specific formats, skip conditions, and plugin versions. ([GitHub][7])
-
-This is valuable contributor documentation, but it interrupts the user journey.
-
-Move it to:
-
-* `tests/README.md`, or
-* `CONTRIBUTING.md`, or
-* `doc/testing/gst-nmos-rs.md`.
-
-Leave a short link in the main README:
-
-> For end-to-end A/V and ancillary-data integration tests, see the gst-nmos-rs testing guide.
-
-## 8. Separate supported behaviour from design plans
-
-The main README links to files named `*-plan.md` for ST 2022-7 and `nvdsudp`. ([GitHub][2]) A plan may contain obsolete assumptions after implementation lands.
-
-Either:
-
-* rename completed plans to `design.md` or `implementation-notes.md`;
-* add a prominent status heading inside them;
-* or keep the plan but link users to a concise current-behaviour document first.
-
-The user-facing README should be authoritative about supported behaviour. Design records should explain why it works that way.
-
-# Missing user-oriented material
-
-## 9. Add a lifecycle section
-
-Users need a simple explanation of what happens at each GStreamer state transition:
-
-* when the daemon connection opens;
-* when the NMOS Node is created or joined;
-* when Sender/Receiver resources are registered;
-* when transport files are read;
-* when inner elements are created;
-* when activation can occur;
-* what happens on PAUSED/PLAYING;
-* when resources and Nodes are removed.
-
-The property declarations reveal that many sink properties are mutable only up to READY. ([GitHub][4]) That is a crucial practical constraint, but users should not have to infer it from `gst-inspect` flags.
-
-A compact table would suffice:
-
-| Transition       | Action                                           |
-| ---------------- | ------------------------------------------------ |
-| NULL → READY     | Read files, connect to daemon, register resource |
-| READY → PAUSED   | Construct or prepare active data path            |
-| IS-05 activation | Reconfigure and enable data path                 |
-| READY → NULL     | Remove resource and close session                |
-
-Obviously, adjust this to match the exact implementation.
-
-## 10. Add a property mutability column
-
-The current README table has Property, Type, Required, and Notes. ([GitHub][2]) Add:
-
-* Default
-* Applies to
-* Mutable until
-
-For example:
-
-| Property         | Type   | Default | Applies to | Mutable until |
-| ---------------- | ------ | ------: | ---------- | ------------- |
-| `transport`      | enum   |   `mxl` | both       | READY         |
-| `destination-ip` | string |   empty | RTP Sender | READY         |
-| `auto-activate`  | bool   |   false | both       | READY         |
-
-This is much more useful than “required?” because many properties are conditionally required depending on the configuration pattern.
-
-Replace “Required?” with **When needed**.
-
-For example:
-
-* `node-seed`: always;
-* `caps`: unless fully described by transport file, subject to source/sink inference;
-* `destination-ip`: self-activated RTP Sender;
-* `mxl-domain-path`: MXL data path;
-* `transport-file`: one configuration option, not inherently required.
-
-## 11. Add a troubleshooting section based on likely first failures
-
-The most useful entries would be:
-
-### Plugin not found
-
-Commands:
-
-```bash
-gst-inspect-1.0 nmos
-gst-inspect-1.0 nmossink
-echo "$GST_PLUGIN_PATH"
-```
-
-### Cannot connect to daemon
-
-Explain expected Unix socket and `daemon-uri`.
-
-### Node appears but Sender/Receiver does not
-
-Explain names, state transition, daemon logs, and transport configuration.
-
-### Resource exists but no packets flow
-
-Explain `auto-activate` versus IS-05 activation.
-
-### `nmossrc` fails caps negotiation
-
-State that it needs `caps`, a usable transport file, or activation-provided media information. This matches the existing source warning. ([GitHub][3])
-
-### Registry does not discover the Node
-
-Explain DNS-SD/mDNS, `domain=local`, `registration-url`, host-name resolution, and container networking.
-
-### MXL starts but cannot find a flow/domain
-
-Explain domain mount, `domain_def.json`, UUID matching, and shared-host requirements.
-
-### Rivermax path fails
-
-The current prerequisite material—DeepStream, Rivermax SDK, ConnectX-5+, `CAP_NET_RAW`, and plugin/library paths—is useful and should become a checklist rather than prose. ([GitHub][2])
-
-# Smaller consistency improvements
+- status heading inside the plan, and/or
+- user README links only to a short “current behaviour” note, with the plan as further reading.
 
 ## Terminology
 
-Choose and apply consistently:
+Use consistently across user-facing docs:
 
-* **Node**, **Sender**, and **Receiver** when referring to NMOS resources;
-* lowercase “element” and “pipeline” for GStreamer;
-* “transport file” as the generic term;
-* “SDP” and “MXL flow definition” for specific representations;
-* “data plane” rather than alternating between “data path” and “data plane,” unless the distinction is intentional;
-* “ID” rather than “id” in prose and nicknames: “MXL domain ID,” “MXL flow ID.”
+- **Node**, **Sender**, **Receiver** for NMOS resources
+- lowercase **element** / **pipeline** for GStreamer
+- **transport file** as the generic term; **SDP** / **MXL flow definition** when specific
+- **data plane** (pick one; avoid alternating with “data path” unless distinguishing intentionally)
+- **ID** in prose (“MXL domain ID”)
+- Explain **name** vs **label** vs **description** once (programmatic resource name vs controller-facing text)
+- Prefer “configuration-dependent” over unexplained “route-dependent”
+- Reserve **registration** for NMOS Registry (IS-04), not for adding resources to the Node
 
-## Explain `name`, `label`, and `description` together
-
-This is a common source of confusion:
-
-* `sender-name` / `receiver-name` is the stable programmatic resource name used internally and in activation routing;
-* `label` is user-facing controller text;
-* `description` is longer user-facing text.
-
-The design notes show that name is operationally significant to the daemon’s resource lookup. ([GitHub][5]) Put this distinction in one visible callout.
-
-## Define “route-dependent”
-
-The current table uses “route-dependent” under Required. ([GitHub][2]) That is not immediately clear terminology for users. Prefer:
-
-* “configuration-dependent,”
-* “required for this configuration pattern,” or
-* a direct condition such as “required unless caps and endpoint properties are supplied.”
-
-## Avoid back-end RPC names in normal user docs
-
-Terms such as `OpenSession`, `OpenSessionResponse`, `AddSender`, and `AddReceiver` help daemon-client developers, but GStreamer users mostly need observed behaviour. The existing `http-port` and transport-file descriptions expose these RPCs. ([GitHub][2])
-
-Move that detail to the daemon API reference and say, for example:
-
-> Only the first element that creates a Node controls this value; later elements joining the same Node do not change it.
-
-That communicates the behaviour directly.
+---
 
 # Suggested priority order
 
-I would implement the documentation changes in this order:
+Ship value in this order (can be separate PRs):
 
-1. **Add a minimal Quick start before the property table.**
-2. **Explain the four configuration patterns and precedence rules.**
-3. **Reorganize properties into essential, transport-specific, and advanced groups.**
-4. **Shorten `gst-inspect` blurbs and move implementation mappings into generated long-form reference.**
-5. **Document lifecycle, mutability, and activation behaviour.**
-6. **Add troubleshooting for daemon connection, activation, caps negotiation, discovery, MXL, and Rivermax.**
-7. **Move integration-test detail out of the primary user guide.**
-8. **Mark design plans clearly and rationalize terminology.**
+1. **GStreamer blurb pass** in `session/mod.rs` — immediate `gst-inspect` / Hotdoc improvement; refresh plugin cache.
+2. **gst-nmos-rs README** — Quick start + configuration patterns above the property catalogue; trim RPC names from Notes.
+3. **Top-level C Usage reshape** — minimal embed before extensions / API-change history.
+4. **nvnmosd README** — minimal client sequence first; keep env/RPC summary.
+5. **gRPC Pages product** — wire sabledocs (or chosen tool) into `pages.yml`; cross-link.
+6. **Lifecycle / mutability / troubleshooting** on the GStreamer guide.
+7. **Move Sync Testing** and other contributor sections out of the primary user path.
+8. **Design-plan status** / link hygiene and terminology sweep.
 
-The first four would produce the largest immediate improvement. The current documentation already contains most of the required facts; it mainly needs to guide users through them in the order they encounter problems, rather than in the order the implementation exposes configuration fields.
+Items 1–4 are mostly editorial and do not require a new generator. Item 5 is the main tooling addition.
 
-[1]: https://github.com/NVIDIA/nvnmos "GitHub - NVIDIA/nvnmos: NVIDIA NMOS (Networked Media Open Specifications) Library · GitHub"
-[2]: https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/README.md "nvnmos/rust/gst-nmos-rs/README.md at main · NVIDIA/nvnmos · GitHub"
-[3]: https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/src/nmossrc/imp.rs "nvnmos/rust/gst-nmos-rs/src/nmossrc/imp.rs at main · NVIDIA/nvnmos · GitHub"
-[4]: https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/src/nmossink/imp.rs "nvnmos/rust/gst-nmos-rs/src/nmossink/imp.rs at main · NVIDIA/nvnmos · GitHub"
-[5]: https://github.com/NVIDIA/nvnmos/blob/main/doc/designs/nvnmosd/README.md?utm_source=chatgpt.com "nvnmos/doc/designs/nvnmosd/README.md at main - GitHub"
-[6]: https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md?utm_source=chatgpt.com "nvnmos/rust/README.md at main · NVIDIA/nvnmos · GitHub"
-[7]: https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/README.md?utm_source=chatgpt.com "nvnmos/rust/gst-nmos-rs/README.md at main - GitHub"
+## Success criteria
+
+- A new GStreamer user can run sender + receiver from docs without reading property tables first.
+- A new C embedder can create a Node and one resource from docs without first reading extension attribute grammar.
+- A new daemon client can implement the happy-path RPC sequence from the operator guide + generated reference without reading the design record.
+- `gst-inspect-1.0 nmossink` blurbs describe outcomes; daemon/IS-05 mapping detail appears only in guides or gRPC docs.
+)
