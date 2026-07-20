@@ -28,16 +28,19 @@
  *
  * Defines the NVIDIA NMOS utility library (NvNmos) API.
  *
- * The NvNmos utility library provides the APIs to create, destroy and
- * internally manage an <a href="https://specs.amwa.tv/nmos/">NMOS</a> Node for a Media Node application.
+ * The NvNmos library provides APIs to create, destroy and internally
+ * manage an <a href="https://specs.amwa.tv/nmos/">NMOS</a> Node for a Media Node application.
+ *
+ * It is intended to be integrated with data plane libraries for ST 2110
+ * and/or MXL, such as <a href="https://developer.nvidia.com/networking/rivermax">NVIDIA Rivermax</a>
+ * or the <a href="https://github.com/dmf-mxl/mxl">MXL SDK</a>.
  *
  * The library can automatically discover and register with an NMOS Registry
  * on the network using the <a href="https://specs.amwa.tv/is-04/">AMWA IS-04</a> Registration API.
  *
  * The library provides callbacks for NMOS events such as <a href="https://specs.amwa.tv/is-05/">AMWA IS-05</a>
  * Connection API requests from an NMOS Controller. These callbacks can be
- * used to update running DeepStream pipelines with new transport parameters,
- * for example.
+ * used to update a running data plane with new transport parameters, for example.
  *
  * NvNmos currently supports Senders and Receivers for video, audio, and
  * ancillary data flows over RTP/UDP (i.e., SMPTE ST 2110-20, -22, -30,

@@ -43,11 +43,11 @@ sudo apt-get install --no-install-recommends -y \
 
 CMake must be **3.17+**. Ubuntu 24.04's `cmake` package is sufficient; on older
 distros use `pip install cmake~=3.17` inside the venv below (see
-[`README.md`](../README.md#cmake)).
+[`building.md`](../doc/user/building.md#cmake)).
 
 **Conan** — resolves and builds C++ dependencies for `libnvnmos`. Use a
 Python venv at the **repository root** so Conan stays off the system Python
-([`README.md`](../README.md#python-virtual-environment)):
+([`building.md`](../doc/user/building.md#python-virtual-environment)):
 
 ```sh
 # repository root
@@ -65,8 +65,8 @@ Keep the venv activated while running `conan install` in the next section.
 
 ### Build `libnvnmos.so`
 
-From the **repository root** (full detail in the top-level
-[`README.md`](../README.md#building-the-nvnmos-library)):
+From the **repository root** (full detail in
+[`building.md`](../doc/user/building.md#building-the-nvnmos-library)):
 
 ```sh
 conan install src \

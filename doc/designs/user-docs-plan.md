@@ -331,32 +331,24 @@ Add links from the Hotdoc portal to the C API and future gRPC docs.
 
 ## B1. Decide the Doxygen document boundaries
 
-Do not assume the top-level README should remain one document. It currently
-acts as:
+The documentation topology is agreed as:
 
-- Repository landing page
-- Doxygen main page
-- C API user guide
-- Build and runtime guide
-- Compatibility / API-change record
-- Container entry point
-
-A likely split is:
-
-| Document | Purpose | Publish in Doxygen? |
+| Document | Purpose | Publication owner |
 | --- | --- | --- |
-| Top-level `README.md` | Project landing page and choice of C / daemon / GStreamer entry point | Yes, as main page |
-| C API quick start / user guide | Minimal embed, lifecycle, transports, callbacks, troubleshooting | Yes |
-| Build and installation guide | Prerequisites, Conan/CMake, platform notes | Yes, if part of the supported C-library journey |
-| Transport-file extensions reference | SDP and MXL extension grammar | Yes |
-| API changes / migration notes | Version compatibility | Yes if maintained as current guidance; otherwise release notes |
-| Daemon guide | Running and using `nvnmosd` | No; publish with daemon/gRPC docs |
-| GStreamer guide | Pipelines and element configuration | No; publish with Hotdoc |
-| Contributor / design material | Development and rationale | No |
+| Top-level `README.md` | Project landing page and choice of C / daemon / GStreamer entry point | Doxygen main page and GitHub repository landing page |
+| `doc/user/c-api-guide.md` | C API usage, example application, transports, callbacks, and troubleshooting | Doxygen |
+| `doc/user/building.md` | Prerequisites, Conan/CMake, local nmos-cpp checkout, and runtime requirements | Doxygen |
+| `doc/user/transport-files.md` | SDP and MXL extension grammar and minimal unconstrained Receiver transport files | Doxygen |
+| `doc/user/migration.md` | API changes and current migration guidance | Doxygen |
+| `rust/nvnmosd/README.md` | Running and using `nvnmosd` | Daemon/gRPC documentation product; GitHub until that product is published |
+| `rust/gst-nmos-rs/README.md` | Pipelines and element configuration | Hotdoc/GStreamer documentation product; GitHub until the guide is published there |
+| `docker/**/README.md` | Container build and runtime guidance | GitHub container documentation |
+| `doc/designs/**` | Contributor plans, design records, and rationale | GitHub; not user-reference input |
 
-Confirm the split against Doxygen navigation before moving files. Add selected
-Markdown files to `Doxyfile` `INPUT`. Keep the top-level README short and link
-to the generated pages.
+The top-level README remains short and links to the Doxygen-published C pages
+and to the separately owned daemon, GStreamer, and container guides. The shared
+concepts guide is the next work item; do not create it as part of this
+mechanical split.
 
 ## B2. Link rules for the dual-rendered README
 

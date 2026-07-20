@@ -324,7 +324,7 @@ Both endpoints are at IS-04 by the time the pipeline is up, and there is no Catc
 
 #### Constrained vs unconstrained Receiver Caps (`receiver-caps-mode`)
 
-Hand-authored minimal configuring transport files for unconstrained Receivers (SDP and MXL flow_def) are documented in the root [`README.md`](../../../README.md#minimal-transport-files-for-unconstrained-receivers).
+Hand-authored minimal configuring transport files for unconstrained Receivers (SDP and MXL flow_def) are documented in [`transport-files.md`](../../user/transport-files.md#minimal-transport-files-for-unconstrained-receivers).
 
 In all three modes, the GStreamer pad caps are fixed at the format derived from the transport file (or declared via `caps`). The `receiver-caps-mode` property only controls what's advertised in IS-04:
 

@@ -12,6 +12,7 @@ on:
       - '.github/workflows/pages.yml'
       - 'Doxyfile'
       - 'README.md'
+      - 'doc/user/**'
       - 'src/**'
       - 'rust/docs/**'
       - 'rust/gst-nmos-rs/**'
