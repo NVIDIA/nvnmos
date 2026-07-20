@@ -22,16 +22,20 @@ The first commit of this file captured a GStreamer-centric editorial review. Thi
 ## Goals
 
 1. **Examples first** — every audience gets a minimal working path before catalogues, enums, and edge cases.
-2. **“Why” and “how” live in guides** — READMEs and Hotdoc/Doxygen prose explain configuration models, lifecycle, and trade-offs. Property blurbs and short API summaries do not.
-3. **Blurbs describe outcomes** — for `gst-nmos-rs`, say what the property achieves for the pipeline / NMOS resource. Do not name daemon RPCs, struct fields, or detailed IS-05/SDP mappings in the blurb. It is enough that the element participates in NMOS; exact field mappings belong in long-form docs.
-4. **gRPC API reference** — publish generated docs from `nvnmosd.proto` as a third documentation product (not folded into Doxygen or Hotdoc).
+2. **“Why” and “how” live in guides** — READMEs and Hotdoc/Doxygen prose explain configuration models, lifecycle, and trade-offs. Property blurbs and proto comments do not.
+3. **Reference text describes outcomes / contracts** — GStreamer blurbs say what a property achieves; proto comments state the RPC/field contract. Neither should re-tell the guide’s narrative.
+4. **No duplication within a layer** — state a policy or mapping once per layer; other entries in that layer link or stay silent. Across layers, a short pointer is fine; copying essays is not.
+5. **gRPC API reference** — publish generated docs from a slimmed `nvnmosd.proto` as a third documentation product (not folded into Doxygen or Hotdoc).
+6. **Readable prose** — prefer short sentences, lists, and focused sections. Avoid paragraphs made from several clauses.
+7. **Publish guides with their reference** — where practical, include each audience's usage guide in the same generated site as its API reference. Do not maintain a copied version for the generator.
 
 ## Non-goals
 
 - Merging C, GStreamer, and gRPC into one documentation generator or one theme.
 - Rewriting design records as user guides (keep them contributor-facing; mark status clearly).
-- Changing runtime defaults (e.g. `transport=mxl`) in this docs work — call out surprises in guides; decide defaults separately if needed.
+- Changing runtime behaviour other than the explicitly agreed `transport` default below.
 - Duplicating the full property catalogue in three places — Hotdoc/`gst-inspect` remain authoritative for element properties; Markdown guides summarise patterns and link out.
+- Keeping proto comments as a second operator manual — generation should amplify a tight contract, not paste repeated GC/lifecycle essays under every RPC.
 
 ## Current documentation map
 
@@ -47,11 +51,20 @@ The first commit of this file captured a GStreamer-centric editorial review. Thi
 
 CI: `.github/workflows/pages.yml` builds Doxygen then Hotdoc into `public/` and `/public/gstreamer/`.
 
+The top-level README has two render contexts:
+
+- GitHub renders it at the repository root.
+- Doxygen uses it as the generated main page.
+
+Relative links only work in both contexts when their targets are also available
+at the corresponding generated path. Links from the README to repository-only
+files must therefore use absolute GitHub URLs.
+
 Important existing assets to build on rather than replace:
 
 - Top-level **Ways To Use NvNmos** already names the three models.
 - **`rust/README.md` Quick Start** already runs `nvnmosd` + `nmossink`/`nmossrc` with `transport=udp` and `auto-activate=true`.
-- **`nvnmosd.proto`** already has solid service/RPC/message comments suitable for generation.
+- **`nvnmosd.proto`** has detailed comments that are a good *starting* source for generation, but they currently duplicate operator-guide narrative (session GC, Node flavours, `name` rules) across service banners and several RPCs — slim before or with publishing.
 - Shared blurb strings live in `rust/gst-nmos-rs/src/session/mod.rs` (and a few element-local blurbs) — that is the rewrite surface for `gst-inspect` / Hotdoc property text.
 
 ---
@@ -64,8 +77,37 @@ Important existing assets to build on rather than replace:
 | --- | --- | --- |
 | Quick start | How do I see something work in five minutes? | Minimal pipeline, minimal C create/add/destroy, `cargo run -p nvnmosd` |
 | User guide | Why these knobs? Which pattern do I pick? | Configuration patterns, lifecycle, activation model, troubleshooting |
-| Generated reference | Exact surface | Doxygen symbols, Hotdoc property tables, gRPC message/RPC pages |
+| Generated / inspectable reference | Exact surface next to the symbol | Doxygen, Hotdoc/`gst-inspect` blurbs, proto comments → gRPC HTML |
 | Design record | Why the implementation looks like this | `doc/designs/nvnmosd/`, plans, audits |
+
+### No duplication within a layer
+
+Within one layer, prefer a single canonical statement:
+
+| Layer | State once | Do not repeat on every entry |
+| --- | --- | --- |
+| GStreamer guide | Configuration patterns, precedence, lifecycle | Same essay inside each property Note |
+| GStreamer blurbs | Outcome + default + applicability | Precedence model, RPC names, full IS-05/SDP maps |
+| Daemon operator README | Happy-path sequence, GC *why* and env defaults, Node flavours | Full per-RPC error catalogue (link to generated ref) |
+| Proto comments | Conventions (`_id` vs `_handle`), one GC/subscribe policy block | Same GC paragraph on `CloseSession`, `SubscribeActivations`, and resource banners |
+| C guide / `nvnmos.h` | Embed walkthrough; extension grammar as reference | Daemon concepts in the C header |
+
+Across layers, a one-line cross-reference is expected (README → proto pages;
+blurb → guide section). Copied multi-paragraph explanations are not.
+
+### Writing style
+
+Apply these rules to user guides and generated-reference prose:
+
+- Prefer one idea per sentence.
+- Prefer bullets for prerequisites, choices, procedures, and consequences.
+- Break long paragraphs into short sections with descriptive headings.
+- Avoid sentences that encode a list as several comma-separated clauses.
+- Put caveats next to the affected step.
+- Use tables only for comparisons. Use bullets for simple lists.
+
+The editing pass should reduce density, not merely move the same dense prose
+between files.
 
 ## Property / field blurb rules (`gst-nmos-rs`)
 
@@ -97,6 +139,30 @@ Illustrative rewrite direction (not final copy):
 | `auto-activate` | Start media without waiting for a controller | `SyncResourceState`, fake-chain swap internals |
 | `source-ip` (receiver) | Optional remote source filter for multicast | `udpsrc` vs `udpsrc2` property name mapping |
 
+## Proto comment rules (`nvnmosd.proto`)
+
+Proto comments are the gRPC analogue of property blurbs. They feed generated
+reference pages and are read next to the symbol.
+
+A service-, RPC-, or field-level comment should usually answer only:
+
+1. What does this call or field do in the contract?
+2. What preconditions are unique to this symbol?
+3. Which notable errors can this symbol return?
+4. Is an identifier opaque or an NMOS UUID?
+
+A proto comment should **not**:
+
+- Re-explain session GC policy, Node flavour trade-offs, or the full client
+  sequence.
+- Restate service-level conventions on every message.
+- Duplicate transport-file grammar on every related RPC or field.
+- Refer to GStreamer elements or their design documents.
+
+Put handles versus IDs and the subscribe / GC policy in one service-level
+conventions block. Per-RPC comments should add only what differs. The operator
+README keeps the narrative and environment-variable table.
+
 ---
 
 # Workstream A — GStreamer users
@@ -126,7 +192,24 @@ State precedence once:
 
 Remove repeated precedence essays from individual blurbs where the central section covers them.
 
-## A3. Reorder property documentation by intent
+## A3. Default to `transport=udp`
+
+Change the `nmossink` and `nmossrc` `transport` property default from `mxl` to
+`udp`.
+
+- `udp` has the lowest setup cost and matches the examples-first quick start.
+- It uses the broadly available gst-plugins-good elements.
+- It does not require MXL, gst-plugins-rs, DeepStream, or Rivermax.
+- It aligns with the C API, where zero-initialised configurations default to
+  `NVNMOS_TRANSPORT_RTP`.
+- A required sentinel would make every pipeline spell out the property without
+  adding useful safety.
+
+Call this out as a default change. MXL users must set `transport=mxl`
+explicitly. Update both the Rust `Default` implementation and the
+`ParamSpecEnum` defaults so runtime state, `gst-inspect`, and Hotdoc agree.
+
+## A4. Reorder property documentation by intent
 
 Group Markdown (and Hotdoc intro prose where practical) as:
 
@@ -139,7 +222,7 @@ Group Markdown (and Hotdoc intro prose where practical) as:
 
 GObject property registration order need not change solely for docs; Hotdoc follows introspection / cache order. Prefer README section order and Hotdoc **plugin intro** pages for hierarchy; blurbs stay short regardless of order.
 
-## A4. Shorten blurbs; move mappings to guides
+## A5. Shorten blurbs; move mappings to guides
 
 Rewrite constants in `session/mod.rs` (and element-local blurbs) per the principles above. Refresh `rust/docs/gstreamer/plugins/gst_plugins_cache.json` after blurb changes so Hotdoc stays in sync.
 
@@ -148,7 +231,7 @@ Put IS-05 / SDP / inner-element mapping tables in:
 - `rust/gst-nmos-rs/README.md` subsections, and/or
 - Hotdoc markdown under `rust/docs/gstreamer/plugins/nmos/` (preferred for “long form next to the element”).
 
-## A5. Lifecycle, mutability, troubleshooting
+## A6. Lifecycle, mutability, troubleshooting
 
 Add compact user-facing sections (verify against implementation when writing):
 
@@ -162,35 +245,86 @@ Document mutability (“many settings only until READY”) in the guide, not onl
 
 Troubleshooting starters: plugin not found, cannot connect to daemon, Node without Sender/Receiver, no media until activation, `nmossrc` caps negotiation, registry discovery, MXL domain/flow, Rivermax prerequisites checklist.
 
-## A6. Move contributor-only material
+## A7. Move contributor-only material
 
 Relocate **Sync Testing** detail from the main gst-nmos-rs README to a testing doc (`tests/README.md` or `doc/testing/…`). Leave a one-line link for contributors.
 
-## A7. Hotdoc portal polish
+## A8. Publish the GStreamer usage guide with Hotdoc
 
-Portal pages today mostly redirect (C API → Doxygen root, usage → GitHub README). After guides improve, consider short in-portal intros (still examples-first) instead of bare redirects, and add a link to the future gRPC docs from the GStreamer portal and top-level README.
+The Hotdoc portal currently redirects its usage page to the GitHub README.
+Decide how to publish the improved usage guide inside Hotdoc instead:
+
+- Prefer one Markdown source consumed by Hotdoc and readable on GitHub.
+- Keep `rust/gst-nmos-rs/README.md` as a short repository entry page if Hotdoc
+  needs the full guide elsewhere.
+- Do not copy the same guide into a Hotdoc-only file.
+- Keep generated property tables in Hotdoc. The guide should link to them.
+
+Add links from the Hotdoc portal to the C API and future gRPC docs.
 
 ---
 
 # Workstream B — C API users
 
-## B1. C quick start before the encyclopaedia
+## B1. Decide the Doxygen document boundaries
 
-The top-level README **Usage** section currently leads with transport enums and `x-nvnmos-*` extensions. Restructure toward:
+Do not assume the top-level README should remain one document. It currently
+acts as:
 
-1. **Minimal embed** — create Node, add one Sender or Receiver, run until callback or destroy (point at `nvnmos-example` symbols / steps).
-2. **When to use the C API** vs daemon vs GStreamer (one short paragraph; Ways To Use already frames this).
-3. **Transports and transport files** — keep the existing tables, but after the minimal path.
-4. **Extensions** — retain as reference, not cold open.
-5. **API changes** — keep as appendix / changelog style, not the first reading path.
+- Repository landing page
+- Doxygen main page
+- C API user guide
+- Build and runtime guide
+- Compatibility / API-change record
+- Container entry point
 
-Doxygen already ingests `README.md` + `nvnmos.h`. Prefer README restructuring over inventing a parallel guide, unless the README becomes too long — then split `doc/user/c-api.md` (or similar) and point Doxygen `INPUT` at it.
+A likely split is:
 
-## B2. Align C and daemon vocabulary carefully
+| Document | Purpose | Publish in Doxygen? |
+| --- | --- | --- |
+| Top-level `README.md` | Project landing page and choice of C / daemon / GStreamer entry point | Yes, as main page |
+| C API quick start / user guide | Minimal embed, lifecycle, transports, callbacks, troubleshooting | Yes |
+| Build and installation guide | Prerequisites, Conan/CMake, platform notes | Yes, if part of the supported C-library journey |
+| Transport-file extensions reference | SDP and MXL extension grammar | Yes |
+| API changes / migration notes | Version compatibility | Yes if maintained as current guidance; otherwise release notes |
+| Daemon guide | Running and using `nvnmosd` | No; publish with daemon/gRPC docs |
+| GStreamer guide | Pipelines and element configuration | No; publish with Hotdoc |
+| Contributor / design material | Development and rationale | No |
+
+Confirm the split against Doxygen navigation before moving files. Add selected
+Markdown files to `Doxyfile` `INPUT`. Keep the top-level README short and link
+to the generated pages.
+
+## B2. Link rules for the dual-rendered README
+
+Audit every link after deciding the split:
+
+- A document included in Doxygen may use a relative link only when its
+  generated target is verified.
+- A repository file not included in Doxygen must use an absolute
+  `https://github.com/NVIDIA/nvnmos/blob/main/...` link.
+- A published GStreamer or gRPC reference should use its stable Pages URL.
+- Build both renderings and click-test the navigation.
+
+Apply the same rule to Markdown rendered both on GitHub and by Hotdoc or the
+gRPC generator.
+
+## B3. C quick start before the encyclopaedia
+
+The C guide currently leads with transport enums and `x-nvnmos-*` extensions.
+Restructure it toward:
+
+1. **Minimal embed** — create a Node; add one Sender or Receiver; run; destroy.
+2. **When to use the C API** — contrast it briefly with daemon and GStreamer.
+3. **Transports and transport files** — keep existing tables after the example.
+4. **Extensions** — retain as reference, not as the opening section.
+5. **API changes** — keep as migration guidance or release notes.
+
+## B4. Align C and daemon vocabulary carefully
 
 C API docs must not grow daemon/gRPC concepts. Shared ideas (Node seed, caller-chosen resource `name`, transport file, activation callback) should use the same user terms as GStreamer guides where accurate, without mentioning `nvnmosd` RPCs in `nvnmos.h` comments.
 
-## B3. Example application as the tutorial spine
+## B5. Example application as the tutorial spine
 
 Treat `nvnmos-example` output steps as the authoritative walkthrough; ensure the README’s “Running the Example Application” section stays early in the C journey (link from the new quick start).
 
@@ -202,9 +336,20 @@ Treat `nvnmos-example` output steps as the authoritative walkthrough; ensure the
 
 Keep `rust/nvnmosd/README.md` as the operator entry: build/run, UDS, env vars, session GC contract, Node flavours. Lead with a **minimal client sequence** (open session → subscribe activations → add resource → ack loop → close) before the env-var catalogue.
 
-Link out to design docs for lock ordering and history; do not require reading the design record to run the daemon.
+Own the narrative here once. Link to generated gRPC pages for per-RPC detail.
+Link to design docs for lock ordering and history.
 
-## C2. Generated gRPC reference (third documentation product)
+## C2. Slim `nvnmosd.proto` comments
+
+Apply the proto comment rules before or with generated documentation:
+
+- State session GC and resubscribe policy once.
+- State name uniqueness and handle-versus-ID conventions once.
+- State transport-file embedding rules once.
+- Remove GStreamer and design-document asides.
+- Keep per-RPC error codes and symbol-specific preconditions.
+
+## C3. Generated gRPC reference (third documentation product)
 
 Integrating protobuf HTML into Doxygen or Hotdoc is a poor fit (different object model, separate toolchain, little shared navigation). Prefer a **third generator** publishing beside the existing Pages artifacts, e.g. `public/grpc/` or `public/nvnmosd/`.
 
@@ -216,7 +361,10 @@ Integrating protobuf HTML into Doxygen or Hotdoc is a poor fit (different object
 | **protoc-gen-doc** | Common, simple HTML/Markdown from comments | Historically weaker gRPC-service presentation unless templated |
 | **Buf / BSR** | Hosted polish | External dependency / org setup; less “in-tree Pages” |
 
-Default recommendation: **sabledocs** (or protoc-gen-doc if CI wants a single `protoc` plugin and no Python), fed by `nvnmosd.proto` with `--include_source_info`. The proto comments are already the source of truth — generation should not require rewriting them into a second manual.
+Default recommendation: **sabledocs** (or protoc-gen-doc if CI wants a single
+`protoc` plugin and no Python), fed by the slimmed `nvnmosd.proto` with
+`--include_source_info`. Generated pages are the RPC/message reference. Do not
+restore guide narrative in generated comments.
 
 Pages job sketch:
 
@@ -225,19 +373,122 @@ Pages job sketch:
 3. New: generate gRPC HTML → `public/grpc/` (name TBD)
 4. Cross-link from top-level README, `rust/nvnmosd/README.md`, and optionally Hotdoc portal / Doxygen header
 
-## C3. What the gRPC docs should emphasise
+## C4. Split of emphasis
 
-- Session lifecycle and the subscribe-before-add rule (already in proto + operator README).
-- Persistent vs session-refcounted Nodes.
-- `name` vs NMOS UUID (`resource_id`) vs daemon `*_handle`.
-- Activation stream + `AckActivation`.
-- Error / precondition expectations that clients hit first.
+| Concern | Where |
+| --- | --- |
+| Minimal client sequence; GC why + env defaults; Node flavours | Operator README |
+| `_id` vs `_handle`; subscribe-before-add; per-RPC errors | Proto → generated pages |
+| Lock ordering, history | Design docs |
 
-Hand-written “why” stays in the operator README; generated pages are the RPC/message reference.
+## C5. Publish daemon usage with the gRPC reference
+
+Test whether the selected generator can use the operator guide as its landing
+page. Prefer one `rust/nvnmosd/README.md` source followed by generated RPC and
+message reference.
+
+If that is not possible, publish a short landing page that links to the
+operator guide. Do not copy the operator guide into generator-specific content.
 
 ---
 
 # Cross-cutting
+
+## Shared NvNmos concepts guide
+
+Some concepts apply to all three user surfaces and already cause confusion.
+Explain them once in a shared project-level guide, likely
+`doc/user/concepts.md`. Publish it in the Doxygen site and link to its stable
+Pages URL from the C, daemon, and GStreamer guides.
+
+Each audience guide should add only its API-specific names and examples. It
+should not copy the shared explanation.
+
+### Configuring transport files
+
+Distinguish three related artifacts:
+
+1. A **configuring transport file** is a southbound NvNmos configuration
+   document.
+2. An IS-05 Sender `/transportfile` is a northbound NMOS API result.
+3. Runtime SDP or an MXL flow definition describes an actual media transport
+   or flow.
+
+NvNmos uses SDP and MXL flow-definition syntax because those formats are
+familiar and already carry much of the required information. Shared syntax
+does not make the artifacts identical.
+
+Explain:
+
+- Which values configure identity, capabilities, and initial transport
+  parameters
+- Which `x-nvnmos-*` attributes and `urn:x-nvnmos:tag:*` values are NvNmos
+  extensions
+- How configuration differs from the IS-05 transport file
+- What transport document is delivered after controller activation
+
+Use “configuring transport file” only for the southbound input. Use “IS-05
+transport file,” “SDP,” or “MXL flow definition” for the other artifacts.
+
+### Activation direction
+
+Explain the direction before naming APIs:
+
+- The **activation callback** handles an activation initiated through the
+  northbound IS-05 API. NvNmos asks the application to apply the requested
+  data-plane state.
+- `nmos_connection_activate` reports an application-originated state change.
+  It updates the NvNmos model after the application changes its data plane.
+- `nmos_connection_activate` neither performs data-plane activation nor invokes
+  the callback.
+
+Map that model to each surface:
+
+| Surface | Controller-originated change | Application-originated change |
+| --- | --- | --- |
+| C API | `nmos_connection_activation_callback` | `nmos_connection_activate` |
+| gRPC | `SubscribeActivations` + `AckActivation` | `SyncResourceState` |
+| GStreamer | Controller activation handled by the element | `auto-activate=true` |
+
+### Identity and resource layering
+
+Define the boundary:
+
+- **Northbound** means NMOS APIs used by controllers. Identity is standard NMOS
+  UUIDs.
+- **Southbound** means the NvNmos C API or `nvnmosd` gRPC API. Identity uses a
+  Node seed and caller-chosen names.
+
+A southbound Sender or Receiver is addressed by:
+
+```text
+Node seed + resource side + caller-chosen name
+```
+
+Names are unique per side within a Node. A Sender and Receiver may share the
+same name.
+
+Explain the one-to-many mapping:
+
+- A Node seed identifies an NvNmos Node and its NMOS Node and Device resources.
+- One southbound Sender creates an NMOS Source, Flow, and Sender.
+- One southbound Receiver creates an NMOS Receiver.
+- NvNmos derives stable NMOS UUIDs from the seed, side, and name as applicable.
+- Controllers continue to use only standard NMOS UUIDs.
+- `label`, `description`, group hints, and similar values are human-readable
+  metadata. They are not southbound identity.
+
+Document the mappings exposed by each API:
+
+- The C API can make or query Node, Sender, Receiver, Source, and Flow UUIDs.
+- gRPC returns the Node UUID and the added Sender or Receiver UUID. It does not
+  currently return Source and Flow UUIDs.
+- NvNmos publishes the caller-chosen name as `urn:x-nvnmos:tag:name` on the
+  corresponding NMOS Sender or Receiver. This helps diagnostics. Controllers
+  must not treat it as resource identity.
+
+Include one worked example that shows one seed and Sender name producing
+several NMOS resource UUIDs.
 
 ## Discoverability
 
@@ -252,6 +503,31 @@ Expand the top-level Ways To Use table into an explicit task map:
 | Understand implementation decisions | `doc/designs/` |
 
 Add a one-line audience/status header to substantial Markdown guides and to design docs (as on this file).
+
+## Doxygen typography
+
+The current Doxygen prose is visually dense. The small font size makes the
+README main page harder to scan.
+
+Add a small stylesheet through `HTML_EXTRA_STYLESHEET` rather than editing
+Doxygen's generated CSS. Prototype:
+
+- A larger prose font size
+- More line height
+- More space around headings and list items
+- A sensible maximum line width
+- Responsive behaviour on narrow screens
+
+Scope these rules to user-guide and main-page content where possible. Do not
+accidentally enlarge signatures, source listings, navigation, or compact API
+tables. A wrapper class in Markdown may provide a stable selector.
+
+Compare:
+
+- The main README page
+- A split C usage page
+- A normal API symbol page
+- Desktop and mobile widths
 
 ## Design plans vs supported behaviour
 
@@ -280,20 +556,40 @@ Use consistently across user-facing docs:
 Ship value in this order (can be separate PRs):
 
 1. **GStreamer blurb pass** in `session/mod.rs` — immediate `gst-inspect` / Hotdoc improvement; refresh plugin cache.
-2. **gst-nmos-rs README** — Quick start + configuration patterns above the property catalogue; trim RPC names from Notes.
-3. **Top-level C Usage reshape** — minimal embed before extensions / API-change history.
-4. **nvnmosd README** — minimal client sequence first; keep env/RPC summary.
-5. **gRPC Pages product** — wire sabledocs (or chosen tool) into `pages.yml`; cross-link.
-6. **Lifecycle / mutability / troubleshooting** on the GStreamer guide.
-7. **Move Sync Testing** and other contributor sections out of the primary user path.
-8. **Design-plan status** / link hygiene and terminology sweep.
+2. **Default `transport` to `udp`** in Rust state and GObject metadata; document the default change.
+3. **Documentation topology and link audit** — decide the README split, Doxygen `INPUT`, and where daemon/GStreamer guides are published.
+4. **Shared concepts guide** — explain transport documents, activation direction, and identity/resource layering once.
+5. **Doxygen typography** — add and validate a scoped prose stylesheet.
+6. **gst-nmos-rs guide** — publish it with Hotdoc; add Quick start and configuration patterns; trim dense prose.
+7. **C guide split and rewrite** — put minimal embedding before extensions and migration notes.
+8. **nvnmosd README** — put the minimal client sequence first and publish it with the gRPC reference if supported.
+9. **Slim `nvnmosd.proto` comments** — apply the same within-layer rule as blurbs.
+10. **gRPC Pages product** — generate from the slimmed proto and cross-link it.
+11. **Lifecycle / mutability / troubleshooting** on the GStreamer guide.
+12. **Move Sync Testing** and other contributor sections out of the primary user path.
+13. **Readability and link pass** — shorten sentences, use bullets, verify links, and mark design-plan status.
 
-Items 1–4 are mostly editorial and do not require a new generator. Item 5 is the main tooling addition.
+Item 3 prevents document moves from creating broken Doxygen links or duplicate
+guides. Item 10 is the main tooling addition. Do not publish generated gRPC
+docs before slimming the proto comments.
 
 ## Success criteria
 
 - A new GStreamer user can run sender + receiver from docs without reading property tables first.
 - A new C embedder can create a Node and one resource from docs without first reading extension attribute grammar.
 - A new daemon client can implement the happy-path RPC sequence from the operator guide + generated reference without reading the design record.
-- `gst-inspect-1.0 nmossink` blurbs describe outcomes; daemon/IS-05 mapping detail appears only in guides or gRPC docs.
-)
+- Every top-level README link works in both GitHub and Doxygen.
+- Usage guides are published with their respective references where one source
+  can feed the generator.
+- Shared concepts have one canonical explanation linked from all user surfaces.
+- Users can distinguish southbound names from NMOS UUIDs.
+- Users can distinguish activation callbacks from application-originated
+  activate/sync calls.
+- “Configuring transport file” is not presented as synonymous with an IS-05
+  `/transportfile` or a runtime MXL flow definition.
+- User guides use short sentences and scannable lists.
+- Doxygen guide prose is readable without making API pages oversized.
+- `gst-inspect-1.0 nmossink` blurbs describe outcomes; daemon/IS-05 mapping detail appears only in guides.
+- A pipeline that omits `transport` uses RTP/UDP; MXL remains explicit.
+- Proto comments state each policy once; the operator README owns lifecycle
+  narrative.
