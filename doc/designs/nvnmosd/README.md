@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 A plan for a new way of supporting NMOS in GStreamer, replacing the bin-based `nvdsnmosbin` approach with an out-of-process NMOS daemon (`nvnmosd`) and a pair of single-pad GStreamer elements (`nmossrc`, `nmossink`). NvNmos provides the NMOS implementation inside the daemon; GStreamer plugins talk to the daemon over a small gRPC protocol.
 
-**Operator / as-built docs:** [`rust/nvnmosd/README.md`](../../rust/nvnmosd/README.md) (run, env vars, API summary). This file is the long-form design record.
+**Daemon as-built docs:** [`rust/nvnmosd/README.md`](../../rust/nvnmosd/README.md) (run, env vars, API summary). This file is the long-form design record.
 
 ## Initial scope
 
@@ -117,10 +117,10 @@ service NvnmosDaemon {
   // (SDP) or urn:x-nvnmos:tag:name tag (MXL flow_def) inside is the
   // NvNmos name of the sender or receiver; NvNmos generates the NMOS
   // /senders/<id> or /receivers/<id> UUID from it.
-  // AddResourceResponse returns both the daemon-local resource_handle
-  // (for subsequent RPCs) and the NMOS resource_id (informational).
-  rpc AddSender(AddSenderRequest) returns (AddResourceResponse);
-  rpc AddReceiver(AddReceiverRequest) returns (AddResourceResponse);
+  // AddSenderResponse returns resource_handle plus source_id / flow_id /
+  // sender_id. AddReceiverResponse returns resource_handle plus receiver_id.
+  rpc AddSender(AddSenderRequest) returns (AddSenderResponse);
+  rpc AddReceiver(AddReceiverRequest) returns (AddReceiverResponse);
   rpc RemoveResource(RemoveResourceRequest) returns (Empty);
 
   // Server-streaming: one per session, kept open for the session's lifetime.
@@ -285,10 +285,10 @@ There are three ways to fully describe a sender or receiver. Each is sufficient 
 
 **Route C — `transport-file` + property overrides / cross-checks.** Provide a baseline `transport-file` and combine it with any of the Route B properties. The rule depends on the property:
 
-- **Identity / cosmetic properties** (`sender-name` / `receiver-name`, `mxl-flow-id`, `mxl-domain-id`, `label`, `description`, `receiver-caps-mode`) — **override** the matching field/tag in the file. This is the natural "I have a template SDP or flow_def, but the per-instance bits (`sender-name` or `receiver-name`, `source-ip` or `interface-ip`, port, label, ...) change" workflow, and nvdsnmosbin already worked this way.
+- **Identity, human-readable metadata, and Receiver capability properties** (`sender-name` / `receiver-name`, `mxl-flow-id`, `mxl-domain-id`, `label`, `description`, `receiver-caps-mode`) — **override** the matching field/tag in the file. This is the natural "I have a template SDP or flow_def, but the per-instance bits (`sender-name` or `receiver-name`, `source-ip` or `interface-ip`, port, label, ...) change" workflow, and nvdsnmosbin already worked this way.
 - **Essence-shape properties** (`caps`, `transport-caps`) — **cross-check** against the file's shape. Mismatch is a hard error at NULL→READY; the application is asked to align the two rather than have one silently win over the other.
 
-The full matrix (including which properties have no transport file interaction at all) lives in the gst-nmos-rs crate README under "Property interaction with `transport-file`".
+The full matrix (including which properties have no transport file interaction at all) lives in the gst-nmos-rs crate README under "Property Interaction With Transport Files".
 
 #### Defaults the element synthesises
 
@@ -324,7 +324,7 @@ Both endpoints are at IS-04 by the time the pipeline is up, and there is no Catc
 
 #### Constrained vs unconstrained Receiver Caps (`receiver-caps-mode`)
 
-Hand-authored minimal configuring transport files for unconstrained Receivers (SDP and MXL flow_def) are documented in the root [`README.md`](../../../README.md#minimal-transport-files-for-unconstrained-receivers).
+Hand-authored minimal configuring transport files for unconstrained Receivers (SDP and MXL flow_def) are documented in [`transport-files.md`](../../user/transport-files.md#minimal-transport-files-for-unconstrained-receivers).
 
 In all three modes, the GStreamer pad caps are fixed at the format derived from the transport file (or declared via `caps`). The `receiver-caps-mode` property only controls what's advertised in IS-04:
 

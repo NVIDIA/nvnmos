@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! NMOS IS-08 channel mapping element (`nmosaudiochannelmap`).
+//! NMOS audio channel mapping element (`nmosaudiochannelmap`).
 
 /**
  * SECTION:element-nmosaudiochannelmap
@@ -12,6 +12,10 @@
  * creates matching IS-08 Inputs and Outputs on the Node; a controller then
  * decides which input channels feed which output channels and the element
  * re-orders the audio channels accordingly.
+ *
+ * Element and pad properties are listed alphabetically below. The
+ * [Audio Channel Mapping Guide](https://nvidia.github.io/nvnmos/gstreamer/audio-channel-mapping.html)
+ * explains how channel mappings contribute to the Node's shared IS-08 API.
  *
  * ## Example
  *

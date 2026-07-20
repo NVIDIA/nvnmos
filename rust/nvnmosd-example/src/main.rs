@@ -36,11 +36,11 @@
 //!     and start a background task that auto-acks each event with
 //!     `success = true`. Stays alive for the rest of the resource phase
 //!     so IS-05 PATCHes against libnvnmos can drive the round-trip.
-//! 11. `AddSender` — create a sender, assert `resource_id` matches
-//!     `nvnmos::make_sender_id(seed, name)`.
+//! 11. `AddSender` — create a sender, assert `source_id` / `flow_id` /
+//!     `sender_id` match the corresponding `nvnmos::make_*_id` helpers.
 //! 12. `AddReceiver` — create a receiver with the same `name` as the
 //!     sender in (11) to exercise the side-disambiguated namespace, and
-//!     assert `resource_id` matches `nvnmos::make_receiver_id(seed,
+//!     assert `receiver_id` matches `nvnmos::make_receiver_id(seed,
 //!     name)` (a distinct UUID from the sender's).
 //! 13. `SyncResourceState` on the sender with an updated transport_file
 //!     (bumped SDP session version) — exercises the (re)activate path.
@@ -95,7 +95,7 @@ use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
     AckActivationRequest, AckChannelMappingActivationRequest, ActivationEvent, ActiveMapEntry,
     AddChannelMappingRequest, AddChannelMappingResponse, AddNodeRequest, AddNodeResponse,
-    AddReceiverRequest, AddResourceResponse, AddSenderRequest, AssetConfig,
+    AddReceiverRequest, AddReceiverResponse, AddSenderRequest, AddSenderResponse, AssetConfig,
     ChannelMappingActivationEvent, ChannelMappingInput as ProtoChannelMappingInput,
     ChannelMappingOutput as ProtoChannelMappingOutput,
     ChannelMappingParentType as ProtoChannelMappingParentType, CloseSessionRequest, NodeConfig,
@@ -254,6 +254,10 @@ async fn main() -> anyhow::Result<()> {
 
     // (5) AddNode: create a persistent Node.
     let added = add_node(&mut client, &persistent_seed, args.http_port).await?;
+    anyhow::ensure!(
+        !added.device_id.is_empty(),
+        "AddNode returned an empty device_id"
+    );
 
     // (6) Two OpenSessions on the persistent seed: attach to it without
     // affecting its lifetime. Both must return the persistent Node's id
@@ -338,9 +342,9 @@ async fn main() -> anyhow::Result<()> {
         spawn_auto_ack_task(client.clone(), r.session_handle.clone()).await?;
 
     // (11) AddSender on the happy path. Cross-check the daemon's returned
-    // resource_id against the pure helper. The sender and receiver
-    // deliberately share the same `name` ("video-a") to exercise the
-    // Node-scoped, side-disambiguated namespace: a Sender and a
+    // sender/source/flow ids against the pure helpers. The sender and
+    // receiver deliberately share the same `name` ("video-a") to exercise
+    // the Node-scoped, side-disambiguated namespace: a Sender and a
     // Receiver may share a name, and the daemon distinguishes them
     // (in `by_name`, in `ActivationEvent.side`, and in
     // `nmos_connection_activate(side, ...)`).
@@ -352,12 +356,32 @@ async fn main() -> anyhow::Result<()> {
         &build_video_sdp(sender_name, true, &iface_ip),
     )
     .await?;
+    let expected_source_id =
+        nvnmos::make_source_id(&resource_seed, sender_name).context("make_source_id")?;
+    let expected_flow_id =
+        nvnmos::make_flow_id(&resource_seed, sender_name).context("make_flow_id")?;
     let expected_sender_id =
         nvnmos::make_sender_id(&resource_seed, sender_name).context("make_sender_id")?;
     anyhow::ensure!(
-        sender_resp.resource_id == expected_sender_id,
-        "AddSender returned resource_id {} but make_sender_id({:?}, {:?}) says {}",
-        sender_resp.resource_id,
+        sender_resp.source_id == expected_source_id,
+        "AddSender returned source_id {} but make_source_id({:?}, {:?}) says {}",
+        sender_resp.source_id,
+        resource_seed,
+        sender_name,
+        expected_source_id,
+    );
+    anyhow::ensure!(
+        sender_resp.flow_id == expected_flow_id,
+        "AddSender returned flow_id {} but make_flow_id({:?}, {:?}) says {}",
+        sender_resp.flow_id,
+        resource_seed,
+        sender_name,
+        expected_flow_id,
+    );
+    anyhow::ensure!(
+        sender_resp.sender_id == expected_sender_id,
+        "AddSender returned sender_id {} but make_sender_id({:?}, {:?}) says {}",
+        sender_resp.sender_id,
         resource_seed,
         sender_name,
         expected_sender_id,
@@ -380,19 +404,19 @@ async fn main() -> anyhow::Result<()> {
     let expected_receiver_id =
         nvnmos::make_receiver_id(&resource_seed, receiver_name).context("make_receiver_id")?;
     anyhow::ensure!(
-        receiver_resp.resource_id == expected_receiver_id,
-        "AddReceiver returned resource_id {} but make_receiver_id({:?}, {:?}) says {}",
-        receiver_resp.resource_id,
+        receiver_resp.receiver_id == expected_receiver_id,
+        "AddReceiver returned receiver_id {} but make_receiver_id({:?}, {:?}) says {}",
+        receiver_resp.receiver_id,
         resource_seed,
         receiver_name,
         expected_receiver_id,
     );
     anyhow::ensure!(
-        sender_resp.resource_id != receiver_resp.resource_id,
+        sender_resp.sender_id != receiver_resp.receiver_id,
         "Sender and Receiver shared the same name {:?} but their NMOS \
          UUIDs collided: {}",
         sender_name,
-        sender_resp.resource_id,
+        sender_resp.sender_id,
     );
 
     // (13) SyncResourceState on the sender with a fresh transport_file.
@@ -438,7 +462,7 @@ async fn main() -> anyhow::Result<()> {
             &sender_resp.resource_handle,
             &iface_ip,
             args.http_port,
-            &sender_resp.resource_id,
+            &sender_resp.sender_id,
             true,
         )
         .await
@@ -448,7 +472,7 @@ async fn main() -> anyhow::Result<()> {
             &sender_resp.resource_handle,
             &iface_ip,
             args.http_port,
-            &sender_resp.resource_id,
+            &sender_resp.sender_id,
             false,
         )
         .await
@@ -505,7 +529,7 @@ async fn main() -> anyhow::Result<()> {
     if args.hold_secs > 0 {
         tracing::info!(
             hold_secs = args.hold_secs,
-            receiver_resource_id = %receiver_resp.resource_id,
+            receiver_resource_id = %receiver_resp.receiver_id,
             "holding session open for manual IS-05 PATCH testing",
         );
         tokio::time::sleep(Duration::from_secs(args.hold_secs)).await;
@@ -886,7 +910,11 @@ async fn add_node(
         .await
         .context("AddNode failed")?
         .into_inner();
-    tracing::info!(node_id = %resp.node_id, "AddNode succeeded");
+    tracing::info!(
+        node_id = %resp.node_id,
+        device_id = %resp.device_id,
+        "AddNode succeeded"
+    );
     Ok(resp)
 }
 
@@ -909,7 +937,7 @@ async fn add_sender(
     session_handle: &str,
     sender_name: &str,
     transport_file: &str,
-) -> anyhow::Result<AddResourceResponse> {
+) -> anyhow::Result<AddSenderResponse> {
     tracing::info!(session_handle, sender_name, "AddSender");
     let resp = client
         .add_sender(AddSenderRequest {
@@ -923,7 +951,9 @@ async fn add_sender(
         .into_inner();
     tracing::info!(
         resource_handle = %resp.resource_handle,
-        resource_id = %resp.resource_id,
+        source_id = %resp.source_id,
+        flow_id = %resp.flow_id,
+        sender_id = %resp.sender_id,
         "AddSender succeeded",
     );
     Ok(resp)
@@ -934,7 +964,7 @@ async fn add_receiver(
     session_handle: &str,
     receiver_name: &str,
     transport_file: &str,
-) -> anyhow::Result<AddResourceResponse> {
+) -> anyhow::Result<AddReceiverResponse> {
     tracing::info!(session_handle, receiver_name, "AddReceiver");
     let resp = client
         .add_receiver(AddReceiverRequest {
@@ -948,7 +978,7 @@ async fn add_receiver(
         .into_inner();
     tracing::info!(
         resource_handle = %resp.resource_handle,
-        resource_id = %resp.resource_id,
+        receiver_id = %resp.receiver_id,
         "AddReceiver succeeded",
     );
     Ok(resp)

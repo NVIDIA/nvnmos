@@ -31,11 +31,11 @@ use gstreamer::glib;
 #[enum_type(name = "GstNmosTransport")]
 pub enum Transport {
     /// MXL shared-memory transport (`mxlsrc` and `mxlsink`).
-    #[default]
     #[enum_value(name = "MXL shared-memory transport", nick = "mxl")]
     Mxl = 0,
     /// ST 2110 via gst-plugins-good `udpsrc` / `udpsink` plus
     /// the matching gst-plugins-good RTP (de)payloaders.
+    #[default]
     #[enum_value(name = "RTP/UDP via gst-plugins-good", nick = "udp")]
     Udp = 1,
     /// ST 2110 via gst-plugins-rs' `udpsrc2` plus the

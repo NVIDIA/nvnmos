@@ -102,6 +102,7 @@ ARG PACKAGE_NAME
 RUN apt update && apt install -y --no-install-recommends \
     doxygen \
     graphviz \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /nvnmos
@@ -118,12 +119,16 @@ COPY --from=rust-builder /nvnmos/rust/target/release/nvnmosd-example \
 
 COPY docker/nvnmos/entrypoint.sh docker/nvnmos/entrypoint-setup.sh LICENSE README.md Doxyfile ./
 COPY doc/doxygen doc/doxygen
+COPY doc/user doc/user
 
 RUN chmod +x entrypoint.sh entrypoint-setup.sh \
     && cp src/conan.lock ${PACKAGE_NAME}/ \
     && cp LICENSE README.md ${PACKAGE_NAME}
 # Doxyfile paths assume CWD is src/ (INPUT, HTML_HEADER, etc.).
-RUN cd src && doxygen ../Doxyfile && mv html ../${PACKAGE_NAME}/
+RUN cd src \
+    && python3 ../doc/doxygen/prepare-markdown.py \
+    && doxygen ../Doxyfile \
+    && mv html ../${PACKAGE_NAME}/
 
 RUN tar -cvzf ${PACKAGE_NAME}.tar.gz ${PACKAGE_NAME}
 

@@ -11,6 +11,10 @@
  * hosted by `nvnmosd` and transmits the video, audio or ST 2038 ANC essence
  * arriving on its sink pad over the configured transport.
  *
+ * Properties are listed alphabetically below. The
+ * [Configuration Guide](https://nvidia.github.io/nvnmos/gstreamer/configuration.html#property-groups)
+ * groups them by task and explains the common configuration choices.
+ *
  * ## Examples
  *
  * These pipelines assume `nvnmosd` is listening on `unix:/tmp/nvnmosd.sock`.

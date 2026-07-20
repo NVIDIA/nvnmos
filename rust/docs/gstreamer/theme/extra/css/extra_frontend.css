@@ -2,6 +2,60 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+:root {
+	--nvnmos-green: #76b900;
+	--nvnmos-green-dark: #4f7d00;
+	--nvnmos-green-darker: #3f6400;
+	--nvnmos-link: var(--nvnmos-green-dark);
+	--nvnmos-link-hover: var(--nvnmos-green-darker);
+}
+
+html[data-hotdoc-style='dark'] {
+	--nvnmos-link: #8dcc25;
+	--nvnmos-link-hover: #a2df4b;
+}
+
+#topnav {
+	border-bottom: 2px solid var(--nvnmos-green);
+}
+
+#main a:not(.btn) {
+	color: var(--nvnmos-link);
+}
+
+#main a:not(.btn):hover,
+#main a:not(.btn):focus {
+	color: var(--nvnmos-link-hover);
+}
+
+#main code {
+	color: inherit;
+}
+
+.btn-primary,
+.label-primary,
+.panel-primary > .panel-heading,
+.nav-pills > li.active > a,
+.nav-pills > li.active > a:hover,
+.nav-pills > li.active > a:focus,
+.pagination > .active > a,
+.pagination > .active > a:hover,
+.pagination > .active > a:focus {
+	background-color: var(--nvnmos-green-dark);
+	border-color: var(--nvnmos-green-dark);
+}
+
+.btn-primary:hover,
+.btn-primary:focus,
+.btn-primary:active {
+	background-color: var(--nvnmos-green-darker);
+	border-color: var(--nvnmos-green-darker);
+}
+
+nav[data-toggle='toc'] * {
+	border-left-color: var(--nvnmos-green) !important;
+}
+
 /* #extra-menu raises specificity above Bootstrap's `.navbar-nav > li > a`,
    which otherwise forces `display: block` and drops the icon to the baseline. */
 #extra-menu .nvnmos-github-link {

@@ -12,10 +12,14 @@ on:
       - '.github/workflows/pages.yml'
       - 'Doxyfile'
       - 'README.md'
+      - 'doc/doxygen/**'
+      - 'doc/user/**'
       - 'src/**'
       - 'rust/docs/**'
       - 'rust/gst-nmos-rs/**'
       - 'rust/gst-avsynctest-rs/**'
+      - 'rust/nvnmosd/README.md'
+      - 'rust/nvnmos-rpc/proto/**'
   workflow_dispatch:
 
 jobs:
@@ -30,7 +34,24 @@ jobs:
       run: sudo apt update && sudo apt install -y doxygen graphviz
 
     - name: Generate C API documentation
-      run: cd src && doxygen ../Doxyfile && mv html ../public
+      run: |
+        cd src
+        python3 ../doc/doxygen/prepare-markdown.py
+        doxygen ../Doxyfile
+        mv html ../public
+
+    - name: Build daemon gRPC documentation
+      run: |
+        sudo apt-get install -y protobuf-compiler
+        python3 -m venv .venv-sabledocs
+        . .venv-sabledocs/bin/activate
+        pip install "sabledocs==0.19.1050"
+        cd rust/nvnmos-rpc/proto
+        protoc nvnmosd.proto -o descriptor.pb --include_source_info
+        sabledocs
+        cat nvnmos-theme.css >> sabledocs_output/static/mystyles.css
+        mkdir -p "$GITHUB_WORKSPACE/public/grpc"
+        cp -a sabledocs_output/* "$GITHUB_WORKSPACE/public/grpc/"
 
     - name: Install GStreamer plugin documentation toolchain
       run: |
@@ -74,7 +95,7 @@ jobs:
       run: |
         name="docs-${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
         echo "artifact_name=${name//\//-}" >> "$GITHUB_ENV"
-        tar -C public -czf "$RUNNER_TEMP/docs-preview.tar.gz" .
+        tar --dereference -C public -czf "$RUNNER_TEMP/docs-preview.tar.gz" .
 
     - name: Upload preview artifact
       if: github.event_name != 'push'

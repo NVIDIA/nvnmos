@@ -356,30 +356,38 @@ async fn add_resource(
     transport: ProtoTransport,
     transport_file: &str,
 ) -> Result<AddedResource, DaemonError> {
-    let resp = match side {
-        Side::Sender => client
-            .add_sender(AddSenderRequest {
-                session_handle: session_handle.to_owned(),
-                name: name.to_owned(),
-                transport: transport as i32,
-                transport_file: transport_file.to_owned(),
+    match side {
+        Side::Sender => {
+            let resp = client
+                .add_sender(AddSenderRequest {
+                    session_handle: session_handle.to_owned(),
+                    name: name.to_owned(),
+                    transport: transport as i32,
+                    transport_file: transport_file.to_owned(),
+                })
+                .await?
+                .into_inner();
+            Ok(AddedResource {
+                handle: resp.resource_handle,
+                id: resp.sender_id,
             })
-            .await?
-            .into_inner(),
-        Side::Receiver => client
-            .add_receiver(AddReceiverRequest {
-                session_handle: session_handle.to_owned(),
-                name: name.to_owned(),
-                transport: transport as i32,
-                transport_file: transport_file.to_owned(),
+        }
+        Side::Receiver => {
+            let resp = client
+                .add_receiver(AddReceiverRequest {
+                    session_handle: session_handle.to_owned(),
+                    name: name.to_owned(),
+                    transport: transport as i32,
+                    transport_file: transport_file.to_owned(),
+                })
+                .await?
+                .into_inner();
+            Ok(AddedResource {
+                handle: resp.resource_handle,
+                id: resp.receiver_id,
             })
-            .await?
-            .into_inner(),
-    };
-    Ok(AddedResource {
-        handle: resp.resource_handle,
-        id: resp.resource_id,
-    })
+        }
+    }
 }
 
 pub(crate) fn parse_unix_uri(daemon_uri: &str) -> Result<PathBuf, DaemonError> {

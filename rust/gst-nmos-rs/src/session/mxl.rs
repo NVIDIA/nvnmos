@@ -217,12 +217,12 @@ pub(super) fn resolve_inner_config_mxl(
     let transport_file =
         synthesise_or_passthrough_mxl(cat, element, settings, &domain_id, resolved_transport_file)?;
 
-    // Property-overrides-file: splice any user-set identity/cosmetic
-    // properties (name, flow_id, mxl-domain-id, label, description,
-    // receiver-caps-mode) into the transport file before the daemon
-    // sees it. `caps` and `transport-caps` remain cross-checked by
-    // `resolve_mxl_flow_meta` below — they describe the essence
-    // shape and a mismatch is a real error.
+    // Property-overrides-file: splice any user-set identity, metadata,
+    // and Receiver capability properties (name, flow_id, mxl-domain-id,
+    // label, description, receiver-caps-mode) into the transport file
+    // before the daemon sees it. `caps` and `transport-caps` remain
+    // cross-checked by `resolve_mxl_flow_meta` below — they describe
+    // the essence shape and a mismatch is a real error.
     let transport_file = match transport_file {
         Some(text) => Some(
             flow_def::splice_overrides(&text, &property_overrides_mxl(settings, &domain_id))

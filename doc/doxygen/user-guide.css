@@ -1,0 +1,132 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+:root {
+  --nvnmos-green: #76b900;
+  --nvnmos-green-dark: #4f7d00;
+  --nvnmos-green-darker: #3f6400;
+  --nvnmos-nav-active-background: var(--nvnmos-green-dark);
+  --nvnmos-nav-current: var(--nvnmos-green-dark);
+}
+
+html {
+  --page-link-color: var(--nvnmos-green-dark);
+  --page-visited-link-color: var(--nvnmos-green-darker);
+  --title-separator-color: var(--header-separator-color);
+  --group-header-color: var(--nvnmos-green-dark);
+  --group-header-separator-color: var(--nvnmos-green);
+  --separator-color: #d6d6d6;
+  --toc-header-color: var(--nvnmos-green-dark);
+  --search-filter-highlight-bg-color: var(--nvnmos-green-dark);
+  --code-link-color: var(--nvnmos-green-dark);
+  --code-external-link-color: var(--nvnmos-green-dark);
+  --tooltip-link-color: var(--nvnmos-green-dark);
+  --header-background-color: #f7f7f7;
+  --header-separator-color: #d6d6d6;
+  --header-gradient-image: none;
+  --nav-background-color: #f2f2f2;
+  --nav-foreground-color: #333;
+  --nav-gradient-image: none;
+  --nav-gradient-hover-image: none;
+  --nav-gradient-active-image: none;
+  --nav-gradient-active-image-parent: none;
+  --nav-separator-image: none;
+  --nav-breadcrumb-image: none;
+  --nav-splitbar-image: none;
+  --nav-breadcrumb-border-color: #d6d6d6;
+  --nav-text-normal-color: #333;
+  --nav-text-hover-color: white;
+  --nav-text-active-color: white;
+  --nav-text-normal-shadow: none;
+  --nav-text-hover-shadow: none;
+  --nav-text-active-shadow: none;
+  --nav-menu-button-color: #333;
+  --nav-menu-background-color: white;
+  --nav-menu-foreground-color: #555;
+  --nav-menu-toggle-color: rgb(0 0 0 / 8%);
+  --nav-arrow-color: #999;
+  --nav-arrow-selected-color: var(--nvnmos-green-dark);
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not(.dark-mode) {
+    --nvnmos-nav-active-background: var(--nvnmos-green-dark);
+    --nvnmos-nav-current: var(--nvnmos-green);
+    --page-link-color: var(--nvnmos-green);
+    --page-visited-link-color: #8dcc25;
+    --group-header-color: var(--nvnmos-green);
+    --group-header-separator-color: var(--nvnmos-green);
+    --separator-color: #444;
+    --toc-header-color: var(--nvnmos-green);
+    --search-filter-highlight-bg-color: var(--nvnmos-green-dark);
+    --code-link-color: var(--nvnmos-green);
+    --code-external-link-color: var(--nvnmos-green);
+    --tooltip-link-color: var(--nvnmos-green);
+    --header-background-color: #202020;
+    --header-separator-color: #3d3d3d;
+    --header-gradient-image: none;
+    --title-separator-color: var(--header-separator-color);
+    --nav-background-color: #242424;
+    --nav-foreground-color: #ddd;
+    --nav-gradient-image: none;
+    --nav-gradient-hover-image: none;
+    --nav-gradient-active-image: none;
+    --nav-gradient-active-image-parent: none;
+    --nav-separator-image: none;
+    --nav-breadcrumb-image: none;
+    --nav-splitbar-image: none;
+    --nav-breadcrumb-border-color: #444;
+    --nav-text-normal-color: #ddd;
+    --nav-text-hover-color: white;
+    --nav-text-active-color: white;
+    --nav-text-normal-shadow: none;
+    --nav-text-hover-shadow: none;
+    --nav-text-active-shadow: none;
+    --nav-menu-button-color: #ddd;
+    --nav-menu-background-color: #242424;
+    --nav-menu-foreground-color: #ddd;
+    --nav-menu-toggle-color: rgb(255 255 255 / 10%);
+    --nav-arrow-color: #888;
+    --nav-arrow-selected-color: var(--nvnmos-green);
+  }
+}
+
+.sm-dox,
+.tabsearch,
+.navpath ul {
+  background-color: var(--nav-background-color);
+}
+
+.sm-dox a:hover,
+.sm-dox ul a:hover,
+td.navtabHL {
+  background-color: var(--nvnmos-nav-active-background);
+}
+
+.sm-dox a.current {
+  color: var(--nvnmos-nav-current);
+}
+
+.navpath li {
+  border-right: 1px solid var(--nav-breadcrumb-border-color);
+  padding-right: 10px;
+}
+
+.navpath li.footer {
+  border-right: 0;
+}
+
+.navpath li.navelem a:hover {
+  color: var(--page-link-color);
+  text-shadow: none;
+}
+
+/*
+ * Doxygen bolds internal cross-reference links (a.el); external links are not.
+ * Un-bold them on prose pages so mixed guide link lists look consistent.
+ */
+.contents:not(:has(.memitem)):not(:has(.memproto)) > .textblock a.el {
+  font-weight: normal;
+}

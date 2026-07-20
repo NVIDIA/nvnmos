@@ -44,7 +44,7 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
         "nmossrc",
         gst::DebugColorFlags::empty(),
-        Some("NMOS receiver wrapper element"),
+        Some("NMOS receiver element"),
     )
 });
 
@@ -160,22 +160,22 @@ impl ObjectImpl for NmosSrc {
                     .default_value(Some(DEFAULT_DAEMON_URI))
                     .build(),
                 glib::ParamSpecString::builder("node-seed")
-                    .nick("Node seed")
+                    .nick("Node Seed")
                     .blurb(crate::session::NODE_SEED_BLURB)
                     .build(),
                 glib::ParamSpecUInt::builder("http-port")
-                    .nick("HTTP port")
+                    .nick("HTTP Port")
                     .blurb(crate::session::HTTP_PORT_BLURB)
                     .minimum(0)
                     .maximum(65535)
                     .default_value(0)
                     .build(),
                 glib::ParamSpecString::builder("host-name")
-                    .nick("Host name")
+                    .nick("Host Name")
                     .blurb(crate::session::HOST_NAME_BLURB)
                     .build(),
                 glib::ParamSpecString::builder("domain")
-                    .nick("NMOS DNS domain")
+                    .nick("NMOS DNS Domain")
                     .blurb(crate::session::DOMAIN_BLURB)
                     .build(),
                 glib::ParamSpecString::builder("registration-url")
@@ -186,171 +186,137 @@ impl ObjectImpl for NmosSrc {
                     .nick("System URL")
                     .blurb(crate::session::SYSTEM_URL_BLURB)
                     .build(),
-                glib::ParamSpecEnum::builder_with_default("transport", Transport::Mxl)
+                glib::ParamSpecEnum::builder_with_default("transport", Transport::Udp)
                     .nick("Transport")
                     .blurb(crate::session::TRANSPORT_BLURB)
                     .build(),
                 glib::ParamSpecString::builder("receiver-name")
-                    .nick("NMOS receiver name")
+                    .nick("NMOS Receiver Name")
                     .blurb(crate::session::RECEIVER_NAME_BLURB)
                     .build(),
                 glib::ParamSpecString::builder("mxl-domain-id")
-                    .nick("MXL domain id")
+                    .nick("MXL Domain ID")
                     .blurb(crate::session::MXL_DOMAIN_ID_BLURB)
                     .build(),
                 glib::ParamSpecString::builder("mxl-domain-path")
-                    .nick("MXL domain path")
+                    .nick("MXL Domain Path")
                     .blurb(
-                        "Local filesystem path identifying the MXL Domain on \
-                         this host. If the directory contains a \
-                         `domain_def.json` (AMWA BCP-007-03 WIP) its `id` is \
-                         used to populate `mxl-domain-id` (or cross-checked \
-                         against it when both are set). Without \
-                         `domain_def.json`, an unset `mxl-domain-id` leaves \
-                         the NMOS tag application-resolved while the data plane \
-                         still uses this path. Fed into the inner `mxlsrc` \
-                         `domain=` property when the real inner chain is \
-                         installed (after IS-05 activation, or at startup when \
-                         `auto-activate=true`).",
+                        "Local path to the MXL Domain used by the data plane. A \
+                         `domain_def.json` in this directory can supply or verify \
+                         `mxl-domain-id`. Used only with MXL.",
                     )
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("mxl-flow-id")
-                    .nick("MXL flow id")
+                    .nick("MXL Flow ID")
                     .blurb(
-                        "MXL flow id (UUID) the inner `mxlsrc` should pull. \
-                         An NMOS Receiver is normally configured by IS-05 \
-                         PATCH activation, so this is mainly a development \
-                         convenience: combined with `auto-activate=true` \
-                         (plus `caps` and `mxl-domain-path`) the receiver \
-                         starts up pre-bound to a known flow without an \
-                         external controller. Overrides the transport \
-                         file's top-level `id` when both are supplied.",
+                        "UUID of the MXL flow consumed by this Receiver. Set it \
+                         with `auto-activate=true` for a fixed pipeline. When \
+                         set, overrides the matching value from `transport-file*`. \
+                         Used only with MXL.",
                     )
                     .build(),
                 glib::ParamSpecBoolean::builder("auto-activate")
-                    .nick("Auto-activate")
+                    .nick("Auto-Activate")
                     .blurb(crate::session::AUTO_ACTIVATE_BLURB)
                     .default_value(false)
                     .build(),
                 glib::ParamSpecString::builder("label")
-                    .nick("Label")
+                    .nick("IS-04 Label")
                     .blurb(crate::session::LABEL_BLURB_RECEIVER)
                     .build(),
                 glib::ParamSpecString::builder("description")
-                    .nick("Description")
+                    .nick("IS-04 Description")
                     .blurb(crate::session::DESCRIPTION_BLURB_RECEIVER)
                     .build(),
                 glib::ParamSpecString::builder("group-hint")
-                    .nick("Group hint")
+                    .nick("Group Hint")
                     .blurb(crate::session::GROUP_HINT_BLURB_RECEIVER)
                     .build(),
                 glib::ParamSpecString::builder("transport-file")
-                    .nick("Transport file")
+                    .nick("Transport File")
                     .blurb(crate::session::TRANSPORT_FILE_BLURB_RECEIVER)
                     .build(),
                 glib::ParamSpecString::builder("transport-file-path")
-                    .nick("Transport file path")
+                    .nick("Transport File Path")
                     .blurb(crate::session::TRANSPORT_FILE_PATH_BLURB)
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Caps>("caps")
-                    .nick("Essence caps")
+                    .nick("Essence Caps")
                     .blurb(crate::session::CAPS_BLURB_RECEIVER)
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Caps>("transport-caps")
-                    .nick("Transport caps")
+                    .nick("Transport Caps")
                     .blurb(crate::session::TRANSPORT_CAPS_BLURB)
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Structure>("transport-properties")
-                    .nick("Transport source properties")
+                    .nick("Transport Source Properties")
                     .blurb(crate::session::TRANSPORT_PROPERTIES_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Structure>("depay-properties")
-                    .nick("Depayloader properties")
+                    .nick("Depayloader Properties")
                     .blurb(crate::session::DEPAY_PROPERTIES_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecEnum::builder::<CapsMode>("receiver-caps-mode")
-                    .nick("Receiver caps mode")
+                    .nick("Receiver Caps Mode")
                     .blurb(
-                        "Whether the Receiver advertises BCP-004-01 Receiver Caps \
-                         on IS-04. `constrained` publishes caps with a \
-                         `constraint_set` derived from the transport file; \
-                         `unconstrained` publishes none. On MXL, the marker is \
-                         `urn:x-nvnmos:tag:caps`; on RTP/UDP, media-level \
-                         `a=x-nvnmos-caps:`. `auto` (default) leaves the marker \
-                         untouched in the spliced transport file — constrained \
-                         when absent (or with no transport file), unconstrained \
-                         when present. `constrained` strips the marker; \
-                         `unconstrained` ensures it is present (libnvnmos: \
-                         present + non-empty = unconstrained).",
+                        "How the Receiver advertises media constraints to NMOS \
+                         controllers. `constrained` publishes constraints. \
+                         `unconstrained` publishes none. `auto` preserves the \
+                         choice from `transport-file*`. When neither \
+                         `transport-file` nor `transport-file-path` is set, \
+                         `auto` publishes constraints. Default: `auto`.",
                     )
                     .default_value(CapsMode::Auto)
                     .build(),
                 glib::ParamSpecString::builder("source-ip")
                     .nick("Source IP")
                     .blurb(
-                        "IS-05 receiver transport_params `source_ip`: \
-                         SSM include-source — the remote sender's IP. \
-                         Drives the configuring SDP \
-                         `a=source-filter:` include-source. On the \
-                         `udp2` (gst-plugins-rs `udpsrc2`) variant \
-                         this translates to `source-filter`; on the \
-                         `udp` (gst-plugins-good `udpsrc`) variant it \
-                         translates to `multicast-source`. Empty = \
-                         unset (any-source multicast / unicast). \
-                         Honoured only on the RTP transports; ignored \
-                         on `mxl`.",
+                        "Optional remote source filter for RTP/UDP multicast. \
+                         Empty accepts any source. Corresponds to IS-05 Receiver \
+                         `transport_params.source_ip`. Used only with RTP/UDP.",
                     )
                     .build(),
                 glib::ParamSpecString::builder("interface-ip")
                     .nick("Interface IP")
                     .blurb(
-                        "IS-05 receiver transport_params \
-                         `interface_ip`: local NIC IP used for the \
-                         IGMP join. Resolved to an interface name and \
-                         fed into `udpsrc.multicast-iface` on the RTP \
-                         transports. Also emitted in the configuring \
-                         SDP as `a=x-nvnmos-iface-ip:`. Empty = unset \
-                         (let the kernel pick). Honoured only on the \
-                         RTP transports; ignored on `mxl`.",
+                        "Local interface address for RTP/UDP reception and \
+                         multicast joins. Empty selects it automatically. \
+                         Corresponds to IS-05 Receiver \
+                         `transport_params.interface_ip`. Used only with \
+                         RTP/UDP.",
                     )
                     .build(),
                 glib::ParamSpecString::builder("multicast-ip")
                     .nick("Multicast IP")
                     .blurb(
-                        "IS-05 receiver transport_params \
-                         `multicast_ip`: multicast group to join. \
-                         Becomes `udpsrc.address` and the SDP `c=` \
-                         line address on the RTP transports. Empty = \
-                         unset (unicast reception). Honoured only on \
-                         the RTP transports; ignored on `mxl`.",
+                        "Multicast group to join for RTP/UDP reception. Empty \
+                         selects unicast reception. Corresponds to IS-05 \
+                         Receiver `transport_params.multicast_ip`. Used only \
+                         with RTP/UDP.",
                     )
                     .build(),
                 glib::ParamSpecUInt::builder("destination-port")
-                    .nick("Destination port")
+                    .nick("Destination Port")
                     .blurb(
-                        "IS-05 receiver transport_params \
-                         `destination_port`: local listen port \
-                         (becomes `udpsrc.port` and the SDP `m=` port \
-                         slot). 0 (the default) = unset; falls back \
-                         to the transport file's `m=` port if \
-                         present, else to the canonical RTP default \
-                         5004 (`nmos-cpp` `auto_rtp_port`). Honoured \
-                         only on the RTP transports; ignored on `mxl`.",
+                        "Local listen port for RTP/UDP reception. 0 uses \
+                         `transport-file*`, otherwise 5004. Corresponds to \
+                         IS-05 Receiver `transport_params.destination_port`. \
+                         Used only with RTP/UDP.",
                     )
                     .minimum(0)
                     .maximum(65535)
                     .default_value(0)
                     .build(),
                 glib::ParamSpecUInt64::builder("format-bit-rate")
-                    .nick("Format bit rate")
+                    .nick("Format Bit Rate")
                     .blurb(crate::session::FORMAT_BIT_RATE_BLURB)
                     .default_value(0)
                     .build(),
                 glib::ParamSpecUInt64::builder("transport-bit-rate")
-                    .nick("Transport bit rate")
+                    .nick("Transport Bit Rate")
                     .blurb(crate::session::TRANSPORT_BIT_RATE_BLURB)
                     .default_value(0)
                     .build(),
@@ -515,7 +481,8 @@ impl ElementImpl for NmosSrc {
             gst::subclass::ElementMetadata::new(
                 "NMOS receiver",
                 "Source/Network/NMOS",
-                "NMOS Receiver wrapper element backed by nvnmosd",
+                "NMOS Receiver supporting MXL (`transport=mxl`) and RTP/UDP \
+                 (`transport=udp`, `udp2`, or `nvdsudp`)",
                 "NVIDIA Corporation",
             )
         });

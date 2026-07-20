@@ -14,14 +14,16 @@
 //!   model after start-up.
 //! * [`NodeServer::activate_connection`] — surface an out-of-band activation
 //!   (mirrors the `nmos_connection_activate` C function).
-//! * [`NodeServer::node_id`] / [`sender_id`](NodeServer::sender_id) /
+//! * [`NodeServer::node_id`] / [`device_id`](NodeServer::device_id) /
+//!   [`sender_id`](NodeServer::sender_id) /
 //!   [`receiver_id`](NodeServer::receiver_id) /
 //!   [`source_id`](NodeServer::source_id) /
 //!   [`flow_id`](NodeServer::flow_id) — look up NMOS resource UUIDs on a
 //!   running server.
-//! * [`make_node_id`] / [`make_sender_id`] / [`make_receiver_id`] /
-//!   [`make_source_id`] / [`make_flow_id`] — pure functions that compute the
-//!   same UUIDs deterministically from a seed, without needing a running server.
+//! * [`make_node_id`] / [`make_device_id`] / [`make_sender_id`] /
+//!   [`make_receiver_id`] / [`make_source_id`] / [`make_flow_id`] — pure
+//!   functions that compute the same UUIDs deterministically from a seed,
+//!   without needing a running server.
 //! * [`NodeServer::builder`] — opt into IS-05 [`Activation`] handling and / or
 //!   forward libnvnmos's slog output via [`LogMessage`]. Both knobs are
 //!   chainable on the returned [`NodeServerBuilder`]; the bare
@@ -480,6 +482,22 @@ pub fn make_node_id(seed: &str) -> Result<String> {
     };
     if !ok {
         return Err(Error::Failed("nmos_make_node_id"));
+    }
+    capture_id(&buf)
+}
+
+/// Compute the NMOS Device resource id that a [`NodeServer`] with the given
+/// `seed` will use.
+///
+/// Pure function of `seed`. NvNmos creates one Device per Node.
+pub fn make_device_id(seed: &str) -> Result<String> {
+    let cseed = CString::new(seed)?;
+    let mut buf = [0u8; ID_BUF_LEN];
+    let ok = unsafe {
+        sys::nmos_make_device_id(cseed.as_ptr(), buf.as_mut_ptr() as *mut c_char, buf.len())
+    };
+    if !ok {
+        return Err(Error::Failed("nmos_make_device_id"));
     }
     capture_id(&buf)
 }
@@ -1445,6 +1463,20 @@ impl NodeServer {
         capture_id(&buf)
     }
 
+    /// Look up the NMOS Device UUID of this running server.
+    ///
+    /// NvNmos creates one Device per Node.
+    pub fn device_id(&self) -> Result<String> {
+        let mut buf = [0u8; ID_BUF_LEN];
+        let ok = unsafe {
+            sys::nmos_get_device_id(&*self.raw, buf.as_mut_ptr() as *mut c_char, buf.len())
+        };
+        if !ok {
+            return Err(Error::Failed("nmos_get_device_id"));
+        }
+        capture_id(&buf)
+    }
+
     /// Look up a sender's NMOS UUID by its name.
     ///
     /// Returns `Ok(None)` if no sender with the given `sender_name`
@@ -1592,6 +1624,23 @@ mod tests {
         let b = make_node_id("seed-X").unwrap();
         assert_eq!(a, b);
         let c = make_node_id("seed-Y").unwrap();
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn device_id_has_uuid_shape() {
+        let id = make_device_id("test:42").expect("make_device_id");
+        assert_uuid_shape(&id);
+    }
+
+    #[test]
+    fn device_id_is_deterministic_and_distinct_from_node() {
+        let node = make_node_id("seed-X").unwrap();
+        let a = make_device_id("seed-X").unwrap();
+        let b = make_device_id("seed-X").unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, node, "device and node ids must not collide");
+        let c = make_device_id("seed-Y").unwrap();
         assert_ne!(a, c);
     }
 

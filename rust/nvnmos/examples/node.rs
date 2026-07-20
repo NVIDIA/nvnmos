@@ -36,7 +36,7 @@ use std::process::ExitCode;
 
 use nvnmos::{
     LOG_LEVEL_DEVEL, NodeConfig, NodeServer, ReceiverConfig, SenderConfig, Side, Transport,
-    make_node_id, make_receiver_id, make_sender_id,
+    make_device_id, make_node_id, make_receiver_id, make_sender_id,
 };
 
 // === Example resource catalogue =============================================
@@ -136,6 +136,11 @@ fn print_expected(seed: &str) {
         "",
         &make_node_id(seed).unwrap_or_else(|_| "<error>".into()),
     );
+    print_id(
+        "device",
+        "",
+        &make_device_id(seed).unwrap_or_else(|_| "<error>".into()),
+    );
     for r in SENDERS {
         print_id(
             "sender",
@@ -158,6 +163,11 @@ fn print_actual(server: &NodeServer) {
         "node",
         "",
         &server.node_id().unwrap_or_else(|_| "<error>".into()),
+    );
+    print_id(
+        "device",
+        "",
+        &server.device_id().unwrap_or_else(|_| "<error>".into()),
     );
     for r in SENDERS {
         let value = match server.sender_id(r.name) {

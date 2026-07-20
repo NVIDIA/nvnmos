@@ -19,25 +19,28 @@
  * @file nvnmos.h
  * <b>NVIDIA Networked Media Open Specifications (NMOS) API</b>
  *
- * @b Description: This file defines the NVIDIA NMOS utility library
+ * @b Description: This file defines the NVIDIA NMOS library
  * (NvNmos) API.
  */
 
 /**
  * @defgroup  nvnmos  Networked Media Open Specifications (NMOS) API
  *
- * Defines the NVIDIA NMOS utility library (NvNmos) API.
+ * Defines the NVIDIA NMOS library (NvNmos) API.
  *
- * The NvNmos utility library provides the APIs to create, destroy and
- * internally manage an <a href="https://specs.amwa.tv/nmos/">NMOS</a> Node for a Media Node application.
+ * The NvNmos library provides APIs to create, destroy and internally
+ * manage an <a href="https://specs.amwa.tv/nmos/">NMOS</a> Node for a Media Node application.
+ *
+ * It is intended to be integrated with data plane libraries for ST 2110
+ * and/or MXL, such as <a href="https://developer.nvidia.com/networking/rivermax">NVIDIA Rivermax</a>
+ * or the <a href="https://github.com/dmf-mxl/mxl">MXL SDK</a>.
  *
  * The library can automatically discover and register with an NMOS Registry
  * on the network using the <a href="https://specs.amwa.tv/is-04/">AMWA IS-04</a> Registration API.
  *
  * The library provides callbacks for NMOS events such as <a href="https://specs.amwa.tv/is-05/">AMWA IS-05</a>
  * Connection API requests from an NMOS Controller. These callbacks can be
- * used to update running DeepStream pipelines with new transport parameters,
- * for example.
+ * used to update a running data plane with new transport parameters, for example.
  *
  * NvNmos currently supports Senders and Receivers for video, audio, and
  * ancillary data flows over RTP/UDP (i.e., SMPTE ST 2110-20, -22, -30,
@@ -822,6 +825,24 @@ bool nmos_make_node_id(
     size_t out_len);
 
 /**
+ * Compute the NMOS Device resource id that an
+ * @ref NvNmosNodeServer created with the given @p seed will use.
+ *
+ * Pure function of @p seed. NvNmos creates one Device per Node. See
+ * @ref nmos_make_node_id for the contract; the same notes apply.
+ *
+ * @param[in]  seed    Seed string. Must not be null.
+ * @param[out] out     Buffer to receive the id.
+ * @param[in]  out_len Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_make_device_id(
+    const char *seed,
+    char *out,
+    size_t out_len);
+
+/**
  * Compute the NMOS Sender resource id that an
  * @ref NvNmosNodeServer created with the given @p seed will use for
  * the sender with the given @p sender_name.
@@ -932,6 +953,23 @@ bool nmos_make_flow_id(
  */
 NVNMOS_API
 bool nmos_get_node_id(
+    const NvNmosNodeServer *server,
+    char *out,
+    size_t out_len);
+
+/**
+ * Get the NMOS Device resource id of a running @ref NvNmosNodeServer.
+ *
+ * NvNmos creates one Device per Node.
+ *
+ * @param[in]  server  Pointer to a server previously initialised by
+ *                     @ref create_nmos_node_server.
+ * @param[out] out     Buffer to receive the id.
+ * @param[in]  out_len Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_get_device_id(
     const NvNmosNodeServer *server,
     char *out,
     size_t out_len);

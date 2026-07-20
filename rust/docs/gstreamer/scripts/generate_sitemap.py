@@ -61,14 +61,18 @@ if __name__ == "__main__":
                     name += '.json'
                 index += "\n\t\t" + name
         if plugins:
-            index += '\n\tgst-index'
+            plugin_index = '\tgst-index'
             for plugin in plugins:
                 if not plugin:
                     continue
                 fname = plugin
                 if not fname.endswith('.json'):
                     fname += '.json'
-                index += "\n\t\t" + fname
+                plugin_index += "\n\t\t" + fname
+            if '\tgst-index' in index:
+                index = index.replace('\tgst-index', plugin_index, 1)
+            else:
+                index += '\n' + plugin_index
 
         index = '%s\n%s' % (index_md, index)
 

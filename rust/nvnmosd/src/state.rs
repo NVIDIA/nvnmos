@@ -295,6 +295,7 @@ pub struct CloseOutcome {
 #[derive(Debug)]
 pub struct AddNodeOutcome {
     pub node_id: String,
+    pub device_id: String,
     pub http_port: u16,
 }
 
@@ -304,15 +305,25 @@ pub struct RemoveNodeOutcome {
     pub node_id: String,
 }
 
-/// Outcome of [`State::add_sender`] / [`State::add_receiver`].
+/// Outcome of adding a Sender.
 #[derive(Debug)]
-pub struct AddResourceOutcome {
+pub struct AddSenderOutcome {
     pub resource_handle: String,
-    /// NMOS UUID returned by libnvnmos for the resource. Equal to
-    /// `nvnmos::make_{sender,receiver}_id(node_seed, name)` — we
-    /// pull it out of libnvnmos directly so we don't recompute.
-    pub resource_id: String,
-    pub side: Side,
+    /// NMOS Source UUID paired with this Sender.
+    pub source_id: String,
+    /// NMOS Flow UUID paired with this Sender.
+    pub flow_id: String,
+    /// NMOS Sender UUID returned by libnvnmos.
+    pub sender_id: String,
+    pub node_seed: String,
+}
+
+/// Outcome of adding a Receiver.
+#[derive(Debug)]
+pub struct AddReceiverOutcome {
+    pub resource_handle: String,
+    /// NMOS Receiver UUID returned by libnvnmos.
+    pub receiver_id: String,
     pub node_seed: String,
 }
 
@@ -576,9 +587,10 @@ impl SyncResourceFfi {
 /// First phase of `AddSender` / `AddReceiver`: daemon bookkeeping is
 /// validated under `state`, then the lock is dropped and
 /// [`AddResourcePrep::run_ffi`] performs the libnvnmos add + name-match
-/// lookup with no lock held. [`State::commit_add_resource`] finishes the
-/// bookkeeping. See [`CloseSessionFfi`].
-#[must_use = "add_resource must proceed through run_ffi + commit_add_resource"]
+/// lookup with no lock held. [`State::commit_add_sender`] /
+/// [`State::commit_add_receiver`] finish the bookkeeping. See
+/// [`CloseSessionFfi`].
+#[must_use = "add_resource must proceed through run_ffi + commit_add_*"]
 pub struct AddResourcePrep {
     server: Arc<NodeServer>,
     side: Side,
@@ -589,14 +601,30 @@ pub struct AddResourcePrep {
     session_handle: String,
 }
 
-/// Output of [`AddResourcePrep::run_ffi`], fed to
-/// [`State::commit_add_resource`].
-pub struct AddResourceReady {
-    side: Side,
+/// Output of [`AddResourcePrep::run_ffi`] for a Sender, fed to
+/// [`State::commit_add_sender`].
+pub struct AddSenderReady {
     name: String,
     node_seed: String,
     session_handle: String,
-    resource_id: String,
+    source_id: String,
+    flow_id: String,
+    sender_id: String,
+}
+
+/// Output of [`AddResourcePrep::run_ffi`] for a Receiver, fed to
+/// [`State::commit_add_receiver`].
+pub struct AddReceiverReady {
+    name: String,
+    node_seed: String,
+    session_handle: String,
+    receiver_id: String,
+}
+
+/// Side-specific result of [`AddResourcePrep::run_ffi`].
+pub enum AddResourceReady {
+    Sender(AddSenderReady),
+    Receiver(AddReceiverReady),
 }
 
 impl AddResourcePrep {
@@ -636,13 +664,50 @@ impl AddResourcePrep {
             }
         };
 
-        Ok(AddResourceReady {
-            side: self.side,
-            name: self.name,
-            node_seed: self.node_seed,
-            session_handle: self.session_handle,
-            resource_id,
-        })
+        match self.side {
+            Side::Sender => {
+                let source_id = self
+                    .server
+                    .source_id(&self.name)
+                    .map_err(|e| {
+                        Status::internal(format!(
+                            "querying source id from libnvnmos failed after add: {e}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        Status::internal(
+                            "libnvnmos accepted the Sender but source_id lookup returned None",
+                        )
+                    })?;
+                let flow_id = self
+                    .server
+                    .flow_id(&self.name)
+                    .map_err(|e| {
+                        Status::internal(format!(
+                            "querying flow id from libnvnmos failed after add: {e}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        Status::internal(
+                            "libnvnmos accepted the Sender but flow_id lookup returned None",
+                        )
+                    })?;
+                Ok(AddResourceReady::Sender(AddSenderReady {
+                    name: self.name,
+                    node_seed: self.node_seed,
+                    session_handle: self.session_handle,
+                    source_id,
+                    flow_id,
+                    sender_id: resource_id,
+                }))
+            }
+            Side::Receiver => Ok(AddResourceReady::Receiver(AddReceiverReady {
+                name: self.name,
+                node_seed: self.node_seed,
+                session_handle: self.session_handle,
+                receiver_id: resource_id,
+            })),
+        }
     }
 }
 
@@ -749,6 +814,7 @@ pub struct CreateNodeReady {
     pub http_port: u16,
     pub server: Arc<NodeServer>,
     pub node_id: String,
+    pub device_id: String,
 }
 
 impl CreateNodePrep {
@@ -781,12 +847,18 @@ impl CreateNodePrep {
                 "querying node_id from the new NodeServer failed: {e}"
             ))
         })?;
+        let device_id = server.device_id().map_err(|e| {
+            Status::internal(format!(
+                "querying device_id from the new NodeServer failed: {e}"
+            ))
+        })?;
 
         Ok(CreateNodeReady {
             seed: self.seed,
             http_port: self.http_port,
             server: Arc::new(server),
             node_id,
+            device_id,
         })
     }
 }
@@ -1177,6 +1249,7 @@ impl State {
         );
         AddNodeOutcome {
             node_id: ready.node_id,
+            device_id: ready.device_id,
             http_port: ready.http_port,
         }
     }
@@ -1241,7 +1314,8 @@ impl State {
     ///    `{sender,receiver}_id(claimed_name)` — libnvnmos is the oracle:
     ///    success proves the transport file's id equalled the claim
     ///    ([`AddResourcePrep::run_ffi`], no lock held).
-    /// 3. On success, finalise the maps ([`State::commit_add_resource`]).
+    /// 3. On success, finalise the maps ([`State::commit_add_sender`] /
+    ///    [`State::commit_add_receiver`]).
     ///    On a name mismatch the libnvnmos resource is left as a stray
     ///    (no compensating remove); activations NACK with
     ///    [`ActivationDispatch::NoResource`]; the stray is torn down when
@@ -1306,26 +1380,61 @@ impl State {
         })
     }
 
-    /// Third phase of `AddSender` / `AddReceiver`: record the resource in
-    /// daemon state after the libnvnmos add + name-match lookup succeeded.
+    /// Third phase of `AddSender`: record the Sender in daemon state after
+    /// the libnvnmos add + id lookups succeeded.
     ///
     /// The session must still exist; if it was closed while the FFI ran
     /// (a concurrent `CloseSession`), the libnvnmos resource is left as a
     /// stray (no compensating remove; torn down when the Node is destroyed)
     /// and this returns `NOT_FOUND`.
-    pub fn commit_add_resource(
-        &mut self,
-        ready: AddResourceReady,
-    ) -> Result<AddResourceOutcome, Status> {
-        let AddResourceReady {
-            side,
-            name,
-            node_seed,
-            session_handle,
-            resource_id,
-        } = ready;
+    pub fn commit_add_sender(&mut self, ready: AddSenderReady) -> Result<AddSenderOutcome, Status> {
+        let resource_handle = self.commit_added_resource(
+            Side::Sender,
+            &ready.name,
+            &ready.node_seed,
+            &ready.session_handle,
+        )?;
+        Ok(AddSenderOutcome {
+            resource_handle,
+            source_id: ready.source_id,
+            flow_id: ready.flow_id,
+            sender_id: ready.sender_id,
+            node_seed: ready.node_seed,
+        })
+    }
 
-        if !self.sessions.contains_key(&session_handle) {
+    /// Third phase of `AddReceiver`: record the Receiver in daemon state
+    /// after the libnvnmos add + id lookup succeeded.
+    ///
+    /// The session must still exist; if it was closed while the FFI ran
+    /// (a concurrent `CloseSession`), the libnvnmos resource is left as a
+    /// stray (no compensating remove; torn down when the Node is destroyed)
+    /// and this returns `NOT_FOUND`.
+    pub fn commit_add_receiver(
+        &mut self,
+        ready: AddReceiverReady,
+    ) -> Result<AddReceiverOutcome, Status> {
+        let resource_handle = self.commit_added_resource(
+            Side::Receiver,
+            &ready.name,
+            &ready.node_seed,
+            &ready.session_handle,
+        )?;
+        Ok(AddReceiverOutcome {
+            resource_handle,
+            receiver_id: ready.receiver_id,
+            node_seed: ready.node_seed,
+        })
+    }
+
+    fn commit_added_resource(
+        &mut self,
+        side: Side,
+        name: &str,
+        node_seed: &str,
+        session_handle: &str,
+    ) -> Result<String, Status> {
+        if !self.sessions.contains_key(session_handle) {
             tracing::warn!(
                 session_handle,
                 side = side.label(),
@@ -1343,26 +1452,22 @@ impl State {
         self.resources.insert(
             resource_handle.clone(),
             ResourceEntry {
-                name: name.clone(),
-                node_seed: node_seed.clone(),
-                session_handle: session_handle.clone(),
+                name: name.to_string(),
+                node_seed: node_seed.to_string(),
+                session_handle: session_handle.to_string(),
                 side,
             },
         );
-        self.by_name
-            .insert((node_seed.clone(), side, name), resource_handle.clone());
+        self.by_name.insert(
+            (node_seed.to_string(), side, name.to_string()),
+            resource_handle.clone(),
+        );
         self.sessions
-            .get_mut(&session_handle)
+            .get_mut(session_handle)
             .expect("checked above")
             .resources
             .insert(resource_handle.clone());
-
-        Ok(AddResourceOutcome {
-            resource_handle,
-            resource_id,
-            side,
-            node_seed,
-        })
+        Ok(resource_handle)
     }
 
     /// Remove a resource. Only the owning session is allowed to remove

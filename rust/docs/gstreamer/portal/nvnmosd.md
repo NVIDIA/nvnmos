@@ -1,5 +1,5 @@
 ---
-short-description: API reference for libnvnmos
+short-description: Daemon guide and gRPC API reference for nvnmosd
 ...
 
 <!--
@@ -7,6 +7,6 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-<meta http-equiv="refresh" content="0; url=../index.html">
+<meta http-equiv="refresh" content="0; url=../grpc/">
 
-# C API
+# Daemon / gRPC

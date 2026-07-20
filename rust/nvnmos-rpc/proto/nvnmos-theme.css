@@ -1,0 +1,78 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+:root {
+  --nvnmos-green: #76b900;
+  --nvnmos-green-hover: #68a300;
+  --nvnmos-link: #4f7d00;
+  --nvnmos-link-hover: #3f6400;
+}
+
+html.dark {
+  --nvnmos-link: #8dcc25;
+  --nvnmos-link-hover: #a2df4b;
+}
+
+a,
+.link.is-info {
+  color: var(--nvnmos-link);
+}
+
+a:hover,
+a:focus,
+.link.is-info:hover,
+.link.is-info:focus {
+  color: var(--nvnmos-link-hover);
+}
+
+code {
+  color: #363636;
+}
+
+a code,
+code a {
+  color: inherit;
+}
+
+html.dark code {
+  color: #e6e6e6;
+}
+
+html.dark a code,
+html.dark code a {
+  color: inherit;
+}
+
+.bottom-border {
+  border-color: var(--nvnmos-green);
+}
+
+.theme-toggle {
+  --icon-fill: var(--nvnmos-green);
+  --icon-fill-hover: var(--nvnmos-link);
+}
+
+html.dark .theme-toggle {
+  --icon-fill: var(--nvnmos-green);
+  --icon-fill-hover: var(--nvnmos-link-hover);
+}
+
+.button.is-primary {
+  background-color: var(--nvnmos-green);
+  border-color: var(--nvnmos-green);
+  color: #101010;
+}
+
+.button.is-primary:hover,
+.button.is-primary:focus,
+.button.is-primary:active {
+  background-color: var(--nvnmos-green-hover);
+  border-color: var(--nvnmos-green-hover);
+  color: #101010;
+}
+
+.button.is-primary:focus:not(:active) {
+  box-shadow: 0 0 0 0.125em rgb(118 185 0 / 35%);
+}

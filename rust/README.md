@@ -10,12 +10,12 @@ Rust components for the NMOS daemon and GStreamer plugin family.
 | Doc | Contents |
 | --- | --- |
 | **This file — Quick start** | Build, run `nvnmosd`, try two example GStreamer pipelines |
-| [`nvnmosd/README.md`](nvnmosd/README.md) | Daemon operator reference (env vars, gRPC contract) |
-| [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md) | `nmossrc` / `nmossink` property reference |
-| [`gst-nmos-rs/pipeline-examples.md`](gst-nmos-rs/pipeline-examples.md) | Full pipeline catalog (MXL, flipper, demo script, …) |
-| [`doc/designs/nvnmosd/README.md`](../doc/designs/nvnmosd/README.md) | Architecture and design history |
-| [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Contribution guidelines (sign-off, DCO) |
-| [`SECURITY.md`](../SECURITY.md) | Security vulnerability reporting |
+| [Daemon guide and gRPC API reference](https://nvidia.github.io/nvnmos/grpc/) | Minimal client sequence, daemon operation, and generated API reference |
+| [GStreamer plugin documentation](https://nvidia.github.io/nvnmos/gstreamer/) | Usage guide, element reference, and property groups |
+| [GStreamer pipeline examples](gst-nmos-rs/pipeline-examples.md) | Full pipeline catalog (MXL, flipper, demo script, …) |
+| [Daemon design record](../doc/designs/nvnmosd/README.md) | Architecture, element integration, and historical rationale |
+| [How to contribute](../CONTRIBUTING.md) | Contribution guidelines (sign-off, DCO) |
+| [How to report a vulnerability](../SECURITY.md) | Security vulnerability reporting |
 
 ## Quick Start
 
@@ -43,11 +43,11 @@ sudo apt-get install --no-install-recommends -y \
 
 CMake must be **3.17+**. Ubuntu 24.04's `cmake` package is sufficient; on older
 distros use `pip install cmake~=3.17` inside the venv below (see
-[`README.md`](../README.md#cmake)).
+[`building.md`](../doc/user/building.md#cmake)).
 
 **Conan** — resolves and builds C++ dependencies for `libnvnmos`. Use a
 Python venv at the **repository root** so Conan stays off the system Python
-([`README.md`](../README.md#python-virtual-environment)):
+([`building.md`](../doc/user/building.md#python-virtual-environment)):
 
 ```sh
 # repository root
@@ -65,8 +65,8 @@ Keep the venv activated while running `conan install` in the next section.
 
 ### Build `libnvnmos.so`
 
-From the **repository root** (full detail in the top-level
-[`README.md`](../README.md#building-the-nvnmos-library)):
+From the **repository root** (full detail in
+[`building.md`](../doc/user/building.md#building-the-nvnmos-library)):
 
 ```sh
 conan install src \
@@ -154,7 +154,7 @@ For MXL (`transport=mxl`), build the [MXL SDK](https://github.com/dmf-mxl/mxl)
 first, then see [`pipeline-examples.md`](gst-nmos-rs/pipeline-examples.md) for
 example pipelines. For compliant ST 2110 (`transport=nvdsudp`)
 using DeepStream and Rivermax SDK, see
-[`gst-nmos-rs/README.md`](gst-nmos-rs/README.md#transportnvdsudp-deepstream-rivermax).
+[`gst-nmos-rs/pipeline-examples.md`](gst-nmos-rs/pipeline-examples.md#deepstream-rivermax).
 
 ## Crates
 

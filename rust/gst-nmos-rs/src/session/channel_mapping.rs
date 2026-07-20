@@ -17,13 +17,13 @@ use super::NodeSettings;
 
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) const CHANNELMAPPING_NAME_BLURB: &str = "Caller-chosen name for this channel mapping within the Node. Unique per \
-     Node; identifies the Input/Output bundle added at NULL→READY. Not an IS-08 \
-     Input or Output id.";
+pub(crate) const CHANNELMAPPING_NAME_BLURB: &str = "\
+    Caller-chosen name for this channel mapping. It must be unique within the \
+    Node. It is not an IS-08 Input or Output ID.";
 
-pub(crate) const RESTRICT_ROUTABLE_INPUTS_BLURB: &str = "When true, each Output's IS-08 /caps routable_inputs lists only this \
-     element's Input ids. When false (default), routable inputs are \
-     unrestricted on the IS-08 Output /caps endpoint.";
+pub(crate) const RESTRICT_ROUTABLE_INPUTS_BLURB: &str = "\
+    Limit each Output's IS-08 `/caps/routable_inputs` to this element's Inputs. \
+    When false, routable Inputs are unrestricted. Default: false.";
 
 /// Settings snapshot for `nmosaudiochannelmap` NULL→READY.
 #[derive(Debug, Clone)]

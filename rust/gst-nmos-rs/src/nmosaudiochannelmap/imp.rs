@@ -32,7 +32,7 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
         "nmosaudiochannelmap",
         gst::DebugColorFlags::empty(),
-        Some("NMOS IS-08 channel mapping element"),
+        Some("NMOS audio channel mapping element"),
     )
 });
 
@@ -112,20 +112,20 @@ impl ObjectImpl for NmosAudioChannelMap {
                     .default_value(Some(DEFAULT_DAEMON_URI))
                     .build(),
                 glib::ParamSpecString::builder("node-seed")
-                    .nick("Node seed")
+                    .nick("Node Seed")
                     .blurb(crate::session::NODE_SEED_BLURB)
                     .build(),
                 glib::ParamSpecUInt::builder("http-port")
-                    .nick("HTTP port")
+                    .nick("HTTP Port")
                     .blurb(crate::session::HTTP_PORT_BLURB)
                     .maximum(65535)
                     .build(),
                 glib::ParamSpecString::builder("host-name")
-                    .nick("Host name")
+                    .nick("Host Name")
                     .blurb(crate::session::HOST_NAME_BLURB)
                     .build(),
                 glib::ParamSpecString::builder("domain")
-                    .nick("NMOS DNS domain")
+                    .nick("NMOS DNS Domain")
                     .blurb(crate::session::DOMAIN_BLURB)
                     .build(),
                 glib::ParamSpecString::builder("registration-url")
@@ -137,12 +137,12 @@ impl ObjectImpl for NmosAudioChannelMap {
                     .blurb(crate::session::SYSTEM_URL_BLURB)
                     .build(),
                 glib::ParamSpecString::builder("channelmapping-name")
-                    .nick("Channel mapping name")
+                    .nick("Channel Mapping Name")
                     .blurb(CHANNELMAPPING_NAME_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecBoolean::builder("restrict-routable-inputs")
-                    .nick("Restrict routable inputs")
+                    .nick("Restrict Routable Inputs")
                     .blurb(RESTRICT_ROUTABLE_INPUTS_BLURB)
                     .default_value(false)
                     .mutable_ready()
@@ -230,9 +230,9 @@ impl ElementImpl for NmosAudioChannelMap {
     fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
         static ELEMENT_METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
             gst::subclass::ElementMetadata::new(
-                "NMOS IS-08 audio channel map",
+                "NMOS audio channel mapping",
                 "Filter/Audio/Network",
-                "IS-08 channel mapping between NMOS audio streams, backed by nvnmosd",
+                "AMWA IS-08 audio channel mapping between NMOS audio streams, backed by nvnmosd",
                 "NVIDIA Corporation",
             )
         });
