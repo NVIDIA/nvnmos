@@ -5,170 +5,126 @@ syntax = "proto3";
 
 package nvnmos.daemon.v1;
 
-// The NvnmosDaemon gRPC service.
+// Manages NvNmos Nodes, client sessions, Senders, Receivers, and audio
+// channel mappings.
 //
-// Wire contract between `nvnmosd` and its clients.
+// Identifier conventions:
 //
-// Naming convention:
+// * `<thing>_id` is a stable NMOS resource UUID derived from the Node seed.
+// * `<thing>_handle` is an opaque, daemon-local token used only by this API.
+// * `name` is chosen by the client. A resource name is unique per Node and
+//   per side, so a Sender and Receiver may share a name.
+// * IS-08 channel mappings use a separate handle namespace and activation
+//   subscription from Senders and Receivers.
 //
-// * `<thing>_id` — an NMOS resource UUID. Stable, derived deterministically
-//   from a seed, and what shows up in IS-04 (`/self/<id>`,
-//   `/senders/<id>`, `/receivers/<id>`).
+// After `OpenSession`, call `SubscribeActivations` before adding resources and
+// keep the stream open. When session GC is enabled, failure to subscribe within
+// `NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC` or resubscribe within
+// `NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC` implicitly closes the session.
 //
-// * `<thing>_handle` — a daemon-local opaque token. Issued by the daemon,
-//   meaningful only within this gRPC API, and not surfaced to NMOS
-//   controllers. Treat as opaque; do not parse.
+// A Sender or Receiver `transport_file` is SDP for `TRANSPORT_RTP` or MXL
+// `flow_def` JSON for `TRANSPORT_MXL`. It must contain the resource `name` as
+// `a=x-nvnmos-name` or `urn:x-nvnmos:tag:name`, respectively.
 service NvnmosDaemon {
-  // -------- Node lifecycle (persistent Nodes) --------
-  //
-  // `AddNode` / `RemoveNode` manage persistent Nodes — Nodes that exist
-  // independently of any contributing session and that serve as
-  // discovery anchors in IS-04 even when no client process is currently
-  // attached. Sessions may still attach to a persistent Node via
-  // `OpenSession` and contribute senders/receivers to it.
-  //
-  // Most deployments don't need persistent Nodes; the implicit
-  // session-refcounted lifetime exposed by `OpenSession` is sufficient
-  // and avoids the explicit teardown step.
-
-  // Create a persistent Node bound to `node_config.seed`. Errors with
-  // `ALREADY_EXISTS` if a Node (persistent or session-refcounted)
-  // already exists for that seed.
+  // Creates a persistent Node that remains until `RemoveNode`. Returns
+  // `ALREADY_EXISTS` if the seed or requested HTTP port is already in use,
+  // `INVALID_ARGUMENT` for invalid configuration, or `FAILED_PRECONDITION`
+  // when the requested HTTP port cannot be bound.
   rpc AddNode(AddNodeRequest) returns (AddNodeResponse);
 
-  // Tear down a persistent Node. Errors with `FAILED_PRECONDITION` if
-  // the Node was created by `OpenSession` (i.e. is session-refcounted,
-  // not persistent), or if any sessions are still attached — close
-  // them first.
+  // Removes a persistent Node. Returns `NOT_FOUND` for an unknown seed or
+  // `FAILED_PRECONDITION` for a session-refcounted Node or while sessions
+  // remain attached.
   rpc RemoveNode(RemoveNodeRequest) returns (Empty);
 
-  // -------- Sessions --------
-  //
-  // A session contributes resources to exactly one Node. Many sessions
-  // (across many client processes) may share a Node by reusing the
-  // same `seed`. The session handle distinguishes them so that the
-  // daemon can refcount Node lifetime correctly, route activations
-  // only to the session that added the affected resource, and
-  // drop the right resources when a stream dies.
-
-  // Open a session on the Node identified by `node_config.seed`.
-  // Attaches to an existing Node (persistent or session-refcounted).
-  // If no Node currently exists for the seed, creates a
-  // session-refcounted Node from `node_config` and attaches to it.
-  // Returns a daemon-local session handle used to address all
-  // subsequent RPCs.
+  // Opens a session on the Node identified by `node_config.seed`, creating a
+  // session-refcounted Node when the seed is new. Returns `INVALID_ARGUMENT`
+  // for invalid creation configuration, `ALREADY_EXISTS` when a requested
+  // HTTP port belongs to another Node, or `FAILED_PRECONDITION` when that port
+  // cannot be bound.
   rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
 
-  // Close a session. Removes any resources the session contributed.
-  // Tears down the backing Node if the session was the last attached
-  // *and* the Node is session-refcounted (i.e. was not created by
-  // `AddNode`).
-  //
-  // The daemon may also close a session implicitly when session GC is
-  // enabled (`NVNMOSD_SESSION_GC`, on by default): if
-  // `SubscribeActivations` is not called within
-  // `NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC` (default 60) of
-  // `OpenSession`, or not called again within
-  // `NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC` (default 5) after the
-  // previous activation stream ends. Implicit close uses the same
-  // teardown as this RPC; subsequent RPCs with the old session handle
-  // return `NOT_FOUND`.
+  // Closes a session and removes its resources. The backing Node is also
+  // removed when this was its last session and it is session-refcounted.
+  // Returns `NOT_FOUND` for an unknown or implicitly closed session.
   rpc CloseSession(CloseSessionRequest) returns (Empty);
 
-  // -------- Resource lifecycle --------
-  //
-  // `name` is the caller-chosen identifier for the sender or receiver,
-  // unique within the Node *per side*: a Sender and a Receiver are
-  // permitted to share a `name`, but two Senders or two Receivers may
-  // not. Together with the Node's seed and the resource side (Sender
-  // or Receiver), `name` deterministically identifies the NMOS
-  // `/senders/<id>` or `/receivers/<id>` UUID.
-  //
-  // `transport_file` carries the resource's transport definition: an
-  // SDP for `TRANSPORT_RTP`, or an MXL `flow_def` JSON for
-  // `TRANSPORT_MXL`. It **must** embed `name` as the session-level
-  // `a=x-nvnmos-name` attribute (SDP) or the `urn:x-nvnmos:tag:name` tag
-  // (MXL `flow_def`). The daemon rejects a mismatch with
-  // `INVALID_ARGUMENT`.
-  //
-  // The returned `resource_handle` is the daemon's local addressing
-  // token used for every later RPC on this resource. The corresponding
-  // NMOS `/senders/<id>` or `/receivers/<id>` UUID is returned in
-  // `resource_id` for the client's convenience (e.g. cross-referencing
-  // with controller logs).
-  //
-  // Requires an active `SubscribeActivations` stream on the session;
-  // otherwise `FAILED_PRECONDITION`.
+  // Adds a Sender owned by the session. Requires an active activation
+  // subscription. Returns `FAILED_PRECONDITION` without one and
+  // `INVALID_ARGUMENT` for invalid or inconsistent resource configuration.
+  // Returns `NOT_FOUND` for an unknown session and `ALREADY_EXISTS` for a
+  // duplicate Sender name on the Node.
+  rpc AddSender(AddSenderRequest) returns (AddSenderResponse);
 
-  rpc AddSender(AddSenderRequest) returns (AddResourceResponse);
-  rpc AddReceiver(AddReceiverRequest) returns (AddResourceResponse);
+  // Adds a Receiver owned by the session. Requires an active activation
+  // subscription. Returns `FAILED_PRECONDITION` without one and
+  // `INVALID_ARGUMENT` for invalid or inconsistent resource configuration.
+  // Returns `NOT_FOUND` for an unknown session and `ALREADY_EXISTS` for a
+  // duplicate Receiver name on the Node.
+  rpc AddReceiver(AddReceiverRequest) returns (AddReceiverResponse);
+
+  // Removes a Sender or Receiver owned by the session. Returns `NOT_FOUND` if
+  // the session is unknown or does not own the resource handle.
   rpc RemoveResource(RemoveResourceRequest) returns (Empty);
 
-  // -------- Activation flow --------
-  //
-  // Long-lived server-streaming RPC. One stream per session, kept open for
-  // the session's lifetime. Each `ActivationEvent` reports a pending
-  // IS-05 activation (or deactivation) for one of the session's
-  // resources; the client applies (or refuses) it locally and replies
-  // with `AckActivation`. The IS-05 controller's request remains
-  // pending until the ack arrives.
-  //
-  // Must be called promptly after `OpenSession` (before `AddSender` /
-  // `AddReceiver`) and again within the resubscribe timeout after any
-  // prior activation stream ends. See `CloseSession` for the implicit
-  // teardown policy when these deadlines are missed.
+  // Streams pending IS-05 activations for resources owned by the session.
+  // Keep one stream open for the session lifetime and acknowledge every event;
+  // for an immediate activation, the controller request remains pending until
+  // `AckActivation`. A scheduled activation occurs after that request has
+  // already completed. Returns `NOT_FOUND` for an unknown session or
+  // `ALREADY_EXISTS` if a stream is already active.
   rpc SubscribeActivations(SubscribeActivationsRequest) returns (stream ActivationEvent);
 
-  // Required after each `ActivationEvent`. The success/failure outcome
-  // and optional failure reason are propagated to the IS-05 controller
-  // as the activation response, and the IS-04 / IS-05 model is updated
-  // accordingly. (For state changes the client originated itself, see
-  // `SyncResourceState` instead.)
+  // Completes a pending IS-05 activation and, on success, updates the NMOS
+  // state. For an immediate activation, the result is returned to the IS-05
+  // controller; a scheduled activation occurs after the controller request
+  // has already completed. Returns `NOT_FOUND` unless the activation is
+  // pending for this session.
   rpc AckActivation(AckActivationRequest) returns (Empty);
 
-  // -------- Out-of-band state sync --------
-  //
-  // Reports a data-plane state change for one of the session's resources
-  // that did not arrive via an IS-05 PATCH. Use this when the client
-  // adjusts its own data plane out-of-band and wants the IS-04 / IS-05
-  // model to reflect the new state. Set `transport_file` to the new
-  // transport file to (re)activate the resource, or leave it absent to
-  // deactivate it.
+  // Updates NMOS state after a client-originated data-plane change. A present
+  // `transport_file` activates the resource; absence deactivates it. Returns
+  // `NOT_FOUND` if the session does not own the resource or `INVALID_ARGUMENT`
+  // if the state change is invalid.
   rpc SyncResourceState(SyncResourceStateRequest) returns (Empty);
 
-  // -------- IS-08 Channel Mapping --------
-  //
-  // Parallel to Senders/Receivers + IS-05 activations, but a separate
-  // subscription stream and handle namespace:
-  //
-  // * `name` — caller-chosen channel mapping name; unique per Node;
-  //   duplicate names rejected. Not an IS-08 input or output id.
-  // * `parent_name` / `sender_name` — IS-04 linkage by resource name
-  //   (libnvnmos derives UUIDs from the Node seed).
-  // * `input_ids` / `output_ids` in the response — effective IS-08 ids
-  //   after empty-id defaulting on add.
-  // * `ChannelMappingOutput.routable_inputs` — mirrors libnvnmos / IS-08
-  //   (empty → caps `routable_inputs: null`; non-empty list; "" → null
-  //   array element). gst-nmos-rs may populate explicitly (§ design doc).
-  // * `channelmapping_handle` — daemon-local token (like `resource_handle`).
-
+  // Adds an audio channel mapping owned by the session. Requires an active
+  // channel-mapping activation subscription; otherwise `FAILED_PRECONDITION`.
+  // Returns `NOT_FOUND` for an unknown session, `ALREADY_EXISTS` for a
+  // duplicate name, or `INVALID_ARGUMENT` for invalid geometry.
   rpc AddChannelMapping(AddChannelMappingRequest) returns (AddChannelMappingResponse);
+
+  // Removes an audio channel mapping owned by the session. Returns `NOT_FOUND`
+  // if the session is unknown or does not own the channel-mapping handle.
   rpc RemoveChannelMapping(RemoveChannelMappingRequest) returns (Empty);
+
+  // Updates one output after a client-originated channel-mapping change.
+  // Returns `NOT_FOUND` if the session does not own the channel mapping or
+  // `INVALID_ARGUMENT` if the active map is invalid.
   rpc SyncChannelMappingState(SyncChannelMappingStateRequest) returns (Empty);
+
+  // Streams pending IS-08 activations for channel mappings owned by the
+  // session. Returns `NOT_FOUND` for an unknown session or `ALREADY_EXISTS` if
+  // a stream is already active.
   rpc SubscribeChannelMappingActivations(SubscribeChannelMappingActivationsRequest)
       returns (stream ChannelMappingActivationEvent);
+
+  // Completes a pending IS-08 activation. Returns `NOT_FOUND` unless the
+  // activation is pending for this session.
   rpc AckChannelMappingActivation(AckChannelMappingActivationRequest) returns (Empty);
 }
 
-// -------- Common --------
-
+// Empty response for RPCs that return no data.
 message Empty {}
 
 // Transport family carried by a resource's `transport_file`.
 // `UNSPECIFIED` is the proto3 zero value and is an error from a client.
 enum Transport {
+  // No transport selected. Invalid in client requests.
   TRANSPORT_UNSPECIFIED = 0;
+  // RTP/UDP transport described by SDP.
   TRANSPORT_RTP = 1;
+  // MXL transport described by `flow_def` JSON.
   TRANSPORT_MXL = 2;
 }
 
@@ -179,29 +135,22 @@ enum Transport {
 // `UNSPECIFIED` is the proto3 zero value and is never sent by the
 // daemon.
 enum Side {
+  // No resource side selected. Never emitted by the daemon.
   SIDE_UNSPECIFIED = 0;
+  // NMOS Sender.
   SIDE_SENDER = 1;
+  // NMOS Receiver.
   SIDE_RECEIVER = 2;
 }
 
-// -------- Node config --------
-
-// Configuration for creating a Node (via `AddNode` for a persistent
-// Node, or via `OpenSession` for a session-refcounted Node). Unset
-// fields take the daemon's defaults (autodetect host name, autodetect
-// addresses, default port).
+// Configuration used when creating a Node. Unset fields use daemon defaults.
 message NodeConfig {
-  // Node seed. The daemon's multi-Node lookup key and the canonical
-  // Node identifier across every create / attach RPC. The NMOS
-  // `/self` `node_id` is a deterministic function of this seed; the
-  // same seed always yields the same `node_id`, whether the Node is
-  // created by `AddNode` or by the first `OpenSession`.
-  //
-  // Must be non-empty on `AddNode` and `OpenSession`; the daemon
-  // rejects an empty seed with `INVALID_ARGUMENT`.
+  // Seed used to derive stable NMOS UUIDs. Must be non-empty.
   string seed = 1;
 
+  // NMOS host name. Empty asks libnvnmos to autodetect it.
   string host_name = 2;
+  // NMOS host addresses. Empty asks libnvnmos to autodetect them.
   repeated string host_addresses = 3;
   // TCP port for libnvnmos's NMOS HTTP APIs. `0` (the default) asks the
   // daemon to allocate from `NVNMOSD_HTTP_PORT_MIN`..`NVNMOSD_HTTP_PORT_MAX`.
@@ -211,9 +160,11 @@ message NodeConfig {
   // to an existing Node (same `seed`).
   uint32 http_port = 4;
 
-  // Label and description for the Node. Empty falls back to a
-  // libnvnmos-synthesised value (using `asset_tags` when present).
+  // Label for the Node. Empty falls back to a libnvnmos-synthesised value,
+  // using `asset_tags` when present.
   string label = 5;
+  // Description for the Node. Empty falls back to a libnvnmos-synthesised
+  // value, using `asset_tags` when present.
   string description = 6;
 
   // Optional BCP-002-02 Asset Distinguishing Information. See
@@ -231,12 +182,17 @@ message NodeConfig {
 // `INVALID_ARGUMENT`. An entirely-default `AssetConfig` (all strings
 // empty, no functions) is treated as absent.
 message AssetConfig {
+  // Asset manufacturer.
   string manufacturer = 1;
+  // Asset product name.
   string product = 2;
+  // Asset instance identifier.
   string instance_id = 3;
+  // Functions performed by this asset. Must be non-empty when configured.
   repeated string functions = 4;
 }
 
+// Overrides for NMOS discovery and fixed Registration or System APIs.
 message NetworkServicesConfig {
   // DNS domain; use "local" to force mDNS. Empty for automatic.
   string domain = 1;
@@ -263,61 +219,48 @@ message NetworkServicesConfig {
   string system_version = 7;
 }
 
-// -------- Node lifecycle --------
-
+// Request to create a persistent Node.
 message AddNodeRequest {
-  // Node identity and configuration. `node_config.seed` is both the
-  // daemon's lookup key (so `RemoveNode.node_seed` can later refer to
-  // this Node) and the NMOS UUID derivation seed. Errors with
-  // `ALREADY_EXISTS` if a Node (persistent or session-refcounted) is
-  // already bound to that seed.
+  // Identity and configuration of the persistent Node.
   NodeConfig node_config = 1;
 }
 
+// Result of creating a persistent Node.
 message AddNodeResponse {
-  // The NMOS `/self` UUID of the new Node — a deterministic function of
-  // `node_config.seed`. Informational; the daemon never accepts this as
-  // input.
+  // NMOS `/self` `id`. Informational; requests identify the Node by seed.
   string node_id = 1;
 
   // Effective HTTP API port the Node is listening on (after daemon
   // allocation when `node_config.http_port` was `0`).
   uint32 http_port = 2;
+
+  // Deterministic NMOS Device `id` derived from the Node seed.
+  // Informational; requests identify the Node by seed.
+  string device_id = 3;
 }
 
+// Request to remove a persistent Node.
 message RemoveNodeRequest {
-  // Identifies the persistent Node to tear down. Matched against the
-  // `seed` the Node was created with via `AddNode`.
+  // Seed of the persistent Node to remove.
   string node_seed = 1;
 }
 
-// -------- Sessions --------
-
+// Request to attach a new session to a Node.
 message OpenSessionRequest {
-  // Identifies the Node to attach to (`node_config.seed`) and, when
-  // the daemon has to create a Node because none currently exists for
-  // that seed, supplies the rest of the configuration. The remaining
-  // fields are ignored when attaching to a pre-existing Node — once a
-  // Node exists its configuration is fixed, whether it was created by
-  // `AddNode` or by an earlier `OpenSession`. See
-  // `OpenSessionResponse.created_node` for which path was taken.
+  // Identifies the Node by seed and configures it if this call creates
+  // it. Other fields are ignored when attaching to an existing Node.
   NodeConfig node_config = 1;
 }
 
+// Session and Node identifiers returned after opening a session.
 message OpenSessionResponse {
-  // Daemon-local session handle. Pass back to all subsequent RPCs.
+  // Opaque handle for subsequent calls in this session.
   string session_handle = 1;
 
-  // The NMOS `/self` UUID of the Node this session is attached to.
-  // Stable across sessions that share the same `node_config.seed`.
-  // Informational; the daemon never accepts this as input.
+  // NMOS `/self` `id`. Informational; requests identify the Node by seed.
   string node_id = 2;
 
-  // True iff this call constructed a new Node (which is necessarily
-  // session-refcounted). False if it attached to an existing Node —
-  // whether that Node was created by `AddNode` (persistent) or by an
-  // earlier `OpenSession` (session-refcounted). Lets the caller tell
-  // whether the rest of `OpenSessionRequest.node_config` was consulted.
+  // Whether this call created a new session-refcounted Node.
   bool created_node = 3;
 
   // Effective HTTP API port of the Node this session is attached to
@@ -325,91 +268,111 @@ message OpenSessionResponse {
   uint32 http_port = 4;
 }
 
+// Request to close a session and remove everything it owns.
 message CloseSessionRequest {
+  // Session to close.
   string session_handle = 1;
 }
 
-// -------- Resources --------
-
+// Request to add a Sender to a session.
 message AddSenderRequest {
+  // Session that will own the Sender.
   string session_handle = 1;
 
-  // Caller-chosen name for the sender, unique among Senders on this
-  // Node (a Receiver on the same Node may share the same name). Must
-  // be non-empty and must equal the `name` embedded in
-  // `transport_file` (`a=x-nvnmos-name` for SDP, `urn:x-nvnmos:tag:name`
-  // for MXL `flow_def`). See the `Resource lifecycle` section above.
+  // Caller-chosen Sender name. Must be non-empty and match `transport_file`.
   string name = 2;
 
+  // Transport family of `transport_file`.
   Transport transport = 3;
 
-  // SDP (`TRANSPORT_RTP`) or MXL `flow_def` JSON (`TRANSPORT_MXL`).
+  // Initial configuring transport file: SDP for RTP or `flow_def` JSON for
+  // MXL. Its embedded resource name must match `name`.
   string transport_file = 4;
 }
 
+// Request to add a Receiver to a session.
 message AddReceiverRequest {
+  // Session that will own the Receiver.
   string session_handle = 1;
 
-  // Caller-chosen name for the receiver, unique among Receivers on
-  // this Node (a Sender on the same Node may share the same name).
-  // Must be non-empty and must equal the `name` embedded in
-  // `transport_file` (`a=x-nvnmos-name` for SDP, `urn:x-nvnmos:tag:name`
-  // for MXL `flow_def`). See the `Resource lifecycle` section above.
+  // Caller-chosen Receiver name. Must be non-empty and match `transport_file`.
   string name = 2;
 
+  // Transport family of `transport_file`.
   Transport transport = 3;
 
-  // SDP (`TRANSPORT_RTP`) or MXL `flow_def` JSON (`TRANSPORT_MXL`).
+  // Initial configuring transport file: SDP for RTP or `flow_def` JSON for
+  // MXL. Its embedded resource name must match `name`.
   string transport_file = 4;
 }
 
-message AddResourceResponse {
-  // Daemon-local handle. Use in `RemoveResource` / `AckActivation` /
-  // `SyncResourceState` / `ActivationEvent.resource_handle`.
+// Identifiers returned after adding a Sender.
+message AddSenderResponse {
+  // Opaque handle for subsequent calls concerning this Sender.
   string resource_handle = 1;
 
-  // NMOS resource UUID (`/senders/<id>` or `/receivers/<id>`) — a
-  // deterministic function of the Node's seed and the resource's
-  // `name`.
-  string resource_id = 2;
+  // Deterministic NMOS Source `id` paired with this Sender.
+  // Informational; subsequent RPCs use the handle.
+  string source_id = 2;
+
+  // Deterministic NMOS Flow `id` paired with this Sender. This is the IS-04
+  // Flow resource `id`, not the MXL `mxl_flow_id` transport parameter.
+  // Informational; subsequent RPCs use the handle.
+  string flow_id = 3;
+
+  // Deterministic NMOS Sender `id` derived from the Node seed and name.
+  // Informational; subsequent RPCs use the handle.
+  string sender_id = 4;
 }
 
+// Identifiers returned after adding a Receiver.
+message AddReceiverResponse {
+  // Opaque handle for subsequent calls concerning this Receiver.
+  string resource_handle = 1;
+
+  // Deterministic NMOS Receiver `id` derived from the Node seed and name.
+  // Informational; subsequent RPCs use the handle.
+  string receiver_id = 2;
+}
+
+// Request to remove a Sender or Receiver owned by a session.
 message RemoveResourceRequest {
+  // Session that owns the resource.
   string session_handle = 1;
+  // Opaque handle of the resource to remove.
   string resource_handle = 2;
 }
 
-// -------- Activations --------
-
+// Request to open the session's IS-05 activation stream.
 message SubscribeActivationsRequest {
+  // Session whose activations to stream.
   string session_handle = 1;
 }
 
+// Pending IS-05 activation or deactivation for one resource.
 message ActivationEvent {
-  // The resource the activation applies to.
+  // Opaque handle of the affected resource.
   string resource_handle = 1;
 
-  // Daemon-local handle for the activation; pass back unchanged in
-  // `AckActivationRequest.activation_handle`.
+  // Opaque activation handle to return in `AckActivation`.
   string activation_handle = 2;
 
-  // The updated transport_file in the same format as `AddSender` /
-  // `AddReceiver`. Absent means the resource is being deactivated.
-  // Symmetric with `SyncResourceStateRequest.transport_file`.
+  // Effective transport file in the resource's configured format. Absence
+  // means deactivation. Symmetric with `SyncResourceStateRequest.transport_file`.
   optional string transport_file = 3;
 
-  // Whether the resource is a Sender or a Receiver. Surfaces the same
-  // information the client supplied via the `AddSender` / `AddReceiver`
-  // RPC; redundant with the `resource_handle` mapping the client
-  // already holds, but lets the client dispatch on `(side, name)`
-  // without that lookup.
+  // Whether the affected resource is a Sender or Receiver.
   Side side = 4;
 }
 
+// Result of applying a pending IS-05 activation.
 message AckActivationRequest {
+  // Session that owns the affected resource.
   string session_handle = 1;
+  // Opaque activation handle from `ActivationEvent`.
   string activation_handle = 2;
 
+  // Whether the client applied the activation successfully.
   bool success = 3;
 
   // Free-form failure reason, surfaced to the IS-05 controller. Set
@@ -417,90 +380,145 @@ message AckActivationRequest {
   string failure_reason = 4;
 }
 
-// -------- Out-of-band sync --------
-
+// Client-originated active state for a Sender or Receiver.
 message SyncResourceStateRequest {
+  // Session that owns the resource.
   string session_handle = 1;
+  // Opaque handle of the affected resource.
   string resource_handle = 2;
-  // The new transport_file reflecting the out-of-band state. Same
-  // format as `AddSender` / `AddReceiver`. Absent means the resource
-  // is being deactivated. Symmetric with `ActivationEvent.transport_file`.
+  // Effective transport file in the resource's configured format. Absence
+  // means deactivation. Symmetric with `ActivationEvent.transport_file`.
   optional string transport_file = 3;
 }
 
-// -------- IS-08 Channel Mapping --------
-
+// Request to add IS-08 Inputs and Outputs as one channel mapping.
 message AddChannelMappingRequest {
+  // Session that will own the channel mapping.
   string session_handle = 1;
-  string name = 2;  // caller-chosen channel mapping name; unique per Node
+  // Caller-chosen channel-mapping name, unique within the Node. This is not an
+  // IS-08 Input or Output ID.
+  string name = 2;
+  // IS-08 Inputs to add.
   repeated ChannelMappingInput inputs = 3;
+  // IS-08 Outputs to add.
   repeated ChannelMappingOutput outputs = 4;
 }
 
+// Handle and effective IS-08 IDs returned after adding a channel mapping.
 message AddChannelMappingResponse {
+  // Opaque handle for subsequent calls concerning this channel mapping.
   string channelmapping_handle = 1;
+  // Effective IS-08 input IDs after assigning defaults for empty IDs.
   repeated string input_ids = 2;
+  // Effective IS-08 output IDs after assigning defaults for empty IDs.
   repeated string output_ids = 3;
 }
 
+// Request to remove a channel mapping owned by a session.
 message RemoveChannelMappingRequest {
+  // Session that owns the channel mapping.
   string session_handle = 1;
+  // Opaque handle of the channel mapping to remove.
   string channelmapping_handle = 2;
 }
 
+// Type of the IS-04 resource linked from an IS-08 Input `/parent`.
 enum ChannelMappingParentType {
+  // Link the Input to an NMOS Receiver.
   CHANNEL_MAPPING_PARENT_TYPE_RECEIVER = 0;
+  // Link the Input to an NMOS Source.
   CHANNEL_MAPPING_PARENT_TYPE_SOURCE = 1;
 }
 
+// IS-08 Input geometry.
 message ChannelMappingInput {
-  string id = 1;                       // IS-08 input id; empty → default assigned on add
-  string name = 2;                     // IS-08 /properties name (not AddChannelMappingRequest.name)
+  // IS-08 input ID. Empty requests an assigned default.
+  string id = 1;
+  // IS-08 `/properties` name, independent of the channel-mapping name.
+  string name = 2;
+  // IS-08 `/properties` description.
   string description = 3;
+  // IS-08 channel labels. Must be non-empty.
   repeated string channel_labels = 4;
-  string parent_name = 5;              // empty → null /parent; else caller-chosen receiver or sender name
-  ChannelMappingParentType parent_type = 6;  // receiver vs source when parent_name set; ignored when parent_name empty
-  bool reordering = 7;                 // used when block_size != 0; default true when block_size is 0
-  uint32 block_size = 8;               // 0 → default 1
+  // Caller-chosen Receiver name when `parent_type` is `RECEIVER`, or Sender
+  // name whose derived Source is used when it is `SOURCE`. Empty produces a
+  // null `/parent`.
+  string parent_name = 5;
+  // Parent resource type. Ignored when `parent_name` is empty.
+  ChannelMappingParentType parent_type = 6;
+  // Reordering capability. Ignored when `block_size` is zero.
+  bool reordering = 7;
+  // Block size. Zero selects a block size of one with reordering enabled.
+  uint32 block_size = 8;
 }
 
+// IS-08 Output geometry.
 message ChannelMappingOutput {
-  string id = 1;                       // IS-08 output id; empty → default assigned on add
-  string name = 2;                     // IS-08 /properties name (not AddChannelMappingRequest.name)
+  // IS-08 output ID. Empty requests an assigned default.
+  string id = 1;
+  // IS-08 `/properties` name, independent of the channel-mapping name.
+  string name = 2;
+  // IS-08 `/properties` description.
   string description = 3;
+  // IS-08 channel labels. Must be non-empty.
   repeated string channel_labels = 4;
-  string sender_name = 5;              // empty → null /sourceid; else caller-chosen sender name
-  // IS-08 output /caps routable_inputs: empty → null (unrestricted); non-empty
-  // → restricted list; "" entry → null in the IS-08 array (unrouted permitted).
+  // Caller-chosen Sender name used for IS-04 linkage. Empty produces a null
+  // `/sourceid`.
+  string sender_name = 5;
+  // IS-08 output `/caps/routable_inputs`. Empty is unrestricted; an empty
+  // string entry permits an unrouted channel.
   repeated string routable_inputs = 6;
 }
 
+// Route for one output channel in a dense IS-08 active map. Entry index `i`
+// describes output channel `i`.
 message ActiveMapEntry {
+  // IS-08 Input ID. Absence means the output channel is unrouted.
   optional string input_id = 1;
+  // Input channel index. Defaults to zero when routed and is ignored when
+  // `input_id` is absent.
   optional uint32 input_channel = 2;
 }
 
+// Client-originated active map for one IS-08 Output.
 message SyncChannelMappingStateRequest {
+  // Session that owns the channel mapping.
   string session_handle = 1;
+  // Opaque handle of the channel mapping.
   string channelmapping_handle = 2;
+  // IS-08 Output ID being updated.
   string output_id = 3;
+  // Dense active map with one entry per output channel.
   repeated ActiveMapEntry active_map = 4;
 }
 
+// Request to open the session's IS-08 activation stream.
 message SubscribeChannelMappingActivationsRequest {
+  // Session whose channel-mapping activations to stream.
   string session_handle = 1;
 }
 
+// Pending IS-08 activation for one Output.
 message ChannelMappingActivationEvent {
+  // Opaque handle of the affected channel mapping.
   string channelmapping_handle = 1;
+  // Opaque activation handle to return in `AckChannelMappingActivation`.
   string activation_handle = 2;
+  // IS-08 Output ID being activated.
   string output_id = 3;
+  // Dense active map with one entry per output channel.
   repeated ActiveMapEntry active_map = 4;
 }
 
+// Result of applying a pending IS-08 activation.
 message AckChannelMappingActivationRequest {
+  // Session that owns the affected channel mapping.
   string session_handle = 1;
+  // Opaque activation handle from `ChannelMappingActivationEvent`.
   string activation_handle = 2;
+  // Whether the client applied the activation successfully.
   bool success = 3;
+  // Free-form failure reason returned to the IS-08 controller. Set only when
+  // `success` is false.
   string failure_reason = 4;
 }

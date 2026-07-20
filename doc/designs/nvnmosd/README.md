@@ -117,10 +117,10 @@ service NvnmosDaemon {
   // (SDP) or urn:x-nvnmos:tag:name tag (MXL flow_def) inside is the
   // NvNmos name of the sender or receiver; NvNmos generates the NMOS
   // /senders/<id> or /receivers/<id> UUID from it.
-  // AddResourceResponse returns both the daemon-local resource_handle
-  // (for subsequent RPCs) and the NMOS resource_id (informational).
-  rpc AddSender(AddSenderRequest) returns (AddResourceResponse);
-  rpc AddReceiver(AddReceiverRequest) returns (AddResourceResponse);
+  // AddSenderResponse returns resource_handle plus source_id / flow_id /
+  // sender_id. AddReceiverResponse returns resource_handle plus receiver_id.
+  rpc AddSender(AddSenderRequest) returns (AddSenderResponse);
+  rpc AddReceiver(AddReceiverRequest) returns (AddReceiverResponse);
   rpc RemoveResource(RemoveResourceRequest) returns (Empty);
 
   // Server-streaming: one per session, kept open for the session's lifetime.

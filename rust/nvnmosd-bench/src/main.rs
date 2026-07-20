@@ -737,7 +737,7 @@ async fn main() -> anyhow::Result<()> {
                     ResourceSlot {
                         session_index,
                         resource_handle: resp.resource_handle,
-                        resource_id: resp.resource_id,
+                        resource_id: resp.sender_id,
                         sdp,
                     },
                 ));
@@ -763,7 +763,7 @@ async fn main() -> anyhow::Result<()> {
                     ResourceSlot {
                         session_index,
                         resource_handle: resp.resource_handle,
-                        resource_id: resp.resource_id,
+                        resource_id: resp.receiver_id,
                         sdp,
                     },
                 ));

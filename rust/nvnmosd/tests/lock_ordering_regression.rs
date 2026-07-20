@@ -400,8 +400,7 @@ async fn in_band_activation_does_not_deadlock_add_sender() {
         .expect("AddSender s1")
         .into_inner();
 
-    let parker =
-        start_parked_in_band_activation_on_stream(stream, http_port, &s1.resource_id).await;
+    let parker = start_parked_in_band_activation_on_stream(stream, http_port, &s1.sender_id).await;
 
     let mut add_client = client.clone();
     let add_session = session.clone();
@@ -467,8 +466,7 @@ async fn in_band_activation_does_not_deadlock_close_session() {
         .expect("AddSender s1")
         .into_inner();
 
-    let parker =
-        start_parked_in_band_activation_on_stream(stream, http_port, &s1.resource_id).await;
+    let parker = start_parked_in_band_activation_on_stream(stream, http_port, &s1.sender_id).await;
 
     let mut close_client = client.clone();
     let close_session = session.clone();

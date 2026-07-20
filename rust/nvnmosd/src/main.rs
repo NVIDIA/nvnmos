@@ -40,9 +40,10 @@ use nvnmos_rpc::v1::nvnmos_daemon_server::{NvnmosDaemon, NvnmosDaemonServer};
 use nvnmos_rpc::v1::{
     AckActivationRequest, AckChannelMappingActivationRequest, ActivationEvent,
     AddChannelMappingRequest, AddChannelMappingResponse, AddNodeRequest, AddNodeResponse,
-    AddReceiverRequest, AddResourceResponse, AddSenderRequest, CloseSessionRequest, Empty,
-    OpenSessionRequest, OpenSessionResponse, RemoveChannelMappingRequest, RemoveNodeRequest,
-    RemoveResourceRequest, SubscribeActivationsRequest, SubscribeChannelMappingActivationsRequest,
+    AddReceiverRequest, AddReceiverResponse, AddSenderRequest, AddSenderResponse,
+    CloseSessionRequest, Empty, OpenSessionRequest, OpenSessionResponse,
+    RemoveChannelMappingRequest, RemoveNodeRequest, RemoveResourceRequest,
+    SubscribeActivationsRequest, SubscribeChannelMappingActivationsRequest,
     SyncChannelMappingStateRequest, SyncResourceStateRequest, Transport as ProtoTransport,
 };
 use tokio::net::UnixListener;
@@ -162,36 +163,72 @@ impl Daemon {
         }
     }
 
-    /// Shared `AddSender` / `AddReceiver` orchestration: validate daemon
-    /// bookkeeping under the lock, run the libnvnmos add + name-match
-    /// lookup with no lock held, then commit under the lock.
-    fn add_resource(
+    /// `AddSender` orchestration: validate daemon bookkeeping under the
+    /// lock, run the libnvnmos add + id lookups with no lock held, then
+    /// commit under the lock.
+    fn add_sender(
         &self,
-        side: Side,
         session_handle: &str,
         transport: Transport,
         transport_file: &str,
         claimed_name: &str,
-    ) -> Result<state::AddResourceOutcome, Status> {
+    ) -> Result<state::AddSenderOutcome, Status> {
         let prep = {
             let mut state = self.lock_state();
             state.prepare_add_resource(
-                side,
+                Side::Sender,
                 session_handle,
                 transport,
                 transport_file,
                 claimed_name,
             )?
         };
-        let ready = prep.run_ffi()?;
-        let mut state = self.lock_state();
-        state.commit_add_resource(ready)
+        match prep.run_ffi()? {
+            state::AddResourceReady::Sender(ready) => {
+                let mut state = self.lock_state();
+                state.commit_add_sender(ready)
+            }
+            state::AddResourceReady::Receiver(_) => Err(Status::internal(
+                "AddSender prep produced a Receiver ready result",
+            )),
+        }
+    }
+
+    /// `AddReceiver` orchestration: validate daemon bookkeeping under the
+    /// lock, run the libnvnmos add + id lookup with no lock held, then
+    /// commit under the lock.
+    fn add_receiver(
+        &self,
+        session_handle: &str,
+        transport: Transport,
+        transport_file: &str,
+        claimed_name: &str,
+    ) -> Result<state::AddReceiverOutcome, Status> {
+        let prep = {
+            let mut state = self.lock_state();
+            state.prepare_add_resource(
+                Side::Receiver,
+                session_handle,
+                transport,
+                transport_file,
+                claimed_name,
+            )?
+        };
+        match prep.run_ffi()? {
+            state::AddResourceReady::Receiver(ready) => {
+                let mut state = self.lock_state();
+                state.commit_add_receiver(ready)
+            }
+            state::AddResourceReady::Sender(_) => Err(Status::internal(
+                "AddReceiver prep produced a Sender ready result",
+            )),
+        }
     }
 
     /// `AddChannelMapping` orchestration (IS-08 analogue of
-    /// [`Daemon::add_resource`]): validate daemon bookkeeping under the
-    /// lock, run the libnvnmos add with no lock held, then commit under
-    /// the lock.
+    /// [`Daemon::add_sender`] / [`Daemon::add_receiver`]): validate daemon
+    /// bookkeeping under the lock, run the libnvnmos add with no lock held,
+    /// then commit under the lock.
     fn add_channelmapping(
         &self,
         session_handle: &str,
@@ -222,12 +259,14 @@ impl NvnmosDaemon for Daemon {
         tracing::info!(
             node_seed = %seed,
             node_id = %outcome.node_id,
+            device_id = %outcome.device_id,
             http_port = outcome.http_port,
             "AddNode",
         );
         Ok(Response::new(AddNodeResponse {
             node_id: outcome.node_id,
             http_port: u32::from(outcome.http_port),
+            device_id: outcome.device_id,
         }))
     }
 
@@ -319,11 +358,10 @@ impl NvnmosDaemon for Daemon {
     async fn add_sender(
         &self,
         request: Request<AddSenderRequest>,
-    ) -> Result<Response<AddResourceResponse>, Status> {
+    ) -> Result<Response<AddSenderResponse>, Status> {
         let req = request.into_inner();
         let transport = state::translate_transport(decode_proto_transport(req.transport)?)?;
-        let outcome = self.add_resource(
-            Side::Sender,
+        let outcome = self.add_sender(
             &req.session_handle,
             transport,
             &req.transport_file,
@@ -333,25 +371,27 @@ impl NvnmosDaemon for Daemon {
             session_handle = %req.session_handle,
             node_seed = %outcome.node_seed,
             resource_handle = %outcome.resource_handle,
-            resource_id = %outcome.resource_id,
+            source_id = %outcome.source_id,
+            flow_id = %outcome.flow_id,
+            sender_id = %outcome.sender_id,
             name = %req.name,
-            side = outcome.side.label(),
             "AddSender",
         );
-        Ok(Response::new(AddResourceResponse {
+        Ok(Response::new(AddSenderResponse {
             resource_handle: outcome.resource_handle,
-            resource_id: outcome.resource_id,
+            source_id: outcome.source_id,
+            flow_id: outcome.flow_id,
+            sender_id: outcome.sender_id,
         }))
     }
 
     async fn add_receiver(
         &self,
         request: Request<AddReceiverRequest>,
-    ) -> Result<Response<AddResourceResponse>, Status> {
+    ) -> Result<Response<AddReceiverResponse>, Status> {
         let req = request.into_inner();
         let transport = state::translate_transport(decode_proto_transport(req.transport)?)?;
-        let outcome = self.add_resource(
-            Side::Receiver,
+        let outcome = self.add_receiver(
             &req.session_handle,
             transport,
             &req.transport_file,
@@ -361,14 +401,13 @@ impl NvnmosDaemon for Daemon {
             session_handle = %req.session_handle,
             node_seed = %outcome.node_seed,
             resource_handle = %outcome.resource_handle,
-            resource_id = %outcome.resource_id,
+            receiver_id = %outcome.receiver_id,
             name = %req.name,
-            side = outcome.side.label(),
             "AddReceiver",
         );
-        Ok(Response::new(AddResourceResponse {
+        Ok(Response::new(AddReceiverResponse {
             resource_handle: outcome.resource_handle,
-            resource_id: outcome.resource_id,
+            receiver_id: outcome.receiver_id,
         }))
     }
 
