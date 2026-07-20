@@ -181,7 +181,7 @@ impl ObjectImpl for NmosSink {
                     .nick("System URL")
                     .blurb(crate::session::SYSTEM_URL_BLURB)
                     .build(),
-                glib::ParamSpecEnum::builder_with_default("transport", Transport::Mxl)
+                glib::ParamSpecEnum::builder_with_default("transport", Transport::Udp)
                     .nick("Transport")
                     .blurb(crate::session::TRANSPORT_BLURB)
                     .mutable_ready()
