@@ -825,6 +825,24 @@ bool nmos_make_node_id(
     size_t out_len);
 
 /**
+ * Compute the NMOS Device resource id that an
+ * @ref NvNmosNodeServer created with the given @p seed will use.
+ *
+ * Pure function of @p seed. NvNmos creates one Device per Node. See
+ * @ref nmos_make_node_id for the contract; the same notes apply.
+ *
+ * @param[in]  seed    Seed string. Must not be null.
+ * @param[out] out     Buffer to receive the id.
+ * @param[in]  out_len Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_make_device_id(
+    const char *seed,
+    char *out,
+    size_t out_len);
+
+/**
  * Compute the NMOS Sender resource id that an
  * @ref NvNmosNodeServer created with the given @p seed will use for
  * the sender with the given @p sender_name.
@@ -935,6 +953,23 @@ bool nmos_make_flow_id(
  */
 NVNMOS_API
 bool nmos_get_node_id(
+    const NvNmosNodeServer *server,
+    char *out,
+    size_t out_len);
+
+/**
+ * Get the NMOS Device resource id of a running @ref NvNmosNodeServer.
+ *
+ * NvNmos creates one Device per Node.
+ *
+ * @param[in]  server  Pointer to a server previously initialised by
+ *                     @ref create_nmos_node_server.
+ * @param[out] out     Buffer to receive the id.
+ * @param[in]  out_len Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_get_device_id(
     const NvNmosNodeServer *server,
     char *out,
     size_t out_len);

@@ -25,6 +25,7 @@ Existing application code needs to be updated as itemised below - mostly possibl
 The NMOS resource UUIDs are deterministic pure functions of `(seed, side, name)`. Pure accessors compute them without a server:
 
 - `nmos_make_node_id(seed, out, out_len)`
+- `nmos_make_device_id(seed, out, out_len)`
 - `nmos_make_sender_id(seed, sender_name, out, out_len)`
 - `nmos_make_receiver_id(seed, receiver_name, out, out_len)`
 - `nmos_make_source_id(seed, sender_name, out, out_len)`
@@ -33,6 +34,7 @@ The NMOS resource UUIDs are deterministic pure functions of `(seed, side, name)`
 Live accessors look them up on a running server:
 
 - `nmos_get_node_id(server, out, out_len)`
+- `nmos_get_device_id(server, out, out_len)`
 - `nmos_get_sender_id(server, sender_name, out, out_len)`
 - `nmos_get_receiver_id(server, receiver_name, out, out_len)`
 - `nmos_get_source_id(server, sender_name, out, out_len)`

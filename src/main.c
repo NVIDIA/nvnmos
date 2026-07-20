@@ -396,6 +396,11 @@ static void print_expected_ids(const char *seed)
         print_id("node", "", success ? id : "<error>");
     }
 
+    {
+        const bool success = nmos_make_device_id(seed, id, sizeof id);
+        print_id("device", "", success ? id : "<error>");
+    }
+
     static const char *const sender_names[] = {
         "sink-0", "sink-1", "mxl-sink-0", "mxl-sink-1"
     };
@@ -431,6 +436,11 @@ static void print_actual_ids(const NvNmosNodeServer *server)
     {
         const bool success = nmos_get_node_id(server, id, sizeof id);
         print_id("node", "", success ? id : "<error>");
+    }
+
+    {
+        const bool success = nmos_get_device_id(server, id, sizeof id);
+        print_id("device", "", success ? id : "<error>");
     }
 
     static const char *const sender_names[] = {

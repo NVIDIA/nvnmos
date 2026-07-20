@@ -193,6 +193,7 @@ namespace nvnmos
         void activate_channelmapping(const std::string& name, const std::string& output_id, const NvNmosChannelMappingActiveMapEntry* active_map, size_t num_active_map);
 
         nmos::id node_id() const;
+        nmos::id device_id() const;
         nmos::id sender_id(const std::string& sender_name) const;
         nmos::id receiver_id(const std::string& receiver_name) const;
         nmos::id source_id(const std::string& source_name) const;
@@ -674,6 +675,12 @@ namespace nvnmos
         return impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::node);
     }
 
+    nmos::id server::device_id() const
+    {
+        auto lock = node_model.read_lock();
+        return impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), nmos::types::device);
+    }
+
     nmos::id server::sender_id(const std::string& sender_name) const
     {
         auto lock = node_model.read_lock();
@@ -947,6 +954,24 @@ bool nmos_make_node_id(
 }
 
 NVNMOS_API
+bool nmos_make_device_id(
+    const char* seed,
+    char* out,
+    size_t out_len)
+{
+    if (!seed) return false;
+    try
+    {
+        const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
+        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::device), out, out_len);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
 bool nmos_make_sender_id(
     const char* seed,
     const char* sender_name,
@@ -1034,6 +1059,25 @@ bool nmos_get_node_id(
     try
     {
         return nvnmos::copy_id_to_buffer(impl->node_id(), out, out_len);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
+bool nmos_get_device_id(
+    const NvNmosNodeServer* server,
+    char* out,
+    size_t out_len)
+{
+    if (!server) return false;
+    auto impl = (nvnmos::server*)server->impl;
+    if (!impl) return false;
+    try
+    {
+        return nvnmos::copy_id_to_buffer(impl->device_id(), out, out_len);
     }
     catch (...)
     {
