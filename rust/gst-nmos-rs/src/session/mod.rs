@@ -59,206 +59,136 @@ pub(crate) fn transport_to_proto(t: Transport) -> ProtoTransport {
 // `label`, `description`, `mxl-flow-id`, `caps`) keep their text
 // inline in the respective `imp.rs`.
 
-pub(crate) const DAEMON_URI_BLURB: &str = "gRPC endpoint for nvnmosd. Only `unix:/path/to/sock` URIs are \
-     currently supported.";
+pub(crate) const DAEMON_URI_BLURB: &str = "\
+    Address of nvnmosd used to expose this element through NMOS. Only Unix \
+    socket URIs are supported. Default: `unix:/tmp/nvnmosd.sock`.";
 
-pub(crate) const NODE_SEED_BLURB: &str = "NvNmos Node seed (node_config.seed). Required. Sessions sharing \
-     this seed contribute to the same NMOS Node.";
+pub(crate) const NODE_SEED_BLURB: &str = "\
+    Caller-chosen seed for the NMOS Node. Elements using the same seed with one \
+    daemon join the same Node. Use a globally unique seed for each Node. It \
+    determines stable NMOS resource IDs. It is required.";
 
-pub(crate) const HTTP_PORT_BLURB: &str = "TCP port libnvnmos serves the NMOS HTTP APIs on \
-     (node_config.http_port). 0 (the default) asks nvnmosd to allocate \
-     from NVNMOSD_HTTP_PORT_MIN..NVNMOSD_HTTP_PORT_MAX. Non-zero selects \
-     an explicit port (rejected when unavailable). Honoured only by the \
-     OpenSession that actually creates the Node — when attaching to a \
-     pre-existing Node (e.g. another nmossink / nmossrc opened first with \
-     the same node-seed) this property is ignored. The effective port is \
-     returned in OpenSessionResponse.http_port.";
+pub(crate) const HTTP_PORT_BLURB: &str = "\
+    Port for the Node's NMOS HTTP APIs. 0 allocates a port automatically. \
+    Only the first element to create the Node controls this value.";
 
-pub(crate) const HOST_NAME_BLURB: &str = "NMOS Node host name (`node_config.host_name`). Empty (the \
-     default) leaves libnvnmos to autodetect. Honoured only by the \
-     OpenSession that actually creates the Node; ignored when \
-     attaching to a pre-existing Node with the same `node-seed`.";
+pub(crate) const HOST_NAME_BLURB: &str = "\
+    Host name advertised by the NMOS Node. Empty autodetects it. Only the \
+    first element to create the Node controls this value.";
 
-pub(crate) const DOMAIN_BLURB: &str = "DNS domain for NMOS network services (`network_services.domain`). \
-     Use `local` to force mDNS. Empty (the default) leaves libnvnmos \
-     on automatic discovery. Not to be confused with `mxl-domain-id` \
-     / `mxl-domain-path`, which identify an MXL shared-memory Domain. \
-     Honoured only by the OpenSession that creates the Node.";
+pub(crate) const DOMAIN_BLURB: &str = "\
+    DNS domain used to discover NMOS services. Use `local` for mDNS. Empty \
+    selects automatic discovery. Only the first element to create the Node \
+    controls this value.";
 
-pub(crate) const REGISTRATION_URL_BLURB: &str = "Fixed IS-04 Registration API URL. Format: \
-     `http://host[:port]/x-nmos/registration/v<X.Y>[/]`. Parsed into \
-     `network_services.registration_*`; invalid URLs are logged and \
-     ignored. Empty (the default) leaves libnvnmos on DNS-SD discovery \
-     based on `host-name`. Honoured only by the OpenSession that \
-     creates the Node.";
+pub(crate) const REGISTRATION_URL_BLURB: &str = "\
+    Fixed IS-04 Registration API URL. Empty uses DNS-SD discovery. Only \
+    the first element to create the Node controls this value.";
 
-pub(crate) const SYSTEM_URL_BLURB: &str = "Fixed IS-09 System API URL. Format: \
-     `http://host[:port]/x-nmos/system/v<X.Y>[/]`. Parsed into \
-     `network_services.system_*`; invalid URLs are logged and ignored. \
-     Honoured only when `registration-url` is also set (libnvnmos \
-     ignores a standalone System API). Honoured only by the OpenSession \
-     that creates the Node.";
+pub(crate) const SYSTEM_URL_BLURB: &str = "\
+    Fixed IS-09 System API URL. Used only when `registration-url` is also set. \
+    Only the first element to create the Node controls this value.";
 
-pub(crate) const TRANSPORT_BLURB: &str = "Inner data path family. \
-     `mxl`: MXL shared-memory transport (`mxlsrc` / `mxlsink`). \
-     `udp`: ST 2110 over RTP/UDP via gst-plugins-good (`udpsrc` / \
-     `udpsink` + the `rtpvrawpay` / `rtpL24pay` / `rtpsmpte291pay` \
-     family). \
-     `udp2`: ST 2110 over RTP/UDP via gst-plugins-rs (`udpsrc2` + \
-     the `*pay2` / `*depay2` family where available, falling back \
-     to gst-plugins-good per-element). \
-     `nvdsudp`: ST 2110 via DeepStream's `nvdsudpsrc` / `nvdsudpsink` \
-     (Rivermax kernel-bypass, built-in RTP (de)payload, Mode 3). \
-     Requires ConnectX-5+ and the Rivermax SDK.";
+pub(crate) const TRANSPORT_BLURB: &str = "\
+    Data-plane implementation. `udp` uses gst-plugins-good RTP/UDP. `udp2` \
+    uses gst-plugins-rs RTP/UDP where available. `mxl` uses MXL shared memory. \
+    `nvdsudp` uses DeepStream/Rivermax ST 2110. Default: `udp`.";
 
-pub(crate) const MXL_DOMAIN_ID_BLURB: &str = "MXL Domain identifier (UUID) included as \
-     `urn:x-nvnmos:tag:mxl-domain-id` in the transport file. \
-     Optional when transport=mxl: the path's `domain_def.json` `id` \
-     supplies it when present (for a `caps`-synthesised file; a supplied \
-     `transport-file*` keeps its own tag, cross-checked at activation); \
-     otherwise the tag is left application-resolved (`[\"\"]`) and the \
-     data plane uses `mxl-domain-path` locally. When supplied, overrides \
-     the transport file's tag. Cross-checked against `domain_def.json` \
-     when both are supplied (mismatch is an error). On `nmossrc`, set \
-     before NULL\u{2192}READY; on `nmossink` it may also be set in READY \
-     for deferred AddSender.";
+pub(crate) const MXL_DOMAIN_ID_BLURB: &str = "\
+    UUID advertised for the MXL Domain. Empty lets `domain_def.json` supply \
+    it. Without either value, the domain remains application-resolved. It must \
+    match `domain_def.json` when both are present. Used only with MXL.";
 
-pub(crate) const SENDER_NAME_BLURB: &str = "Name for this Sender within the Node (becomes the \
-     `x-nvnmos-name` SDP attribute or the `urn:x-nvnmos:tag:name` \
-     flow-def tag in the transport file). Unique across Senders on the \
-     Node; a Receiver on the same Node may share the same name (the \
-     daemon scopes names by side). Required unless the name is already \
-     carried in `transport-file*`. Overrides the transport file's value \
-     when both are supplied. The Sender's IS-04 id is derived from the \
-     name and the element's `node-seed`.";
+pub(crate) const SENDER_NAME_BLURB: &str = "\
+    Caller-chosen name for this Sender. It must be unique among Senders on the \
+    Node. Together with `node-seed`, it determines stable NMOS resource IDs. \
+    It is required unless supplied by `transport-file*`.";
 
-pub(crate) const RECEIVER_NAME_BLURB: &str = "Name for this Receiver within the Node (becomes the \
-     `x-nvnmos-name` SDP attribute or the `urn:x-nvnmos:tag:name` \
-     flow-def tag in the transport file). Unique across Receivers on the \
-     Node; a Sender on the same Node may share the same name (the \
-     daemon scopes names by side). Required unless the name is already \
-     carried in `transport-file*`. Overrides the transport file's value \
-     when both are supplied. The Receiver's IS-04 id is derived from the \
-     name and the element's `node-seed`.";
+pub(crate) const RECEIVER_NAME_BLURB: &str = "\
+    Caller-chosen name for this Receiver. It must be unique among Receivers on \
+    the Node. Together with `node-seed`, it determines a stable NMOS Receiver \
+    ID. It is required unless supplied by `transport-file*`.";
 
-pub(crate) const LABEL_BLURB_SENDER: &str = "NMOS label for the Sender. Optional. Overrides the transport \
-     file when both are supplied (top-level `label` in an MXL \
-     `flow_def`; SDP `s=` line for RTP/UDP).";
+pub(crate) const LABEL_BLURB_SENDER: &str = "\
+    Label for this Sender shown to controllers as IS-04 `label`. When set, \
+    overrides the matching value from `transport-file*`.";
 
-pub(crate) const LABEL_BLURB_RECEIVER: &str = "NMOS label for the Receiver. Optional. Overrides the transport \
-     file when both are supplied (top-level `label` in an MXL \
-     `flow_def`; SDP `s=` line for RTP/UDP).";
+pub(crate) const LABEL_BLURB_RECEIVER: &str = "\
+    Label for this Receiver shown to controllers as IS-04 `label`. When set, \
+    overrides the matching value from `transport-file*`.";
 
-pub(crate) const DESCRIPTION_BLURB_SENDER: &str = "NMOS description for the Sender. Optional. Overrides the \
-     transport file when both are supplied (top-level `description` \
-     in an MXL `flow_def`; SDP `i=` line for RTP/UDP).";
+pub(crate) const DESCRIPTION_BLURB_SENDER: &str = "\
+    Description for this Sender shown to controllers as IS-04 `description`. \
+    When set, overrides the matching value from `transport-file*`.";
 
-pub(crate) const DESCRIPTION_BLURB_RECEIVER: &str = "NMOS description for the Receiver. Optional. Overrides the \
-     transport file when both are supplied (top-level `description` \
-     in an MXL `flow_def`; SDP `i=` line for RTP/UDP).";
+pub(crate) const DESCRIPTION_BLURB_RECEIVER: &str = "\
+    Description for this Receiver shown to controllers as IS-04 `description`. \
+    When set, overrides the matching value from `transport-file*`.";
 
-pub(crate) const GROUP_HINT_BLURB_SENDER: &str = "NMOS group hint for the Sender (the \
-     `urn:x-nmos:tag:grouphint/v1.0` tag), e.g. `\"SDI 1:Video\"`. \
-     Becomes the `x-nvnmos-group-hint` session-level SDP attribute on \
-     RTP/UDP or the grouphint tag in an MXL `flow_def`. Overrides the \
-     transport file when both are supplied. Optional. Omitted when unset.";
+pub(crate) const GROUP_HINT_BLURB_SENDER: &str = "\
+    NMOS group hint for the Sender, for example `Camera:Video`. When set, \
+    overrides the matching value from `transport-file*`.";
 
-pub(crate) const GROUP_HINT_BLURB_RECEIVER: &str = "NMOS group hint for the Receiver (the \
-     `urn:x-nmos:tag:grouphint/v1.0` tag), e.g. `\"SDI 1:Video\"`. \
-     Becomes the `x-nvnmos-group-hint` session-level SDP attribute on \
-     RTP/UDP or the grouphint tag in an MXL `flow_def`. Overrides the \
-     transport file when both are supplied. Optional. Omitted when unset.";
+pub(crate) const GROUP_HINT_BLURB_RECEIVER: &str = "\
+    NMOS group hint for the Receiver, for example `Camera:Video`. When set, \
+    overrides the matching value from `transport-file*`.";
 
-pub(crate) const TRANSPORT_FILE_PATH_BLURB: &str = "Filesystem path read at NULL\u{2192}READY into `transport-file`. \
-     Convenience for gst-launch; mutually exclusive with \
-     `transport-file`.";
+pub(crate) const TRANSPORT_FILE_PATH_BLURB: &str = "\
+    Path to configuring SDP or MXL flow-definition JSON, read when the \
+    element starts. Mutually exclusive with `transport-file`.";
 
-pub(crate) const TRANSPORT_FILE_BLURB_SENDER: &str = "Literal contents of the NvNmos transport file: MXL `flow_def` JSON \
-     for `transport=mxl`, SDP text for `transport=udp` / `udp2` / \
-     `nvdsudp`. The daemon adds the Sender via AddSender and \
-     re-publishes the transport file on IS-05 activation. Pass the \
-     text, not a path. Convenient for programmatic callers; from \
-     gst-launch use `transport-file-path` instead. Mutually exclusive \
-     with `transport-file-path`. When unset and `caps` is supplied the \
-     element synthesises a configuring transport file from the essence \
-     caps (MXL `flow_def` or SDP, depending on `transport`).";
+pub(crate) const TRANSPORT_FILE_BLURB_SENDER: &str = "\
+    Configuring SDP text for RTP/UDP or MXL flow-definition JSON for MXL. Empty \
+    makes the element derive the configuration from the `caps` property or \
+    negotiated upstream caps, plus applicable RTP/UDP endpoint or MXL \
+    properties. Mutually exclusive with `transport-file-path`.";
 
-pub(crate) const TRANSPORT_FILE_BLURB_RECEIVER: &str = "Literal contents of the NvNmos transport file: MXL `flow_def` JSON \
-     for `transport=mxl`, SDP text for `transport=udp` / `udp2` / \
-     `nvdsudp`. The daemon adds the Receiver via AddReceiver and \
-     re-publishes the transport file on IS-05 activation. Pass the \
-     text, not a path. Convenient for programmatic callers; from \
-     gst-launch use `transport-file-path` instead. Mutually exclusive \
-     with `transport-file-path`. Required unless `caps` is provided.";
+pub(crate) const TRANSPORT_FILE_BLURB_RECEIVER: &str = "\
+    Configuring SDP text for RTP/UDP or MXL flow-definition JSON for MXL. Empty \
+    makes the element derive the configuration from the `caps` property and \
+    applicable RTP/UDP endpoint or MXL properties. Mutually exclusive with \
+    `transport-file-path`.";
 
-pub(crate) const CAPS_BLURB_SENDER: &str = "Essence caps for this Sender. Synthesises the configuring transport \
-     file when `transport-file*` is unset (MXL `flow_def` or SDP depending \
-     on `transport`). On `transport=mxl`, requires `mxl-flow-id`; supported \
-     shapes: v210 video, F32LE audio, `meta/x-st-2038` data. On RTP \
-     transports, requires the relevant IS-05 endpoint properties. When \
-     `transport-file*` is also set, the file wins and `caps` are \
-     cross-checked against it — mismatch is a hard error.";
+pub(crate) const CAPS_BLURB_SENDER: &str = "\
+    Unpacketized media caps used to configure and advertise this Sender. When \
+    `transport-file*` is also set, it must agree with these caps.";
 
-pub(crate) const CAPS_BLURB_RECEIVER: &str = "Essence caps for this Receiver. Required when `transport-file*` is \
-     unset; synthesises the configuring transport file (MXL `flow_def` or \
-     SDP depending on `transport`). On `transport=mxl`, requires \
-     `mxl-flow-id` (media-type structure name picks the matching `mxlsrc` \
-     flow-id slot); supported shapes: v210 video, F32LE audio, \
-     `meta/x-st-2038` data. On RTP transports, requires the relevant IS-05 \
-     endpoint properties. When `transport-file*` is also set, the file wins \
-     and `caps` are cross-checked against it — mismatch is a hard error.";
+pub(crate) const CAPS_BLURB_RECEIVER: &str = "\
+    Unpacketized media caps used to configure and constrain this Receiver. \
+    Required when neither `transport-file` nor `transport-file-path` is set. \
+    When `transport-file*` is also set, it must agree with these caps.";
 
-pub(crate) const TRANSPORT_CAPS_BLURB: &str =
-    "Per-transport overrides (SDP fmtp-style). Typically empty for MXL.";
+pub(crate) const TRANSPORT_CAPS_BLURB: &str = "\
+    RTP-layer settings expressed as `application/x-rtp` caps. Used only with \
+    RTP/UDP.";
 
-pub(crate) const FORMAT_BIT_RATE_BLURB: &str = "Coded essence (Flow) bit rate in kilobits per second (1000 bits/s), \
-     matching NMOS Flow `bit_rate` and SDP fmtp `x-nvnmos-format-bit-rate`. \
-     On JPEG XS RTP transports, synthesises the configuring SDP \
-     `a=fmtp:… x-nvnmos-format-bit-rate=` attribute and `b=AS:` (via the \
-     derived transport rate) and sets `rtpjxsvpay max-codestream-bitrate` \
-     to this value times 1000 (bit/s) unless `pay-properties` already \
-     supplies it. 0 (the default) = unset. When only one of \
-     `format-bit-rate` and `transport-bit-rate` is set, the other is derived \
-     using the same overhead factor as `nvnmosd` (AMWA BCP-006-01 / VSF \
-     TR-08 style). With a supplied `transport-file*`, cross-checks when both \
-     sides declare a rate and splices when the file omits it. Ignored on \
-     `transport=mxl`.";
+pub(crate) const FORMAT_BIT_RATE_BLURB: &str = "\
+    Coded media bit rate in kilobits per second for JPEG XS. 0 is unset. \
+    When only one bit-rate property is set, the other is derived. Used only \
+    with RTP/UDP.";
 
-pub(crate) const TRANSPORT_BIT_RATE_BLURB: &str = "Transport (Sender) bit rate in kilobits per second (1000 bits/s), \
-     including RTP/UDP/IP overhead, matching NMOS Sender `bit_rate`, SDP \
-     `b=AS:`, and fmtp `x-nvnmos-transport-bit-rate`. On JPEG XS RTP \
-     transports, synthesises the configuring SDP `b=AS:` bandwidth line and \
-     `a=fmtp:… x-nvnmos-transport-bit-rate=` attribute. 0 (the default) = \
-     unset. When only one of `format-bit-rate` and `transport-bit-rate` is \
-     set, the other is derived using the same overhead factor as `nvnmosd`. \
-     With a supplied `transport-file*`, cross-checks when both sides declare \
-     a rate and splices when the file omits it. Ignored on `transport=mxl`.";
+pub(crate) const TRANSPORT_BIT_RATE_BLURB: &str = "\
+    Total RTP/UDP/IP bit rate in kilobits per second for JPEG XS. 0 is unset. \
+    When only one bit-rate property is set, the other is derived. Used only \
+    with RTP/UDP.";
 
-pub(crate) const TRANSPORT_PROPERTIES_BLURB: &str = "Overrides applied to the inner source or sink (`udpsrc`, `udpsink`, \
-     `nvdsudpsrc`, `nvdsudpsink`, `mxlsrc`, or `mxlsink`) every time the \
-     data-path chain is built. \
-     Pass a `GstStructure` whose fields are GObject property names on that \
-     inner source or sink — for example `properties,buffer-size=26214400`. \
-     The structure name is not interpreted. Takes effect on the next chain \
-     build, not immediately on the one currently in the chain.";
+pub(crate) const TRANSPORT_PROPERTIES_BLURB: &str = "\
+    Additional properties for the selected transport source or sink, for \
+    example `properties,buffer-size=26214400`. Applied the next time the data \
+    plane is built.";
 
-pub(crate) const PAY_PROPERTIES_BLURB: &str = "Overrides applied to the inner RTP payloader every time the UDP sender \
-     chain is built. Same `GstStructure` syntax as `transport-properties`; \
-     ignored on non-UDP transports (a warning is logged if non-empty). Takes \
-     effect on the next chain build.";
+pub(crate) const PAY_PROPERTIES_BLURB: &str = "\
+    Additional properties for the RTP payloader, for example \
+    `properties,mtu=(uint)1220`. Applied the next time the Sender data plane is \
+    built. Used only with RTP/UDP.";
 
-pub(crate) const DEPAY_PROPERTIES_BLURB: &str = "Overrides applied to the inner RTP depayloader every time the UDP \
-     receiver chain is built. Same `GstStructure` syntax as \
-     `transport-properties`; ignored on non-UDP transports (a warning is \
-     logged if non-empty). Takes effect on the next chain build.";
+pub(crate) const DEPAY_PROPERTIES_BLURB: &str = "\
+    Additional properties for the RTP depayloader. Applied the next time the \
+    Receiver data plane is built. Used only with RTP/UDP.";
 
-pub(crate) const AUTO_ACTIVATE_BLURB: &str = "When `true`, swap in the real transport sink or source (instead of the \
-     fake chain) once the configuring transport file has been resolved at \
-     NULL\u{2192}READY (or READY\u{2192}PAUSED for deferred senders), and call \
-     `SyncResourceState` so IS-04/IS-05 show active without an IS-05 PATCH. \
-     Does not force PLAYING — child state still follows the bin. Default \
-     `false`: add via AddSender / AddReceiver (visible on IS-04) but keep the fake chain until an external \
-     IS-05 controller activates the resource.";
+pub(crate) const AUTO_ACTIVATE_BLURB: &str = "\
+    Activate the configured data path without waiting for an IS-05 controller. \
+    This property does not change the GStreamer pipeline state. Default: false.";
 
 /// Snapshot of the properties needed to open a session, taken under
 /// the per-element settings lock so the lock isn't held over the

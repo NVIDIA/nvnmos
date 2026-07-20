@@ -105,6 +105,9 @@ Apply these rules to user guides and generated-reference prose:
 - Avoid sentences that encode a list as several comma-separated clauses.
 - Put caveats next to the affected step.
 - Use tables only for comparisons. Use bullets for simple lists.
+- In reference blurbs, describe string and numeric sentinels in a separate
+  sentence starting with `Empty` or `0`. End enum and boolean blurbs with
+  `Default: …`. Do not join default behaviour to the outcome with a semicolon.
 
 The editing pass should reduce density, not merely move the same dense prose
 between files.
@@ -117,17 +120,62 @@ A blurb should usually answer only:
 2. Default / unset behaviour (briefly).
 3. Which element or transport it applies to (when not obvious).
 4. Simple exclusivity or override rules that prevent misuse (`transport-file` vs `transport-file-path`).
+5. The standard NMOS API field it affects when that mapping clarifies the
+   outcome (for example IS-08 `/properties/name`).
 
 A blurb should **not**:
 
 - Name `OpenSession`, `AddSender`, `AddReceiver`, `SyncResourceState`, or other gRPC RPCs.
-- Lead with IS-05 `transport_params.*` or SDP attribute grammar.
+- Lead with IS-05 `transport_params.*` or SDP attribute grammar. A short NMOS
+  field mapping may follow the user-facing outcome.
 - List inner element chains, fallback tables, or Rivermax Mode details.
 - Duplicate the configuration-model essay (that belongs once in the README / Hotdoc intro).
 
-NMOS may be mentioned at outcome level (“joins the same NMOS Node”, “presented to controllers as the Sender label”) without explaining the control-plane mapping.
+Standard NMOS API effects are part of the public contract. Daemon RPCs, inner
+elements, and SDP/MXL implementation mappings are not.
+
+At the GStreamer layer, blurbs should name the element surface the user sets
+(`transport-file*`, `caps`, and so on). Reserve “configuring transport file”
+for guides that explain the artifact passed to NvNmos / nvnmosd.
 
 **Long-form docs** then cover: IS-05/SDP/MXL tag mappings, inner-element wiring, precedence tables, mutability, and troubleshooting.
+
+### Check every removed detail
+
+Before shortening a blurb, classify each removed fact:
+
+- **Keep in the blurb** when it is required to use the property safely or
+  identifies an observable standard NMOS API effect.
+- **Move to the user guide** when it explains configuration interactions,
+  detailed NMOS mappings, syntax, lifecycle, or troubleshooting.
+- **Move to contributor documentation** when it describes inner elements,
+  daemon RPCs, or implementation rationale.
+- **Discard deliberately** only when it duplicates a canonical explanation or
+  no longer describes current behaviour.
+
+Do not delete information from its only documentation location. During the
+blurb pass, keep an audit of removed facts and their destination. Complete the
+corresponding guide changes before treating the pass as finished.
+
+Current blurb-pass audit:
+
+- The gst-nmos-rs README already contains the detailed endpoint-to-IS-05/SDP
+  mappings, transport selection, MXL domain rules, bit-rate interactions,
+  inner-property syntax, and activation behaviour removed from the blurbs.
+- Audio channel-mapping pad behaviour currently lives only in the IS-08 design
+  document. Add a user-facing channel-mapping section before completing the
+  blurb pass.
+- Explain channel-mapping aggregation in that section. Multiple NvNmos channel
+  mappings, including multiple `nmosaudiochannelmap` elements on the same Node,
+  contribute Inputs and Outputs to the Node's shared IS-08 Channel Mapping API.
+  `channelmapping-name` identifies the subset owned and managed by one caller;
+  it does not create a separate IS-08 API.
+- Keep exact IS-08 `/properties/name` and `/properties/description` mappings in
+  the pad blurbs because they disambiguate `label` from the several meanings of
+  `name`.
+- Sender and Receiver names are separate uniqueness namespaces on a Node. The
+  same string may name both a Sender and a Receiver. Capture that in the shared
+  identity guide, not in the name blurbs.
 
 Illustrative rewrite direction (not final copy):
 
@@ -189,6 +237,21 @@ Before listing properties, document the patterns:
 State precedence once:
 
 > Explicit element properties override corresponding values from the transport file. `transport-file` and `transport-file-path` are mutually exclusive.
+
+Add one transport-applicability map:
+
+- MXL means `transport=mxl`.
+- RTP/UDP means `transport=udp`, `transport=udp2`, or
+  `transport=nvdsudp`.
+- Call out narrower exceptions such as JPEG XS bit-rate and RTP
+  payloader/depayloader properties, which apply only to `udp` and `udp2`.
+
+Use “Used only with MXL” or “Used only with RTP/UDP” in transport-specific
+blurbs. Put the exact `transport=…` mapping in each element's top-level
+description. Document narrower exceptions in the transport guide rather than
+repeating the implementation comparison in each blurb. In particular, record
+that JPEG XS bit-rate properties and RTP payloader/depayloader properties do
+not currently apply to `nvdsudp`.
 
 Remove repeated precedence essays from individual blurbs where the central section covers them.
 

@@ -155,22 +155,22 @@ impl ObjectImpl for NmosSink {
                     .default_value(Some(DEFAULT_DAEMON_URI))
                     .build(),
                 glib::ParamSpecString::builder("node-seed")
-                    .nick("Node seed")
+                    .nick("Node Seed")
                     .blurb(crate::session::NODE_SEED_BLURB)
                     .build(),
                 glib::ParamSpecUInt::builder("http-port")
-                    .nick("HTTP port")
+                    .nick("HTTP Port")
                     .blurb(crate::session::HTTP_PORT_BLURB)
                     .minimum(0)
                     .maximum(65535)
                     .default_value(0)
                     .build(),
                 glib::ParamSpecString::builder("host-name")
-                    .nick("Host name")
+                    .nick("Host Name")
                     .blurb(crate::session::HOST_NAME_BLURB)
                     .build(),
                 glib::ParamSpecString::builder("domain")
-                    .nick("NMOS DNS domain")
+                    .nick("NMOS DNS Domain")
                     .blurb(crate::session::DOMAIN_BLURB)
                     .build(),
                 glib::ParamSpecString::builder("registration-url")
@@ -187,117 +187,99 @@ impl ObjectImpl for NmosSink {
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("sender-name")
-                    .nick("NMOS sender name")
+                    .nick("NMOS Sender Name")
                     .blurb(crate::session::SENDER_NAME_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("mxl-domain-id")
-                    .nick("MXL domain id")
+                    .nick("MXL Domain ID")
                     .blurb(crate::session::MXL_DOMAIN_ID_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("mxl-domain-path")
-                    .nick("MXL domain path")
+                    .nick("MXL Domain Path")
                     .blurb(
-                        "Local filesystem path identifying the MXL Domain on \
-                         this host. If the directory contains a \
-                         `domain_def.json` (AMWA BCP-007-03 WIP) its `id` is \
-                         used to populate `mxl-domain-id` (or cross-checked \
-                         against it when both are set). Without \
-                         `domain_def.json`, an unset `mxl-domain-id` leaves \
-                         the NMOS tag application-resolved while the data plane \
-                         still uses this path. The path itself will be consumed \
-                         by the inner `mxlsink` `domain=` property when the \
-                         data path is wired up.",
+                        "Local path to the MXL Domain used by the data plane. A \
+                         `domain_def.json` in this directory can supply or verify \
+                         `mxl-domain-id`. Used only with MXL.",
                     )
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("mxl-flow-id")
-                    .nick("MXL flow id")
+                    .nick("MXL Flow ID")
                     .blurb(
-                        "MXL flow id (UUID) the inner `mxlsink` should push into. \
-                         Overrides the transport file's top-level `id` when both \
-                         are supplied.",
+                        "UUID of the MXL flow produced by this Sender. When set, \
+                         overrides the matching value from `transport-file*`. \
+                         Used only with MXL.",
                     )
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecBoolean::builder("auto-activate")
-                    .nick("Auto-activate")
+                    .nick("Auto-Activate")
                     .blurb(crate::session::AUTO_ACTIVATE_BLURB)
                     .default_value(false)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("label")
-                    .nick("Label")
+                    .nick("IS-04 Label")
                     .blurb(crate::session::LABEL_BLURB_SENDER)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("description")
-                    .nick("Description")
+                    .nick("IS-04 Description")
                     .blurb(crate::session::DESCRIPTION_BLURB_SENDER)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("group-hint")
-                    .nick("Group hint")
+                    .nick("Group Hint")
                     .blurb(crate::session::GROUP_HINT_BLURB_SENDER)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("transport-file")
-                    .nick("Transport file")
+                    .nick("Transport File")
                     .blurb(crate::session::TRANSPORT_FILE_BLURB_SENDER)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("transport-file-path")
-                    .nick("Transport file path")
+                    .nick("Transport File Path")
                     .blurb(crate::session::TRANSPORT_FILE_PATH_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Caps>("caps")
-                    .nick("Essence caps")
+                    .nick("Essence Caps")
                     .blurb(crate::session::CAPS_BLURB_SENDER)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Caps>("transport-caps")
-                    .nick("Transport caps")
+                    .nick("Transport Caps")
                     .blurb(crate::session::TRANSPORT_CAPS_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Structure>("transport-properties")
-                    .nick("Transport sink properties")
+                    .nick("Transport Sink Properties")
                     .blurb(crate::session::TRANSPORT_PROPERTIES_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecBoxed::builder::<gst::Structure>("pay-properties")
-                    .nick("Payloader properties")
+                    .nick("Payloader Properties")
                     .blurb(crate::session::PAY_PROPERTIES_BLURB)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecString::builder("source-ip")
                     .nick("Source IP")
                     .blurb(
-                        "IS-05 sender transport_params `source_ip`: \
-                         local egress NIC IP. Drives both the SDP \
-                         `a=source-filter:` include-source (RFC 4607 \
-                         SSM convention) and the `a=x-nvnmos-iface-ip:` \
-                         attribute, and `udpsink.bind-address` on the \
-                         RTP transports (`udp`, `udp2`, `nvdsudp`). \
-                         Empty = unset (leave the daemon / SDP / \
-                         IS-05 `auto` resolver to fill at activation \
-                         time). Honoured only on the RTP transports; \
-                         ignored on `mxl`.",
+                        "Local source address for RTP/UDP transmission. Empty \
+                         selects it automatically. Corresponds to IS-05 Sender \
+                         `transport_params.source_ip`. Used only with RTP/UDP.",
                     )
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecUInt::builder("source-port")
-                    .nick("Source port")
+                    .nick("Source Port")
                     .blurb(
-                        "IS-05 sender transport_params `source_port`: \
-                         local egress port. Drives `udpsink.bind-port` \
-                         and the SDP `a=x-nvnmos-src-port:` attribute \
-                         on the RTP transports. 0 (the default) = \
-                         unset; the OS picks an ephemeral port. \
-                         Honoured only on the RTP transports; ignored \
-                         on `mxl`.",
+                        "Local source port for RTP/UDP transmission. 0 lets the \
+                         operating system choose. Corresponds to IS-05 Sender \
+                         `transport_params.source_port`. Used only with RTP/UDP.",
                     )
                     .minimum(0)
                     .maximum(65535)
@@ -307,30 +289,21 @@ impl ObjectImpl for NmosSink {
                 glib::ParamSpecString::builder("destination-ip")
                     .nick("Destination IP")
                     .blurb(
-                        "IS-05 sender transport_params `destination_ip`: \
-                         remote destination (unicast peer or multicast \
-                         group). Becomes the configuring SDP `c=` line \
-                         address and `udpsink.host` on the RTP \
-                         transports. Empty = unset (use the transport \
-                         file's `c=` line if present; otherwise the \
-                         daemon fills the IS-05 `auto` sentinel). \
-                         Honoured only on the RTP transports; ignored \
-                         on `mxl`.",
+                        "Remote unicast address or multicast group for RTP/UDP \
+                         transmission. Empty uses `transport-file*` or a \
+                         controller-supplied value. Corresponds to IS-05 Sender \
+                         `transport_params.destination_ip`. Used only with \
+                         RTP/UDP.",
                     )
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecUInt::builder("destination-port")
-                    .nick("Destination port")
+                    .nick("Destination Port")
                     .blurb(
-                        "IS-05 sender transport_params \
-                         `destination_port`: remote destination port. \
-                         Becomes the configuring SDP `m=` line port \
-                         and `udpsink.port` on the RTP transports. 0 \
-                         (the default) = unset; falls back to the \
-                         transport file's `m=` port if present, else \
-                         to the canonical RTP default 5004 \
-                         (`nmos-cpp` `auto_rtp_port`). Honoured only \
-                         on the RTP transports; ignored on `mxl`.",
+                        "Remote destination port for RTP/UDP transmission. 0 \
+                         uses `transport-file*`, otherwise 5004. Corresponds to \
+                         IS-05 Sender `transport_params.destination_port`. Used \
+                         only with RTP/UDP.",
                     )
                     .minimum(0)
                     .maximum(65535)
@@ -338,13 +311,13 @@ impl ObjectImpl for NmosSink {
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecUInt64::builder("format-bit-rate")
-                    .nick("Format bit rate")
+                    .nick("Format Bit Rate")
                     .blurb(crate::session::FORMAT_BIT_RATE_BLURB)
                     .default_value(0)
                     .mutable_ready()
                     .build(),
                 glib::ParamSpecUInt64::builder("transport-bit-rate")
-                    .nick("Transport bit rate")
+                    .nick("Transport Bit Rate")
                     .blurb(crate::session::TRANSPORT_BIT_RATE_BLURB)
                     .default_value(0)
                     .mutable_ready()
@@ -508,7 +481,8 @@ impl ElementImpl for NmosSink {
             gst::subclass::ElementMetadata::new(
                 "NMOS sender",
                 "Sink/Network/NMOS",
-                "NMOS Sender wrapper element backed by nvnmosd",
+                "NMOS Sender supporting MXL (`transport=mxl`) and RTP/UDP \
+                 (`transport=udp`, `udp2`, or `nvdsudp`)",
                 "NVIDIA Corporation",
             )
         });

@@ -81,32 +81,36 @@ mod imp {
             static PROPS: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
                 vec![
                     glib::ParamSpecString::builder("receiver-name")
-                        .nick("Receiver name")
+                        .nick("Receiver Name")
                         .blurb(
-                            "Caller-chosen Receiver name on this Node; the IS-04 \
-                             Receiver id for IS-08 Input `/parent` is derived \
-                             from this name and the element's `node-seed` when \
-                             non-empty.",
+                            "Caller-chosen name of the NMOS Receiver associated \
+                             with this Input. Its derived NMOS ID is published as \
+                             IS-08 `/parent`. Empty publishes null.",
                         )
                         .build(),
                     glib::ParamSpecString::builder("input-id")
-                        .nick("Input id")
-                        .blurb("IS-08 Input id; empty assigns a default.")
+                        .nick("Input ID")
+                        .blurb("IS-08 Input ID. Empty assigns a default.")
                         .build(),
                     glib::ParamSpecString::builder("label")
-                        .nick("IS-08 name")
-                        .blurb("IS-08 /properties name (UI label) for this Input.")
+                        .nick("IS-08 Name")
+                        .blurb(
+                            "Label for this Input shown to controllers as IS-08 \
+                             `/properties/name`.",
+                        )
                         .build(),
                     glib::ParamSpecString::builder("description")
-                        .nick("IS-08 description")
-                        .blurb("IS-08 /properties description for this Input.")
+                        .nick("IS-08 Description")
+                        .blurb(
+                            "Description for this Input shown to controllers as \
+                             IS-08 `/properties/description`.",
+                        )
                         .build(),
                     glib::ParamSpecUInt::builder("channels")
                         .nick("Channels")
                         .blurb(
-                            "0 (default): derive channel count from negotiated audio/x-raw caps \
-                             at fixation. >0: declare early; must match negotiated caps when \
-                             present.",
+                            "Number of Input channels. 0 derives it from \
+                             negotiated audio caps.",
                         )
                         .maximum(u32::MAX)
                         .build(),
@@ -183,40 +187,45 @@ mod imp {
             static PROPS: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
                 vec![
                     glib::ParamSpecString::builder("sender-name")
-                        .nick("Sender name")
+                        .nick("Sender Name")
                         .blurb(
-                            "Caller-chosen Sender name on this Node; the IS-04 \
-                             Source id for IS-08 Output `/sourceid` is derived\
-                             from this name and the element's `node-seed` when \
-                             non-empty.",
+                            "Caller-chosen name of the NMOS Sender associated \
+                             with this Output. The derived NMOS ID of its Source \
+                             is published as IS-08 `/sourceid`. Empty publishes \
+                             null.",
                         )
                         .build(),
                     glib::ParamSpecString::builder("output-id")
-                        .nick("Output id")
-                        .blurb("IS-08 Output id; empty assigns a default.")
+                        .nick("Output ID")
+                        .blurb("IS-08 Output ID. Empty assigns a default.")
                         .build(),
                     glib::ParamSpecString::builder("label")
-                        .nick("IS-08 name")
-                        .blurb("IS-08 /properties name (UI label) for this Output.")
+                        .nick("IS-08 Name")
+                        .blurb(
+                            "Label for this Output shown to controllers as IS-08 \
+                             `/properties/name`.",
+                        )
                         .build(),
                     glib::ParamSpecString::builder("description")
-                        .nick("IS-08 description")
-                        .blurb("IS-08 /properties description for this Output.")
+                        .nick("IS-08 Description")
+                        .blurb(
+                            "Description for this Output shown to controllers as \
+                             IS-08 `/properties/description`.",
+                        )
                         .build(),
                     glib::ParamSpecUInt::builder("channels")
                         .nick("Channels")
                         .blurb(
-                            "0 (default): derive channel count from negotiated audio/x-raw caps \
-                             at fixation. >0: declare early; must match negotiated caps when \
-                             present.",
+                            "Number of Output channels. 0 derives it from \
+                             negotiated audio caps.",
                         )
                         .maximum(u32::MAX)
                         .build(),
                     glib::ParamSpecBoxed::builder::<gst::Structure>("active-map")
-                        .nick("Active map")
+                        .nick("Active Map")
                         .blurb(
-                            "Fixation-time initial /map/active for this Output. A `map` \
-                             structure, e.g. `map,0=input0:0,1=input0:1`.",
+                            "Initial channel routing for this Output, for example \
+                             `map,0=input0:0,1=input0:1`.",
                         )
                         .build(),
                 ]
