@@ -34,6 +34,7 @@ NvNmos currently supports Senders and Receivers for video, audio, and ancillary 
 
 - [C API guide](doc/user/c-api-guide.md)
 - [Building and installation](doc/user/building.md)
+- [Core NvNmos concepts](doc/user/concepts.md)
 - [Configuring transport files](doc/user/transport-files.md)
 - [C API reference](https://nvidia.github.io/nvnmos/nvnmos_8h.html)
 - [Migration guide](doc/user/migration.md)

@@ -336,6 +336,7 @@ The documentation topology is agreed as:
 | Document | Purpose | Publication owner |
 | --- | --- | --- |
 | Top-level `README.md` | Project landing page and choice of C / daemon / GStreamer entry point | Doxygen main page and GitHub repository landing page |
+| `doc/user/concepts.md` | Shared transport file, activation direction, and identity model | Doxygen; linked from every integration layer |
 | `doc/user/c-api-guide.md` | C API usage, example application, transports, callbacks, and troubleshooting | Doxygen |
 | `doc/user/building.md` | Prerequisites, Conan/CMake, local nmos-cpp checkout, and runtime requirements | Doxygen |
 | `doc/user/transport-files.md` | SDP and MXL extension grammar and minimal unconstrained Receiver transport files | Doxygen |
@@ -345,10 +346,9 @@ The documentation topology is agreed as:
 | `docker/**/README.md` | Container build and runtime guidance | GitHub container documentation |
 | `doc/designs/**` | Contributor plans, design records, and rationale | GitHub; not user-reference input |
 
-The top-level README remains short and links to the Doxygen-published C pages
-and to the separately owned daemon, GStreamer, and container guides. The shared
-concepts guide is the next work item; do not create it as part of this
-mechanical split.
+The top-level README remains short and links to the Doxygen-published shared
+concepts and C pages, and to the separately owned daemon, GStreamer, and
+container guides.
 
 ## B2. Link rules for the dual-rendered README
 
@@ -452,7 +452,7 @@ operator guide. Do not copy the operator guide into generator-specific content.
 ## Shared NvNmos concepts guide
 
 Some concepts apply to all three user surfaces and already cause confusion.
-Explain them once in a shared project-level guide, likely
+Explain them once in the shared project-level guide at
 `doc/user/concepts.md`. Publish it in the Doxygen site and link to its stable
 Pages URL from the C, daemon, and GStreamer guides.
 

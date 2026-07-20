@@ -10,6 +10,9 @@ The API is specified by the `nvnmos.h` header file.
 
 The nvnmos-example application demonstrates use of the library.
 
+See [Core NvNmos Concepts](concepts.md) for the shared transport file,
+activation direction, and identity model.
+
 ## Running the Example Application
 
 ### Starting the Example Application
@@ -78,7 +81,7 @@ NvNmos transport-file extensions and minimal unconstrained Receiver transport fi
 
 When an IS-05 Connection API activation occurs, the library invokes the application's `connection_activated` callback with an `NvNmosSide` (Sender or Receiver), the application's `name`, and an updated `transport_file` reflecting the new active transport parameters:
 
-- For an RTP/UDP Sender or Receiver, the callback receives the effective active SDP. It is based on a Receiver `transport_file` supplied by an IS-05 PATCH when present, or otherwise the configuring `transport_file`, with the active `transport_params` applied.
+- For an RTP/UDP Sender or Receiver, the callback receives the effective active SDP. It is based on a Receiver `transport_file` supplied by an IS-05 `PATCH` when present, or otherwise the configuring `transport_file`, with the active `transport_params` applied.
 - For an MXL Sender or Receiver, the callback receives back the configuring MXL flow definition (JSON), with the new active `mxl_domain_id` and `mxl_flow_id` spliced in as the `urn:x-nvnmos:tag:mxl-domain-id` tag value and the top-level `id` field, respectively.
 
 The application is expected to dispatch on `(side, name)` to identify the Sender or Receiver and react accordingly, for example by reconfiguring its data plane.

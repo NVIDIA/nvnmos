@@ -17,6 +17,10 @@ Concurrency and the no-FFI-under-`state` invariant are documented in
 This file describes the **as-built** daemon surface for operators and client
 authors.
 
+The [Core NvNmos Concepts](https://nvidia.github.io/nvnmos/md_doc_2user_2concepts.html)
+guide explains the transport file, activation direction, and identity model
+shared by the daemon, C API, and GStreamer elements.
+
 ## Build and Run
 
 Requires a pre-built `libnvnmos.so` — see the workspace

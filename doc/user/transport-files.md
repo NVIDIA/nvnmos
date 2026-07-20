@@ -5,6 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Configuring Transport Files
 
+See [Core NvNmos Concepts](concepts.md#configuring-transport-files) for how a
+configuring transport file differs from an IS-05 transport file and the active
+SDP or MXL flow definition delivered during activation.
+
 ## NvNmos Extensions to the Transport File
 
 NvNmos uses a small set of extensions in the transport file to convey configuration that the standard transport file format does not carry. The same conceptual extensions are carried differently in the two transport file formats:
