@@ -46,7 +46,7 @@ All write a null-terminated UUID into a buffer of at least `NVNMOS_ID_LEN` bytes
 
 For `NVNMOS_TRANSPORT_MXL` the transport file is an MXL flow definition JSON (the form consumed by the MXL SDK), with NvNmos extensions carried as entries in the standard `tags` property keyed by `urn:x-nvnmos:tag:*` URN strings. See [NvNmos Extensions to the Transport File](transport-files.md) for the full set.
 
-For the full per-field documentation see [`src/nvnmos.h`](https://github.com/NVIDIA/nvnmos/blob/main/src/nvnmos.h).
+For the full per-field documentation see the [C API reference](https://nvidia.github.io/nvnmos/nvnmos_8h.html).
 
 ## API Changes for RTP/UDP Sender IS-05 Defaults
 

@@ -239,7 +239,7 @@ Build the library and application with the following command or manually using t
 cmake --build build --config <Release-or-Debug> --parallel
 ```
 
-### Local nmos-cpp Checkout (Conan for Dependencies Only)
+### Local nmos-cpp Checkout
 
 To build against a clone of [nmos-cpp](https://github.com/sony/nmos-cpp) while using Conan to resolve Boost, cpprestsdk, Avahi or mDNSResponder, and other dependencies:
 

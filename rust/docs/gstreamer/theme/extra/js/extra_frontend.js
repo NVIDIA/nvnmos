@@ -27,6 +27,15 @@
 		setActiveStyleSheet('light');
 	}
 
+	function syncThemeStyle() {
+		if (typeof getActiveStyleSheet === 'function') {
+			document.documentElement.setAttribute(
+				'data-hotdoc-style',
+				getActiveStyleSheet()
+			);
+		}
+	}
+
 	function addGitHubNavLink() {
 		if (document.getElementById('extra-menu')) {
 			return;
@@ -53,11 +62,62 @@
 		}
 	}
 
+	// The sidenav lives in a same-origin iframe (hotdoc-sitemap.html) that does
+	// not load extra_frontend.css. Inject a small override: NVIDIA green for the
+	// active bar, and inherit body text color so the title stays neutral in both
+	// light and dark modes without titled stylesheets or a template override.
+	var SIDENAV_CSS =
+		'.sidenav-panel-current > .panel-heading,' +
+		'.sidenav-panel-current > span > .panel-heading {' +
+		'border-left-color:#76b900}' +
+		'.sidenav-panel-current > .panel-heading > .panel-title,' +
+		'.sidenav-panel-current > span > .panel-heading > .panel-title {' +
+		'color:inherit}';
+
+	function styleSitenavFrame() {
+		var frame = document.getElementById('sitenav-frame');
+		if (!frame) {
+			return;
+		}
+
+		function inject() {
+			var doc = frame.contentDocument;
+			if (!doc || !doc.head || doc.getElementById('nvnmos-sitenav')) {
+				return;
+			}
+			var style = doc.createElement('style');
+			style.id = 'nvnmos-sitenav';
+			style.textContent = SIDENAV_CSS;
+			doc.head.appendChild(style);
+		}
+
+		frame.addEventListener('load', inject);
+		try {
+			if (frame.contentDocument && frame.contentDocument.readyState === 'complete') {
+				inject();
+			}
+		} catch (e) {
+			/* ignore cross-origin failures during early load */
+		}
+	}
+
 	defaultToLightMode();
+	syncThemeStyle();
 
 	if (window.jQuery) {
-		jQuery(document).ready(addGitHubNavLink);
+		jQuery(document).ready(function () {
+			addGitHubNavLink();
+			styleSitenavFrame();
+			jQuery('#lightmode-icon').on('click', syncThemeStyle);
+		});
 	} else {
-		document.addEventListener('DOMContentLoaded', addGitHubNavLink);
+		document.addEventListener('DOMContentLoaded', function () {
+			addGitHubNavLink();
+			styleSitenavFrame();
+			var toggle = document.getElementById('lightmode-icon');
+			if (toggle) {
+				toggle.addEventListener('click', syncThemeStyle);
+			}
+		});
 	}
 })();
