@@ -53,11 +53,11 @@ pub(crate) fn transport_to_proto(t: Transport) -> ProtoTransport {
 // `session.rs` (next to `CommonSettings`) so the two elements can't
 // drift, and so `gst-inspect-1.0 nmossink` and `gst-inspect-1.0
 // nmossrc` print the same text for properties that aren't side-
-// specific. The narrative form lives in the README's property
-// table; properties whose blurb genuinely *does* differ between
-// sender and receiver (e.g. `mxl-domain-path`, `transport-file`,
-// `label`, `description`, `mxl-flow-id`, `caps`) keep their text
-// inline in the respective `imp.rs`.
+// specific. The narrative form lives in the README's property groups
+// and interaction sections; properties whose blurb genuinely *does*
+// differ between sender and receiver (e.g. `mxl-domain-path`,
+// `transport-file`, `label`, `description`, `mxl-flow-id`, `caps`)
+// keep their text inline in the respective `imp.rs`.
 
 pub(crate) const DAEMON_URI_BLURB: &str = "\
     Address of nvnmosd used to expose this element through NMOS. Only Unix \

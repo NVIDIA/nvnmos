@@ -295,6 +295,10 @@ Put IS-05 / SDP / inner-element mapping tables in:
 
 ## A6. Lifecycle, mutability, troubleshooting
 
+**Status:** compact lifecycle, mutability, and symptom-based troubleshooting
+sections are implemented in the GStreamer usage guide. Transport-specific
+setup remains in its existing guide sections.
+
 Add compact user-facing sections (verify against implementation when writing):
 
 | Transition | User-visible effect |
@@ -308,6 +312,9 @@ Document mutability (“many settings only until READY”) in the guide, not onl
 Troubleshooting starters: plugin not found, cannot connect to daemon, Node without Sender/Receiver, no media until activation, `nmossrc` caps negotiation, registry discovery, MXL domain/flow, Rivermax prerequisites checklist.
 
 ## A7. Move contributor-only material
+
+**Status:** Sync Testing moved to `rust/gst-nmos-rs/tests/README.md`; the usage
+guide retains one contributor link.
 
 Relocate **Sync Testing** detail from the main gst-nmos-rs README to a testing doc (`tests/README.md` or `doc/testing/…`). Leave a one-line link for contributors.
 

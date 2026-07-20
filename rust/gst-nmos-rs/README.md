@@ -47,7 +47,7 @@ independent choices.
 
 | Policy | Setting | Intended use |
 | --- | --- | --- |
-| Controller-managed | Leave `auto-activate=false` (the default) | Production systems where an IS-05 Controller decides when the data path becomes active |
+| Controller-managed | Leave `auto-activate=false` (the default) | Production systems where an IS-05 Controller decides when the data plane becomes active |
 | Self-starting | Set `auto-activate=true` | Development and fixed pipelines that should begin processing without a Controller |
 
 ### Configuring Transport File Source
@@ -59,7 +59,7 @@ independent choices.
 | Upstream caps (`nmossink` only) | Omit `caps` and `transport-file*` | Defer synthesis until upstream caps arrive during preroll |
 
 `transport` defaults to `udp`. Set `transport=mxl`, `udp2`, or `nvdsudp`
-explicitly when selecting another data-plane implementation.
+explicitly when selecting another transport implementation.
 
 `transport-file` and `transport-file-path` are mutually exclusive. Explicit
 element properties override corresponding values in a supplied transport file;
@@ -81,7 +81,7 @@ which properties matter for a task:
 
 | Group | Properties | Purpose |
 | --- | --- | --- |
-| Essential | `node-seed`, `sender-name` / `receiver-name`, `transport`, `caps` or `transport-file*`, `receiver-caps-mode`, `auto-activate` | Identify the Node and resource, choose the data plane, describe the essence and Receiver capabilities, and choose Controller-managed or self-starting activation |
+| Essential | `node-seed`, `sender-name` / `receiver-name`, `transport`, `caps` or `transport-file*`, `receiver-caps-mode`, `auto-activate` | Identify the Node and Sender or Receiver, choose the data plane, describe the essence and Receiver capabilities, and choose Controller-managed or self-starting activation |
 | RTP/UDP | Sender: `source-ip`, `source-port`, `destination-ip`, `destination-port`; Receiver: `source-ip`, `interface-ip`, `multicast-ip`, `destination-port`; both: `transport-caps`, `format-bit-rate`, `transport-bit-rate` | Configure SDP and IS-05 endpoint values for `udp`, `udp2`, and `nvdsudp`; the bit-rate properties apply to JPEG XS on `udp` / `udp2` |
 | MXL | `mxl-domain-path`, `mxl-domain-id`, `mxl-flow-id` | Select the local MXL Domain and flow for `transport=mxl` |
 | Human-readable metadata | `label`, `description`, `group-hint` | Set human-readable labels, descriptions, and grouping metadata for NMOS resources |
@@ -128,7 +128,7 @@ built with these rules:
 | Receiver capabilities | `receiver-caps-mode` | **Property overrides file.** The element rewrites the file's Receiver Caps marker before the daemon sees it. |
 | Essence shape | `caps`, `transport-caps` | **Cross-check.** Property must agree with the file's shape (today: `caps` first structure name vs `format`). Mismatch is a hard error at NULL→READY. |
 | Bit rates | `format-bit-rate`, `transport-bit-rate` | **Cross-check when both declare a rate; splice when only the property is set.** Values are kilobits per second (matching NMOS `bit_rate`, SDP `b=AS:`, and fmtp `x-nvnmos-*-bit-rate` per AMWA BCP-006-01 / RFC 9134 / ST 2110-22). When the supplied SDP omits bit rates, non-zero properties are written into the configuring SDP before the daemon sees it. |
-| Activation gate | `auto-activate` | Doesn't appear in the transport file; it gates whether the data path goes live eagerly at NULL→READY (and tells the daemon to flip `/active` to `master_enable: true` via `SyncResourceState`) or waits for an IS-05 PATCH. Orthogonal to where the flow_def came from. |
+| Activation gate | `auto-activate` | Does not appear in the transport file. Controls whether the data plane starts when configuration is resolved or waits for an IS-05 activation. Independent of the configuration source. |
 | No interaction | `daemon-uri`, `node-seed`, `http-port`, `host-name`, `domain`, `registration-url`, `system-url`, `transport`, `mxl-domain-path`, `transport-properties`, `pay-properties`, `depay-properties` | These don't appear in the transport file at all. Node-identity properties (`host-name`, `domain`, `registration-url`, `system-url`, `http-port`) are forwarded to `OpenSession` as `node_config` and honoured only when that session creates the Node (first opener for a given `node-seed`). `transport-properties` / `pay-properties` / `depay-properties` tune the inner GStreamer elements at chain-build time instead. |
 
 `mxl-domain-id` is in the override group for the file tag, but is
@@ -143,33 +143,31 @@ configured-at-startup flow id); the essence-shape cross-check
 still applies, so an activation that asks an `nmossrc` configured for
 v210 video to receive an audio flow is ack-failed.
 
-### Activation: `auto-activate` vs IS-05 PATCH
+## Lifecycle, Activation, and Property Changes
 
-The element separates "is the resource visible to NMOS controllers?"
-from "is the data path live?":
+| Transition or event | User-visible effect |
+| --- | --- |
+| NULL→READY | Connect to `nvnmosd` and add the NMOS Sender or Receiver when its configuring transport file can be resolved |
+| READY→PAUSED | For a deferred `nmossink`, derive configuration from upstream caps and add the Sender |
+| IS-05 activation | Build or replace the inner transport elements using the active transport file |
+| READY→NULL | Remove the Sender or Receiver and close the daemon session |
 
-- **Adding resources** (`AddSender` / `AddReceiver`) happens
-  at NULL→READY whenever a configuring transport file (MXL
-  `flow_def` JSON or SDP) is in play — supplied via
-  `transport-file*`, synthesised from `caps` plus the
-  transport-specific identity properties (`mxl-flow-id` on MXL;
-  the IS-05 endpoint properties — `destination-ip` etc. — on
-  RTP), or for the deferred-mode sender, synthesised from peer
-  caps at READY→PAUSED. With no transport file in play the
-  session opens with no resource and the data path stays on the
-  fake chain until an IS-05 activation supplies one.
+When neither `transport-file*` nor `caps` is set, `nmossink` defers
+configuration until it can query upstream caps at READY→PAUSED. `nmossrc`
+has no deferred mode; set `caps` or `transport-file*` before READY.
 
-- **Inner data path** only goes live when `auto-activate=true` *or*
-  when an IS-05 activation arrives. With the default
-  `auto-activate=false` the element adds the Sender or Receiver to
-  the daemon but leaves the inner on the fake chain; the daemon's
-  `/single/{senders,receivers}/{id}/active` shows
-  `master_enable: false` until an external controller PATCHes the
-  resource. Setting `auto-activate=true` is the no-controller
-  shortcut: the element brings the inner up eagerly from its
-  resolved configuring transport file and calls
-  `SyncResourceState` on the daemon to bring `/active` into sync
-  — no IS-05 PATCH required.
+The element separates NMOS resource visibility from an active data plane. With
+the default `auto-activate=false`, the Sender or Receiver is visible but waits
+for an IS-05 activation before starting its data plane. With
+`auto-activate=true`, it starts the data plane as soon as configuration is
+available. This property does not change the GStreamer pipeline state.
+
+Set configuration properties while the element is in NULL unless the element
+reference marks them as changeable in READY. A property that can be set in
+READY is not necessarily applied immediately: the element reads it at the next
+relevant lifecycle action. In particular, `mxl-domain-path`,
+`transport-properties`, `pay-properties`, and `depay-properties` apply when the
+inner data plane is next built.
 
 ## Audio Channel Mapping
 
@@ -227,6 +225,27 @@ gst-inspect-1.0 nmos
 `gst-inspect-1.0 nmos` prints the plugin metadata;
 `gst-inspect-1.0 nmossink`, `gst-inspect-1.0 nmossrc`, and
 `gst-inspect-1.0 nmosaudiochannelmap` list the exact property reference.
+
+## Troubleshooting
+
+- **Plugin not found:** confirm `libgstnmos.so` is on `GST_PLUGIN_PATH` and
+  `libnvnmos.so` is on `LD_LIBRARY_PATH`, then run `gst-inspect-1.0 nmos`.
+- **Cannot connect to the daemon:** start `nvnmosd` and check that `daemon-uri`
+  names the same Unix socket.
+- **Node has no Sender:** an `nmossink` without `caps` or `transport-file*`
+  waits until READY→PAUSED to query upstream caps. Move the pipeline to
+  PAUSED or PLAYING and ensure upstream offers fixed, supported caps.
+- **Node has no Receiver:** `nmossrc` does not defer configuration; set `caps`
+  or `transport-file*` before READY.
+- **Sender or Receiver is visible but media is not flowing:** either activate
+  it through IS-05 or set `auto-activate=true` for a self-starting pipeline.
+- **Caps negotiation fails:** compare the configured or negotiated caps with
+  the [supported essence shapes](#supported-caps-essence-shapes).
+- **Node does not appear in the Registry:** check `domain`, `registration-url`,
+  and the DNS-SD service used by the host.
+- **MXL or DeepStream transport setup fails:** check the MXL environment in the
+  [workspace quick start](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md)
+  or the [DeepStream/Rivermax prerequisites](#transportnvdsudp-deepstream-rivermax).
 
 ## Interactive Demo
 
@@ -340,29 +359,8 @@ available on `udp` / `udp2` only.
 Design notes:
 [`doc/designs/gst-nmos-rs-nvdsudp-plan.md`](https://github.com/NVIDIA/nvnmos/blob/main/doc/designs/gst-nmos-rs-nvdsudp-plan.md).
 
-## Sync Testing
+## Integration Testing
 
-[`tests/av_sync.rs`](https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/tests/av_sync.rs)
-is an end-to-end integration test that drives
-[`gst-avsynctest-rs`](https://github.com/NVIDIA/nvnmos/tree/main/rust/gst-avsynctest-rs)'s
-`avsyncvideotestsrc` /
-`avsyncaudiotestsrc` through real NMOS Senders and Receivers and asserts that
-video, audio-pip, and CEA-708 caption alignment survive the round-trip. The
-video's ancillary data (frame index plus a phase-locked TICK/TOCK caption) is
-split into its own Sender with `st2038extractor` and re-attached on the
-Receiver side with `st2038combiner`. It runs once per transport
-(`av_sync_via_mxl`, `av_sync_via_udp`, `av_sync_via_nvdsudp`), negotiating the
-essence format each transport expects (MXL: `v210`/`F32LE`, RTP/UDP:
-`UYVP`/`S24BE`).
-
-```sh
-cargo test -p gst-nmos-rs --test av_sync -- --test-threads=1
-```
-
-Each case **self-skips** (rather than fails) when its prerequisites are
-missing — `libnvnmos` / `nvnmosd` (see the
-[workspace README](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md)), the
-transport's element factories on `GST_PLUGIN_PATH`, and, for MXL, `/dev/shm`.
-The `mxl` and `udp` cases additionally need current `st2038combiner`
-(`drop-late-st2038`) and `rtpsmpte291depay` builds on `GST_PLUGIN_PATH`; the
-`nvdsudp` case needs the DeepStream/Rivermax stack above.
+See the
+[integration testing guide](https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/tests/README.md)
+for end-to-end sync test setup and commands.
