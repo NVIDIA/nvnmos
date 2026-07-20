@@ -1,2 +1,8 @@
-	c-api.md
 	gst-nmos-rs.md
+		configuration.md
+		audio-channel-mapping.md
+		pipeline-examples.md
+	gst-index
+	other-ways.md
+		c-api.md
+		nvnmosd.md

@@ -102,6 +102,7 @@ ARG PACKAGE_NAME
 RUN apt update && apt install -y --no-install-recommends \
     doxygen \
     graphviz \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /nvnmos

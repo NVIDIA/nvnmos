@@ -45,6 +45,11 @@ python3 -m venv .venv-hotdoc
 pip install "hotdoc~=0.18.0"
 ```
 
+Meson then runs `scripts/patch_hotdoc_gtk_doc_hrefs.py` against the installed
+Hotdoc to rewrite leftover `web.mit.edu/barnowl` gtk-doc fallbacks (for example
+`gchararray`) to `docs.gtk.org`. The patch is idempotent and re-applied on every
+configure.
+
 Rust toolchain plus workspace dependencies (same as `rust/` CI).
 
 ## Build

@@ -43,13 +43,13 @@ The first commit of this file captured a GStreamer-centric editorial review. Thi
 | --- | --- | --- |
 | C API | Doxygen (`Doxyfile`: `README.md` + `nvnmos.h`) | GitHub Pages root (`nvidia.github.io/nvnmos/`) |
 | GStreamer plugins | Hotdoc (`rust/docs/gstreamer/`) | Pages `/gstreamer/` |
-| Daemon / gRPC | Markdown summary + rich comments in `rust/nvnmos-rpc/proto/nvnmosd.proto` | Not on Pages yet |
+| Daemon / gRPC | Sabledocs from `rust/nvnmos-rpc/proto/nvnmosd.proto`, with `rust/nvnmosd/README.md` as the landing page | Pages `/grpc/` |
 | Workspace quick start | `rust/README.md` | GitHub only (already has a UDP sender/receiver example) |
-| Element usage | `rust/gst-nmos-rs/README.md` | GitHub; Hotdoc portal deep-links here |
-| Daemon operator | `rust/nvnmosd/README.md` | GitHub |
+| Element usage | `rust/gst-nmos-rs/*.md` | GitHub and Hotdoc from the same sources |
+| Daemon guide | `rust/nvnmosd/README.md` | GitHub and the Sabledocs `/grpc/` landing page |
 | Design | `doc/designs/**` | GitHub |
 
-CI: `.github/workflows/pages.yml` builds Doxygen then Hotdoc into `public/` and `/public/gstreamer/`.
+CI: `.github/workflows/pages.yml` builds Doxygen, the Sabledocs gRPC reference, then Hotdoc into `public/`, `public/grpc/`, and `public/gstreamer/`.
 
 The top-level README has two render contexts:
 
@@ -215,6 +215,10 @@ README keeps the narrative and environment-variable table.
 
 ## A1. Examples before the property catalogue
 
+**Status:** the Hotdoc landing page now leads with the quick start, build,
+loading, examples, and troubleshooting. Detailed configuration and IS-08
+guidance are separate subpages.
+
 `rust/gst-nmos-rs/README.md` currently opens on **Property Surface**. Move a short **Quick start** (or a prominent link) above it:
 
 - Point at the workspace quick start in `rust/README.md` for build + first pipelines, **or** inline one minimal sender and one minimal receiver (UDP + `auto-activate=true` is the lowest-infra path).
@@ -223,6 +227,9 @@ README keeps the narrative and environment-variable table.
 Keep `pipeline-examples.md` as the full catalogue.
 
 ## A2. Configuration model once, centrally
+
+**Status:** `rust/gst-nmos-rs/configuration.md` owns the configuration choices,
+property groups, caps, transport-file interaction, and lifecycle timing.
 
 Before listing properties, document the patterns:
 
@@ -255,6 +262,10 @@ Remove repeated precedence essays from individual blurbs where the central secti
 
 ## A3. Default to `transport=udp`
 
+**Status:** done. `nmossink` and `nmossrc` default `transport` to `udp` in the
+Rust `Default` and `ParamSpecEnum`; the guides state the default and that MXL is
+explicit.
+
 Change the `nmossink` and `nmossrc` `transport` property default from `mxl` to
 `udp`.
 
@@ -285,6 +296,11 @@ Group Markdown (and Hotdoc intro prose where practical) as:
 GObject property registration order need not change solely for docs; Hotdoc follows introspection / cache order. Prefer README section order and Hotdoc **plugin intro** pages for hierarchy; blurbs stay short regardless of order.
 
 ## A5. Shorten blurbs; move mappings to guides
+
+**Status:** done. Shared `session/mod.rs` and element-local blurbs describe
+outcomes, defaults, and applicability; the IS-05/SDP/inner-element mappings live
+in the guides, and `gst_plugins_cache.json` is refreshed. See the blurb-pass
+audit above.
 
 Rewrite constants in `session/mod.rs` (and element-local blurbs) per the principles above. Refresh `rust/docs/gstreamer/plugins/gst_plugins_cache.json` after blurb changes so Hotdoc stays in sync.
 
@@ -319,6 +335,11 @@ guide retains one contributor link.
 Relocate **Sync Testing** detail from the main gst-nmos-rs README to a testing doc (`tests/README.md` or `doc/testing/…`). Leave a one-line link for contributors.
 
 ## A8. Publish the GStreamer usage guide with Hotdoc
+
+**Status:** done. Hotdoc consumes the single `rust/gst-nmos-rs/*.md` sources
+(usage guide, configuration, channel mapping, pipeline examples) via
+`configure_file`, keeps the generated property tables, and the portal links out
+to the C API and gRPC references under "Other Ways to Use NvNmos".
 
 The Hotdoc portal currently redirects its usage page to the GitHub README.
 Decide how to publish the improved usage guide inside Hotdoc instead:
@@ -357,6 +378,11 @@ concepts and C pages, and to the separately owned daemon, GStreamer, and
 container guides.
 
 ## B2. Link rules for the dual-rendered README
+
+**Status:** done. Doxygen, Sabledocs, and Hotdoc build successfully. An audit of
+their generated internal and cross-product links found and fixed stale element
+links to sections moved into the configuration and audio channel-mapping
+guides; all generated targets and fragments now resolve.
 
 Audit every link after deciding the split:
 
@@ -565,6 +591,11 @@ several NMOS resource UUIDs.
 
 ## Discoverability
 
+**Status:** done enough. The top-level "Ways To Use NvNmos" section directs
+users to the C API, daemon/gRPC, and GStreamer entry points, with a separate
+container link. The generated products cross-link through stable Pages URLs;
+another task table would duplicate those routes.
+
 Expand the top-level Ways To Use table into an explicit task map:
 
 | Goal | Start here |
@@ -576,6 +607,11 @@ Expand the top-level Ways To Use table into an explicit task map:
 | Understand implementation decisions | `doc/designs/` |
 
 Add a one-line audience/status header to substantial Markdown guides and to design docs (as on this file).
+
+**Audience/status headers:** not needed at the moment. User-guide titles and
+opening paragraphs establish their audience; retain explicit status labels for
+plans, investigations, and other contributor documents that could be mistaken
+for supported behaviour.
 
 ## Doxygen typography
 
@@ -610,6 +646,11 @@ Files named `*-plan.md` linked from user READMEs confuse “what works today.”
 - user README links only to a short “current behaviour” note, with the plan as further reading.
 
 ## Terminology
+
+**Status:** reviewed. User-facing guides consistently distinguish configuring
+transport files, active transport files, names, labels, IDs, and handles. The
+review replaced remaining user-facing "data path" wording with "data plane" and
+kept registration terminology scoped to IS-04 Registry behaviour.
 
 Use consistently across user-facing docs:
 

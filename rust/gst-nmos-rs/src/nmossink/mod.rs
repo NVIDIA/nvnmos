@@ -12,7 +12,7 @@
  * arriving on its sink pad over the configured transport.
  *
  * Properties are listed alphabetically below. The
- * [Usage Guide](https://nvidia.github.io/nvnmos/gstreamer/gst-nmos-rs.html#property-groups)
+ * [Configuration Guide](https://nvidia.github.io/nvnmos/gstreamer/configuration.html#property-groups)
  * groups them by task and explains the common configuration choices.
  *
  * ## Examples

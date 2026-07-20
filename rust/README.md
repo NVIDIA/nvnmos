@@ -154,7 +154,7 @@ For MXL (`transport=mxl`), build the [MXL SDK](https://github.com/dmf-mxl/mxl)
 first, then see [`pipeline-examples.md`](gst-nmos-rs/pipeline-examples.md) for
 example pipelines. For compliant ST 2110 (`transport=nvdsudp`)
 using DeepStream and Rivermax SDK, see
-[`gst-nmos-rs/README.md`](gst-nmos-rs/README.md#transportnvdsudp-deepstream-rivermax).
+[`gst-nmos-rs/pipeline-examples.md`](gst-nmos-rs/pipeline-examples.md#deepstream-rivermax).
 
 ## Crates
 

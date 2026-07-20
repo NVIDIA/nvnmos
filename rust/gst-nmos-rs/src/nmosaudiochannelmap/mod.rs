@@ -14,7 +14,7 @@
  * re-orders the audio channels accordingly.
  *
  * Element and pad properties are listed alphabetically below. The
- * [Usage Guide](https://nvidia.github.io/nvnmos/gstreamer/gst-nmos-rs.html#audio-channel-mapping)
+ * [Audio Channel Mapping Guide](https://nvidia.github.io/nvnmos/gstreamer/audio-channel-mapping.html)
  * explains how channel mappings contribute to the Node's shared IS-08 API.
  *
  * ## Example

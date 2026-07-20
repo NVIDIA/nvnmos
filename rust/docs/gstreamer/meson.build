@@ -107,6 +107,15 @@ if not hotdoc_version.version_compare(hotdoc_req_min) or not hotdoc_version.vers
   error('Hotdoc @0@, <0.19.0 required, found @1@'.format(hotdoc_req_min, hotdoc_version))
 endif
 
+# Hotdoc 0.18 still hardcodes a few gtk-doc fallbacks to web.mit.edu/barnowl.
+# Rewrite those to docs.gtk.org before generate_doc runs (idempotent).
+patch_hotdoc_hrefs = find_program(cdir / 'scripts' / 'patch_hotdoc_gtk_doc_hrefs.py')
+patch_hotdoc_result = run_command(patch_hotdoc_hrefs, check: false)
+if patch_hotdoc_result.returncode() != 0
+  error('Failed to patch Hotdoc gtk_doc.py hrefs:\n@0@'.format(patch_hotdoc_result.stderr()))
+endif
+message(patch_hotdoc_result.stdout().strip())
+
 hotdoc = import('hotdoc')
 required_hotdoc_extensions = ['gst-extension']
 foreach extension: required_hotdoc_extensions
@@ -163,11 +172,29 @@ avsynctest_doc = hotdoc.generate_doc(
 
 sitemap_gen = find_program(cdir / 'scripts' / 'generate_sitemap.py')
 
-# Publish the repository usage guide directly instead of maintaining a
-# Hotdoc-only copy.
+# Publish the repository guides directly instead of maintaining Hotdoc-only
+# copies.
 configure_file(
   input: rust_root / 'gst-nmos-rs' / 'README.md',
   output: 'gst-nmos-rs.md',
+  copy: true,
+)
+
+configure_file(
+  input: rust_root / 'gst-nmos-rs' / 'configuration.md',
+  output: 'configuration.md',
+  copy: true,
+)
+
+configure_file(
+  input: rust_root / 'gst-nmos-rs' / 'audio-channel-mapping.md',
+  output: 'audio-channel-mapping.md',
+  copy: true,
+)
+
+configure_file(
+  input: rust_root / 'gst-nmos-rs' / 'pipeline-examples.md',
+  output: 'pipeline-examples.md',
   copy: true,
 )
 
@@ -180,6 +207,7 @@ portal_sitemap = custom_target(
     '--markdown-index', 'index.md',
     '--plugins', nmos_doc.full_path() + pathsep + avsynctest_doc.full_path(),
   ],
+  depend_files: cdir / 'portal' / 'sitemap.txt',
   depends: [nmos_doc, avsynctest_doc],
   output: 'portal-sitemap.txt',
 )

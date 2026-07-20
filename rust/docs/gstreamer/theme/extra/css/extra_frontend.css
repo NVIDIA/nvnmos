@@ -28,6 +28,10 @@ html[data-hotdoc-style='dark'] {
 	color: var(--nvnmos-link-hover);
 }
 
+#main code {
+	color: inherit;
+}
+
 .btn-primary,
 .label-primary,
 .panel-primary > .panel-heading,

@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 A plan for a new way of supporting NMOS in GStreamer, replacing the bin-based `nvdsnmosbin` approach with an out-of-process NMOS daemon (`nvnmosd`) and a pair of single-pad GStreamer elements (`nmossrc`, `nmossink`). NvNmos provides the NMOS implementation inside the daemon; GStreamer plugins talk to the daemon over a small gRPC protocol.
 
-**Operator / as-built docs:** [`rust/nvnmosd/README.md`](../../rust/nvnmosd/README.md) (run, env vars, API summary). This file is the long-form design record.
+**Daemon as-built docs:** [`rust/nvnmosd/README.md`](../../rust/nvnmosd/README.md) (run, env vars, API summary). This file is the long-form design record.
 
 ## Initial scope
 

@@ -84,7 +84,7 @@ The surface APIs are:
 
 - C: `nmos_connection_activate`.
 - gRPC: `SyncResourceState`.
-- GStreamer: `auto-activate=true` applies the element's configured data path
+- GStreamer: `auto-activate=true` applies the element's configured data plane
   without waiting for a controller.
 
 An activation callback and an activate or sync call therefore have opposite
