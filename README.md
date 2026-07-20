@@ -12,9 +12,9 @@ NvNmos can be integrated in three ways:
 1. **C library** (`libnvnmos`) — embed the NMOS control plane directly in a Media Node application.
    - Start with the [C API guide](doc/user/c-api-guide.md), then use the [C API reference](https://nvidia.github.io/nvnmos/nvnmos_8h.html).
 2. **Daemon and gRPC API** (`nvnmosd`) — run the control plane out-of-process; Media Node applications attach as clients over gRPC.
-   - See [`rust/nvnmosd/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/nvnmosd/README.md), the Rust workspace quick start in [`rust/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md), and the design record in [`doc/designs/nvnmosd/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/doc/designs/nvnmosd/README.md).
+   - Start with the [daemon guide and gRPC API reference](https://nvidia.github.io/nvnmos/grpc/), then use the [Rust workspace quick start](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md).
 3. **GStreamer elements** (`gst-nmos-rs`) — `nmossrc` and `nmossink` talk to `nvnmosd` and configure the GStreamer MXL, RTP/UDP, or DeepStream elements for the data plane.
-   - See the [published element reference](https://nvidia.github.io/nvnmos/gstreamer/), the usage guide in [`rust/gst-nmos-rs/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/README.md), and the Rust workspace quick start in [`rust/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md).
+   - See the [published plugin documentation](https://nvidia.github.io/nvnmos/gstreamer/) and the [Rust workspace quick start](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md).
 
 For a self-contained build and basic examples, see [Container Images](#container-images).
 
@@ -43,10 +43,10 @@ NvNmos currently supports Senders and Receivers for video, audio, and ancillary 
 
 ## Container Images
 
-Container definitions live under [`docker/`](https://github.com/NVIDIA/nvnmos/tree/main/docker). Build context is always the repository root.
+See the [container definitions](https://github.com/NVIDIA/nvnmos/tree/main/docker). Build context is always the repository root.
 
-- [`nvnmos` library package image](https://github.com/NVIDIA/nvnmos/blob/main/docker/nvnmos/README.md)
-- [`gst-nmos-rs` operator image](https://github.com/NVIDIA/nvnmos/blob/main/docker/gst-nmos-rs/README.md)
+- [NvNmos library container](https://github.com/NVIDIA/nvnmos/blob/main/docker/nvnmos/README.md)
+- [Complete runtime container (`libnvnmos`, `nvnmosd`, and `gst-nmos-rs`)](https://github.com/NVIDIA/nvnmos/blob/main/docker/gst-nmos-rs/README.md)
 
 ## Supported Specifications
 
@@ -72,5 +72,5 @@ The following operating systems and compilers have been tested.
 
 ## Contributing
 
-- How to contribute: [CONTRIBUTING.md](https://github.com/NVIDIA/nvnmos/blob/main/CONTRIBUTING.md)
-- How to report a vulnerability: [SECURITY.md](https://github.com/NVIDIA/nvnmos/blob/main/SECURITY.md)
+- [How to contribute](https://github.com/NVIDIA/nvnmos/blob/main/CONTRIBUTING.md)
+- [How to report a vulnerability](https://github.com/NVIDIA/nvnmos/blob/main/SECURITY.md)

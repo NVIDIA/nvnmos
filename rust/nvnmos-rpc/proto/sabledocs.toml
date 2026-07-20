@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+module-title = "NvNmos Daemon gRPC API"
+main-page-content-file = "../../nvnmosd/README.md"
+member-ordering = "preserve"
+markdown-extensions = ["fenced_code", "tables"]
+
+repository-type = "github"
+repository-url = "https://github.com/NVIDIA/nvnmos"
+repository-branch = "main"
+repository-dir = "rust/nvnmos-rpc/proto"

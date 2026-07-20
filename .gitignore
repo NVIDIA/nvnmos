@@ -15,6 +15,7 @@
 
 # Python venv (README recommends `.venv` beside the repo)
 .venv/
+.venv-*/
 
 # CMake user presets (machine-specific paths, generators, etc.)
 CMakeUserPresets.json
@@ -27,3 +28,7 @@ src/.doxygen-markdown/
 # Doxygen HTML output (generated into src/ by Doxyfile, then moved by CI/Docker)
 src/html/
 doc/doxygen/__pycache__/
+
+# Generated gRPC documentation
+rust/nvnmos-rpc/proto/descriptor.pb
+rust/nvnmos-rpc/proto/sabledocs_output/

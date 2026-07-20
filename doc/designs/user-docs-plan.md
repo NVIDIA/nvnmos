@@ -395,12 +395,19 @@ Treat `nvnmos-example` output steps as the authoritative walkthrough; ensure the
 
 ## C1. Operator guide stays Markdown
 
+**Status:** the operator guide now leads with the minimal client sequence and
+links to the generated gRPC reference for symbol details.
+
 Keep `rust/nvnmosd/README.md` as the operator entry: build/run, UDS, env vars, session GC contract, Node flavours. Lead with a **minimal client sequence** (open session → subscribe activations → add resource → ack loop → close) before the env-var catalogue.
 
 Own the narrative here once. Link to generated gRPC pages for per-RPC detail.
 Link to design docs for lock ordering and history.
 
 ## C2. Slim `nvnmosd.proto` comments
+
+**Status:** the service-level conventions state identifier, subscription, GC,
+and transport-file rules once. Symbol comments retain local contracts,
+preconditions, and errors.
 
 Apply the proto comment rules before or with generated documentation:
 
@@ -412,9 +419,11 @@ Apply the proto comment rules before or with generated documentation:
 
 ## C3. Generated gRPC reference (third documentation product)
 
+**Status:** Sabledocs generates the reference into Pages at `/grpc/`.
+
 Integrating protobuf HTML into Doxygen or Hotdoc is a poor fit (different object model, separate toolchain, little shared navigation). Prefer a **third generator** publishing beside the existing Pages artifacts, e.g. `public/grpc/` or `public/nvnmosd/`.
 
-**Recommended approach (to confirm at implementation time):**
+**Options considered:**
 
 | Option | Pros | Cons |
 | --- | --- | --- |
@@ -422,8 +431,7 @@ Integrating protobuf HTML into Doxygen or Hotdoc is a poor fit (different object
 | **protoc-gen-doc** | Common, simple HTML/Markdown from comments | Historically weaker gRPC-service presentation unless templated |
 | **Buf / BSR** | Hosted polish | External dependency / org setup; less “in-tree Pages” |
 
-Default recommendation: **sabledocs** (or protoc-gen-doc if CI wants a single
-`protoc` plugin and no Python), fed by the slimmed `nvnmosd.proto` with
+Selected implementation: **Sabledocs**, fed by the slimmed `nvnmosd.proto` with
 `--include_source_info`. Generated pages are the RPC/message reference. Do not
 restore guide narrative in generated comments.
 
@@ -431,7 +439,7 @@ Pages job sketch:
 
 1. Existing Doxygen → `public/`
 2. Existing Hotdoc → `public/gstreamer/`
-3. New: generate gRPC HTML → `public/grpc/` (name TBD)
+3. New: generate gRPC HTML → `public/grpc/`
 4. Cross-link from top-level README, `rust/nvnmosd/README.md`, and optionally Hotdoc portal / Doxygen header
 
 ## C4. Split of emphasis
@@ -443,6 +451,10 @@ Pages job sketch:
 | Lock ordering, history | Design docs |
 
 ## C5. Publish daemon usage with the gRPC reference
+
+**Status:** Sabledocs consumes `rust/nvnmosd/README.md` directly as its landing
+page content, followed by the generated package, service, RPC, and message
+reference.
 
 Test whether the selected generator can use the operator guide as its landing
 page. Prefer one `rust/nvnmosd/README.md` source followed by generated RPC and

@@ -10,12 +10,12 @@ Rust components for the NMOS daemon and GStreamer plugin family.
 | Doc | Contents |
 | --- | --- |
 | **This file — Quick start** | Build, run `nvnmosd`, try two example GStreamer pipelines |
-| [`nvnmosd/README.md`](nvnmosd/README.md) | Daemon operator reference (env vars, gRPC contract) |
-| [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md) | GStreamer usage guide and property groups |
-| [`gst-nmos-rs/pipeline-examples.md`](gst-nmos-rs/pipeline-examples.md) | Full pipeline catalog (MXL, flipper, demo script, …) |
-| [`doc/designs/nvnmosd/README.md`](../doc/designs/nvnmosd/README.md) | Architecture and design history |
-| [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Contribution guidelines (sign-off, DCO) |
-| [`SECURITY.md`](../SECURITY.md) | Security vulnerability reporting |
+| [Daemon guide and gRPC API reference](https://nvidia.github.io/nvnmos/grpc/) | Minimal client sequence, daemon operation, and generated API reference |
+| [GStreamer plugin documentation](https://nvidia.github.io/nvnmos/gstreamer/) | Usage guide, element reference, and property groups |
+| [GStreamer pipeline examples](gst-nmos-rs/pipeline-examples.md) | Full pipeline catalog (MXL, flipper, demo script, …) |
+| [Daemon design record](../doc/designs/nvnmosd/README.md) | Architecture, element integration, and historical rationale |
+| [How to contribute](../CONTRIBUTING.md) | Contribution guidelines (sign-off, DCO) |
+| [How to report a vulnerability](../SECURITY.md) | Security vulnerability reporting |
 
 ## Quick Start
 
