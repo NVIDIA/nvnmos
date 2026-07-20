@@ -26,17 +26,18 @@
 //! reported back to the daemon as the `AckActivation` `success` /
 //! `failure_reason`.
 //!
-//! Property override / cross-check at NULL→READY: identity and
-//! cosmetic properties (`sender-name` / `receiver-name`, `mxl-flow-id`,
-//! `mxl-domain-id`, `label`, `description`, `receiver-caps-mode`)
-//! that overlap with the transport file's content **override** the
-//! file — the element rewrites the matching field/tag before handing
-//! it to the daemon. Essence-shape properties (`caps`,
-//! `transport-caps`) are **cross-checked** against the file and
-//! mismatch is a hard error. See `flow_def::splice_overrides` (MXL)
-//! and `sdp::passthrough_with_overrides` (RTP/UDP) for the splice
-//! mechanics and `rust/gst-nmos-rs/README.md` ("Property interaction
-//! with `transport-file`") for the full property matrix.
+//! Property override / cross-check at NULL→READY: identity,
+//! human-readable metadata, and Receiver capability properties
+//! (`sender-name` / `receiver-name`, `mxl-flow-id`, `mxl-domain-id`,
+//! `label`, `description`, `receiver-caps-mode`) that overlap with the
+//! transport file's content **override** the file — the element
+//! rewrites the matching field/tag before handing it to the daemon.
+//! Essence-shape properties (`caps`, `transport-caps`) are
+//! **cross-checked** against the file and mismatch is a hard error.
+//! See `flow_def::splice_overrides` (MXL) and
+//! `sdp::passthrough_with_overrides` (RTP/UDP) for the splice mechanics
+//! and `rust/gst-nmos-rs/README.md` ("Property Interaction With
+//! Transport Files") for the full property matrix.
 //!
 //! Inner data path: when the resolved configuration is complete for
 //! the chosen `transport`, the bin is *capable* of running the real

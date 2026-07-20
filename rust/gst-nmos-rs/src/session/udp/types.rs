@@ -87,7 +87,7 @@ pub(crate) struct UdpMedia {
 /// ([`UdpMedia::secondary`]) carrying the same essence over an
 /// independent network path for hitless merging.
 ///
-/// All fields are per-leg state that NMOS IS-05's
+/// All fields are per-leg state that AMWA IS-05's
 /// `transport_params` carries one-for-one (with `source_ip`
 /// modelled as the NMOS-simplified single-entry equivalent of the
 /// SDP `a=source-filter:` include list — see field doc).

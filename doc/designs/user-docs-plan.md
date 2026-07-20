@@ -162,12 +162,10 @@ Current blurb-pass audit:
 - The gst-nmos-rs README already contains the detailed endpoint-to-IS-05/SDP
   mappings, transport selection, MXL domain rules, bit-rate interactions,
   inner-property syntax, and activation behaviour removed from the blurbs.
-- Audio channel-mapping pad behaviour currently lives only in the IS-08 design
-  document. Add a user-facing channel-mapping section before completing the
-  blurb pass.
-- Explain channel-mapping aggregation in that section. Multiple NvNmos channel
-  mappings, including multiple `nmosaudiochannelmap` elements on the same Node,
-  contribute Inputs and Outputs to the Node's shared IS-08 Channel Mapping API.
+- The gst-nmos-rs usage guide now documents audio channel-mapping pad
+  behaviour and aggregation. Multiple NvNmos channel mappings, including
+  multiple `nmosaudiochannelmap` elements on the same Node, contribute Inputs
+  and Outputs to the Node's shared IS-08 Channel Mapping API.
   `channelmapping-name` identifies the subset owned and managed by one caller;
   it does not create a separate IS-08 API.
 - Keep exact IS-08 `/properties/name` and `/properties/description` mappings in
@@ -276,10 +274,11 @@ explicitly. Update both the Rust `Default` implementation and the
 
 Group Markdown (and Hotdoc intro prose where practical) as:
 
-1. Essential — `node-seed`, names, `transport`, `caps`, `auto-activate`
+1. Essential — `node-seed`, names, `transport`, `caps`, `receiver-caps-mode`,
+   `auto-activate`
 2. RTP/UDP network endpoints
 3. MXL domain / flow
-4. Identity presentation (`label`, `description`, `group-hint`, receiver caps mode)
+4. Human-readable metadata (`label`, `description`, `group-hint`)
 5. Advanced Node/session (`daemon-uri`, `http-port`, host/domain/URLs)
 6. Inner-element overrides (`transport-properties`, `pay-properties`, `depay-properties`)
 

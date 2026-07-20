@@ -214,7 +214,7 @@
         "elements": {
             "nmosaudiochannelmap": {
                 "author": "NVIDIA Corporation",
-                "description": "IS-08 channel mapping between NMOS audio streams, backed by nvnmosd",
+                "description": "AMWA IS-08 audio channel mapping between NMOS audio streams, backed by nvnmosd",
                 "hierarchy": [
                     "GstNmosAudioChannelMap",
                     "GstBin",

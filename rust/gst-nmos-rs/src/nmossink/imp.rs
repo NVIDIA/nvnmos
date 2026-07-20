@@ -43,7 +43,7 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
         "nmossink",
         gst::DebugColorFlags::empty(),
-        Some("NMOS sender wrapper element"),
+        Some("NMOS sender element"),
     )
 });
 

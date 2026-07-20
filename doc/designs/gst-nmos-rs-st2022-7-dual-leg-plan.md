@@ -111,7 +111,7 @@ activation SDP → parse active legs → UdpMedia → build_* (auto nvdsudp mapp
 On the **passthrough** path, IS-05 **transport scalars** spliced onto **leg 0 only** (`destination-ip`, `interface-ip`, `source-ip`, `source-port`, `destination-port`):
 
 - When any of those overrides is set → **remove `a=inactive` from leg 0** (explicit intent to configure a live primary leg).
-- Identity / cosmetic overrides (`label`, `name`, `description`, `caps-mode`, …) → **do not** touch `a=inactive`.
+- Identity, human-readable metadata, and caps-mode overrides (`label`, `name`, `description`, `caps-mode`, …) → **do not** touch `a=inactive`.
 - Leg 1 → never receives scalar splices from element properties.
 
 ### Chain gating (`a=inactive` and `master_enable`)

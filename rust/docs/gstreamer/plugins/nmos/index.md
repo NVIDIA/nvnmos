@@ -26,5 +26,7 @@ NvNmos integration layers.
 GStreamer registry when media starts — gst-mxl-rs (`mxlsrc` / `mxlsink` and
 `libmxl.so`) for `transport=mxl`, gst-plugins-good and/or gst-plugins-rs for
 ST 2110 RTP/UDP (`transport=udp` or `udp2`), or the DeepStream plugin for
-`transport=nvdsudp` (Rivermax). See the Usage Guide for building, loading
+`transport=nvdsudp` (Rivermax). See the
+[Usage Guide](https://nvidia.github.io/nvnmos/gstreamer/gst-nmos-rs.html)
+for the quick start, task-oriented property groups, building, loading
 `libgstnmos.so` on `GST_PLUGIN_PATH`, and transport-specific setup.

@@ -32,7 +32,7 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
         "nmosaudiochannelmap",
         gst::DebugColorFlags::empty(),
-        Some("NMOS IS-08 channel mapping element"),
+        Some("NMOS audio channel mapping element"),
     )
 });
 
@@ -230,9 +230,9 @@ impl ElementImpl for NmosAudioChannelMap {
     fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
         static ELEMENT_METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
             gst::subclass::ElementMetadata::new(
-                "NMOS IS-08 audio channel map",
+                "NMOS audio channel mapping",
                 "Filter/Audio/Network",
-                "IS-08 channel mapping between NMOS audio streams, backed by nvnmosd",
+                "AMWA IS-08 audio channel mapping between NMOS audio streams, backed by nvnmosd",
                 "NVIDIA Corporation",
             )
         });

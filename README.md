@@ -13,7 +13,7 @@ NvNmos can be integrated in three ways:
    - Start with the [C API guide](doc/user/c-api-guide.md), then use the [C API reference](https://nvidia.github.io/nvnmos/nvnmos_8h.html).
 2. **Daemon and gRPC API** (`nvnmosd`) — run the control plane out-of-process; Media Node applications attach as clients over gRPC.
    - See [`rust/nvnmosd/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/nvnmosd/README.md), the Rust workspace quick start in [`rust/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md), and the design record in [`doc/designs/nvnmosd/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/doc/designs/nvnmosd/README.md).
-3. **GStreamer elements** (`gst-nmos-rs`) — `nmossrc` and `nmossink` talk to `nvnmosd` and set up the data path (MXL, RTP/UDP, DeepStream).
+3. **GStreamer elements** (`gst-nmos-rs`) — `nmossrc` and `nmossink` talk to `nvnmosd` and configure the GStreamer MXL, RTP/UDP, or DeepStream elements for the data plane.
    - See the [published element reference](https://nvidia.github.io/nvnmos/gstreamer/), the usage guide in [`rust/gst-nmos-rs/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/README.md), and the Rust workspace quick start in [`rust/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md).
 
 For a self-contained build and basic examples, see [Container Images](#container-images).

@@ -163,6 +163,14 @@ avsynctest_doc = hotdoc.generate_doc(
 
 sitemap_gen = find_program(cdir / 'scripts' / 'generate_sitemap.py')
 
+# Publish the repository usage guide directly instead of maintaining a
+# Hotdoc-only copy.
+configure_file(
+  input: rust_root / 'gst-nmos-rs' / 'README.md',
+  output: 'gst-nmos-rs.md',
+  copy: true,
+)
+
 portal_sitemap = custom_target(
   'portal-sitemap',
   command: [
