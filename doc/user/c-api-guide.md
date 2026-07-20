@@ -8,10 +8,34 @@ SPDX-License-Identifier: Apache-2.0
 NvNmos consists of a single shared library (`libnvnmos.so` on Linux, `nvnmos.dll` on Windows).
 The API is specified by the `nvnmos.h` header file.
 
-The nvnmos-example application demonstrates use of the library.
-
 See [Core NvNmos Concepts](concepts.md) for the shared transport file,
 activation direction, and identity model.
+
+## When to Use the C API
+
+Use the C API when an application owns its data plane and needs to host an
+NMOS Node in the application process. Use `nvnmosd` when the NMOS control
+plane should run as a separate service, or the GStreamer elements when the
+data plane is naturally a GStreamer pipeline.
+
+## Minimal C API Sequence
+
+The application lifecycle is:
+
+1. Zero-initialize `NvNmosNodeConfig` and `NvNmosNodeServer`, then configure
+   the Node and callbacks.
+2. Call `create_nmos_node_server`.
+3. Zero-initialize an `NvNmosSenderConfig` or `NvNmosReceiverConfig`, supply
+   its transport and configuring transport file, then call
+   `add_nmos_sender_to_node_server` or `add_nmos_receiver_to_node_server`.
+4. Run the application data plane and handle `connection_activated` callbacks.
+5. Call `destroy_nmos_node_server` during shutdown. Explicitly removing
+   Senders and Receivers first is optional.
+
+The
+[`nvnmos-example` application](https://github.com/NVIDIA/nvnmos/blob/main/src/main.c)
+is the complete example, including configuration, transport files, callbacks,
+error handling, and dynamic resource removal and addition.
 
 ## Running the Example Application
 
@@ -79,14 +103,39 @@ NvNmos transport-file extensions and minimal unconstrained Receiver transport fi
 
 ## Connection Activations
 
-When an IS-05 Connection API activation occurs, the library invokes the application's `connection_activated` callback with an `NvNmosSide` (Sender or Receiver), the application's `name`, and an updated `transport_file` reflecting the new active transport parameters:
+The [Activation Direction](concepts.md#activation-direction) guide explains
+the two directions in which a connection state change can originate.
 
-- For an RTP/UDP Sender or Receiver, the callback receives the effective active SDP. It is based on a Receiver `transport_file` supplied by an IS-05 `PATCH` when present, or otherwise the configuring `transport_file`, with the active `transport_params` applied.
-- For an MXL Sender or Receiver, the callback receives back the configuring MXL flow definition (JSON), with the new active `mxl_domain_id` and `mxl_flow_id` spliced in as the `urn:x-nvnmos:tag:mxl-domain-id` tag value and the top-level `id` field, respectively.
+### Handling a Controller-Originated Activation
 
-The application is expected to dispatch on `(side, name)` to identify the Sender or Receiver and react accordingly, for example by reconfiguring its data plane.
+When an IS-05 activation reaches its activation time, the library invokes the
+application's `connection_activated` callback with:
 
-Conversely, if an activation or deactivation has already occurred in the application's data plane by some other means, outside the NMOS API, the application calls `nmos_connection_activate` (also passing the `side`) to update the IS-04 and IS-05 model to reflect it.
+- `side`, identifying a Sender or Receiver;
+- the caller-chosen `name` for that Sender or Receiver; and
+- the effective active `transport_file`, or a null pointer for deactivation.
+
+Dispatch on `(side, name)` to identify the Sender or Receiver and reconfigure
+its data plane. Return `true` when the requested state was applied, or `false`
+to report failure.
+
+The effective transport file depends on the transport:
+
+- For RTP/UDP, the callback receives the effective active SDP with the IS-05
+  `transport_params` applied. For a Receiver, NvNmos uses SDP supplied in the
+  IS-05 `PATCH` when present; otherwise it uses the configuring SDP.
+- For MXL, the callback receives the configuring MXL flow definition with the
+  active `mxl_domain_id` and `mxl_flow_id` in the
+  `urn:x-nvnmos:tag:mxl-domain-id` tag and top-level `id`, respectively.
+
+### Reporting an Application-Originated State Change
+
+If the application changes its data plane independently of IS-05, call
+`nmos_connection_activate` with the Sender or Receiver's `side`, caller-chosen
+`name`, and effective transport file. Pass a null pointer for deactivation.
+
+This updates the IS-04 and IS-05 model. It does not invoke the application's
+`connection_activated` callback.
 
 ## Troubleshooting
 
