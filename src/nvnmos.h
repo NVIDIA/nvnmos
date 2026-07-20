@@ -19,14 +19,14 @@
  * @file nvnmos.h
  * <b>NVIDIA Networked Media Open Specifications (NMOS) API</b>
  *
- * @b Description: This file defines the NVIDIA NMOS utility library
+ * @b Description: This file defines the NVIDIA NMOS library
  * (NvNmos) API.
  */
 
 /**
  * @defgroup  nvnmos  Networked Media Open Specifications (NMOS) API
  *
- * Defines the NVIDIA NMOS utility library (NvNmos) API.
+ * Defines the NVIDIA NMOS library (NvNmos) API.
  *
  * The NvNmos library provides APIs to create, destroy and internally
  * manage an <a href="https://specs.amwa.tv/nmos/">NMOS</a> Node for a Media Node application.

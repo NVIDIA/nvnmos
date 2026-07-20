@@ -22,3 +22,8 @@ CMakeUserPresets.json
 # Local Conan + CMake output (README layout)
 build*/
 src/conan*/
+src/.doxygen-markdown/
+
+# Doxygen HTML output (generated into src/ by Doxyfile, then moved by CI/Docker)
+src/html/
+doc/doxygen/__pycache__/

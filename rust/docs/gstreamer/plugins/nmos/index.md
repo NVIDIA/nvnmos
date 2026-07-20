@@ -15,7 +15,7 @@ create AMWA IS-04 resources and follow IS-05 / IS-08 activations, so
 controllers manage connections while the pipeline carries ST 2110 (RTP/UDP) or
 MXL essence.
 
-See [Core NvNmos Concepts](https://nvidia.github.io/nvnmos/md_doc_2user_2concepts.html)
+See [Core NvNmos Concepts](https://nvidia.github.io/nvnmos/concepts.html)
 for the transport file, activation direction, and identity model shared by all
 NvNmos integration layers.
 

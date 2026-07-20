@@ -10,7 +10,7 @@ talking to the `nvnmosd` NMOS daemon over gRPC. Design lives in
 [`doc/designs/nvnmosd/README.md`](../../doc/designs/nvnmosd/README.md);
 the workspace overview is in [`../README.md`](../README.md).
 
-The [Core NvNmos Concepts](https://nvidia.github.io/nvnmos/md_doc_2user_2concepts.html)
+The [Core NvNmos Concepts](https://nvidia.github.io/nvnmos/concepts.html)
 guide explains the transport file, activation direction, and identity model
 shared by the GStreamer elements, C API, and daemon.
 

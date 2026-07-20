@@ -1,0 +1,12 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
+ * Doxygen bolds internal cross-reference links (a.el); external links are not.
+ * Un-bold them on prose pages so mixed guide link lists look consistent.
+ */
+.contents:not(:has(.memitem)):not(:has(.memproto)) > .textblock a.el {
+  font-weight: normal;
+}

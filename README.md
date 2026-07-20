@@ -16,6 +16,8 @@ NvNmos can be integrated in three ways:
 3. **GStreamer elements** (`gst-nmos-rs`) — `nmossrc` and `nmossink` talk to `nvnmosd` and set up the data path (MXL, RTP/UDP, DeepStream).
    - See the [published element reference](https://nvidia.github.io/nvnmos/gstreamer/), the usage guide in [`rust/gst-nmos-rs/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/README.md), and the Rust workspace quick start in [`rust/README.md`](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md).
 
+For a self-contained build and basic examples, see [Container Images](#container-images).
+
 ## Introduction
 
 The [Networked Media Open Specifications (NMOS)](https://www.amwa.tv/nmos-overview) enable the registration, discovery and management of Media Nodes.

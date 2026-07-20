@@ -29,7 +29,7 @@ Several related documents use the same syntax but have different roles:
 
 - The **configuring transport file** supplies the details NvNmos needs to
   create a Sender or Receiver.
-- An IS-05 Sender **`/transportfile`** is the result exposed to NMOS
+- An IS-05 Sender `/transportfile` is the result exposed to NMOS
   controllers.
 - An activation callback or event carries the effective active transport file
   for the requested state.

@@ -12,6 +12,7 @@ on:
       - '.github/workflows/pages.yml'
       - 'Doxyfile'
       - 'README.md'
+      - 'doc/doxygen/**'
       - 'doc/user/**'
       - 'src/**'
       - 'rust/docs/**'
@@ -31,7 +32,11 @@ jobs:
       run: sudo apt update && sudo apt install -y doxygen graphviz
 
     - name: Generate C API documentation
-      run: cd src && doxygen ../Doxyfile && mv html ../public
+      run: |
+        cd src
+        python3 ../doc/doxygen/prepare-markdown.py
+        doxygen ../Doxyfile
+        mv html ../public
 
     - name: Install GStreamer plugin documentation toolchain
       run: |

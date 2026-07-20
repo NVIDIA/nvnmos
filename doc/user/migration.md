@@ -20,25 +20,25 @@ Existing application code needs to be updated as itemised below - mostly possibl
 - The IS-05 activation callback typedef `nmos_connection_rtp_activation_callback` is now `nmos_connection_activation_callback`, and its signature changed from `(server, id, sdp)` to `(server, side, name, transport_file)`. The matching `NvNmosNodeConfig::rtp_connection_activated` field is now `connection_activated`. The new `NvNmosSide` parameter (`NVNMOS_SIDE_SENDER` / `NVNMOS_SIDE_RECEIVER`) disambiguates a name that may now be shared between a Sender and a Receiver on the same Node — names are scoped per side.
 - `nmos_connection_rtp_activate(server, id, sdp)` is now `nmos_connection_activate(server, side, name, transport_file)`.
 
-### New ID-Accessors
+### New ID Accessors
 
 The NMOS resource UUIDs are deterministic pure functions of `(seed, side, name)`. Pure accessors compute them without a server:
 
 - `nmos_make_node_id(seed, out, out_len)`
 - `nmos_make_device_id(seed, out, out_len)`
-- `nmos_make_sender_id(seed, sender_name, out, out_len)`
-- `nmos_make_receiver_id(seed, receiver_name, out, out_len)`
 - `nmos_make_source_id(seed, sender_name, out, out_len)`
 - `nmos_make_flow_id(seed, sender_name, out, out_len)`
+- `nmos_make_sender_id(seed, sender_name, out, out_len)`
+- `nmos_make_receiver_id(seed, receiver_name, out, out_len)`
 
 Live accessors look them up on a running server:
 
 - `nmos_get_node_id(server, out, out_len)`
 - `nmos_get_device_id(server, out, out_len)`
-- `nmos_get_sender_id(server, sender_name, out, out_len)`
-- `nmos_get_receiver_id(server, receiver_name, out, out_len)`
 - `nmos_get_source_id(server, sender_name, out, out_len)`
 - `nmos_get_flow_id(server, sender_name, out, out_len)`
+- `nmos_get_sender_id(server, sender_name, out, out_len)`
+- `nmos_get_receiver_id(server, receiver_name, out, out_len)`
 
 All write a null-terminated UUID into a buffer of at least `NVNMOS_ID_LEN` bytes (37, including the terminator). Each returns `bool`.
 
