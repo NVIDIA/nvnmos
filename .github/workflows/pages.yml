@@ -95,7 +95,7 @@ jobs:
       run: |
         name="docs-${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
         echo "artifact_name=${name//\//-}" >> "$GITHUB_ENV"
-        tar -C public -czf "$RUNNER_TEMP/docs-preview.tar.gz" .
+        tar --dereference -C public -czf "$RUNNER_TEMP/docs-preview.tar.gz" .
 
     - name: Upload preview artifact
       if: github.event_name != 'push'
