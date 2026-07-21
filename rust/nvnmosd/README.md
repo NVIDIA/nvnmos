@@ -5,6 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvnmosd
 
+[TOC]
+
 Linux-first NMOS daemon: one process hosts multiple NMOS **Nodes** (by `node_seed`),
 **sessions** (gRPC clients), and session-linked NMOS **Senders/Receivers** backed by
 [`libnvnmos`](https://nvidia.github.io/nvnmos/nvnmos_8h.html). Clients talk to it
@@ -20,7 +22,26 @@ documents the no-FFI-under-`state` invariant.
 This documentation describes the **as-built** daemon surface for operators and
 client authors.
 
-## Minimal Client Sequence
+## Using the gRPC API
+
+**Node flavours:**
+
+- **Session-refcounted** (default): created on first `OpenSession` for a
+  `node_seed`; destroyed when the last session on that node closes.
+- **Persistent**: created with `AddNode`; survives until `RemoveNode`.
+
+Many sessions may attach to the same Node (same `node_seed`). Each session owns
+the resources it registers; activations are routed to the session that added the
+resource.
+
+| Area | RPCs |
+|------|------|
+| Node lifecycle | `AddNode`, `RemoveNode`, `OpenSession`, `CloseSession` |
+| Resources | `AddSender`, `AddReceiver`, `RemoveResource` |
+| IS-05 activation | `SubscribeActivations` (server stream), `AckActivation` |
+| Out-of-band sync | `SyncResourceState` |
+
+### Minimal Client Sequence
 
 Most clients use a session-refcounted Node:
 
@@ -61,7 +82,7 @@ cargo build --bin nvnmosd
 cargo run --bin nvnmosd -- --uds /tmp/nvnmosd.sock
 ```
 
-## Command Line
+### Command Line
 
 | Flag / env | Default | Meaning |
 |------------|---------|---------|
@@ -69,41 +90,12 @@ cargo run --bin nvnmosd -- --uds /tmp/nvnmosd.sock
 
 Logging uses `tracing`; set `RUST_LOG` as usual (e.g. `RUST_LOG=info`).
 
-## gRPC API (Summary)
-
-| Area | RPCs |
-|------|------|
-| Node lifecycle | `AddNode`, `RemoveNode`, `OpenSession`, `CloseSession` |
-| Resources | `AddSender`, `AddReceiver`, `RemoveResource` |
-| IS-05 activation | `SubscribeActivations` (server stream), `AckActivation` |
-| Out-of-band sync | `SyncResourceState` |
-
-**Session contract (enforced when session GC is on, default):**
-
-1. Call `SubscribeActivations` promptly after `OpenSession`, **before**
-   `AddSender` / `AddReceiver`.
-2. To keep a session alive after dropping `SubscribeActivations`, call it
-   again within the resubscribe timeout.
-3. Call `CloseSession` for a clean shutdown.
-
-Missed deadlines trigger implicit `CloseSession` (same teardown as the RPC).
-Details and env vars are below; see the
-[gRPC API reference](https://nvidia.github.io/nvnmos/grpc/) for per-RPC
-contracts.
-
-**Node flavours:**
-
-- **Session-refcounted** (default): created on first `OpenSession` for a
-  `node_seed`; destroyed when the last session on that node closes.
-- **Persistent**: created with `AddNode`; survives until `RemoveNode`.
-
-Many sessions may attach to the same Node (same `node_seed`). Each session owns
-the resources it registers; activations are routed to the session that added the
-resource.
-
 ## Environment Variables
 
-### Session Liveness (Implicit `CloseSession`)
+### Session Liveness
+
+These settings control when the daemon implicitly closes a session whose
+activation subscription is missing or interrupted.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
@@ -120,7 +112,7 @@ resource.
 
 When `NodeConfig.http_port` is **`0`**, the daemon picks the first port in `[MIN, MAX]` that is not already used by another Node and that the host can bind. When **`http_port` is non-zero**, the client chooses the port; the daemon rejects the create if that port is already taken by another Node or unavailable on the host.
 
-### glibc Heap Trim (Linux)
+### Linux glibc Heap Trimming
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
@@ -150,3 +142,13 @@ See the [Rust workspace smoke test](https://github.com/NVIDIA/nvnmos/blob/main/r
 (`--interface-ip`, `--hold-secs`, Connection API PATCH round-trip).
 
 [Scale benchmark guide](https://github.com/NVIDIA/nvnmos/blob/main/doc/designs/nvnmosd/scale-smoke.md).
+
+## Other Ways to Use NvNmos
+
+Use the [C API](https://nvidia.github.io/nvnmos/) to embed the NMOS control
+plane directly in a Media Node application.
+
+Use the
+[GStreamer elements](https://nvidia.github.io/nvnmos/gstreamer/) — `nmossrc`
+and `nmossink` — to connect GStreamer pipelines to `nvnmosd` and configure the
+data plane.

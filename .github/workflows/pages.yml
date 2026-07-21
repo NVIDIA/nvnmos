@@ -49,6 +49,7 @@ jobs:
         cd rust/nvnmos-rpc/proto
         protoc nvnmosd.proto -o descriptor.pb --include_source_info
         sabledocs
+        sed -i 's#<span>Source</span>#<span>View on GitHub</span>#g' sabledocs_output/*.html
         cat nvnmos-theme.css >> sabledocs_output/static/mystyles.css
         mkdir -p "$GITHUB_WORKSPACE/public/grpc"
         cp -a sabledocs_output/* "$GITHUB_WORKSPACE/public/grpc/"

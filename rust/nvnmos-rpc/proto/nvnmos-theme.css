@@ -49,6 +49,66 @@ html.dark code a {
   border-color: var(--nvnmos-green);
 }
 
+nav .level-right .level-item > .link.is-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  font-size: 0.9rem;
+}
+
+nav .level-right .level-item > .link.is-info .icon {
+  width: 1rem;
+  height: 1rem;
+  font-size: 1rem;
+}
+
+.toc {
+  float: right;
+  max-width: 24rem;
+  margin: 0 0 1.5rem 2rem;
+  padding: 0.8rem 1rem;
+  border: 1px solid #dbdbdb;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.toc::before {
+  content: "Contents";
+  display: block;
+  margin-bottom: 0.35rem;
+  font-weight: 600;
+}
+
+.toc > ul {
+  margin-top: 0;
+  margin-left: 0;
+}
+
+.toc > ul > li > ul {
+  margin-top: 0;
+  margin-left: 1.25rem;
+}
+
+.toc > ul > li {
+  list-style: none;
+}
+
+.toc > ul > li > a {
+  display: none;
+}
+
+html.dark .toc {
+  border-color: #4a4a4a;
+}
+
+@media screen and (max-width: 768px) {
+  .toc {
+    float: none;
+    max-width: none;
+    margin: 0 0 1.5rem;
+  }
+}
+
 .theme-toggle {
   --icon-fill: var(--nvnmos-green);
   --icon-fill-hover: var(--nvnmos-link);
