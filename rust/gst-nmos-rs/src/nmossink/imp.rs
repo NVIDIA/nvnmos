@@ -30,7 +30,7 @@ use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
 use tokio::sync::oneshot;
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 
 use crate::daemon::{ActivationHandler, ActivationOutcome, ActivationRequest, Session};
 use crate::inner;
@@ -929,9 +929,24 @@ fn build_real_sink(
         TransportConfig::Mxl {
             domain_path,
             flow_id,
+            transport_file,
             ..
         } => {
+            let transport_file = transport_file.as_deref().ok_or_else(|| {
+                anyhow!("building real MXL sink without a configuring transport file")
+            })?;
+            let metadata = crate::flow_def::metadata_from_transport(transport_file)
+                .context("reading MXL flow metadata from transport file")?;
             let chain = inner::build_mxlsink(domain_path, flow_id)?;
+            for (property, value) in [
+                ("label", metadata.label.as_str()),
+                ("description", metadata.description.as_str()),
+                ("group-hint", metadata.group_hint.as_str()),
+            ] {
+                if chain.transport.has_property(property) {
+                    chain.transport.set_property(property, value);
+                }
+            }
             inner::apply_mxl_sink_inner_properties(
                 &CAT,
                 "nmossink",
