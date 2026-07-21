@@ -4,7 +4,7 @@
 module-title = "NvNmos Daemon gRPC API"
 main-page-content-file = "../../nvnmosd/README.md"
 member-ordering = "preserve"
-markdown-extensions = ["fenced_code", "tables"]
+markdown-extensions = ["fenced_code", "tables", "toc"]
 
 repository-type = "github"
 repository-url = "https://github.com/NVIDIA/nvnmos"
