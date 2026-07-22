@@ -378,8 +378,20 @@
                     }
                 },
                 "properties": {
+                    "active": {
+                        "blurb": "Whether the data plane is currently active (real inner transport chain). Orthogonal to GStreamer pipeline state: the pipeline may be PLAYING while this property is false when waiting for activation.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "false",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gboolean",
+                        "writable": false
+                    },
                     "auto-activate": {
-                        "blurb": "Activate the configured data path without waiting for an IS-05 controller. This property does not change the GStreamer pipeline state. Default: false.",
+                        "blurb": "Activate the configured data plane without waiting for an IS-05 controller. This property does not change the GStreamer pipeline state. Default: false.",
                         "conditionally-available": false,
                         "construct": false,
                         "construct-only": false,
@@ -746,8 +758,20 @@
                     }
                 },
                 "properties": {
+                    "active": {
+                        "blurb": "Whether the data plane is currently active (real inner transport chain). Orthogonal to GStreamer pipeline state: the pipeline may be PLAYING while this property is false when waiting for activation.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "false",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gboolean",
+                        "writable": false
+                    },
                     "auto-activate": {
-                        "blurb": "Activate the configured data path without waiting for an IS-05 controller. This property does not change the GStreamer pipeline state. Default: false.",
+                        "blurb": "Activate the configured data plane without waiting for an IS-05 controller. This property does not change the GStreamer pipeline state. Default: false.",
                         "conditionally-available": false,
                         "construct": false,
                         "construct-only": false,
