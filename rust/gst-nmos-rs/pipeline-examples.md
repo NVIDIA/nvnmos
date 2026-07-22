@@ -270,20 +270,20 @@ before the flipper script.
 ./scripts/example-pipelines/1080p25-flipper-udp.sh
 ```
 
-For IS-05-gated activation (resources visible on IS-04 before the data
-path goes live), omit `auto-activate=true` and PATCH
+For Controller-managed IS-05 activation (resources visible on IS-04 before the
+data path goes live), omit `auto-activate=true` and PATCH
 `/single/{senders,receivers}/{id}/staged` — demo **Node 3** exercises
 this; example scripts use `auto-activate=true` for simplicity.
 
-### Deferred AddSender
+### Deferred Sender Creation
 
 [`1080p25-deferred-sender-mxl.sh`](https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/scripts/example-pipelines/1080p25-deferred-sender-mxl.sh) ·
 [`1080p25-deferred-sender-udp.sh`](https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/scripts/example-pipelines/1080p25-deferred-sender-udp.sh)
 
-When neither `transport-file*` nor `caps=` is set on `nmossink`, AddSender
-runs at **READY→PAUSED** from upstream peer caps. Transport-specific identity
-props must still be set (MXL domain + `mxl-flow-id`, or UDP destination
-multicast + `source-ip`).
+When neither `transport-file*` nor `caps` is set, `nmossink` derives the
+configuring transport file from upstream peer caps and adds the Sender at
+**READY→PAUSED**. Transport-specific identity properties must still be set
+(MXL domain + `mxl-flow-id`, or UDP destination multicast + `source-ip`).
 
 **MXL:**
 
@@ -318,14 +318,14 @@ JSON; UDP synthesises configuring SDP).
 [`minimal-file-sender-udp-jxsv.sh`](https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/scripts/example-pipelines/minimal-file-sender-udp-jxsv.sh) ·
 [`minimal-file-receiver-udp-jxsv.sh`](https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/scripts/example-pipelines/minimal-file-receiver-udp-jxsv.sh)
 
-Smallest NULL→READY AddSender / AddReceiver paths with
+Smallest NULL→READY Sender and Receiver creation paths with
 `auto-activate=false`. Resources become visible through IS-04 at READY; the
 controller PATCHes `/single/{senders,receivers}/{id}/staged` to bring the data
 plane live.
 
 **Properties-driven (`minimal-prop-*`)** — `sender-name` / `receiver-name`
 plus `caps` (and `source-ip` / `interface-ip` for RTP/UDP, or
-`mxl-domain-*` for MXL) synthesise the configuring transport at NULL→READY.
+`mxl-domain-*` for MXL) synthesise the configuring transport file at NULL→READY.
 
 **MXL:**
 
@@ -422,10 +422,12 @@ covers the usual setup).
 
 **ST 2022-7 (dual-leg):** supported on `transport=nvdsudp` when configuring
 SDP has two same-essence `m=` lines (separate destination addresses).
-Inactive legs (`rtp_enabled: false` → `a=inactive`) are gated
-at activation; `nvdsudpsrc` uses comma-separated `st2022-7-streams`,
-`local-iface-ip`, and `source-address`. Dual-leg transport files on
-`udp` / `udp2` are rejected. Caps-only synthesis still emits one `m=`.
+IS-05 `rtp_enabled: false` appears as `a=inactive` in the effective SDP. The
+element omits inactive legs when configuring the inner transport elements; if
+all legs are inactive, the data plane remains dormant. When both Receiver legs
+are active, `nvdsudpsrc` is supplied with comma-separated `st2022-7-streams`,
+`local-iface-ip`, and `source-address` values. Dual-leg transport files on
+`udp` / `udp2` are rejected. Caps-only synthesis only emits one leg (`m=`).
 See the
 [ST 2022-7 design notes](https://github.com/NVIDIA/nvnmos/blob/main/doc/designs/gst-nmos-rs-st2022-7-dual-leg-plan.md).
 

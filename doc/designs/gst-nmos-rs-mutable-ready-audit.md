@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 `mutable_ready()` lets `g_object_set()` run in **NULL or READY**; it does **not** mean the element re-reads the property on every READY-time set. Values are taken from `Settings` only when a **lifecycle step** runs (below).
 
-Override vs cross-check rules for transport-file interaction: [configuration guide](../../rust/gst-nmos-rs/configuration.md#property-interaction-with-transport-files). This doc covers **when** each property must be set and which outer pspec flags apply.
+Property combination rules: [configuration guide](../../rust/gst-nmos-rs/configuration.md#how-properties-are-combined). This doc covers **when** each property must be set and which outer pspec flags apply.
 
 ## Lifecycle steps
 
