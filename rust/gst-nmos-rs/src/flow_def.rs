@@ -54,6 +54,8 @@
 //! shapes that `mxlsink` advertises today are accepted: v210 video,
 //! F32LE audio, ST 2038 ANC.
 
+use std::collections::HashMap;
+
 use gstreamer as gst;
 use serde::Deserialize;
 use thiserror::Error;
@@ -69,6 +71,16 @@ struct RawFlowDef {
     /// NMOS format URN: `urn:x-nmos:format:video|audio|data`.
     /// Optional in the file; the property may supply it instead.
     format: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawFlowMetadata {
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    tags: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,6 +175,13 @@ pub(crate) struct FlowDefMeta {
     pub(crate) format: FlowFormat,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct FlowMetadata {
+    pub(crate) label: String,
+    pub(crate) description: String,
+    pub(crate) group_hint: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ValueOrigin {
     /// User supplied the property; no transport file consulted (or
@@ -205,6 +224,23 @@ pub(crate) fn read_flow_def_meta(text: &str) -> Result<FlowDefMeta, FlowDefError
 
 const NAME_TAG: &str = "urn:x-nvnmos:tag:name";
 const MXL_DOMAIN_ID_TAG: &str = "urn:x-nvnmos:tag:mxl-domain-id";
+const GROUP_HINT_TAG: &str = "urn:x-nmos:tag:grouphint/v1.0";
+
+/// Human-readable metadata from a configuring or activation flow_def.
+pub(crate) fn metadata_from_transport(text: &str) -> Result<FlowMetadata, FlowDefError> {
+    let raw: RawFlowMetadata =
+        serde_json::from_str(text).map_err(|source| FlowDefError::Parse { source })?;
+    Ok(FlowMetadata {
+        label: raw.label,
+        description: raw.description,
+        group_hint: raw
+            .tags
+            .get(GROUP_HINT_TAG)
+            .and_then(|values| values.first())
+            .cloned()
+            .unwrap_or_default(),
+    })
+}
 
 fn mxl_domain_id_from_tag_value(value: &serde_json::Value) -> Result<DomainId, FlowDefError> {
     let Some(arr) = value.as_array() else {
@@ -882,6 +918,33 @@ mod tests {
         let m = read_flow_def_meta(&video_flow_def(UUID_A)).unwrap();
         assert_eq!(m.id, UUID_A);
         assert_eq!(m.format, FlowFormat::Video);
+    }
+
+    #[test]
+    fn metadata_from_transport_reads_effective_flow_metadata() {
+        let json = r#"{
+            "label": "Studio A camera",
+            "description": "v210 1080p50",
+            "tags": {
+                "urn:x-nmos:tag:grouphint/v1.0": ["SDI 1:Video"]
+            }
+        }"#;
+        assert_eq!(
+            metadata_from_transport(json).expect("parse"),
+            FlowMetadata {
+                label: "Studio A camera".to_owned(),
+                description: "v210 1080p50".to_owned(),
+                group_hint: "SDI 1:Video".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn metadata_from_transport_defaults_missing_fields() {
+        assert_eq!(
+            metadata_from_transport(&video_flow_def(UUID_A)).expect("parse"),
+            FlowMetadata::default()
+        );
     }
 
     #[test]
