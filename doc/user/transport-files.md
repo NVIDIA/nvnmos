@@ -148,7 +148,7 @@ Compare with `minimal-video.mxl.json.in`, which also needs `grain_rate`, `frame_
 {
   "label": "@LABEL@",
   "description": "",
-  "media_type": "audio/L24",
+  "media_type": "audio/float32",
   "tags": {
     "urn:x-nvnmos:tag:name": ["@NAME@"],
     "urn:x-nvnmos:tag:caps": [""]
