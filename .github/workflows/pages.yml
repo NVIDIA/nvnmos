@@ -77,6 +77,8 @@ jobs:
         export CARGO_TARGET_DIR="$PWD/rust/target"
         cd rust/docs/gstreamer
         meson setup build -Ddoc=enabled
+        ninja -C build gst-hotdoc-plugins-scanner
+        ./scripts/refresh-plugins-cache.sh --check
         ninja -C build gstreamer-doc
         mkdir -p "$GITHUB_WORKSPACE/public/gstreamer"
         cp -a build/NvNmos-GStreamer-doc/html/* "$GITHUB_WORKSPACE/public/gstreamer/"
