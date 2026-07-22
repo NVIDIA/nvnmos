@@ -288,7 +288,8 @@ There are three ways to fully describe a sender or receiver. Each is sufficient 
 - **Identity, human-readable metadata, and Receiver capability properties** (`sender-name` / `receiver-name`, `mxl-flow-id`, `mxl-domain-id`, `label`, `description`, `receiver-caps-mode`) — **override** the matching field/tag in the file. This is the natural "I have a template SDP or flow_def, but the per-instance bits (`sender-name` or `receiver-name`, `source-ip` or `interface-ip`, port, label, ...) change" workflow, and nvdsnmosbin already worked this way.
 - **Essence-shape properties** (`caps`, `transport-caps`) — **cross-check** against the file's shape. Mismatch is a hard error at NULL→READY; the application is asked to align the two rather than have one silently win over the other.
 
-The full matrix (including which properties have no transport file interaction at all) lives in the gst-nmos-rs crate README under "Property Interaction With Transport Files".
+The full matrix is in
+[How Properties Are Combined](../../../rust/gst-nmos-rs/configuration.md#how-properties-are-combined).
 
 #### Defaults the element synthesises
 
