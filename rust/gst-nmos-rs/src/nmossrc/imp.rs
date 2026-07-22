@@ -135,6 +135,8 @@ impl Default for Settings {
 #[derive(Default)]
 pub struct NmosSrc {
     settings: Mutex<Settings>,
+    /// Whether the real inner transport chain is installed.
+    active: Mutex<bool>,
     session: Mutex<Option<Session>>,
     /// Ghost pad that hides the current inner chain behind the bin.
     /// Created at `constructed`; the chain behind it swaps between
@@ -220,6 +222,12 @@ impl ObjectImpl for NmosSrc {
                     .nick("Auto-Activate")
                     .blurb(crate::session::AUTO_ACTIVATE_BLURB)
                     .default_value(false)
+                    .build(),
+                glib::ParamSpecBoolean::builder("active")
+                    .nick("Receiver Active")
+                    .blurb(crate::session::ACTIVE_BLURB)
+                    .default_value(false)
+                    .read_only()
                     .build(),
                 glib::ParamSpecString::builder("label")
                     .nick("IS-04 Label")
@@ -440,6 +448,7 @@ impl ObjectImpl for NmosSrc {
             "mxl-domain-path" => settings.mxl_domain_path.to_value(),
             "mxl-flow-id" => settings.mxl_flow_id.to_value(),
             "auto-activate" => settings.auto_activate.to_value(),
+            "active" => self.active.lock().unwrap().to_value(),
             "label" => settings.label.to_value(),
             "description" => settings.description.to_value(),
             "group-hint" => settings.group_hint.to_value(),
@@ -532,6 +541,18 @@ impl ElementImpl for NmosSrc {
 impl BinImpl for NmosSrc {}
 
 impl NmosSrc {
+    // Locks `settings`; must not be called while that mutex is held.
+    fn set_connection_active(&self, new_active: bool, reason: &'static str) {
+        let resource_name = self.settings.lock().unwrap().receiver_name.clone();
+        crate::session::connection_active::set_connection_active(
+            self.obj().upcast_ref(),
+            &self.active,
+            new_active,
+            &resource_name,
+            reason,
+        );
+    }
+
     fn open_session(&self) -> Result<(), anyhow::Error> {
         let snapshot = self.settings.lock().unwrap().clone();
         let bin = self.obj();
@@ -638,6 +659,7 @@ impl NmosSrc {
                 ) {
                     gst::warning!(CAT, "nmossrc auto-activate sync failed: {e:#}");
                 }
+                self.set_connection_active(true, "auto-activate");
             }
             InnerConfig::Fake { .. } => {
                 self.upgrade_fake_chain_from_settings(bin)?;
@@ -648,6 +670,7 @@ impl NmosSrc {
 
     fn close_session(&self) {
         crate::session::close(&CAT, "nmossrc", &self.session);
+        self.set_connection_active(false, "deactivate");
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
         // The bin is heading back to NULL, so caps aren't strictly
@@ -952,7 +975,12 @@ impl NmosSrc {
             };
         }
         match &plan.ack {
-            ActivationAck::Success => ActivationOutcome::Applied,
+            ActivationAck::Success => {
+                let new_active = matches!(plan.inner, InnerConfig::Real(_));
+                let reason = if new_active { "activate" } else { "deactivate" };
+                self.set_connection_active(new_active, reason);
+                ActivationOutcome::Applied
+            }
             ActivationAck::Failure { reason } => ActivationOutcome::Failed {
                 reason: reason.clone(),
             },
@@ -1144,6 +1172,21 @@ mod tests {
     };
     use crate::test_support::init_gst;
     use crate::types::FlowFormat;
+
+    #[test]
+    fn active_property_is_read_only_and_defaults_false() {
+        init_gst();
+        // auto-activate is a NULL→READY policy only; active stays false until then.
+        let element = glib::Object::builder::<crate::nmossrc::NmosSrc>()
+            .property("auto-activate", true)
+            .build();
+
+        assert!(!element.property::<bool>("active"));
+        let pspec = element.find_property("active").expect("active property");
+        assert!(pspec.flags().contains(glib::ParamFlags::READABLE));
+        assert!(!pspec.flags().contains(glib::ParamFlags::WRITABLE));
+        assert_eq!(pspec.nick(), "Receiver Active");
+    }
 
     /// Pins the IS-05 Receiver `transport_params` →
     /// `CommonSettings` mapping. `nmossrc` populates the
