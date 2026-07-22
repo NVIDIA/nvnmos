@@ -130,6 +130,8 @@ impl Default for Settings {
 #[derive(Default)]
 pub struct NmosSink {
     settings: Mutex<Settings>,
+    /// Whether the real inner transport chain is installed.
+    active: Mutex<bool>,
     session: Mutex<Option<Session>>,
     /// Ghost pad that hides the current inner chain behind the bin.
     /// Created at `constructed`; the chain behind it swaps between
@@ -219,6 +221,12 @@ impl ObjectImpl for NmosSink {
                     .blurb(crate::session::AUTO_ACTIVATE_BLURB)
                     .default_value(false)
                     .mutable_ready()
+                    .build(),
+                glib::ParamSpecBoolean::builder("active")
+                    .nick("Sender Active")
+                    .blurb(crate::session::ACTIVE_BLURB)
+                    .default_value(false)
+                    .read_only()
                     .build(),
                 glib::ParamSpecString::builder("label")
                     .nick("IS-04 Label")
@@ -441,6 +449,7 @@ impl ObjectImpl for NmosSink {
             "mxl-domain-path" => settings.mxl_domain_path.to_value(),
             "mxl-flow-id" => settings.mxl_flow_id.to_value(),
             "auto-activate" => settings.auto_activate.to_value(),
+            "active" => self.active.lock().unwrap().to_value(),
             "label" => settings.label.to_value(),
             "description" => settings.description.to_value(),
             "group-hint" => settings.group_hint.to_value(),
@@ -558,6 +567,18 @@ impl ElementImpl for NmosSink {
 impl BinImpl for NmosSink {}
 
 impl NmosSink {
+    // Locks `settings`; must not be called while that mutex is held.
+    fn set_connection_active(&self, new_active: bool, reason: &'static str) {
+        let resource_name = self.settings.lock().unwrap().sender_name.clone();
+        crate::session::connection_active::set_connection_active(
+            self.obj().upcast_ref(),
+            &self.active,
+            new_active,
+            &resource_name,
+            reason,
+        );
+    }
+
     fn open_session(&self) -> Result<(), anyhow::Error> {
         let snapshot = self.settings.lock().unwrap().clone();
         let bin = self.obj();
@@ -583,8 +604,10 @@ impl NmosSink {
     fn activate_inner(&self, bin: &gst::Bin, outcome: &InnerConfig) -> Result<(), anyhow::Error> {
         match outcome {
             InnerConfig::Real(transport) => {
-                let settings = self.settings.lock().unwrap();
-                let new_inner = build_real_sink(transport, &settings)?;
+                let new_inner = {
+                    let settings = self.settings.lock().unwrap();
+                    build_real_sink(transport, &settings)?
+                };
                 self.swap_inner(bin, &new_inner)?;
                 // Reaching the `Real` branch at NULL→READY / READY→PAUSED
                 // implies `auto-activate=true` (the `validate_and_open` and
@@ -604,6 +627,9 @@ impl NmosSink {
                     // failure as a warning so it shows up in logs.
                     gst::warning!(CAT, "nmossink auto-activate sync failed: {e:#}");
                 }
+                // Must not hold `settings` here — `set_connection_active`
+                // locks it again for the resource name.
+                self.set_connection_active(true, "auto-activate");
             }
             InnerConfig::Fake { .. } => {
                 self.upgrade_fake_chain_from_settings(bin)?;
@@ -614,6 +640,7 @@ impl NmosSink {
 
     fn close_session(&self) {
         crate::session::close(&CAT, "nmossink", &self.session);
+        self.set_connection_active(false, "deactivate");
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
         let snapshot = self.settings.lock().unwrap().clone();
@@ -910,7 +937,12 @@ impl NmosSink {
             };
         }
         match &plan.ack {
-            ActivationAck::Success => ActivationOutcome::Applied,
+            ActivationAck::Success => {
+                let new_active = matches!(plan.inner, InnerConfig::Real(_));
+                let reason = if new_active { "activate" } else { "deactivate" };
+                self.set_connection_active(new_active, reason);
+                ActivationOutcome::Applied
+            }
             ActivationAck::Failure { reason } => ActivationOutcome::Failed {
                 reason: reason.clone(),
             },
@@ -1105,6 +1137,21 @@ mod tests {
     use super::*;
     use crate::session::CommonSettings;
     use crate::test_support::init_gst;
+
+    #[test]
+    fn active_property_is_read_only_and_defaults_false() {
+        init_gst();
+        // auto-activate is a NULL→READY policy only; active stays false until then.
+        let element = glib::Object::builder::<crate::nmossink::NmosSink>()
+            .property("auto-activate", true)
+            .build();
+
+        assert!(!element.property::<bool>("active"));
+        let pspec = element.find_property("active").expect("active property");
+        assert!(pspec.flags().contains(glib::ParamFlags::READABLE));
+        assert!(!pspec.flags().contains(glib::ParamFlags::WRITABLE));
+        assert_eq!(pspec.nick(), "Sender Active");
+    }
 
     /// Pins the IS-05 Sender `transport_params` → `CommonSettings`
     /// mapping. `nmossink` populates the sender-side slots

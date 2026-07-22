@@ -128,8 +128,9 @@ an activation carrying audio.
 | --- | --- |
 | NULL→READY | Connect to the daemon and, if the element can prepare the configuring transport file, add the NMOS Sender or Receiver |
 | READY→PAUSED | For a deferred `nmossink`, derive the configuring transport file from upstream caps and add the Sender |
-| IS-05 activation | Build or replace the inner transport elements using the effective SDP or MXL flow definition delivered for activation |
-| READY→NULL | Remove the Sender or Receiver and close the daemon session |
+| Resource addition with `auto-activate=true` | Build the real inner transport, synchronize the NMOS active state, set read-only `active` to true, and post a `nmos-activation` element message; occurs during NULL→READY or deferred `nmossink` READY→PAUSED |
+| IS-05 activation | Build or replace the inner transport elements using the effective SDP or MXL flow definition delivered for activation; update read-only `active` and post a `nmos-activation` element message on the bus |
+| READY→NULL | Remove the Sender or Receiver and close the daemon session; `active` becomes false |
 
 When neither `transport-file*` nor `caps` is set, `nmossink` defers
 configuration until it can query upstream caps at READY→PAUSED. `nmossrc`

@@ -26,6 +26,7 @@ use crate::types::{CapsMode, DEFAULT_DAEMON_URI, FlowFormat, Transport};
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) mod channel_mapping;
+pub(crate) mod connection_active;
 pub(crate) mod node;
 pub(crate) mod types;
 
@@ -187,8 +188,13 @@ pub(crate) const DEPAY_PROPERTIES_BLURB: &str = "\
     Receiver data plane is built. Used only with RTP/UDP.";
 
 pub(crate) const AUTO_ACTIVATE_BLURB: &str = "\
-    Activate the configured data path without waiting for an IS-05 controller. \
+    Activate the configured data plane without waiting for an IS-05 controller. \
     This property does not change the GStreamer pipeline state. Default: false.";
+
+pub(crate) const ACTIVE_BLURB: &str = "\
+    Whether the data plane is currently active (real inner transport chain). \
+    Orthogonal to GStreamer pipeline state: the pipeline may be PLAYING while \
+    this property is false when waiting for activation.";
 
 /// Snapshot of the properties needed to open a session, taken under
 /// the per-element settings lock so the lock isn't held over the

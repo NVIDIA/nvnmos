@@ -484,6 +484,13 @@ gst-launch pipelines, then drops into a menu that PATCHes the
 IS-05 endpoints so you can exercise activation paths against a
 live pipeline.
 
+The demo runs each pipeline with `gst-launch-1.0 -m`, so its log includes
+`nmos-activation` element messages whenever an `nmossink` Sender or `nmossrc`
+Receiver is activated, reactivated, or deactivated. The message fields include
+the new `active` value, resource name, and activation reason. Applications can
+also query the elements' read-only `active` property for the current state or
+connect to `notify::active` for property-change notifications.
+
 ### Three-Node Pipeline Diagrams
 
 Each Node runs its own `gst-launch-1.0` process (Node 3 uses two:

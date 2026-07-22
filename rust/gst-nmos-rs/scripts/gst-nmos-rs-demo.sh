@@ -139,6 +139,11 @@ _demo_line_buffered() {
     fi
 }
 
+# Run every demo pipeline with orderly EOS handling and bus-message logging.
+_demo_gst_launch() {
+    _demo_line_buffered gst-launch-1.0 -e -m "$@"
+}
+
 # Return 0 when ss reports a LISTEN socket on path (another nvnmosd up).
 # No listener / missing path in ss → return 1.
 _uds_socket_listening() {
@@ -648,7 +653,7 @@ launch_node1() {
     _rotate_log "$LOG_DIR/node1-producer.log"
     pipeline_dots_prepare_launch node1
     GST_DEBUG=${GST_DEBUG:-nmossink:3} \
-        _demo_line_buffered gst-launch-1.0 -e \
+        _demo_gst_launch \
             videotestsrc pattern=smpte horizontal-speed=2 is-live=true ! \
                 $VIDEO_CAPS ! \
                 nmossink \
@@ -695,7 +700,7 @@ launch_node4() {
     _rotate_log "$LOG_DIR/node4-producer.log"
     pipeline_dots_prepare_launch node4
     GST_DEBUG=${GST_DEBUG:-nmossink:3} \
-        _demo_line_buffered gst-launch-1.0 -e \
+        _demo_gst_launch \
             videotestsrc pattern=snow is-live=true ! \
                 $VIDEO_CAPS_ALT ! \
                 nmossink \
@@ -758,7 +763,7 @@ launch_node3_video() {
     _rotate_log "$LOG_DIR/node3-video.log"
     pipeline_dots_prepare_launch node3-video
     GST_DEBUG=${GST_DEBUG:-nmossrc:3,nmossink:3} \
-        _demo_line_buffered gst-launch-1.0 -e \
+        _demo_gst_launch \
             nmossrc \
                 daemon-uri="unix:$SOCK" \
                 transport="$DEMO_TRANSPORT" \
@@ -796,7 +801,7 @@ launch_node3_audio() {
     _rotate_log "$LOG_DIR/node3-audio.log"
     pipeline_dots_prepare_launch node3-audio
     GST_DEBUG=${GST_DEBUG:-nmossrc:3,nmossink:3,nmosaudiochannelmap:3} \
-        _demo_line_buffered gst-launch-1.0 -e \
+        _demo_gst_launch \
             nmosaudiochannelmap name=map \
                 daemon-uri="unix:$SOCK" \
                 node-seed="$NODE3_SEED" \
@@ -881,7 +886,7 @@ launch_node2() {
     _rotate_log "$LOG_DIR/node2-consumer.log"
     pipeline_dots_prepare_launch node2
     GST_DEBUG=${GST_DEBUG:-nmossrc:3} \
-        _demo_line_buffered gst-launch-1.0 -e \
+        _demo_gst_launch \
             nmossrc \
                 daemon-uri="unix:$SOCK" \
                 transport="$DEMO_TRANSPORT" \
@@ -940,7 +945,7 @@ launch_bare_preview() {
     _rotate_log "$LOG_DIR/bare-preview.log"
     pipeline_dots_prepare_launch bare-preview
     GST_DEBUG=${GST_DEBUG:-mxlsrc:5,basesrc:4} \
-        _demo_line_buffered gst-launch-1.0 -e \
+        _demo_gst_launch \
             mxlsrc \
                 domain="$DEMO_MXL_DOMAIN_PATH" \
                 video-flow-id="$DEMO_MXL_VIDEO_FLOW_ID1" \
