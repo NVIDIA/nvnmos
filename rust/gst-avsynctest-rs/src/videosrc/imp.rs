@@ -308,9 +308,12 @@ impl ObjectImpl for AvSyncVideoTestSrc {
     }
 
     fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
-        let Ok(settings) = self.settings.lock() else {
-            imp_failed!(self, LOCK_SETTINGS);
-            return glib::Value::from(&"");
+        let settings = match self.settings.lock() {
+            Ok(settings) => *settings,
+            Err(_) => {
+                imp_failed!(self, LOCK_SETTINGS);
+                Settings::default()
+            }
         };
 
         match pspec.name() {
@@ -321,7 +324,7 @@ impl ObjectImpl for AvSyncVideoTestSrc {
             "is-live" => settings.is_live.to_value(),
             _ => {
                 gst::error!(CAT, imp = self, "Unknown property {}", pspec.name());
-                glib::Value::from(&"")
+                pspec.default_value().clone()
             }
         }
     }
@@ -433,9 +436,9 @@ impl BaseSrcImpl for AvSyncVideoTestSrc {
         state.info = Some(info);
         drop(state);
 
-        let _ = self
-            .obj()
-            .post_message(gst::message::Latency::builder().src(&*self.obj()).build());
+        self.obj()
+            .post_message(gst::message::Latency::builder().src(&*self.obj()).build())
+            .map_err(|_| gst::loggable_error!(CAT, "Failed to post latency message"))?;
 
         Ok(())
     }
@@ -556,32 +559,43 @@ impl PushSrcImpl for AvSyncVideoTestSrc {
             Some(ref info) => info.clone(),
         };
         let bar_width = state.bar_width;
-        let n = state.n_frames;
+        let n = state.n_frames as u128;
 
-        let num = info.fps().numer() as u64;
-        let den = info.fps().denom() as u64;
-        let pts = gst::ClockTime::SECOND
-            .mul_div_floor(n * den, num)
-            .ok_or_else(|| {
-                imp_failed!(self, "Failed to calculate video PTS");
-                gst::FlowError::Error
-            })?;
-        let next_pts = gst::ClockTime::SECOND
-            .mul_div_floor((n + 1) * den, num)
-            .ok_or_else(|| {
-                imp_failed!(self, "Failed to calculate next video PTS");
-                gst::FlowError::Error
-            })?;
+        // Rational PTS in u128, then narrow once to ClockTime's u64 range.
+        let num = info.fps().numer() as u128;
+        let den = info.fps().denom() as u128;
+        if num == 0 {
+            imp_failed!(self, "Invalid video frame rate");
+            return Err(gst::FlowError::Error);
+        }
+        let second_ns = gst::ClockTime::SECOND.nseconds() as u128;
+        let pts_ns = second_ns * n * den / num;
+        let next_pts_ns = second_ns * (n + 1) * den / num;
+        let pts = gst::ClockTime::from_nseconds(u64::try_from(pts_ns).map_err(|_| {
+            imp_failed!(self, "Video PTS out of range");
+            gst::FlowError::Error
+        })?);
+        let next_pts = gst::ClockTime::from_nseconds(u64::try_from(next_pts_ns).map_err(|_| {
+            imp_failed!(self, "Next video PTS out of range");
+            gst::FlowError::Error
+        })?);
         let bar_centre =
             signal::bar_centre_column(signal::phase(pts, settings.pip_interval), info.width());
         let frame_idx = n as u8;
 
         // Phase-locked CEA-708 CDP: a TICK/TOCK caption on each pip frame, a null
         // CDP otherwise (only when the frame rate is CDP-representable).
-        let cdp = state.cdp_framerate.map(|framerate| {
-            let text = captions::caption_for(pts, next_pts, settings.pip_interval);
-            state.caption_writer.next_cdp(framerate, n as u16, text)
-        });
+        let cdp = state
+            .cdp_framerate
+            .map(|framerate| {
+                let text = captions::caption_for(pts, next_pts, settings.pip_interval);
+                state.caption_writer.next_cdp(framerate, n as u16, text)
+            })
+            .transpose()
+            .map_err(|e| {
+                imp_failed!(self, e);
+                gst::FlowError::Error
+            })?;
 
         let mut buffer = gst::Buffer::with_size(info.size()).map_err(|_| {
             imp_failed!(self, "Failed to allocate video buffer");
@@ -627,7 +641,10 @@ impl PushSrcImpl for AvSyncVideoTestSrc {
                 );
             }
         }
-        state.n_frames += 1;
+        state.n_frames = state.n_frames.checked_add(1).ok_or_else(|| {
+            imp_failed!(self, "Video frame counter overflow");
+            gst::FlowError::Error
+        })?;
         drop(state);
 
         self.sync_to_clock(&buffer)?;

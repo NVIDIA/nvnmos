@@ -93,15 +93,15 @@ pub struct AvSyncAudioTestSrc {
 /// Tone amplitude at `running` for a pip signal, `0.0` in the silent gaps. The
 /// pip at `running_time == 0` is skipped so every emitted pip is a full window.
 fn pip_value(running: gst::ClockTime, settings: &Settings) -> f64 {
-    let p = settings.pip_interval.nseconds();
-    let half = settings.pip_duration.nseconds() / 2;
-    let running_ns = running.nseconds();
+    let p = settings.pip_interval.nseconds() as u128;
+    let half = settings.pip_duration.nseconds() as u128 / 2;
+    let running_ns = running.nseconds() as u128;
     let k = (running_ns + p / 2) / p;
     let centre = k * p;
     if centre < half || running_ns.abs_diff(centre) >= half {
         return 0.0;
     }
-    let t = running_ns as f64 / gst::ClockTime::SECOND.nseconds() as f64;
+    let t = running.nseconds() as f64 / gst::ClockTime::SECOND.nseconds() as f64;
     settings.pip_volume * (2.0 * PI * settings.pip_freq * t).sin()
 }
 
@@ -126,10 +126,10 @@ impl AvSyncAudioTestSrc {
         let format = info.format();
         let bpf = info.bpf() as usize;
         let bytes_per_sample = bpf / channels;
-        let second = gst::ClockTime::SECOND.nseconds() as u128;
+        let second_ns = gst::ClockTime::SECOND.nseconds() as u128;
         for (i, frame) in data.chunks_exact_mut(bpf).enumerate() {
             let g = sample_offset + i as u64;
-            let running_ns = (g as u128 * second / rate as u128) as u64;
+            let running_ns = (g as u128 * second_ns / rate as u128) as u64;
             let value = pip_value(gst::ClockTime::from_nseconds(running_ns), settings);
             for sample in frame.chunks_exact_mut(bytes_per_sample) {
                 write_sample(format, value, sample);
@@ -264,9 +264,12 @@ impl ObjectImpl for AvSyncAudioTestSrc {
     }
 
     fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
-        let Ok(settings) = self.settings.lock() else {
-            imp_failed!(self, LOCK_SETTINGS);
-            return glib::Value::from(&"");
+        let settings = match self.settings.lock() {
+            Ok(settings) => *settings,
+            Err(_) => {
+                imp_failed!(self, LOCK_SETTINGS);
+                Settings::default()
+            }
         };
 
         match pspec.name() {
@@ -278,7 +281,7 @@ impl ObjectImpl for AvSyncAudioTestSrc {
             "is-live" => settings.is_live.to_value(),
             _ => {
                 gst::error!(CAT, imp = self, "Unknown property {}", pspec.name());
-                glib::Value::from(&"")
+                pspec.default_value().clone()
             }
         }
     }
@@ -363,9 +366,9 @@ impl BaseSrcImpl for AvSyncAudioTestSrc {
             .map_err(|_| gst::loggable_error!(CAT, "{}", LOCK_STATE))?
             .info = Some(info);
 
-        let _ = self
-            .obj()
-            .post_message(gst::message::Latency::builder().src(&*self.obj()).build());
+        self.obj()
+            .post_message(gst::message::Latency::builder().src(&*self.obj()).build())
+            .map_err(|_| gst::loggable_error!(CAT, "Failed to post latency message"))?;
 
         Ok(())
     }
@@ -479,6 +482,10 @@ impl PushSrcImpl for AvSyncAudioTestSrc {
         };
 
         let n_samples = settings.samples_per_buffer as u64;
+        let end_offset = state.sample_offset.checked_add(n_samples).ok_or_else(|| {
+            imp_failed!(self, "Audio sample offset overflow");
+            gst::FlowError::Error
+        })?;
         let mut buffer =
             gst::Buffer::with_size(n_samples as usize * info.bpf() as usize).map_err(|_| {
                 imp_failed!(self, "Failed to allocate audio buffer");
@@ -497,7 +504,7 @@ impl PushSrcImpl for AvSyncAudioTestSrc {
                     imp_failed!(self, "Failed to calculate audio PTS");
                     gst::FlowError::Error
                 })?;
-            let next_pts = (state.sample_offset + n_samples)
+            let next_pts = end_offset
                 .mul_div_floor(gst::ClockTime::SECOND.nseconds(), info.rate() as u64)
                 .map(gst::ClockTime::from_nseconds)
                 .ok_or_else(|| {
@@ -513,7 +520,7 @@ impl PushSrcImpl for AvSyncAudioTestSrc {
             })?;
             Self::fill(map.as_mut_slice(), &info, state.sample_offset, &settings);
         }
-        state.sample_offset += n_samples;
+        state.sample_offset = end_offset;
         drop(state);
 
         self.sync_to_clock(&buffer)?;

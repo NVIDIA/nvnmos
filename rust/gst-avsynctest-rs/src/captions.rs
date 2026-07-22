@@ -55,9 +55,14 @@ pub fn caption_for(
     next_pts: gst::ClockTime,
     pip_interval: gst::ClockTime,
 ) -> Option<&'static str> {
-    let p = pip_interval.nseconds();
-    let k = pts.nseconds().div_ceil(p); // smallest k with k*P >= pts
-    (k >= 1 && k * p < next_pts.nseconds()).then_some(if k % 2 == 1 { CC_TICK } else { CC_TOCK })
+    let p = pip_interval.nseconds() as u128;
+    let k = (pts.nseconds() as u128).div_ceil(p); // smallest k with k*P >= pts
+    let kp = k * p;
+    (k >= 1 && kp < next_pts.nseconds() as u128).then_some(if k % 2 == 1 {
+        CC_TICK
+    } else {
+        CC_TOCK
+    })
 }
 
 /// A stateful CDP writer: one CDP per frame, so the CEA-708 sequence numbering
@@ -76,21 +81,27 @@ impl CaptionWriter {
         framerate: Framerate,
         sequence_count: u16,
         text: Option<&str>,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, String> {
         if let Some(text) = text {
             let mut packet = DTVCCPacket::new(self.dtvcc_seq & 0x3);
             let mut service = Service::new(CC_SERVICE_NO);
             for code in caption_codes(text) {
-                let _ = service.push_code(&code);
+                service
+                    .push_code(&code)
+                    .map_err(|e| format!("CEA-708 push_code failed: {e}"))?;
             }
-            let _ = packet.push_service(service);
+            packet
+                .push_service(service)
+                .map_err(|e| format!("CEA-708 push_service failed: {e}"))?;
             self.cdp.push_packet(packet);
             self.dtvcc_seq = self.dtvcc_seq.wrapping_add(1);
         }
         self.cdp.set_sequence_count(sequence_count);
         let mut out = Vec::new();
-        let _ = self.cdp.write(framerate, &mut out);
-        out
+        self.cdp
+            .write(framerate, &mut out)
+            .map_err(|e| format!("CDP write failed: {e}"))?;
+        Ok(out)
     }
 }
 
