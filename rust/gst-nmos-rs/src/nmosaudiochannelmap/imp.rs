@@ -42,6 +42,7 @@ struct Settings {
     node_seed: String,
     http_port: u16,
     host_name: String,
+    node_properties: Option<gst::Structure>,
     domain: String,
     registration_url: String,
     system_url: String,
@@ -56,6 +57,7 @@ impl Default for Settings {
             node_seed: String::new(),
             http_port: 0,
             host_name: String::new(),
+            node_properties: None,
             domain: String::new(),
             registration_url: String::new(),
             system_url: String::new(),
@@ -74,7 +76,7 @@ impl From<&Settings> for ChannelMappingSettings {
                 node_seed: s.node_seed.clone(),
                 http_port: s.http_port,
                 host_name: s.host_name.clone(),
-                node_properties: None,
+                node_properties: s.node_properties.clone(),
                 domain: s.domain.clone(),
                 registration_url: s.registration_url.clone(),
                 system_url: s.system_url.clone(),
@@ -125,6 +127,10 @@ impl ObjectImpl for NmosAudioChannelMap {
                     .nick("Host Name")
                     .blurb(crate::session::HOST_NAME_BLURB)
                     .build(),
+                glib::ParamSpecBoxed::builder::<gst::Structure>("node-properties")
+                    .nick("Node Properties")
+                    .blurb(crate::session::NODE_PROPERTIES_BLURB)
+                    .build(),
                 glib::ParamSpecString::builder("domain")
                     .nick("NMOS DNS Domain")
                     .blurb(crate::session::DOMAIN_BLURB)
@@ -164,6 +170,7 @@ impl ObjectImpl for NmosAudioChannelMap {
             "node-seed" => settings.node_seed = value.get().expect("type checked"),
             "http-port" => settings.http_port = value.get::<u32>().expect("type checked") as u16,
             "host-name" => settings.host_name = value.get().expect("type checked"),
+            "node-properties" => settings.node_properties = value.get().expect("type checked"),
             "domain" => settings.domain = value.get().expect("type checked"),
             "registration-url" => settings.registration_url = value.get().expect("type checked"),
             "system-url" => settings.system_url = value.get().expect("type checked"),
@@ -184,6 +191,7 @@ impl ObjectImpl for NmosAudioChannelMap {
             "node-seed" => settings.node_seed.to_value(),
             "http-port" => (settings.http_port as u32).to_value(),
             "host-name" => settings.host_name.to_value(),
+            "node-properties" => settings.node_properties.to_value(),
             "domain" => settings.domain.to_value(),
             "registration-url" => settings.registration_url.to_value(),
             "system-url" => settings.system_url.to_value(),
@@ -715,5 +723,28 @@ mod tests {
             .field("channels", gst::IntRange::new(1, 8))
             .build();
         assert_eq!(channels_from_structure(wide.as_ref()), None);
+    }
+
+    #[test]
+    fn node_properties_round_trip_and_forward_to_session_settings() {
+        init_gst();
+        let properties = gst::Structure::builder("properties")
+            .field("label", "Studio A")
+            .field("manufacturer", "Acme")
+            .field("product", "Audio Processor")
+            .field("instance-id", "AP-2026072402")
+            .field("functions", gst::List::new(["Mixer"]))
+            .build();
+        let element = glib::Object::builder::<crate::nmosaudiochannelmap::NmosAudioChannelMap>()
+            .property("node-properties", properties.clone())
+            .build();
+
+        assert_eq!(
+            element.property::<gst::Structure>("node-properties"),
+            properties
+        );
+        let guard = element.imp().settings.lock().unwrap();
+        let settings: ChannelMappingSettings = (&*guard).into();
+        assert_eq!(settings.node.node_properties, Some(properties));
     }
 }
