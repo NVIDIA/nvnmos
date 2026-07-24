@@ -76,9 +76,10 @@
  * Sessions that share a `node-seed` contribute to the same NMOS Node, so one
  * host can present many Senders, Receivers and channel maps under a single
  * Node simply by reusing the seed. The Node identity properties — `host-name`,
- * `domain`, `registration-url`, `system-url` and `http-port` — are taken from
- * whichever session first creates the Node and ignored by later sessions that
- * attach to it.
+ * `node-properties`, `domain`, `registration-url`, `system-url` and
+ * `http-port` — are taken from whichever session first creates the Node and
+ * ignored by later sessions that attach to it. `node-properties` groups the
+ * Node and Device label, description, and BCP-002-02 asset information.
  *
  * ## Transport
  *

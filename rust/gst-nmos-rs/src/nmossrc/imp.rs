@@ -54,6 +54,7 @@ struct Settings {
     node_seed: String,
     http_port: u16,
     host_name: String,
+    node_properties: Option<gst::Structure>,
     domain: String,
     registration_url: String,
     system_url: String,
@@ -103,6 +104,7 @@ impl Default for Settings {
             node_seed: String::new(),
             http_port: 0,
             host_name: String::new(),
+            node_properties: None,
             domain: String::new(),
             registration_url: String::new(),
             system_url: String::new(),
@@ -175,6 +177,10 @@ impl ObjectImpl for NmosSrc {
                 glib::ParamSpecString::builder("host-name")
                     .nick("Host Name")
                     .blurb(crate::session::HOST_NAME_BLURB)
+                    .build(),
+                glib::ParamSpecBoxed::builder::<gst::Structure>("node-properties")
+                    .nick("Node Properties")
+                    .blurb(crate::session::NODE_PROPERTIES_BLURB)
                     .build(),
                 glib::ParamSpecString::builder("domain")
                     .nick("NMOS DNS Domain")
@@ -352,6 +358,9 @@ impl ObjectImpl for NmosSrc {
             "host-name" => {
                 settings.host_name = string_or_empty(value);
             }
+            "node-properties" => {
+                settings.node_properties = value.get().expect("type checked upstream");
+            }
             "domain" => {
                 settings.domain = string_or_empty(value);
             }
@@ -439,6 +448,7 @@ impl ObjectImpl for NmosSrc {
             "node-seed" => settings.node_seed.to_value(),
             "http-port" => u32::from(settings.http_port).to_value(),
             "host-name" => settings.host_name.to_value(),
+            "node-properties" => settings.node_properties.to_value(),
             "domain" => settings.domain.to_value(),
             "registration-url" => settings.registration_url.to_value(),
             "system-url" => settings.system_url.to_value(),
@@ -1131,6 +1141,7 @@ impl From<Settings> for CommonSettings {
                 node_seed: s.node_seed,
                 http_port: s.http_port,
                 host_name: s.host_name,
+                node_properties: s.node_properties,
                 domain: s.domain,
                 registration_url: s.registration_url,
                 system_url: s.system_url,

@@ -58,7 +58,7 @@ which properties matter for a task:
 | RTP/UDP | Sender: `source-ip`, `source-port`, `destination-ip`, `destination-port`; Receiver: `source-ip`, `interface-ip`, `multicast-ip`, `destination-port`; both: `transport-caps`, `format-bit-rate`, `transport-bit-rate` | Configure SDP and IS-05 endpoint values for `udp`, `udp2`, and `nvdsudp`; the bit-rate properties apply to JPEG XS on `udp` / `udp2` |
 | MXL | `mxl-domain-path`, `mxl-domain-id`, `mxl-flow-id` | Select the local MXL domain and flow for `transport=mxl` |
 | Human-readable metadata | `label`, `description`, `group-hint` | Set human-readable labels, descriptions, and grouping metadata for NMOS resources |
-| Node and session | `daemon-uri`, `http-port`, `host-name`, `domain`, `registration-url`, `system-url` | Connect to the daemon and configure the NMOS Node; Node properties are taken from the first session that creates a shared `node-seed` |
+| Node and session | `daemon-uri`, `http-port`, `host-name`, `node-properties`, `domain`, `registration-url`, `system-url` | Connect to the daemon and configure the NMOS Node; Node properties are taken from the first session that creates a shared `node-seed` |
 | Inner-element overrides | `transport-properties`, `pay-properties`, `depay-properties` | Pass advanced properties to generated inner elements; payloader and depayloader overrides apply only to `udp` / `udp2` |
 
 The `source-ip` and `destination-port` properties follow the corresponding IS-05
@@ -66,6 +66,35 @@ transport parameter semantics, so their Sender and Receiver meanings differ.
 For a Sender, `source-ip` is the local egress address and
 `destination-port` is remote. For a Receiver, `source-ip` is an optional remote
 source-specific multicast filter and `destination-port` is the local listen port.
+
+### Node and Device Metadata
+
+`node-properties` is a `GstStructure` containing optional metadata for the
+NMOS Node and Device. It supports these fields:
+
+| Field | Type | Purpose |
+| --- | --- | --- |
+| `label` | string | IS-04 label for the Node and Device |
+| `description` | string | IS-04 description for the Node and Device |
+| `manufacturer` | string | BCP-002-02 asset manufacturer |
+| `product` | string | BCP-002-02 asset product name |
+| `instance-id` | string | BCP-002-02 asset instance identifier |
+| `functions` | string or string array | One or more BCP-002-02 asset functions |
+
+The four asset fields must be supplied together and must be non-empty. When
+asset information is supplied without an explicit `label` or `description`,
+libnvnmos synthesises those values from the asset information.
+
+For example:
+
+```text
+node-properties="properties,label=Studio-A,description=Primary-encoder,\
+manufacturer=Acme,product=(string)\"Widget Pro\",\
+instance-id=XYZ123-456789,functions=(string)<Encoder,Decoder>"
+```
+
+Only the first session to create a shared `node-seed` controls this metadata;
+later sessions attach to the existing Node without changing it.
 
 ### Supported Caps Essence Shapes
 
@@ -103,7 +132,7 @@ these rules to construct the configuring transport file sent to the daemon:
 | Bit rates | `format-bit-rate`, `transport-bit-rate` | **Cross-check or apply property values.** A missing bit rate is approximated separately for the SDP and property values. If the SDP and properties both specify bit rates, the resulting values must agree; if only the properties do, the property-derived values are applied. |
 | RTP parameters | `transport-caps` | **Cross-check or apply property values.** Dynamic payload type, audio clock rate, and `a-ptime` / `a-maxptime` are applied to the configuring SDP. The remaining RTP and essence-shape fields must agree with the supplied SDP. |
 | Activation policy | `auto-activate` | **Not in the configuring transport file.** Selects self-starting or Controller-managed activation. |
-| Other configuration | `daemon-uri`, `node-seed`, `http-port`, `host-name`, `domain`, `registration-url`, `system-url`, `transport`, `mxl-domain-path`, `transport-properties`, `pay-properties`, `depay-properties` | **Not in the configuring transport file.** Node properties configure the NMOS Node; when sessions share a `node-seed`, the first session to create the Node determines those settings. The remaining properties control the daemon connection or configure the local data plane and its inner GStreamer elements. |
+| Other configuration | `daemon-uri`, `node-seed`, `http-port`, `host-name`, `node-properties`, `domain`, `registration-url`, `system-url`, `transport`, `mxl-domain-path`, `transport-properties`, `pay-properties`, `depay-properties` | **Not in the configuring transport file.** Node properties configure the NMOS Node; when sessions share a `node-seed`, the first session to create the Node determines those settings. The remaining properties control the daemon connection or configure the local data plane and its inner GStreamer elements. |
 
 Bit rates are in kilobits per second and correspond to NMOS Flow and Sender
 `bit_rate`. SDP may carry the transport rate in `b=AS:` and either rate in the

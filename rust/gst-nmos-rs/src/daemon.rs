@@ -121,6 +121,8 @@ pub(crate) enum DaemonError {
     Transport(#[from] Box<tonic::transport::Error>),
     #[error("RPC error: {0}")]
     Rpc(#[from] Box<tonic::Status>),
+    #[error("invalid node-properties: {0}")]
+    NodeProperties(#[from] crate::session::node::NodePropertiesError),
     #[error("session already has a resource added; deferred AddSender is a one-shot operation")]
     AlreadyAdded,
     #[error(
@@ -171,13 +173,14 @@ impl Session {
         transport_file: Option<&str>,
         activation_handler: ActivationHandler,
     ) -> Result<Self, DaemonError> {
+        let node_config = settings.node.to_node_config()?;
         let uds_path = parse_unix_uri(daemon_uri)?;
         let channel = connect_uds(uds_path).await?;
         let mut client = NvnmosDaemonClient::new(channel.clone());
 
         let resp = client
             .open_session(OpenSessionRequest {
-                node_config: Some(settings.node.to_node_config()),
+                node_config: Some(node_config),
             })
             .await?
             .into_inner();

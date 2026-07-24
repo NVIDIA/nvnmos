@@ -70,13 +70,14 @@ impl ChannelMappingSession {
         settings: &ChannelMappingSettings,
         activation_handler: ChannelMappingActivationHandler,
     ) -> Result<Self, DaemonError> {
+        let node_config = settings.node.to_node_config()?;
         let uds_path = parse_unix_uri(&settings.daemon_uri)?;
         let channel = connect_uds(uds_path).await?;
         let mut client = NvnmosDaemonClient::new(channel.clone());
 
         let resp = client
             .open_session(OpenSessionRequest {
-                node_config: Some(settings.node.to_node_config()),
+                node_config: Some(node_config),
             })
             .await?
             .into_inner();

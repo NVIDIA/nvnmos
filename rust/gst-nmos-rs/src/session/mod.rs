@@ -77,6 +77,14 @@ pub(crate) const HOST_NAME_BLURB: &str = "\
     Host name advertised by the NMOS Node. Empty autodetects it. Only the \
     first element to create the Node controls this value.";
 
+pub(crate) const NODE_PROPERTIES_BLURB: &str = "\
+    Node and Device metadata. Supported fields are `label`, `description`, \
+    `manufacturer`, `product`, `instance-id`, and `functions`; the asset \
+    fields must be supplied together. For example \
+    `properties,label=Studio-A,manufacturer=Acme,product=(string)\"Widget Pro\",\
+    instance-id=XYZ123-456789,functions=(string)<Encoder,Decoder>`. Only the \
+    first element to create the Node controls this value.";
+
 pub(crate) const DOMAIN_BLURB: &str = "\
     DNS domain used to discover NMOS services. Use `local` for mDNS. Empty \
     selects automatic discovery. Only the first element to create the Node \
