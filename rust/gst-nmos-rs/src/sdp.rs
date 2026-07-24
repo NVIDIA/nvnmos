@@ -1612,8 +1612,8 @@ pub(crate) struct SdpBuildInput<'a> {
     /// Empty omits the attribute (libnvnmos then falls back to
     /// the `s=` value at `get_session_description_resource_name`).
     pub name: &'a str,
-    /// NMOS resource label → SDP `s=` line. Empty falls back to
-    /// `"nvnmos"`; RFC 4566 §5.3 requires `s=` to be non-empty.
+    /// NMOS resource label → SDP `s=` line. Empty falls back to the resource
+    /// name, then `"nvnmos"`; RFC 4566 §5.3 requires `s=` to be non-empty.
     pub label: &'a str,
     /// NMOS resource description → SDP `i=` line. Empty omits
     /// the `i=` line.
@@ -1750,7 +1750,11 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
     };
 
     let session_name = if input.label.is_empty() {
-        "nvnmos"
+        if input.name.is_empty() {
+            "nvnmos"
+        } else {
+            input.name
+        }
     } else {
         input.label
     };
@@ -6272,11 +6276,25 @@ mod tests {
     }
 
     #[test]
-    fn from_caps_empty_label_falls_back_to_nvnmos() {
+    fn from_caps_empty_label_falls_back_to_resource_name() {
         init_gst();
         let essence = raw_audio_caps("S24BE", 48_000, 2);
         let mut input = build_input(&essence, Side::Sender, None);
         input.label = "";
+        let text = from_caps(&input).expect("synth");
+        assert!(
+            text.contains("s=test-name"),
+            "default session name:\n{text}"
+        );
+    }
+
+    #[test]
+    fn from_caps_empty_label_and_name_falls_back_to_nvnmos() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let mut input = build_input(&essence, Side::Sender, None);
+        input.label = "";
+        input.name = "";
         let text = from_caps(&input).expect("synth");
         assert!(text.contains("s=nvnmos"), "default session name:\n{text}");
     }
