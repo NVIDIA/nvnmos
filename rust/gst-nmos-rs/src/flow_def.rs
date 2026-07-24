@@ -566,10 +566,10 @@ pub(crate) fn from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDef
     // `label` is `field_as_string` (required) in nmos-cpp — empty
     // would be accepted as long as the key is present, but a more
     // helpful default is the resource name.
-    let label = if input.label.is_empty() {
-        input.name
-    } else {
+    let label = if !input.label.is_empty() {
         input.label
+    } else {
+        input.name
     };
     let format_urn = format
         .as_format_urn()

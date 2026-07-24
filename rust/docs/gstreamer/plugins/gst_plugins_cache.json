@@ -575,6 +575,17 @@
                         "type": "gchararray",
                         "writable": true
                     },
+                    "node-properties": {
+                        "blurb": "Node and Device metadata. Supported fields are `label`, `description`, `manufacturer`, `product`, `instance-id`, and `functions`; the asset fields must be supplied together. For example `properties,label=Studio-A,manufacturer=Acme,product=(string)\"Widget Pro\",instance-id=XYZ123-456789,functions=(string)<Encoder,Decoder>`. Only the first element to create the Node controls this value.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "GstStructure",
+                        "writable": true
+                    },
                     "node-seed": {
                         "blurb": "Caller-chosen seed for the NMOS Node. Elements using the same seed with one daemon join the same Node. Use a globally unique seed for each Node. It determines stable NMOS resource IDs. It is required.",
                         "conditionally-available": false,
@@ -976,6 +987,17 @@
                         "mutable": "null",
                         "readable": true,
                         "type": "gchararray",
+                        "writable": true
+                    },
+                    "node-properties": {
+                        "blurb": "Node and Device metadata. Supported fields are `label`, `description`, `manufacturer`, `product`, `instance-id`, and `functions`; the asset fields must be supplied together. For example `properties,label=Studio-A,manufacturer=Acme,product=(string)\"Widget Pro\",instance-id=XYZ123-456789,functions=(string)<Encoder,Decoder>`. Only the first element to create the Node controls this value.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "GstStructure",
                         "writable": true
                     },
                     "node-seed": {

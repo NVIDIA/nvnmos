@@ -55,7 +55,8 @@ PLAYING
 | inner build  | `mutable_ready()` — **NULL/READY** before PLAYING                               | same (`mxl-domain-path`, `transport-properties`, `depay-properties` only) |
 
 
-**`*-properties` (current choice, may revisit):** `mutable_ready()` only, not `mutable_playing()`. Bags apply on the **next** inner build so PLAYING-time sets are rejected. Revisit if applications need to tune them during the PLAYING wait or between real→real activation-event swaps.
+- **`node-properties`:** Consumed during NULL→READY when the element opens its session.
+- **`transport-properties`, `pay-properties`, and `depay-properties` (current choice, may revisit):** `mutable_ready()` only, not `mutable_playing()`. These bags apply on the **next** inner build, so PLAYING-time sets are rejected. Revisit if applications need to tune them during the PLAYING wait or between real→real activation-event swaps.
 
 **gst-launch:** sets props in NULL before READY — NULL-only pspec is enough for typical lines.
 
@@ -69,6 +70,7 @@ PLAYING
 | `node-seed` | open-session |
 | `http-port` | open-session |
 | `host-name` | open-session |
+| `node-properties` | open-session |
 | `domain` | open-session |
 | `registration-url` | open-session |
 | `system-url` | open-session |
@@ -102,6 +104,7 @@ PLAYING
 | `node-seed` | open-session |
 | `http-port` | open-session |
 | `host-name` | open-session |
+| `node-properties` | open-session |
 | `domain` | open-session |
 | `registration-url` | open-session |
 | `system-url` | open-session |

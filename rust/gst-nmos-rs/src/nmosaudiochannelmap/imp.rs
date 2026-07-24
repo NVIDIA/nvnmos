@@ -74,6 +74,7 @@ impl From<&Settings> for ChannelMappingSettings {
                 node_seed: s.node_seed.clone(),
                 http_port: s.http_port,
                 host_name: s.host_name.clone(),
+                node_properties: None,
                 domain: s.domain.clone(),
                 registration_url: s.registration_url.clone(),
                 system_url: s.system_url.clone(),

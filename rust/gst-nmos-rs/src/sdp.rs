@@ -1613,7 +1613,8 @@ pub(crate) struct SdpBuildInput<'a> {
     /// the `s=` value at `get_session_description_resource_name`).
     pub name: &'a str,
     /// NMOS resource label → SDP `s=` line. Empty falls back to
-    /// `"nvnmos"`; RFC 4566 §5.3 requires `s=` to be non-empty.
+    /// the resource name, then `"nvnmos"`; RFC 4566 §5.3 requires
+    /// `s=` to be non-empty.
     pub label: &'a str,
     /// NMOS resource description → SDP `i=` line. Empty omits
     /// the `i=` line.
@@ -1739,35 +1740,35 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
         bit_rates,
     };
 
-    let origin_address = if input.interface_ip.is_empty() {
-        if input.source_ip.is_empty() {
-            defaults::UNSPECIFIED_ADDRESS
-        } else {
-            input.source_ip
-        }
-    } else {
+    let origin_address = if !input.interface_ip.is_empty() {
         input.interface_ip
+    } else if !input.source_ip.is_empty() {
+        input.source_ip
+    } else {
+        defaults::UNSPECIFIED_ADDRESS
     };
 
-    let session_name = if input.label.is_empty() {
-        "nvnmos"
-    } else {
+    let session_name = if !input.label.is_empty() {
         input.label
-    };
-    let description = if input.description.is_empty() {
-        None
+    } else if !input.name.is_empty() {
+        input.name
     } else {
+        "nvnmos"
+    };
+    let description = if !input.description.is_empty() {
         Some(input.description)
-    };
-    let name = if input.name.is_empty() {
-        None
     } else {
+        None
+    };
+    let name = if !input.name.is_empty() {
         Some(input.name)
-    };
-    let group_hint = if input.group_hint.is_empty() {
-        None
     } else {
+        None
+    };
+    let group_hint = if !input.group_hint.is_empty() {
         Some(input.group_hint)
+    } else {
+        None
     };
 
     let origin_session_id = stable_origin_session_id(input.node_seed, input.side, input.name);
@@ -1922,10 +1923,10 @@ fn udp_leg_from_input(input: &SdpBuildInput<'_>) -> UdpLeg {
     } else {
         input.destination_port
     };
-    let source_ip = if input.source_ip.is_empty() {
-        None
-    } else {
+    let source_ip = if !input.source_ip.is_empty() {
         Some(input.source_ip.to_owned())
+    } else {
+        None
     };
     let interface_ip = match input.side {
         // Sender: the egress NIC IP comes in via `source_ip`
@@ -1937,10 +1938,10 @@ fn udp_leg_from_input(input: &SdpBuildInput<'_>) -> UdpLeg {
         // Receiver: `interface_ip` is the join NIC, a distinct
         // GObject property from `source_ip`.
         Side::Receiver => {
-            if input.interface_ip.is_empty() {
-                None
-            } else {
+            if !input.interface_ip.is_empty() {
                 Some(input.interface_ip.to_owned())
+            } else {
+                None
             }
         }
     };
@@ -1951,10 +1952,10 @@ fn udp_leg_from_input(input: &SdpBuildInput<'_>) -> UdpLeg {
     // Unset `destination-ip` / `multicast-ip`: emit
     // [`defaults::UNSPECIFIED_ADDRESS`] on the `c=` line (synthesis
     // only — passthrough SDPs are never rewritten here).
-    let destination_ip = if input.destination_ip.is_empty() {
-        defaults::UNSPECIFIED_ADDRESS.to_owned()
-    } else {
+    let destination_ip = if !input.destination_ip.is_empty() {
         input.destination_ip.to_owned()
+    } else {
+        defaults::UNSPECIFIED_ADDRESS.to_owned()
     };
     UdpLeg {
         destination_ip,
@@ -6272,11 +6273,25 @@ mod tests {
     }
 
     #[test]
-    fn from_caps_empty_label_falls_back_to_nvnmos() {
+    fn from_caps_empty_label_falls_back_to_resource_name() {
         init_gst();
         let essence = raw_audio_caps("S24BE", 48_000, 2);
         let mut input = build_input(&essence, Side::Sender, None);
         input.label = "";
+        let text = from_caps(&input).expect("synth");
+        assert!(
+            text.contains("s=test-name"),
+            "default session name:\n{text}"
+        );
+    }
+
+    #[test]
+    fn from_caps_empty_label_and_name_falls_back_to_nvnmos() {
+        init_gst();
+        let essence = raw_audio_caps("S24BE", 48_000, 2);
+        let mut input = build_input(&essence, Side::Sender, None);
+        input.label = "";
+        input.name = "";
         let text = from_caps(&input).expect("synth");
         assert!(text.contains("s=nvnmos"), "default session name:\n{text}");
     }

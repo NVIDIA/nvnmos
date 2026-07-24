@@ -136,7 +136,7 @@ mod tests {
             domain: "local".to_owned(),
             ..NodeSettings::default()
         };
-        let config = node.to_node_config();
+        let config = node.to_node_config().unwrap();
         assert_eq!(config.seed, "seed-a");
         assert_eq!(config.host_name, "studio-a");
         let ns = config
@@ -153,7 +153,7 @@ mod tests {
             system_url: "http://sys:10641/x-nmos/system/v1.0".to_owned(),
             ..NodeSettings::default()
         };
-        let config = node.to_node_config();
+        let config = node.to_node_config().unwrap();
         let ns = config
             .network_services
             .expect("urls should populate network_services");
