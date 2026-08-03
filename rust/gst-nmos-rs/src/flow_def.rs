@@ -18,8 +18,7 @@
 //! * File only: use it.
 //! * Both agreeing: use the value (DEBUG log at the caller).
 //! * Both disagreeing: hard error.
-//! * Neither: empty id / `Unspecified` format — the element will
-//!   fall back to its fake chain.
+//! * Neither: empty id / `Unspecified` format.
 //!
 //! At NULL→READY the element-level rule is "property overrides
 //! file", not "cross-check, error on mismatch". The caller therefore
@@ -44,15 +43,14 @@
 //! (`format`, non-empty `label`, the `urn:x-nvnmos:tag:name` and
 //! `urn:x-nvnmos:tag:mxl-domain-id` tags, and the optional
 //! `urn:x-nmos:tag:grouphint/v1.0` tag) are also emitted. The top-level
-//! `id` is omitted when `flow_id` is empty so libnvnmos can create the
-//! resource and resolve the MXL flow id at activation (Senders fall
-//! back to the generated NMOS Flow id; Receivers ignore `id` at
-//! AddReceiver). When the inner data path later goes live, `mxlsink`
-//! creates the domain flow via the MXL SDK using its own JSON built
-//! from upstream caps and the `flow-id` property — that is a separate
-//! `FlowParser` path from this configuring document. Only the caps
-//! shapes that `mxlsink` advertises today are accepted: v210 video,
-//! F32LE audio, ST 2038 ANC.
+//! `id` is omitted when `mxl-flow-id` is empty so libnvnmos can create
+//! the resource and leave a Sender's MXL flow id unconstrained
+//! (Receivers ignore `id` at AddReceiver). When the inner data path
+//! later goes live, `mxlsink` creates the domain flow via the MXL SDK
+//! using its own JSON built from upstream caps and the `flow-id`
+//! property — that is a separate `FlowParser` path from this
+//! configuring document. Only the caps shapes that `mxlsink`
+//! advertises today are accepted: v210 video, F32LE audio, ST 2038 ANC.
 
 use std::collections::HashMap;
 
@@ -65,8 +63,7 @@ use crate::types::{CapsMode, FlowFormat};
 
 #[derive(Debug, Deserialize)]
 struct RawFlowDef {
-    /// MXL flow id (UUID). Required by BCP-007-03 but here we just
-    /// surface a typed error if a JSON document omits it.
+    /// Optional MXL flow id (UUID).
     id: Option<String>,
     /// NMOS format URN: `urn:x-nmos:format:video|audio|data`.
     /// Optional in the file; the property may supply it instead.

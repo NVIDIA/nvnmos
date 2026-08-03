@@ -218,7 +218,8 @@ impl ObjectImpl for NmosSink {
                     .blurb(
                         "UUID of the MXL flow produced by this Sender. When set, \
                          overrides the matching value from `transport-file*`. \
-                         Used only with MXL.",
+                         When unset and absent from the file, IS-05 \
+                         `mxl_flow_id` is unconstrained. Used only with MXL.",
                     )
                     .mutable_ready()
                     .build(),

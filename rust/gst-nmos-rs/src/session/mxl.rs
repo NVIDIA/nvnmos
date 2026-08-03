@@ -5,6 +5,7 @@
 
 use anyhow::Context;
 use gstreamer as gst;
+use uuid::Uuid;
 
 use super::types::Side;
 use super::{
@@ -103,13 +104,9 @@ pub(super) fn synthesise_deferred_sender_mxl(
         Some(&json),
     )
     .with_context(|| format!("{element}: resolving MXL flow id / format for deferred AddSender"))?;
-    let inner = super::apply_auto_activate_policy(
-        &crate::CAT,
-        element,
-        settings,
-        decide_inner_config_mxl(settings, &flow, Some(&json)),
-        mxl_eager_blocked(&flow),
-    );
+    let inner = decide_inner_config_mxl(settings, &flow, Some(&json));
+    let blocked = mxl_eager_blocked(&flow, &inner);
+    let inner = super::apply_auto_activate_policy(&crate::CAT, element, settings, inner, blocked);
     Ok((json, inner))
 }
 
@@ -146,13 +143,14 @@ pub(super) fn log_flow_origin(cat: &gst::DebugCategory, field: &str, origin: Val
         ValueOrigin::None => gst::debug!(cat, "{field} not supplied by either source"),
     }
 }
-/// Deferrable MXL parameter still unavailable for eager `auto-activate`.
-///
-/// The only deferrable MXL transport parameter is the flow id; the
-/// resolved `flow.id` already merges the property and the transport
-/// file (and is left empty when caps-only synthesis omitted it), so a
-/// flow id from either route counts as present.
-fn mxl_eager_blocked(flow: &flow_def::FlowResolution) -> Option<&'static str> {
+
+/// Deferrable MXL parameter still unavailable after [`decide_inner_config_mxl`].
+/// A `Real` chain already has a concrete flow id (including one generated for
+/// `auto-activate`); only dormant/incomplete chains can still be blocked.
+fn mxl_eager_blocked(flow: &flow_def::FlowResolution, inner: &InnerConfig) -> Option<&'static str> {
+    if matches!(inner, InnerConfig::Real(_)) {
+        return None;
+    }
     flow.id.is_empty().then_some("mxl-flow-id")
 }
 
@@ -167,8 +165,32 @@ pub(crate) fn decide_inner_config_mxl(
             detail: "`mxl-domain-path` unset".into(),
         };
     }
-    if flow.id.is_empty() {
-        if transport_file.is_some() {
+
+    // Empty `mxl-flow-id`: generate a UUID for unconstrained Sender + auto-activate
+    // (Real chain / SyncResourceState only — configuring AddSender stays without
+    // top-level `id`); otherwise wait for IS-05 or report missing config. Non-empty
+    // id passes through as-is.
+    let (flow_id, real_transport_file) = match (flow.id.as_str(), transport_file) {
+        ("", None) => {
+            return InnerConfig::Fake {
+                kind: FakeKind::Misconfigured,
+                detail: "`mxl-flow-id` unset (neither property nor transport file supplied it)"
+                    .into(),
+            };
+        }
+        ("", Some(transport_file)) if settings.side == Side::Sender && settings.auto_activate => {
+            let flow_id = Uuid::new_v4().to_string();
+            let spliced = flow_def::splice_overrides(
+                transport_file,
+                &FlowDefOverrides {
+                    flow_id: Some(&flow_id),
+                    ..FlowDefOverrides::default()
+                },
+            )
+            .expect("configuring transport file already validated before auto-activate flow id generation");
+            (flow_id, Some(spliced))
+        }
+        ("", Some(_)) => {
             return InnerConfig::Fake {
                 kind: FakeKind::NotActive,
                 detail:
@@ -176,11 +198,9 @@ pub(crate) fn decide_inner_config_mxl(
                         .into(),
             };
         }
-        return InnerConfig::Fake {
-            kind: FakeKind::Misconfigured,
-            detail: "`mxl-flow-id` unset (neither property nor transport file supplied it)".into(),
-        };
-    }
+        (flow_id, transport_file) => (flow_id.to_owned(), transport_file.map(str::to_owned)),
+    };
+
     if settings.side == Side::Receiver && flow.format == FlowFormat::Unspecified {
         return InnerConfig::Fake {
             kind: FakeKind::Misconfigured,
@@ -191,9 +211,9 @@ pub(crate) fn decide_inner_config_mxl(
     }
     InnerConfig::Real(TransportConfig::Mxl {
         domain_path: settings.mxl_domain_path.clone(),
-        flow_id: flow.id.clone(),
+        flow_id,
         format: flow.format,
-        transport_file: transport_file.map(str::to_owned),
+        transport_file: real_transport_file,
     })
 }
 pub(super) fn resolve_inner_config_mxl(
@@ -259,14 +279,9 @@ pub(super) fn resolve_inner_config_mxl(
     .with_context(|| format!("{element}: resolving MXL flow id / format"))?;
     log_flow_origin(cat, "mxl-flow-id", flow.id_origin);
     log_flow_origin(cat, "caps format", flow.format_origin);
-
-    let inner = super::apply_auto_activate_policy(
-        cat,
-        element,
-        settings,
-        decide_inner_config_mxl(settings, &flow, transport_file.as_deref()),
-        mxl_eager_blocked(&flow),
-    );
+    let inner = decide_inner_config_mxl(settings, &flow, transport_file.as_deref());
+    let blocked = mxl_eager_blocked(&flow, &inner);
+    let inner = super::apply_auto_activate_policy(cat, element, settings, inner, blocked);
     // Deferred-mode case (sender only): no resource is going to be
     // added at NULL→READY because neither `transport-file*` nor
     // `caps` was supplied. Keep the fake chain so we don't bring
@@ -467,6 +482,87 @@ mod tests {
     }
 
     #[test]
+    fn unconstrained_sender_auto_activate_generates_flow_id() {
+        let s = CommonSettings {
+            auto_activate: true,
+            caps: Some(video_caps()),
+            ..settings(Side::Sender)
+        };
+        let (inner, configuring) =
+            resolve_inner_config_mxl(&cat(), "nmossink", &s, None).expect("MXL setup");
+        let configuring = configuring.expect("caps synthesis");
+        let configuring: serde_json::Value =
+            serde_json::from_str(&configuring).expect("configuring flow_def");
+        assert!(
+            configuring.get("id").is_none(),
+            "AddSender flow_def must remain unconstrained"
+        );
+
+        match inner {
+            InnerConfig::Real(TransportConfig::Mxl {
+                flow_id,
+                transport_file: Some(real),
+                ..
+            }) => {
+                let parsed = Uuid::parse_str(&flow_id).expect("generated UUID");
+                assert_eq!(parsed.get_version_num(), 4);
+                let real: serde_json::Value = serde_json::from_str(&real).expect("real flow_def");
+                assert_eq!(real["id"], flow_id);
+            }
+            other => panic!("expected eager unconstrained Sender to be Real(Mxl), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn constrained_sender_auto_activate_keeps_explicit_flow_id() {
+        let s = CommonSettings {
+            auto_activate: true,
+            caps: Some(video_caps()),
+            mxl_flow_id: FLOW_ID_A.to_owned(),
+            ..settings(Side::Sender)
+        };
+        let (inner, configuring) =
+            resolve_inner_config_mxl(&cat(), "nmossink", &s, None).expect("MXL setup");
+        let configuring = configuring.expect("caps synthesis");
+        let configuring_value: serde_json::Value =
+            serde_json::from_str(&configuring).expect("configuring flow_def");
+        assert_eq!(configuring_value["id"], FLOW_ID_A);
+
+        match inner {
+            InnerConfig::Real(TransportConfig::Mxl {
+                flow_id,
+                transport_file: Some(real),
+                ..
+            }) => {
+                assert_eq!(flow_id, FLOW_ID_A);
+                assert_eq!(real, configuring);
+            }
+            other => panic!("expected eager constrained Sender to be Real(Mxl), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unconstrained_sender_without_auto_activate_stays_dormant() {
+        let s = CommonSettings {
+            caps: Some(video_caps()),
+            ..settings(Side::Sender)
+        };
+        let (inner, configuring) =
+            resolve_inner_config_mxl(&cat(), "nmossink", &s, None).expect("MXL setup");
+        let configuring: serde_json::Value =
+            serde_json::from_str(&configuring.expect("caps synthesis"))
+                .expect("configuring flow_def");
+        assert!(configuring.get("id").is_none());
+        assert!(matches!(
+            inner,
+            InnerConfig::Fake {
+                kind: FakeKind::NotActive,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn deactivation_is_fake_success() {
         let plan = make_activation_plan(
             &cat(),
@@ -624,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn domain_path_unset_is_failure_with_live_transport_file() {
+    fn domain_path_unset_is_failure_with_activation_transport_file() {
         // Activation supplies the spliced transport file, but this
         // host has no `mxl-domain-path` so the element can't bring
         // up mxlsink/mxlsrc. Per design: fake chain + failure ack.
@@ -836,6 +932,40 @@ mod tests {
             .expect("deferred AddSender may synthesise without mxl-flow-id");
             let v = serde_json::from_str::<serde_json::Value>(&json).expect("json");
             assert!(v.get("id").is_none());
+        }
+
+        #[test]
+        fn unconstrained_auto_activate_generates_deferred_flow_id() {
+            let s = CommonSettings {
+                auto_activate: true,
+                mxl_flow_id: String::new(),
+                ..sender_settings()
+            };
+            let (configuring, inner) = synthesise_deferred_sender_mxl("nmossink", &s, &good_caps())
+                .expect("deferred synthesis");
+            let configuring: serde_json::Value =
+                serde_json::from_str(&configuring).expect("configuring flow_def");
+            assert!(
+                configuring.get("id").is_none(),
+                "AddSender flow_def must remain unconstrained"
+            );
+
+            match inner {
+                InnerConfig::Real(TransportConfig::Mxl {
+                    flow_id,
+                    transport_file: Some(real),
+                    ..
+                }) => {
+                    let parsed = Uuid::parse_str(&flow_id).expect("generated UUID");
+                    assert_eq!(parsed.get_version_num(), 4);
+                    let real: serde_json::Value =
+                        serde_json::from_str(&real).expect("real flow_def");
+                    assert_eq!(real["id"], flow_id);
+                }
+                other => {
+                    panic!("expected eager unconstrained Sender to be Real(Mxl), got {other:?}")
+                }
+            }
         }
 
         #[test]

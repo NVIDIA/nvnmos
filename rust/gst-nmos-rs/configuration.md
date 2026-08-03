@@ -56,7 +56,7 @@ which properties matter for a task:
 | --- | --- | --- |
 | Essential | `node-seed`, `sender-name` / `receiver-name`, `transport`, `caps` or `transport-file*`, `receiver-caps-mode`, `auto-activate` | Identify the Node and Sender or Receiver, choose the data plane, describe the essence and Receiver capabilities, and choose Controller-managed or self-starting activation |
 | RTP/UDP | Sender: `source-ip`, `source-port`, `destination-ip`, `destination-port`; Receiver: `source-ip`, `interface-ip`, `multicast-ip`, `destination-port`; both: `transport-caps`, `format-bit-rate`, `transport-bit-rate` | Configure SDP and IS-05 endpoint values for `udp`, `udp2`, and `nvdsudp`; the bit-rate properties apply to JPEG XS on `udp` / `udp2` |
-| MXL | `mxl-domain-path`, `mxl-domain-id`, `mxl-flow-id` | Select the local MXL domain and flow for `transport=mxl` |
+| MXL | `mxl-domain-path`, `mxl-domain-id`, `mxl-flow-id` | Select the local MXL domain and optionally constrain the flow for `transport=mxl` |
 | Human-readable metadata | `label`, `description`, `group-hint` | Set human-readable labels, descriptions, and grouping metadata for NMOS resources |
 | Node and session | `daemon-uri`, `http-port`, `host-name`, `node-properties`, `domain`, `registration-url`, `system-url` | Connect to the daemon and configure the NMOS Node; Node properties are taken from the first session that creates a shared `node-seed` |
 | Inner-element overrides | `transport-properties`, `pay-properties`, `depay-properties` | Pass advanced properties to generated inner elements; payloader and depayloader overrides apply only to `udp` / `udp2` |
@@ -101,9 +101,9 @@ later sessions attach to the existing Node without changing it.
 When `transport-file*` is unset, `caps` drives synthesis of the configuring
 transport file sent to the daemon:
 
-- `transport=mxl` produces an MXL flow definition and also requires
-  `mxl-flow-id`.
-- `transport=udp`, `udp2`, or `nvdsudp` produces SDP and uses the relevant
+- `transport=mxl` produces an MXL flow definition using the `mxl-domain-id`
+  and `mxl-flow-id` properties.
+- `transport=udp`, `udp2`, or `nvdsudp` produces SDP using the relevant
   endpoint properties.
 
 On `nmossrc`, `receiver-caps-mode` controls whether the synthesised

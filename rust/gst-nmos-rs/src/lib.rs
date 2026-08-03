@@ -136,7 +136,9 @@
 //! configuring SDP passed at AddReceiver. On MXL, when `mxl-flow-id` is
 //! unset the element still calls AddSender / AddReceiver (the
 //! synthesised `flow_def` omits top-level `id`) but keeps the fake
-//! inner chain until IS-05 activation supplies the MXL flow id.
+//! inner chain until IS-05 activation supplies the MXL flow id. An
+//! unconstrained Sender with `auto-activate=true` generates a UUID on
+//! its own and brings the inner chain up without waiting.
 
 #![allow(unused_doc_comments)]
 
