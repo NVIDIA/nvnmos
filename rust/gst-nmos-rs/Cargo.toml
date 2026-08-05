@@ -37,6 +37,7 @@ serde_json = { workspace = true }
 unicase = "2.9.0"
 regex = "1.12"
 url = "2.5"
+uuid = { version = "1.24.0", features = ["v4"] }
 
 # POSIX getifaddrs for resolving an IPv4/IPv6 host address back to its
 # kernel interface name (NMOS carries IP, GStreamer udpsrc/udpsink want

@@ -204,6 +204,8 @@ namespace nvnmos
         utility::string_t get_mxl_flow_def_domain_id(const web::json::value& flow_def);
         // resolve IS-05 mxl_domain_id "auto" from constraint: enum front or null
         web::json::value resolve_mxl_domain_id(const web::json::value& constraint);
+        // resolve IS-05 mxl_flow_id "auto" from constraint: enum front or a new UUID
+        web::json::value resolve_mxl_flow_id(const web::json::value& constraint);
         // extract the top-level 'id' property (or empty)
         utility::string_t get_mxl_flow_def_id(const web::json::value& flow_def);
         // produce a flow definition JSON string with the active MXL transport parameters spliced in
@@ -638,10 +640,9 @@ namespace nvnmos
         const auto flow_id = impl::make_id(seed_id, nmos::types::flow, name);
         const auto sender_id = impl::make_id(seed_id, nmos::types::sender, name);
 
-        // the NMOS Flow id is always generated (flow_id, above); the MXL flow id is taken from the flow
-        // definition's 'id' property if present, otherwise it falls back to the NMOS Flow id
-        const auto explicit_mxl_flow_id = impl::get_mxl_flow_def_id(flow_def);
-        const auto mxl_flow_id = !explicit_mxl_flow_id.empty() ? explicit_mxl_flow_id : flow_id;
+        // a top-level id constrains the MXL flow identity; omitting it leaves the
+        // IS-05 mxl_flow_id transport parameter unconstrained.
+        const auto mxl_flow_id = impl::get_mxl_flow_def_id(flow_def);
 
         // for now, only manage a single clock (internal); MXL has no equivalent to RTP ts-refclk,
         // that will require a new nvnmos extension property
@@ -1145,7 +1146,7 @@ namespace nvnmos
             {
                 // BCP-007-03: MXL has a single transport leg per sender
                 nmos::details::resolve_auto(transport_params[0], nmos::fields::mxl_domain_id, [&] { return impl::resolve_mxl_domain_id(constraints.at(0).at(nmos::fields::mxl_domain_id)); });
-                nmos::details::resolve_auto(transport_params[0], nmos::fields::mxl_flow_id, [&] { return web::json::front(nmos::fields::constraint_enum(constraints.at(0).at(nmos::fields::mxl_flow_id))); });
+                nmos::details::resolve_auto(transport_params[0], nmos::fields::mxl_flow_id, [&] { return impl::resolve_mxl_flow_id(constraints.at(0).at(nmos::fields::mxl_flow_id)); });
             }
             else if (nmos::types::receiver == id_type.second && is_mxl)
             {
@@ -2291,6 +2292,14 @@ namespace nvnmos
             return constraint.has_field(nmos::fields::constraint_enum)
                 ? web::json::front(nmos::fields::constraint_enum(constraint))
                 : web::json::value::null();
+        }
+
+        // resolve IS-05 mxl_flow_id "auto" from constraint: enum front or a new UUID
+        web::json::value resolve_mxl_flow_id(const web::json::value& constraint)
+        {
+            return constraint.has_field(nmos::fields::constraint_enum)
+                ? web::json::front(nmos::fields::constraint_enum(constraint))
+                : web::json::value::string(nmos::make_id());
         }
 
         // extract the top-level 'id' property (or empty)

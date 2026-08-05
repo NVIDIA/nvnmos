@@ -1546,8 +1546,7 @@ impl NodeServer {
     /// Returns `Ok(None)` if no sender with the given `sender_name`
     /// currently exists on this server. This is the Flow id (the Sender's
     /// `flow_id` property), not the Sender id from [`sender_id`](Self::sender_id).
-    /// The MXL `mxl_flow_id` IS-05 transport parameter may be overridden
-    /// but is the same by default.
+    /// The MXL `mxl_flow_id` IS-05 transport parameter is independent.
     pub fn flow_id(&self, sender_name: &str) -> Result<Option<String>> {
         let cname = CString::new(sender_name)?;
         let mut buf = [0u8; ID_BUF_LEN];
