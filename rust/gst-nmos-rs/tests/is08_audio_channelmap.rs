@@ -1,12 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! IS-08 audio channel map routing: two tones (A4 440 Hz / E5 ~659 Hz) through
-//! `nmosaudiochannelmap`, verify per-src output dominance with Goertzel.
-//!
-//! Spawns a temporary `nvnmosd` for the duration of the test.
-//! The cases run automatically when `nvnmosd` and `libnvnmos.so` are available
-//! (CI sets `LD_LIBRARY_PATH` to the C build dir); otherwise they skip.
+//! IS-08 audio channel map integration tests: lockstep tones, static
+//! `active-map` isolation from the first measure window, live IS-08 re-route,
+//! and channel-count inference / mismatch at fixation.
 //!
 //! ```bash
 //! LD_LIBRARY_PATH=$NVNMOS_LIB_DIR \
@@ -16,8 +13,10 @@
 
 mod common;
 
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{
     A4_HZ, DaemonGuard, Tone, init, nvnmosd_skip_reason, perfect_fifth_hz, require_factories,
@@ -28,178 +27,204 @@ use gstreamer_app as gst_app;
 use test_skip::skip;
 
 const SAMPLE_RATE: i32 = 48_000;
-const CHANNELS: u32 = 2;
+const FRAME_SAMPLES: usize = 480; // 10 ms
+const MEASURE_FRAMES: usize = 20; // 200 ms
 
-struct RoutingCase {
-    name: &'static str,
-    src0_map: Option<&'static str>,
-    src1_map: Option<&'static str>,
-    expect_src0: Tone,
-    expect_src1: Tone,
-}
-
-fn audio_caps() -> gst::Caps {
+fn audio_caps(channels: i32) -> gst::Caps {
     gst::Caps::builder("audio/x-raw")
         .field("format", "F32LE")
         .field("rate", SAMPLE_RATE)
-        .field("channels", CHANNELS as i32)
+        .field("channels", channels)
         .field("layout", "interleaved")
         .build()
 }
 
-fn make_tone_src(freq: f64) -> gst::Element {
-    gst::ElementFactory::make("audiotestsrc")
-        .name(format!("tone-{freq}"))
-        .property("freq", freq)
-        .property("volume", 0.8f64)
+fn make_appsrc(name: &str, channels: i32) -> gst_app::AppSrc {
+    gst::ElementFactory::make("appsrc")
+        .name(name)
+        .property("format", gst::Format::Time)
+        .property("is-live", true)
+        .property("block", false)
+        .property("caps", audio_caps(channels))
         .build()
-        .expect("audiotestsrc")
+        .expect("appsrc")
+        .downcast::<gst_app::AppSrc>()
+        .expect("downcast appsrc")
 }
 
-fn make_capsfilter() -> gst::Element {
-    gst::ElementFactory::make("capsfilter")
-        .property("caps", audio_caps())
-        .build()
-        .expect("capsfilter")
+fn make_appsink(channels: i32) -> gst_app::AppSink {
+    // drop=true: keep only the newest buffer. pull_mono drains and upstream
+    // queues refill; a deeper appsink queue is unnecessary for these tests.
+    make_appsink_opts(channels, true, 1)
 }
 
-fn request_map_pad(map: &gst::Element, templ_name: &str) -> gst::Pad {
-    map.request_pad_simple(templ_name)
-        .unwrap_or_else(|| panic!("request_pad_simple {templ_name} failed"))
-}
-
-fn make_appsink() -> gst_app::AppSink {
+fn make_appsink_opts(channels: i32, drop: bool, max_buffers: u32) -> gst_app::AppSink {
     gst::ElementFactory::make("appsink")
         .property("emit-signals", false)
         .property("sync", false)
-        .property("max-buffers", 4u32)
-        .property("drop", true)
-        .property("caps", audio_caps())
+        .property("max-buffers", max_buffers)
+        .property("drop", drop)
+        .property("caps", audio_caps(channels))
         .build()
         .expect("appsink")
         .downcast::<gst_app::AppSink>()
         .expect("downcast appsink")
 }
 
-fn pull_mono_samples(appsink: &gst_app::AppSink, timeout: Duration) -> Vec<f32> {
-    let mut mono = Vec::new();
-    let deadline = std::time::Instant::now() + timeout;
-    while mono.len() < SAMPLE_RATE as usize / 5 {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        let remaining_ms = u64::try_from(remaining.as_millis()).unwrap_or(0);
-        if remaining_ms == 0 {
+fn active_map(s: &str) -> gst::Structure {
+    gst::Structure::from_str(s).unwrap_or_else(|e| panic!("active-map `{s}`: {e}"))
+}
+
+fn capsfilter_channels(el: &gst::Element) -> u32 {
+    let caps: gst::Caps = el.property("caps");
+    let ch = caps
+        .structure(0)
+        .expect("caps structure")
+        .get::<i32>("channels")
+        .expect("channels field");
+    assert!(ch > 0, "{}: non-positive channels", el.name());
+    ch as u32
+}
+
+fn tone_buffer(freq: f32, pts: gst::ClockTime) -> gst::Buffer {
+    let mut buf = gst::Buffer::with_size(FRAME_SAMPLES * 4).expect("buffer");
+    {
+        let buf = buf.get_mut().unwrap();
+        buf.set_pts(pts);
+        buf.set_duration(gst::ClockTime::from_nseconds(
+            FRAME_SAMPLES as u64 * 1_000_000_000 / SAMPLE_RATE as u64,
+        ));
+        let mut map = buf.map_writable().expect("map");
+        let omega = 2.0 * std::f32::consts::PI * freq / SAMPLE_RATE as f32;
+        let start = (pts.nseconds() * SAMPLE_RATE as u64 / 1_000_000_000) as usize;
+        for (i, chunk) in map.as_mut_slice().chunks_exact_mut(4).enumerate() {
+            let sample = 0.8 * ((start + i) as f32 * omega).sin();
+            chunk.copy_from_slice(&sample.to_le_bytes());
+        }
+    }
+    buf
+}
+
+fn push_lockstep(a: &gst_app::AppSrc, b: &gst_app::AppSrc, start_idx: u64, n: usize) {
+    for i in 0..n {
+        let pts = gst::ClockTime::from_nseconds(
+            (start_idx + i as u64) * FRAME_SAMPLES as u64 * 1_000_000_000 / SAMPLE_RATE as u64,
+        );
+        a.push_buffer(tone_buffer(A4_HZ, pts)).expect("push A");
+        b.push_buffer(tone_buffer(perfect_fifth_hz(A4_HZ), pts))
+            .expect("push B");
+    }
+}
+
+fn pull_mono(appsink: &gst_app::AppSink, frames: usize) -> Vec<f32> {
+    let mut mono = Vec::with_capacity(frames * FRAME_SAMPLES);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while mono.len() < frames * FRAME_SAMPLES {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let ms = u64::try_from(remaining.as_millis()).unwrap_or(0);
+        if ms == 0 {
             break;
         }
-        let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(remaining_ms))
-        else {
-            std::thread::sleep(Duration::from_millis(5));
+        let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(ms)) else {
             continue;
         };
-        let buffer = sample.buffer().expect("buffer");
-        let map = buffer.map_readable().expect("map");
-        mono.extend(common::stereo_f32le_to_mono(map.as_slice()));
+        let map = sample.buffer().unwrap().map_readable().unwrap();
+        for chunk in map.as_slice().chunks_exact(4) {
+            mono.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+        }
     }
     assert!(
-        mono.len() >= SAMPLE_RATE as usize / 20,
-        "insufficient audio samples from appsink (got {} frames)",
+        mono.len() >= FRAME_SAMPLES,
+        "insufficient samples (got {})",
         mono.len()
     );
     mono
 }
 
-/// True when one of the two test tones clearly dominates (same 4x bar as the
-/// routing assertions), without caring which tone.
-fn has_dominant_tone(samples: &[f32]) -> bool {
-    let p_low = common::goertzel_power(samples, SAMPLE_RATE as f32, A4_HZ);
-    let p_high = common::goertzel_power(samples, SAMPLE_RATE as f32, perfect_fifth_hz(A4_HZ));
-    p_low > p_high * 4.0 || p_high > p_low * 4.0
+fn assert_tone(label: &str, samples: &[f32], expect: Tone) {
+    assert!(
+        expect.dominant_in(samples, SAMPLE_RATE as f32),
+        "{label}: expected {:?} Hz; p_low={} p_high={}",
+        expect.hz(),
+        common::goertzel_power(samples, SAMPLE_RATE as f32, A4_HZ),
+        common::goertzel_power(samples, SAMPLE_RATE as f32, perfect_fifth_hz(A4_HZ)),
+    );
 }
 
-/// Pull and drop samples from each appsink until every output shows a clearly
-/// dominant single tone. Waiting only for non-zero is not enough: before both
-/// mixer input legs are active and routed cleanly, an output can carry a mix of
-/// both tones (or silence). Poll concurrently so neither appsink stalls the
-/// other while `drop=true` keeps queues at the newest buffers.
-fn settle(appsinks: &[(&str, &gst_app::AppSink)], timeout: Duration) {
-    let min_frames = SAMPLE_RATE as usize / 20;
-    let max_frames = SAMPLE_RATE as usize / 5;
-    let deadline = std::time::Instant::now() + timeout;
-    let mut ready = vec![false; appsinks.len()];
-    let mut acc = vec![Vec::<f32>::new(); appsinks.len()];
+fn ephemeral_http_port() -> u16 {
+    // Same approach as nvnmosd `lock_ordering_regression`: pick a free port up
+    // front when the test must drive in-band HTTP (IS-08 here, IS-05 there).
+    // Prefer `http-port=0` when the allocated port is not needed.
+    let listener = TcpListener::bind("0.0.0.0:0").expect("bind ephemeral");
+    listener.local_addr().expect("addr").port()
+}
 
-    while !ready.iter().all(|&r| r) {
-        if deadline
-            .saturating_duration_since(std::time::Instant::now())
-            .is_zero()
-        {
-            break;
-        }
-        let mut got_any = false;
-        for (i, (_name, appsink)) in appsinks.iter().enumerate() {
-            while let Some(sample) = appsink.try_pull_sample(gst::ClockTime::ZERO) {
-                got_any = true;
-                let Some(buffer) = sample.buffer() else {
-                    continue;
-                };
-                let Ok(map) = buffer.map_readable() else {
-                    continue;
-                };
-                if ready[i] {
-                    continue;
-                }
-                // Mixer silence for an inactive input is exact F32 zero samples.
-                let silent = map
-                    .as_slice()
-                    .chunks_exact(4)
-                    .all(|word| f32::from_le_bytes(word.try_into().unwrap()) == 0.0);
-                if silent {
-                    acc[i].clear();
-                    continue;
-                }
-                acc[i].extend(common::stereo_f32le_to_mono(map.as_slice()));
-                if acc[i].len() > max_frames {
-                    let drain = acc[i].len() - min_frames;
-                    acc[i].drain(..drain);
-                }
-                if acc[i].len() >= min_frames && has_dominant_tone(&acc[i]) {
-                    ready[i] = true;
-                    acc[i].clear();
-                }
+fn post_is08_activation(http_port: u16, body: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stream = loop {
+        match TcpStream::connect(("127.0.0.1", http_port)) {
+            Ok(s) => break s,
+            Err(e) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "IS-08 HTTP port {http_port} never accepted connections: {e}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
             }
         }
-        if !got_any {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let path = "/x-nmos/channelmapping/v1.0/map/activations/";
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{http_port}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(req.as_bytes()).expect("write POST");
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).expect("read POST");
+    assert!(
+        resp.starts_with("HTTP/1.1 2") || resp.starts_with("HTTP/1.0 2"),
+        "IS-08 activation failed: {resp}"
+    );
+}
 
-    for (i, (name, _)) in appsinks.iter().enumerate() {
-        assert!(
-            ready[i],
-            "{name}: did not settle to a dominant tone (acc_frames={})",
-            acc[i].len()
-        );
+fn wait_paused(pipeline: &gst::Pipeline) {
+    // Reach PAUSED first so nmosaudiochannelmap fixation can finish without
+    // needing buffers (live appsrcs will not complete PLAYING until fed).
+    if pipeline.set_state(gst::State::Paused).is_err() {
+        dump_pipeline_errors(pipeline);
+        panic!("set_state(Paused) failed");
+    }
+    let (ret, state, pending) = pipeline.state(gst::ClockTime::from_seconds(10));
+    if ret.is_err() || state != gst::State::Paused || pending != gst::State::VoidPending {
+        dump_pipeline_errors(pipeline);
+        panic!("pipeline not PAUSED after wait: ret={ret:?} state={state:?} pending={pending:?}");
     }
 }
 
-fn set_playing_or_panic(pipeline: &gst::Pipeline) {
-    match pipeline.set_state(gst::State::Playing) {
-        Ok(_) => {}
-        Err(_) => {
-            dump_pipeline_errors(pipeline);
-            panic!("failed to set pipeline to PLAYING");
-        }
+/// Like [`wait_paused`], but returns whether PAUSED was reached cleanly.
+fn try_wait_paused(pipeline: &gst::Pipeline) -> bool {
+    if pipeline.set_state(gst::State::Paused).is_err() {
+        return false;
     }
-    let timeout = gst::ClockTime::from_seconds(10);
-    match pipeline.state(timeout) {
-        (Ok(_), gst::State::Playing, gst::State::VoidPending) => {}
-        (Ok(_), state, pending) => {
-            dump_pipeline_errors(pipeline);
-            panic!("pipeline stuck in {state:?} (pending {pending:?}) after PLAYING");
-        }
-        (Err(_), ..) => {
-            dump_pipeline_errors(pipeline);
-            panic!("pipeline state query failed after PLAYING");
-        }
+    let (ret, state, pending) = pipeline.state(gst::ClockTime::from_seconds(10));
+    ret.is_ok() && state == gst::State::Paused && pending == gst::State::VoidPending
+}
+
+fn wait_playing(pipeline: &gst::Pipeline) {
+    // Callers should push at least one buffer before waiting: live appsrcs keep
+    // PAUSED→PLAYING async until data arrives.
+    if pipeline.set_state(gst::State::Playing).is_err() {
+        dump_pipeline_errors(pipeline);
+        panic!("set_state(Playing) failed");
+    }
+    let (ret, state, pending) = pipeline.state(gst::ClockTime::from_seconds(10));
+    if ret.is_err() || state != gst::State::Playing || pending != gst::State::VoidPending {
+        dump_pipeline_errors(pipeline);
+        panic!("pipeline not PLAYING after wait: ret={ret:?} state={state:?} pending={pending:?}");
     }
 }
 
@@ -229,175 +254,248 @@ fn dump_pipeline_errors(pipeline: &gst::Pipeline) {
     }
 }
 
-fn run_routing_case(daemon_uri: &str, node_seed: &str, case: &RoutingCase, declare_channels: bool) {
-    let pipeline = gst::Pipeline::default();
-    struct PipelineGuard(gst::Pipeline);
-    impl Drop for PipelineGuard {
-        fn drop(&mut self) {
-            let _ = self.0.set_state(gst::State::Null);
-        }
-    }
-    let _guard = PipelineGuard(pipeline.clone());
-
-    let src_low = make_tone_src(f64::from(A4_HZ));
-    let src_high = make_tone_src(f64::from(perfect_fifth_hz(A4_HZ)));
-    let cf_low = make_capsfilter();
-    let cf_high = make_capsfilter();
-
-    let map = gst::ElementFactory::make("nmosaudiochannelmap")
-        .name("map")
-        .property("daemon-uri", daemon_uri)
-        .property("node-seed", node_seed)
-        .property("channelmapping-name", "audio-routing-smoke")
-        .build()
-        .expect("nmosaudiochannelmap");
-
-    let sink0 = request_map_pad(&map, "sink_%u");
-    let sink1 = request_map_pad(&map, "sink_%u");
-    let src0 = request_map_pad(&map, "src_%u");
-    let src1 = request_map_pad(&map, "src_%u");
-
-    sink0.set_property("input-id", "input0");
-    sink1.set_property("input-id", "input1");
-    // When declared, the element pins the topology from these counts. When not,
-    // it must infer them from the fixed peer caps (capsfilter / appsink) at
-    // fixation; both paths are covered by separate tests.
-    if declare_channels {
-        sink0.set_property("channels", CHANNELS);
-        sink1.set_property("channels", CHANNELS);
-        src0.set_property("channels", CHANNELS);
-        src1.set_property("channels", CHANNELS);
-    }
-
-    if let Some(s) = case.src0_map {
-        let structure = gst::Structure::from_str(s).expect("src0 active-map");
-        src0.set_property("active-map", &structure);
-    }
-    if let Some(s) = case.src1_map {
-        let structure = gst::Structure::from_str(s).expect("src1 active-map");
-        src1.set_property("active-map", &structure);
-    }
-
-    let out0 = make_appsink();
-    let out1 = make_appsink();
-
-    pipeline
-        .add_many([
-            &src_low,
-            &cf_low,
-            &src_high,
-            &cf_high,
-            &map,
-            out0.upcast_ref(),
-            out1.upcast_ref(),
-        ])
-        .expect("add elements");
-
-    gst::Element::link_many([&src_low, &cf_low]).expect("link low tone");
-    gst::Element::link_many([&src_high, &cf_high]).expect("link high tone");
-
-    cf_low
-        .static_pad("src")
-        .unwrap()
-        .link(&sink0)
-        .expect("link cf_low -> map.sink_0");
-    cf_high
-        .static_pad("src")
-        .unwrap()
-        .link(&sink1)
-        .expect("link cf_high -> map.sink_1");
-
-    src0.link(&out0.static_pad("sink").unwrap())
-        .expect("link map.src_0 -> appsink0");
-    src1.link(&out1.static_pad("sink").unwrap())
-        .expect("link map.src_1 -> appsink1");
-
-    set_playing_or_panic(&pipeline);
-
-    // Discard the startup transient before measuring: before both audiomixer
-    // input legs are active and routed cleanly, an output can be silent or carry
-    // a mix of both tones. Wait until each appsink shows a clearly dominant
-    // single tone; the assertions below then check which tone that is.
-    settle(
-        &[("src_0", &out0), ("src_1", &out1)],
-        Duration::from_secs(3),
-    );
-
-    let samples0 = pull_mono_samples(&out0, Duration::from_secs(3));
-    let samples1 = pull_mono_samples(&out1, Duration::from_secs(3));
-
-    pipeline.set_state(gst::State::Null).expect("NULL");
-
-    assert!(
-        case.expect_src0.dominant_in(&samples0, SAMPLE_RATE as f32),
-        "{}: src_0 expected {:?} Hz dominant; case={} p_low={} p_high={}",
-        case.name,
-        case.expect_src0.hz(),
-        case.name,
-        common::goertzel_power(&samples0, SAMPLE_RATE as f32, A4_HZ),
-        common::goertzel_power(&samples0, SAMPLE_RATE as f32, perfect_fifth_hz(A4_HZ)),
-    );
-    assert!(
-        case.expect_src1.dominant_in(&samples1, SAMPLE_RATE as f32),
-        "{}: src_1 expected {:?} Hz dominant; case={} p_low={} p_high={}",
-        case.name,
-        case.expect_src1.hz(),
-        case.name,
-        common::goertzel_power(&samples1, SAMPLE_RATE as f32, A4_HZ),
-        common::goertzel_power(&samples1, SAMPLE_RATE as f32, perfect_fifth_hz(A4_HZ)),
-    );
-}
-
+/// Default identity routes `src_0` from `input0` (tone A). An immediate IS-08
+/// activation then remaps it to `input1` (tone B) on the same output.
 #[test]
-fn is08_audio_channelmap_routes_and_swaps_tones() {
+fn is08_audio_channelmap_live_reroute_swaps_tone() {
     init();
     if let Some(why) = nvnmosd_skip_reason() {
         skip!(why);
     }
     require_factories(&[
         "nmosaudiochannelmap",
-        "audiotestsrc",
-        "capsfilter",
+        "appsrc",
         "appsink",
         "audiomixer",
         "audiomixmatrix",
     ]);
 
     let socket = tempfile::Builder::new()
-        .prefix("nvnmos_is08_audio_")
+        .prefix("nvnmos_is08_audio_reroute_")
         .suffix(".sock")
         .tempfile_in(std::env::temp_dir())
         .expect("temp socket")
         .into_temp_path();
-    let _daemon = DaemonGuard::new(socket.to_path_buf());
-    let daemon_uri = _daemon.uri();
+    let daemon = DaemonGuard::new(socket.to_path_buf());
+    // In-band IS-08 needs a known listen port; reserve one like lock_ordering
+    // does for IS-05 PATCH (http-port=0 is preferred when the port is unused).
+    let http_port = ephemeral_http_port();
 
+    let pipeline = gst::Pipeline::default();
+    let src_a = make_appsrc("tone-a", 1);
+    let src_b = make_appsrc("tone-b", 1);
+    let cf_a = gst::ElementFactory::make("capsfilter")
+        .property("caps", audio_caps(1))
+        .build()
+        .unwrap();
+    let cf_b = gst::ElementFactory::make("capsfilter")
+        .property("caps", audio_caps(1))
+        .build()
+        .unwrap();
+    let node_seed = format!("gst-is08-audio-reroute-{}", std::process::id());
+    let map = gst::ElementFactory::make("nmosaudiochannelmap")
+        .property("daemon-uri", daemon.uri())
+        .property("node-seed", &node_seed)
+        .property("channelmapping-name", "audio-reroute")
+        .property("http-port", http_port as u32)
+        .build()
+        .expect("nmosaudiochannelmap");
+    let sink0 = map.request_pad_simple("sink_%u").unwrap();
+    let sink1 = map.request_pad_simple("sink_%u").unwrap();
+    let src0 = map.request_pad_simple("src_%u").unwrap();
+    sink0.set_property("input-id", "input0");
+    sink1.set_property("input-id", "input1");
+    sink0.set_property("channels", 1u32);
+    sink1.set_property("channels", 1u32);
+    src0.set_property("output-id", "output0");
+    src0.set_property("channels", 1u32);
+    let out = make_appsink(1);
+
+    pipeline
+        .add_many([
+            src_a.upcast_ref(),
+            src_b.upcast_ref(),
+            &cf_a,
+            &cf_b,
+            &map,
+            out.upcast_ref(),
+        ])
+        .unwrap();
+    src_a.link(&cf_a).unwrap();
+    src_b.link(&cf_b).unwrap();
+    cf_a.static_pad("src")
+        .unwrap()
+        .link(&sink0)
+        .expect("link A");
+    cf_b.static_pad("src")
+        .unwrap()
+        .link(&sink1)
+        .expect("link B");
+    src0.link(&out.static_pad("sink").unwrap())
+        .expect("link out");
+
+    wait_paused(&pipeline);
+    push_lockstep(&src_a, &src_b, 0, 2);
+    wait_playing(&pipeline);
+
+    // Default identity: output0 <- input0 (tone A).
+    push_lockstep(&src_a, &src_b, 2, MEASURE_FRAMES);
+    assert_tone(
+        "before re-route",
+        &pull_mono(&out, MEASURE_FRAMES),
+        Tone::Low,
+    );
+
+    post_is08_activation(
+        http_port,
+        r#"{"activation":{"mode":"activate_immediate"},"action":{"output0":{"0":{"input":"input1","channel_index":0}}}}"#,
+    );
+
+    // Drop pre-activation buffers, push a fresh window, expect tone B.
+    while out.try_pull_sample(gst::ClockTime::ZERO).is_some() {}
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut idx = (2 + MEASURE_FRAMES) as u64;
+    let samples = loop {
+        assert!(
+            Instant::now() < deadline,
+            "re-route did not yield tone B within timeout"
+        );
+        push_lockstep(&src_a, &src_b, idx, MEASURE_FRAMES);
+        idx += MEASURE_FRAMES as u64;
+        let samples = pull_mono(&out, MEASURE_FRAMES);
+        if Tone::High.dominant_in(&samples, SAMPLE_RATE as f32) {
+            break samples;
+        }
+    };
+    assert_tone("after re-route", &samples, Tone::High);
+
+    let _ = pipeline.set_state(gst::State::Null);
+}
+
+/// Static `active-map` with lockstep sources: the first measure window must
+/// already show isolated tones (no settle / discard). Covers identity and swap.
+#[test]
+fn is08_audio_channelmap_static_map_first_window_isolates_tones() {
+    init();
+    if let Some(why) = nvnmosd_skip_reason() {
+        skip!(why);
+    }
+    require_factories(&[
+        "nmosaudiochannelmap",
+        "appsrc",
+        "appsink",
+        "audiomixer",
+        "audiomixmatrix",
+    ]);
+
+    struct RoutingCase {
+        name: &'static str,
+        src0_map: &'static str,
+        src1_map: &'static str,
+        expect_src0: Tone,
+        expect_src1: Tone,
+    }
     let cases = [
         RoutingCase {
             name: "identity",
-            src0_map: Some("map,0=input0:0,1=input0:1"),
-            src1_map: Some("map,0=input1:0,1=input1:1"),
+            src0_map: "map,0=input0:0",
+            src1_map: "map,0=input1:0",
             expect_src0: Tone::Low,
             expect_src1: Tone::High,
         },
         RoutingCase {
             name: "swapped",
-            src0_map: Some("map,0=input1:0,1=input1:1"),
-            src1_map: Some("map,0=input0:0,1=input0:1"),
+            src0_map: "map,0=input1:0",
+            src1_map: "map,0=input0:0",
             expect_src0: Tone::High,
             expect_src1: Tone::Low,
         },
     ];
 
     for (idx, case) in cases.iter().enumerate() {
-        let node_seed = format!("gst-is08-audio-{}-{}", std::process::id(), idx);
-        run_routing_case(&daemon_uri, &node_seed, case, true);
+        let socket = tempfile::Builder::new()
+            .prefix("nvnmos_is08_audio_static_")
+            .suffix(".sock")
+            .tempfile_in(std::env::temp_dir())
+            .expect("temp socket")
+            .into_temp_path();
+        let daemon = DaemonGuard::new(socket.to_path_buf());
+
+        let pipeline = gst::Pipeline::default();
+        let src_a = make_appsrc("tone-a", 1);
+        let src_b = make_appsrc("tone-b", 1);
+        let cf_a = gst::ElementFactory::make("capsfilter")
+            .property("caps", audio_caps(1))
+            .build()
+            .unwrap();
+        let cf_b = gst::ElementFactory::make("capsfilter")
+            .property("caps", audio_caps(1))
+            .build()
+            .unwrap();
+        let node_seed = format!("gst-is08-audio-static-{}-{}", std::process::id(), idx);
+        let map = gst::ElementFactory::make("nmosaudiochannelmap")
+            .property("daemon-uri", daemon.uri())
+            .property("node-seed", &node_seed)
+            .property("channelmapping-name", format!("audio-static-{}", case.name))
+            .build()
+            .expect("nmosaudiochannelmap");
+        let sink0 = map.request_pad_simple("sink_%u").unwrap();
+        let sink1 = map.request_pad_simple("sink_%u").unwrap();
+        let src0 = map.request_pad_simple("src_%u").unwrap();
+        let src1 = map.request_pad_simple("src_%u").unwrap();
+        sink0.set_property("input-id", "input0");
+        sink1.set_property("input-id", "input1");
+        sink0.set_property("channels", 1u32);
+        sink1.set_property("channels", 1u32);
+        src0.set_property("output-id", "output0");
+        src1.set_property("output-id", "output1");
+        src0.set_property("channels", 1u32);
+        src1.set_property("channels", 1u32);
+        src0.set_property("active-map", active_map(case.src0_map));
+        src1.set_property("active-map", active_map(case.src1_map));
+        // Keep the startup window: drop=false and room for prime + measure pushes.
+        let out0 = make_appsink_opts(1, false, (2 + MEASURE_FRAMES) as u32);
+        let out1 = make_appsink_opts(1, false, (2 + MEASURE_FRAMES) as u32);
+
+        pipeline
+            .add_many([
+                src_a.upcast_ref(),
+                src_b.upcast_ref(),
+                &cf_a,
+                &cf_b,
+                &map,
+                out0.upcast_ref(),
+                out1.upcast_ref(),
+            ])
+            .unwrap();
+        src_a.link(&cf_a).unwrap();
+        src_b.link(&cf_b).unwrap();
+        cf_a.static_pad("src").unwrap().link(&sink0).unwrap();
+        cf_b.static_pad("src").unwrap().link(&sink1).unwrap();
+        src0.link(&out0.static_pad("sink").unwrap()).unwrap();
+        src1.link(&out1.static_pad("sink").unwrap()).unwrap();
+
+        wait_paused(&pipeline);
+        push_lockstep(&src_a, &src_b, 0, 2);
+        wait_playing(&pipeline);
+        push_lockstep(&src_a, &src_b, 2, MEASURE_FRAMES);
+
+        assert_tone(
+            &format!("{} src_0 first window", case.name),
+            &pull_mono(&out0, MEASURE_FRAMES),
+            case.expect_src0,
+        );
+        assert_tone(
+            &format!("{} src_1 first window", case.name),
+            &pull_mono(&out1, MEASURE_FRAMES),
+            case.expect_src1,
+        );
+
+        let _ = pipeline.set_state(gst::State::Null);
     }
 }
 
-/// Companion to the routing test: leave every pad's `channels` at its default
-/// (0) so the element must infer the 2-in/2-out topology from the fixed peer
-/// caps (capsfilter on each sink, appsink caps on each src) during fixation.
+/// Channel counts left unset so fixation must take them from peer caps.
 #[test]
 fn is08_audio_channelmap_infers_channels_from_peer_caps() {
     init();
@@ -406,8 +504,7 @@ fn is08_audio_channelmap_infers_channels_from_peer_caps() {
     }
     require_factories(&[
         "nmosaudiochannelmap",
-        "audiotestsrc",
-        "capsfilter",
+        "appsrc",
         "appsink",
         "audiomixer",
         "audiomixmatrix",
@@ -419,17 +516,165 @@ fn is08_audio_channelmap_infers_channels_from_peer_caps() {
         .tempfile_in(std::env::temp_dir())
         .expect("temp socket")
         .into_temp_path();
-    let _daemon = DaemonGuard::new(socket.to_path_buf());
+    let daemon = DaemonGuard::new(socket.to_path_buf());
 
-    let case = RoutingCase {
-        name: "identity-inferred-channels",
-        src0_map: Some("map,0=input0:0,1=input0:1"),
-        src1_map: Some("map,0=input1:0,1=input1:1"),
-        expect_src0: Tone::Low,
-        expect_src1: Tone::High,
-    };
+    // Asymmetric widths so a single shared default cannot pass by accident.
+    const CH_A: i32 = 2;
+    const CH_B: i32 = 8;
+    const BUS: i32 = CH_A + CH_B;
+
+    let pipeline = gst::Pipeline::default();
+    let src_a = make_appsrc("audio-infer-a", CH_A);
+    let src_b = make_appsrc("audio-infer-b", CH_B);
+    let cf_a = gst::ElementFactory::make("capsfilter")
+        .property("caps", audio_caps(CH_A))
+        .build()
+        .unwrap();
+    let cf_b = gst::ElementFactory::make("capsfilter")
+        .property("caps", audio_caps(CH_B))
+        .build()
+        .unwrap();
     let node_seed = format!("gst-is08-audio-infer-{}", std::process::id());
-    run_routing_case(&_daemon.uri(), &node_seed, &case, false);
+    let map = gst::ElementFactory::make("nmosaudiochannelmap")
+        .property("daemon-uri", daemon.uri())
+        .property("node-seed", &node_seed)
+        .property("channelmapping-name", "audio-infer")
+        .build()
+        .expect("nmosaudiochannelmap");
+    let sink0 = map.request_pad_simple("sink_%u").unwrap();
+    let sink1 = map.request_pad_simple("sink_%u").unwrap();
+    let src0 = map.request_pad_simple("src_%u").unwrap();
+    let src1 = map.request_pad_simple("src_%u").unwrap();
+    sink0.set_property("input-id", "input0");
+    sink1.set_property("input-id", "input1");
+    src0.set_property("output-id", "output0");
+    src1.set_property("output-id", "output1");
+    // Leave pad `channels` at 0 (default) so fixation derives counts from the
+    // fixed peer caps (capsfilter / appsink).
+    let out_a = make_appsink(CH_A);
+    let out_b = make_appsink(CH_B);
+    pipeline
+        .add_many([
+            src_a.upcast_ref(),
+            src_b.upcast_ref(),
+            &cf_a,
+            &cf_b,
+            &map,
+            out_a.upcast_ref(),
+            out_b.upcast_ref(),
+        ])
+        .unwrap();
+    src_a.link(&cf_a).unwrap();
+    src_b.link(&cf_b).unwrap();
+    cf_a.static_pad("src").unwrap().link(&sink0).unwrap();
+    cf_b.static_pad("src").unwrap().link(&sink1).unwrap();
+    src0.link(&out_a.static_pad("sink").unwrap()).unwrap();
+    src1.link(&out_b.static_pad("sink").unwrap()).unwrap();
+
+    wait_paused(&pipeline);
+
+    // Fixation builds named internals from the inferred topology.
+    let map_bin = map.downcast_ref::<gst::Bin>().expect("map is a Bin");
+    assert_eq!(
+        capsfilter_channels(
+            &map_bin
+                .by_name("sink-capsfilter-0")
+                .expect("sink-capsfilter-0")
+        ),
+        CH_A as u32,
+        "input0 inferred channels"
+    );
+    assert_eq!(
+        capsfilter_channels(
+            &map_bin
+                .by_name("sink-capsfilter-1")
+                .expect("sink-capsfilter-1")
+        ),
+        CH_B as u32,
+        "input1 inferred channels"
+    );
+    let mix0 = map_bin.by_name("mixmatrix-0").expect("mixmatrix-0");
+    assert_eq!(
+        mix0.property::<u32>("out-channels"),
+        CH_A as u32,
+        "output0 out-channels"
+    );
+    assert_eq!(
+        mix0.property::<u32>("in-channels"),
+        BUS as u32,
+        "output0 in-channels (bus)"
+    );
+    let mix1 = map_bin.by_name("mixmatrix-1").expect("mixmatrix-1");
+    assert_eq!(
+        mix1.property::<u32>("out-channels"),
+        CH_B as u32,
+        "output1 out-channels"
+    );
+    assert_eq!(
+        mix1.property::<u32>("in-channels"),
+        BUS as u32,
+        "output1 in-channels (bus)"
+    );
+
+    let _ = pipeline.set_state(gst::State::Null);
+}
+
+/// Declared pad `channels` that disagree with fixed peer caps must fail fixation.
+#[test]
+fn is08_audio_channelmap_rejects_channels_mismatch() {
+    init();
+    if let Some(why) = nvnmosd_skip_reason() {
+        skip!(why);
+    }
+    require_factories(&[
+        "nmosaudiochannelmap",
+        "appsrc",
+        "appsink",
+        "audiomixer",
+        "audiomixmatrix",
+    ]);
+
+    let socket = tempfile::Builder::new()
+        .prefix("nvnmos_is08_audio_mismatch_")
+        .suffix(".sock")
+        .tempfile_in(std::env::temp_dir())
+        .expect("temp socket")
+        .into_temp_path();
+    let daemon = DaemonGuard::new(socket.to_path_buf());
+
+    let pipeline = gst::Pipeline::default();
+    let src = make_appsrc("mismatch-src", 2);
+    let cf = gst::ElementFactory::make("capsfilter")
+        .property("caps", audio_caps(2))
+        .build()
+        .unwrap();
+    let node_seed = format!("gst-is08-audio-mismatch-{}", std::process::id());
+    let map = gst::ElementFactory::make("nmosaudiochannelmap")
+        .property("daemon-uri", daemon.uri())
+        .property("node-seed", &node_seed)
+        .property("channelmapping-name", "audio-mismatch")
+        .build()
+        .expect("nmosaudiochannelmap");
+    let sink0 = map.request_pad_simple("sink_%u").unwrap();
+    let src0 = map.request_pad_simple("src_%u").unwrap();
+    sink0.set_property("input-id", "input0");
+    src0.set_property("output-id", "output0");
+    // Peer caps are stereo; declare 8-channel Input → fixation must reject.
+    sink0.set_property("channels", 8u32);
+    src0.set_property("channels", 2u32);
+    let out = make_appsink(2);
+    pipeline
+        .add_many([src.upcast_ref(), &cf, &map, out.upcast_ref()])
+        .unwrap();
+    src.link(&cf).unwrap();
+    cf.static_pad("src").unwrap().link(&sink0).unwrap();
+    src0.link(&out.static_pad("sink").unwrap()).unwrap();
+
+    assert!(
+        !try_wait_paused(&pipeline),
+        "fixation should fail when declared channels disagree with peer caps"
+    );
+    let _ = pipeline.set_state(gst::State::Null);
 }
 
 /// gst-launch defers `sink_0::channels` until the request pad exists; verify parse applies them.
@@ -455,36 +700,12 @@ fn gst_parse_applies_child_properties_on_request_pads() {
     let map = map.dynamic_cast::<gst::ChildProxy>().expect("ChildProxy");
 
     let sink = map.child_by_name("sink_0").expect("sink_0 pad");
-    assert_eq!(
-        sink.property::<u32>("channels"),
-        7,
-        "sink channels child prop"
-    );
-    assert_eq!(
-        sink.property::<String>("receiver-name"),
-        "rin",
-        "sink receiver-name child prop"
-    );
-    assert_eq!(
-        sink.property::<String>("label"),
-        "in0",
-        "sink label child prop"
-    );
+    assert_eq!(sink.property::<u32>("channels"), 7);
+    assert_eq!(sink.property::<String>("receiver-name"), "rin");
+    assert_eq!(sink.property::<String>("label"), "in0");
 
     let src = map.child_by_name("src_0").expect("src_0 pad");
-    assert_eq!(
-        src.property::<u32>("channels"),
-        5,
-        "src channels child prop"
-    );
-    assert_eq!(
-        src.property::<String>("sender-name"),
-        "sout",
-        "src sender-name child prop"
-    );
-    assert_eq!(
-        src.property::<String>("label"),
-        "out0",
-        "src label child prop"
-    );
+    assert_eq!(src.property::<u32>("channels"), 5);
+    assert_eq!(src.property::<String>("sender-name"), "sout");
+    assert_eq!(src.property::<String>("label"), "out0");
 }
