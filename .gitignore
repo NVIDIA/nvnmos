@@ -20,9 +20,13 @@
 # CMake user presets (machine-specific paths, generators, etc.)
 CMakeUserPresets.json
 
-# Local Conan + CMake output (README layout)
-build*/
-src/conan*/
+# Local Conan + CMake output (README layout).
+# Use explicit dirs plus hyphenated variants (not build*/ / conan*/) so
+# .dockerignore does not also match files like src/conanfile.txt.
+build/
+build-*/
+src/conan/
+src/conan-*/
 src/.doxygen-markdown/
 
 # Doxygen HTML output (generated into src/ by Doxyfile, then moved by CI/Docker)

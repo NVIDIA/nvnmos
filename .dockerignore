@@ -1,17 +1,35 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Same as .gitignore, plus rust/target/ for the Docker build context.
+# Keep in sync with .gitignore where paths overlap. Prefer rooted paths
+# (e.g. src/...) over bare globs: .dockerignore matching is not identical
+# to gitignore (especially with the legacy builder). Avoid **.
+#
+# Plus rust/target/ (see rust/.gitignore /target/) for the build context.
 
 # Python venv (README recommends `.venv` beside the repo)
 .venv/
+.venv-*/
 
 # CMake user presets (machine-specific paths, generators, etc.)
 CMakeUserPresets.json
 
-# Local Conan + CMake output (README layout)
+# Local Conan + CMake output (README layout; root-level only).
+# Use explicit dirs plus hyphenated variants (not build*/ / conan*/) so
+# patterns do not also match files like src/conanfile.txt.
 build/
+build-*/
 src/conan/
+src/conan-*/
+src/.doxygen-markdown/
+
+# Doxygen HTML output (generated into src/ by Doxyfile, then moved by CI/Docker)
+src/html/
+doc/doxygen/__pycache__/
+
+# Generated gRPC documentation
+rust/nvnmos-rpc/proto/descriptor.pb
+rust/nvnmos-rpc/proto/sabledocs_output/
 
 # Rust workspace artifacts
 rust/target/
