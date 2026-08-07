@@ -114,7 +114,7 @@ configuration advertises constrained BCP-004-01 Receiver Caps. With
 | Media | Caps shape | Transports | Notes |
 | --- | --- | --- | --- |
 | Video (raw) | `video/x-raw,format=…,width=…,height=…,framerate=…[,interlace-mode=…]` | all | MXL: `v210`. RTP/UDP: RFC 4175 8-bit `UYVY` and 10-bit `UYVP`. |
-| Video (JPEG XS) | `image/x-jxsc,…` or `video/x-jxsv,…` | `udp` / `udp2` only | `width`, `height`, and `framerate` are required. Bit rates use `format-bit-rate` and `transport-bit-rate`, not caps fields. |
+| Video (JPEG XS) | `image/x-jxsc,…` | `udp` / `udp2` only | `width`, `height`, and `framerate` are required. Bit rates use `format-bit-rate` and `transport-bit-rate`, not caps fields. |
 | Audio | `audio/x-raw,format=…,rate=…,channels=…` | all | MXL: `F32LE`. RTP/UDP: ST 2110-30 `S24BE` (L24) and `S16BE` (L16). |
 | Data (ANC) | `meta/x-st-2038,framerate=…` | all | `framerate` is required; add it with a capsfilter if necessary. |
 

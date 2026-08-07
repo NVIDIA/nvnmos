@@ -209,7 +209,7 @@ Cross-check `caps` vs `transport-file` unchanged.
 | `video/x-raw` UYVP / UYVY, 1920×1080 / 3840×2160, common frame rates | yes | yes | Progressive + interlaced per parent scope |
 | `audio/x-raw` S24BE / S16BE, 48/96 kHz, 1–16 ch | yes | yes | `ptime` from `transport-caps` or default 1 ms |
 | `video/x-raw(memory:NVMM)` | yes | yes | ConnectX-6+; `gpu-id` via `transport-properties` |
-| `video/x-jxsv` | no | no | Placeholder until nvdsudp JXSV lands |
+| `image/x-jxsc` | no | no | Placeholder until nvdsudp JXSV lands |
 | `meta/x-st-2038,alignment=frame` | yes | yes | ST 2110-40 / RFC 8331 SMPTE291 |
 
 ## Session / activation wiring
@@ -270,7 +270,7 @@ Almost all **software** work can land without ConnectX / Rivermax / DeepStream o
 
 - ST 2022-7 caps-only **synthesis** of dual-`m=` SDPs (transport-file passthrough + inner chain are landed)
 - Modes 1/2 (external RTP pay/depay in front of `nvdsudp*`)
-- `video/x-jxsv` (ST 2110-22)
+- `image/x-jxsc` (ST 2110-22)
 - Sender `pass-rtp-timestamp` / regeneration modes
 - Modifying `nvdsudpsrc` / `nvdsudpsink` sources (wrap only — parent non-negotiable)
 - `nvdsudpsrc` `source_port` bind until element supports it

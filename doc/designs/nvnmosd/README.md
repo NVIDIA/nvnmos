@@ -18,7 +18,7 @@ To cover:
 3. **ST 2110** (without perfect packet-pacing) using GStreamer's `udpsrc` and `udpsink` elements with the necessary RTP (de)payloaders.
 4. **ST 2110 essence formats**:
     a. `video/x-raw` (ST 2110-20 `video/raw`) — 1920×1080 and 3840×2160 at common broadcast frame rates (25, 30000/1001, 30, 50, 60000/1001, 60), 10-bit and 8-bit YCbCr-4:2:2 (`format=UYVP` or `UYVV`), also RGB formats, progressive and interlaced.
-    b. `video/x-jxsv` (ST 2110-22 `video/jxsv`) — placeholder until nvdsudp changes merge.
+    b. `image/x-jxsc` (ST 2110-22 `video/jxsv`) — placeholder until nvdsudp changes merge.
     c. `audio/x-raw` (ST 2110-30 `audio/L24` and `audio/L16`) — 16- and 24-bit LPCM, 48 kHz (and 96 kHz), 1–16 channels.
     d. `meta/x-st-2038` (ST 2110-40 `video/smpte291`) — supported via the nvdsudp ANC patch and corresponding GStreamer media type.
     e. **ST 2022-7** — stream duplication of any of the above on two NICs.
@@ -295,7 +295,7 @@ The full matrix is in
 
 For RTP, the element fills the SDP from essence caps + per-format defaults + per-transport defaults. `transport-caps` only needs to be set to override one of these or to add an `fmtp` extra the element doesn't synthesise:
 
-- **`media`**, **`encoding-name`** — from the essence caps top-level type and format (`video/x-raw` → `media=video, encoding-name=raw`; `audio/x-raw` PCM → `L16` for S16BE / `L24` for S24BE; `meta/x-st-2038` → `media=video, encoding-name=smpte291`; `video/x-jxsv` → `jxsv`).
+- **`media`**, **`encoding-name`** — from the essence caps top-level type and format (`video/x-raw` → `media=video, encoding-name=raw`; `audio/x-raw` PCM → `L16` for S16BE / `L24` for S24BE; `meta/x-st-2038` → `media=video, encoding-name=smpte291`; `image/x-jxsc` → `jxsv`).
 - **`clock-rate`** — video / ANC / JXSV → `90000`; audio → `rate` from the essence caps.
 - **`payload` (PT)** — by media: video → `96`, audio → `97`, ancillary → `98`. Override via `transport-caps` if a deployment requires specific PT values.
 - **`depth`, `sampling`** — from the essence format string (`v210` / `UYVP` → `depth=10, sampling=YCbCr-4:2:2`; similar mappings for the other supported formats).
@@ -503,7 +503,7 @@ A `timestamp-mode` property (passthrough vs. regenerated wire timestamps) was sk
 - **Phase 1 — MXL (all essences)**: `nmossrc` + `nmossink` for the full set of MXL flows `gst-mxl-rs` already supports — `video/x-raw` v210, `audio/x-raw` F32LE, and `meta/x-st-2038` ANC (what MXL flow_def.json calls `video/smpte291`). Single Node, gst-launch demoable. No nvdsudp involvement (so no Rivermax requirement). All three routes from the Pad config section are live (`transport-file`, property route, deferred mode on `nmossink`); `transport-caps` is typically empty for MXL.
 - **Phase 2 — ST 2110 via nvdsudp** (**software landed** in `gst-nmos-rs`; Rivermax hardware soak outstanding): ST 2110-20 video, ST 2110-30 audio, and ST 2110-40 ANC (`meta/x-st-2038`) via DeepStream `nvdsudpsrc` / `nvdsudpsink` Mode 3 (`transport=nvdsudp`). `udp` / `udp2` ANC uses `rtp*pay` / `rtp*depay`. Property-route SDP synthesis, `TP=2110TPN`, temp SDP files for `nvdsudpsink`, and IS-05 activation are implemented — see [`gst-nmos-rs-nvdsudp-plan.md`](../gst-nmos-rs-nvdsudp-plan.md). `receiver-caps-mode=unconstrained` reroute is landed and demo-validated on RTP/UDP; nvdsudp wire soak still pending.
 - **Phase 3 — `udpsrc`/`udpsink`** with (de)payloaders (**software landed**). Same NMOS surface, different inner chain.
-- **Phase 4 — `video/x-jxsv` (ST 2110-22)** once nvdsudp changes merge. **`video/v210a`** stub if GStreamer support is still missing.
+- **Phase 4 — `image/x-jxsc` (ST 2110-22)** once nvdsudp changes merge. **`video/v210a`** stub if GStreamer support is still missing.
 - **Phase 5 — ST 2022-7** redundancy (**software landed** in `gst-nmos-rs` for `transport=nvdsudp`; dual-`m=` transport-file passthrough + inner `st2022-7-streams`; not available on `udpsink` — see [`gst-nmos-rs-st2022-7-dual-leg-plan.md`](../gst-nmos-rs-st2022-7-dual-leg-plan.md)).
 - **Phase N — deferred**: cross-host gRPC + TLS; Windows + macOS daemon targets (Phase 0 designs to keep these tractable but doesn't ship them); optional non-gRPC fallback (JSON-RPC over WebSocket) only if there's a concrete adoption blocker.
 

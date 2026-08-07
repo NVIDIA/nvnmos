@@ -431,7 +431,7 @@ are active, `nvdsudpsrc` is supplied with comma-separated `st2022-7-streams`,
 See the
 [ST 2022-7 design notes](https://github.com/NVIDIA/nvnmos/blob/main/doc/designs/gst-nmos-rs-st2022-7-dual-leg-plan.md).
 
-**Not yet supported on `nvdsudp`:** JPEG XS (`image/x-jxsc` / `video/x-jxsv`) —
+**Not yet supported on `nvdsudp`:** JPEG XS (`image/x-jxsc`) —
 available on `udp` / `udp2` only.
 
 ```sh

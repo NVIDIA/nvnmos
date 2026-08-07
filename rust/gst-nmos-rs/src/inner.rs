@@ -1074,10 +1074,9 @@ fn package_hint_for_stem(stem: &str) -> &'static str {
 /// need overriding from the SDP-derived essence caps. Audio and ANC keep
 /// the existing no-op/consistent advertisement behaviour.
 ///
-/// JPEG XS is different: `rtpjxsvdepay` derives complete caps from RTP
-/// fmtp and negotiates `image/x-jxsc` vs `video/x-jxsv` with downstream.
-/// A fixed capssetter would clamp that structure choice, so leave the
-/// depayloader's src pad as the exposed pad.
+/// JPEG XS is different: `rtpjxsvdepay` derives complete `image/x-jxsc`
+/// caps from RTP fmtp. A fixed capssetter would fight that, so leave
+/// the depayloader's src pad as the exposed pad.
 fn select_udp_src_capssetter_caps<'a>(
     format: FlowFormat,
     encoding_name: &str,
@@ -1798,37 +1797,6 @@ pub(crate) fn apply_udp_sink_inner_properties(
     apply_properties_to_element(cat, element, &chain.pay, pay_properties);
 }
 
-/// Set `rtpjxsvpay max-codestream-bitrate` from the resolved format
-/// bit rate (kbit/s) unless `pay-properties` already supplies it.
-pub(crate) fn apply_format_bit_rate_to_jxsv_payloader(
-    media: &UdpMedia,
-    payloader: &gst::Element,
-    format_bit_rate_kbps: u64,
-    pay_properties: Option<&gst::Structure>,
-) {
-    if format_bit_rate_kbps == 0 {
-        return;
-    }
-    let Some(s) = media.rtp_caps.structure(0) else {
-        return;
-    };
-    let Ok(encoding) = s.get::<&str>("encoding-name") else {
-        return;
-    };
-    if !encoding.eq_ignore_ascii_case("jxsv") {
-        return;
-    }
-    if pay_properties.is_some_and(|p| p.has_field("max-codestream-bitrate")) {
-        return;
-    }
-    if payloader.has_property("max-codestream-bitrate") {
-        payloader.set_property(
-            "max-codestream-bitrate",
-            format_bit_rate_kbps.saturating_mul(1000),
-        );
-    }
-}
-
 pub(crate) fn apply_udp_src_inner_properties(
     cat: &gst::DebugCategory,
     element: &str,
@@ -1958,7 +1926,6 @@ mod tests {
                 "video/x-raw,format=UYVP,width=1920,height=1080,framerate=50/1",
             )
             .expect("static raw caps parse"),
-            bit_rates: crate::sdp::BitRates::UNSET,
         }
     }
 
@@ -1987,7 +1954,6 @@ mod tests {
             .expect("static rtp caps parse"),
             caps: gst::Caps::from_str("meta/x-st-2038,framerate=60/1")
                 .expect("static raw caps parse"),
-            bit_rates: crate::sdp::BitRates::UNSET,
         }
     }
 
@@ -2005,8 +1971,10 @@ mod tests {
 
     /// RFC 9134 / ST 2110-22 JPEG XS video, mirroring what
     /// `sdp::parse_sdp` produces from a `video/jxsv` SDP: `media=video`
-    /// with `encoding-name=JXSV` on the RTP caps, and the essence caps
-    /// carrying the bare-codestream `image/x-jxsc` structure.
+    /// with `encoding-name=JXSV` on the RTP caps (gst-sdp upper-cases
+    /// the rtpmap name; matches `rtpjxsv*` pad templates), and the
+    /// essence caps carrying the bare-codestream `image/x-jxsc`
+    /// structure.
     fn jxsv_media() -> UdpMedia {
         init_gst();
         UdpMedia {
@@ -2026,7 +1994,6 @@ mod tests {
             .expect("static rtp caps parse"),
             caps: gst::Caps::from_str("image/x-jxsc,width=1920,height=1080,framerate=50/1")
                 .expect("static raw caps parse"),
-            bit_rates: crate::sdp::BitRates::UNSET,
         }
     }
 
@@ -2066,7 +2033,6 @@ mod tests {
                 "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved",
             )
             .expect("static raw caps parse"),
-            bit_rates: crate::sdp::BitRates::UNSET,
         }
     }
 
@@ -2347,49 +2313,6 @@ mod tests {
             "JPEG XS sender chain must use `gst-plugins-rs`' rtpjxsvpay",
         );
         assert_eq!(pay.property::<u32>("pt"), 96);
-    }
-
-    #[test]
-    fn apply_format_bit_rate_sets_jxsv_payloader_max_codestream_bitrate() {
-        if !rtpjxsv_available() {
-            return;
-        }
-        let chain = build_udpsink(&jxsv_media(), UdpVariant::V1)
-            .expect("JPEG XS sender chain must construct when rtpjxsvpay is available");
-        if !chain.pay.has_property("max-codestream-bitrate") {
-            return;
-        }
-        apply_format_bit_rate_to_jxsv_payloader(&jxsv_media(), &chain.pay, 110_000, None);
-        assert_eq!(
-            chain.pay.property::<u64>("max-codestream-bitrate"),
-            110_000_000,
-        );
-    }
-
-    #[test]
-    fn apply_format_bit_rate_skipped_when_pay_properties_set_max_codestream_bitrate() {
-        if !rtpjxsv_available() {
-            return;
-        }
-        let chain = build_udpsink(&jxsv_media(), UdpVariant::V1)
-            .expect("JPEG XS sender chain must construct when rtpjxsvpay is available");
-        if !chain.pay.has_property("max-codestream-bitrate") {
-            return;
-        }
-        let props = gst::Structure::builder("properties")
-            .field("max-codestream-bitrate", 42_000_000u64)
-            .build();
-        apply_format_bit_rate_to_jxsv_payloader(
-            &jxsv_media(),
-            &chain.pay,
-            110_000_000,
-            Some(&props),
-        );
-        apply_properties_to_element(test_log_cat(), "nmossink", &chain.pay, Some(&props));
-        assert_eq!(
-            chain.pay.property::<u64>("max-codestream-bitrate"),
-            42_000_000,
-        );
     }
 
     #[test]
@@ -2787,8 +2710,8 @@ mod tests {
         }
         let media = jxsv_media();
         // Even when a constrained receiver supplies advertise_caps,
-        // `rtpjxsvdepay` negotiates `image/x-jxsc` vs `video/x-jxsv`
-        // with the downstream itself; no `capssetter` tail is inserted.
+        // `rtpjxsvdepay` owns the `image/x-jxsc` src caps; no
+        // `capssetter` tail is inserted.
         let chain = build_udpsrc(&media, UdpVariant::V1, Some(&media.caps))
             .expect("JPEG XS receiver chain must construct when rtpjxsvdepay is available");
         let bin = chain

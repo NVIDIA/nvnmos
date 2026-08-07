@@ -582,15 +582,6 @@ pub(crate) fn cross_check_bit_rates(property: BitRates, file: BitRates) -> Resul
     Ok(())
 }
 
-/// Property bit rates win when set; otherwise fall back to parsed SDP rates.
-pub(crate) fn effective_bit_rates(property: BitRates, file: BitRates) -> BitRates {
-    if property != BitRates::UNSET {
-        property
-    } else {
-        file
-    }
-}
-
 /// Whether an SDP transport file marks an unconstrained Receiver via
 /// media-level `a=x-nvnmos-caps:` (libnvnmos adds this on IS-05
 /// activation for unconstrained receivers; configuring SDPs may carry it when
@@ -613,7 +604,6 @@ struct ParsedMediaEssence {
     format: FlowFormat,
     rtp_caps: gst::Caps,
     caps: gst::Caps,
-    bit_rates: BitRates,
 }
 
 /// True when the media block carries `a=inactive` (IS-05 `rtp_enabled: false`).
@@ -731,7 +721,6 @@ fn parse_media_essence(
         format,
         rtp_caps,
         caps,
-        bit_rates: bit_rates_from_media(media),
     })
 }
 
@@ -803,7 +792,6 @@ fn active_legs_to_udp_media(essence: ParsedMediaEssence, legs: [(UdpLeg, bool); 
         secondary,
         rtp_caps: essence.rtp_caps,
         caps: essence.caps,
-        bit_rates: essence.bit_rates,
     }
 }
 
@@ -834,7 +822,6 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
             secondary: None,
             rtp_caps: essence.rtp_caps,
             caps: essence.caps,
-            bit_rates: essence.bit_rates,
         });
     }
 
@@ -1496,10 +1483,7 @@ pub(crate) fn cross_check_essence(
 fn essence_caps_format(caps: &gst::Caps) -> Option<FlowFormat> {
     let s = caps.structure(0)?;
     match s.name().as_str() {
-        // RFC 9134 / ST 2110-22 JPEG XS rides `urn:x-nmos:format:video`
-        // whether carried as a bare codestream (`image/x-jxsc`) or as
-        // RFC 9134 picture segments (`video/x-jxsv`).
-        "video/x-raw" | "image/x-jxsc" | "video/x-jxsv" => Some(FlowFormat::Video),
+        "video/x-raw" | "image/x-jxsc" => Some(FlowFormat::Video),
         "audio/x-raw" => Some(FlowFormat::Audio),
         "meta/x-st-2038" => Some(FlowFormat::Data),
         _ => None,
@@ -1695,12 +1679,11 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
 
     let rtp_caps = match format {
         FlowFormat::Video => {
-            // JPEG XS essence (`image/x-jxsc` bare codestream or
-            // `video/x-jxsv` picture segment) vs RFC 4175 raw video.
+            // JPEG XS essence (`image/x-jxsc`) vs RFC 4175 raw video.
             let is_jxsv = input
                 .caps
                 .structure(0)
-                .is_some_and(|s| matches!(s.name().as_str(), "image/x-jxsc" | "video/x-jxsv"));
+                .is_some_and(|s| s.name().as_str() == "image/x-jxsc");
             if is_jxsv {
                 rtp_caps_from_video_jxsv(input.caps, payload_type, input.narrow_traffic_profile)?
             } else {
@@ -1737,7 +1720,6 @@ pub(crate) fn from_caps(input: &SdpBuildInput<'_>) -> Result<String, SdpError> {
         secondary: None,
         rtp_caps,
         caps,
-        bit_rates,
     };
 
     let origin_address = if !input.interface_ip.is_empty() {
@@ -2459,22 +2441,25 @@ fn rtp_caps_from_video(
     let colorimetry_caps = s.get::<&str>("colorimetry").ok();
     let colorimetry_sdp = colorimetry_caps.and_then(sdp_colorimetry_from_caps);
 
-    // `encoding-name=raw` (RFC 4175 §6.7) and `PM=`/`SSN=`
-    // (ST 2110-20 §6.3) emitted in canonical SDP case;
-    // `set_media_from_caps` passes caps fields through verbatim.
+    // `encoding-name=RAW` matches rsrtp / gst-plugins-good pay/depay
+    // pad templates (caps intersection is case-sensitive). SDP text
+    // is rewritten to lower-case `raw` by [`canonicalise_st2110_sdp_case`]
+    // for nmos-cpp. Fmtp keys (`pm`/`ssn`/`tp`/…) are lower-case in
+    // caps to match `caps_from_media`; the same helper rewrites them
+    // to ST 2110 upper-case in the SDP (`PM=`/`SSN=`/`TP=`/…).
     let mut caps_text = format!(
         "application/x-rtp,\
          media=(string)video,\
          clock-rate=(int){clk},\
-         encoding-name=(string)raw,\
+         encoding-name=(string)RAW,\
          payload=(int){pt},\
          sampling=(string){sampling},\
          depth=(string){depth},\
          width=(string){width},\
          height=(string){height},\
          exactframerate=(string){exactframerate},\
-         PM=(string){pm},\
-         SSN=(string){ssn}",
+         pm=(string){pm},\
+         ssn=(string){ssn}",
         clk = defaults::VIDEO_CLOCK_RATE,
         pt = payload_type,
         pm = defaults::ST2110_20_PM,
@@ -2502,20 +2487,16 @@ fn rtp_caps_from_video(
         caps_text.push_str(&format!(",tcs=(string){tcs_value}"));
     }
     if narrow_traffic_profile {
-        caps_text.push_str(",TP=(string)2110TPN");
+        caps_text.push_str(",tp=(string)2110TPN");
     }
     gst::Caps::from_str(&caps_text)
         .map_err(|e| SdpError::UnsupportedEssence(format!("constructing rtp caps: {e}")))
 }
 
-/// One JPEG XS essence structure (`image/x-jxsc` bare codestream
-/// or `video/x-jxsv` picture segment) carrying the fields derived
-/// from an RTP media. Both structures share the same shape; the
-/// caller assembles them into a single multi-structure caps so the
-/// depayloader can negotiate the concrete one with its downstream.
+/// JPEG XS essence caps (`image/x-jxsc`) carrying the fields derived
+/// from an RTP media. Matches what `rtpjxsvdepay` exposes downstream.
 #[allow(clippy::too_many_arguments)]
 fn jxsv_structure_caps(
-    name: &str,
     width: Option<i32>,
     height: Option<i32>,
     depth: Option<i32>,
@@ -2525,7 +2506,7 @@ fn jxsv_structure_caps(
     level: Option<&str>,
     sublevel: Option<&str>,
 ) -> gst::Caps {
-    let mut builder = gst::Caps::builder(name)
+    let mut builder = gst::Caps::builder("image/x-jxsc")
         .field("alignment", "frame")
         .field("interlace-mode", "progressive")
         .field_if_some("width", width)
@@ -2542,10 +2523,9 @@ fn jxsv_structure_caps(
 }
 
 /// Derive JPEG XS essence caps from an RFC 9134 / ST 2110-22
-/// `application/x-rtp,encoding-name=jxsv` media. Emits both
-/// `image/x-jxsc` (bare codestream) and `video/x-jxsv` (picture
-/// segment) so the `rtpjxsvdepay` negotiates the concrete essence
-/// with its downstream. Inverse of [`rtp_caps_from_video_jxsv`].
+/// `application/x-rtp,encoding-name=JXSV` media. Emits `image/x-jxsc`
+/// (bare codestream), matching `rtpjxsvdepay`. Inverse of
+/// [`rtp_caps_from_video_jxsv`].
 fn caps_from_rtp_video_jxsv(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
     let s = rtp_caps
         .structure(0)
@@ -2571,40 +2551,20 @@ fn caps_from_rtp_video_jxsv(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError>
     let level = s.get::<&str>("level").ok();
     let sublevel = s.get::<&str>("sublevel").ok();
 
-    let mut caps = jxsv_structure_caps(
-        "image/x-jxsc",
-        width,
-        height,
-        depth,
-        sampling,
-        framerate,
-        profile,
-        level,
-        sublevel,
-    );
-    caps.make_mut().append(jxsv_structure_caps(
-        "video/x-jxsv",
-        width,
-        height,
-        depth,
-        sampling,
-        framerate,
-        profile,
-        level,
-        sublevel,
-    ));
-    Ok(caps)
+    Ok(jxsv_structure_caps(
+        width, height, depth, sampling, framerate, profile, level, sublevel,
+    ))
 }
 
 /// Build an `application/x-rtp,...` caps describing an RFC 9134 /
-/// ST 2110-22 JPEG XS media that wraps the supplied JPEG XS essence
-/// caps (`image/x-jxsc` or `video/x-jxsv`). Inverse of
-/// [`caps_from_rtp_video_jxsv`].
+/// ST 2110-22 JPEG XS media that wraps the supplied `image/x-jxsc`
+/// essence caps. Inverse of [`caps_from_rtp_video_jxsv`].
 ///
 /// `width` / `height` / `framerate` are required; `sampling` /
 /// `depth` / `profile` / `level` / `sublevel` are passed through
-/// when present. `SSN=ST2110-22:2022` (see
-/// [`defaults::ST2110_22_SSN`]) is always emitted; `colorimetry=`
+/// when present. Caps carry lower-case `ssn=ST2110-22:2022` (see
+/// [`defaults::ST2110_22_SSN`]); [`canonicalise_st2110_sdp_case`]
+/// rewrites it to upper-case `SSN=` in the SDP. `colorimetry=`
 /// and `tcs=` are emitted only when the essence caps carry a
 /// recognised GStreamer `colorimetry`.
 fn rtp_caps_from_video_jxsv(
@@ -2629,17 +2589,19 @@ fn rtp_caps_from_video_jxsv(
 
     // RFC 9134 §7 fmtp: `packetmode=0` (codestream) is the only
     // required parameter; the rest mirror ST 2110-22 §7.2.
+    // Fmtp keys are lower-case in caps (`ssn`/`tp`/…); SDP upper-case
+    // is restored by [`canonicalise_st2110_sdp_case`].
     let mut caps_text = format!(
         "application/x-rtp,\
          media=(string)video,\
          clock-rate=(int){clk},\
-         encoding-name=(string)jxsv,\
+         encoding-name=(string)JXSV,\
          payload=(int){pt},\
          packetmode=(string)0,\
          width=(string){width},\
          height=(string){height},\
          exactframerate=(string){exactframerate},\
-         SSN=(string){ssn}",
+         ssn=(string){ssn}",
         clk = defaults::VIDEO_CLOCK_RATE,
         pt = payload_type,
         ssn = defaults::ST2110_22_SSN,
@@ -2666,7 +2628,7 @@ fn rtp_caps_from_video_jxsv(
         }
     }
     if narrow_traffic_profile {
-        caps_text.push_str(",TP=(string)2110TPN");
+        caps_text.push_str(",tp=(string)2110TPN");
     }
     gst::Caps::from_str(&caps_text)
         .map_err(|e| SdpError::UnsupportedEssence(format!("constructing rtp caps: {e}")))
@@ -5073,20 +5035,19 @@ mod tests {
             s.get::<i32>("clock-rate").unwrap(),
             defaults::VIDEO_CLOCK_RATE
         );
-        // Canonical SDP-form case: RFC 4175 lower-case
-        // `raw`, ST 2110-20 upper-case `PM` / `SSN`. See
-        // the comment on the caps-text builder in
-        // `rtp_caps_from_video` for the libnvnmos /
-        // nmos-cpp compatibility rationale.
-        assert_eq!(s.get::<&str>("encoding-name").unwrap(), "raw");
+        // Pay/depay pad templates use upper-case `RAW`; SDP text is
+        // rewritten to lower-case `raw` by `canonicalise_st2110_sdp_case`
+        // for nmos-cpp. ST 2110-20 fmtp keys are lower-case in caps
+        // (`pm`/`ssn`), matching `caps_from_media`.
+        assert_eq!(s.get::<&str>("encoding-name").unwrap(), "RAW");
         assert_eq!(s.get::<i32>("payload").unwrap(), 96);
         assert_eq!(s.get::<&str>("sampling").unwrap(), "YCbCr-4:2:2");
         assert_eq!(s.get::<&str>("depth").unwrap(), "8");
         assert_eq!(s.get::<&str>("width").unwrap(), "1920");
         assert_eq!(s.get::<&str>("height").unwrap(), "1080");
         assert_eq!(s.get::<&str>("exactframerate").unwrap(), "50");
-        assert_eq!(s.get::<&str>("PM").unwrap(), defaults::ST2110_20_PM);
-        assert_eq!(s.get::<&str>("SSN").unwrap(), defaults::ST2110_20_SSN);
+        assert_eq!(s.get::<&str>("pm").unwrap(), defaults::ST2110_20_PM);
+        assert_eq!(s.get::<&str>("ssn").unwrap(), defaults::ST2110_20_SSN);
     }
 
     #[test]
@@ -5761,7 +5722,7 @@ mod tests {
             s.get::<i32>("clock-rate").unwrap(),
             defaults::VIDEO_CLOCK_RATE
         );
-        assert_eq!(s.get::<&str>("encoding-name").unwrap(), "jxsv");
+        assert_eq!(s.get::<&str>("encoding-name").unwrap(), "JXSV");
         assert_eq!(s.get::<i32>("payload").unwrap(), 96);
         assert_eq!(s.get::<&str>("packetmode").unwrap(), "0");
         assert_eq!(s.get::<&str>("width").unwrap(), "1920");
@@ -5772,13 +5733,13 @@ mod tests {
         assert_eq!(s.get::<&str>("profile").unwrap(), "High444.12");
         assert_eq!(s.get::<&str>("level").unwrap(), "2k-1");
         assert_eq!(s.get::<&str>("sublevel").unwrap(), "Sublev3bpp");
-        assert_eq!(s.get::<&str>("SSN").unwrap(), defaults::ST2110_22_SSN);
+        assert_eq!(s.get::<&str>("ssn").unwrap(), defaults::ST2110_22_SSN);
     }
 
     #[test]
     fn rtp_caps_from_video_jxsv_omits_optional_fields() {
         init_gst();
-        let essence = jxsv_caps("video/x-jxsv", 1280, 720, gst::Fraction::new(25, 1), None);
+        let essence = jxsv_caps("image/x-jxsc", 1280, 720, gst::Fraction::new(25, 1), None);
         let rtp = rtp_caps_from_video_jxsv(&essence, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
         assert!(
@@ -5791,7 +5752,7 @@ mod tests {
         );
         assert!(s.get::<&str>("depth").is_err(), "depth omitted:\n{s:?}");
         assert!(s.get::<&str>("profile").is_err(), "profile omitted:\n{s:?}");
-        assert!(s.get::<&str>("TP").is_err(), "TP omitted when wide:\n{s:?}");
+        assert!(s.get::<&str>("tp").is_err(), "tp omitted when wide:\n{s:?}");
     }
 
     #[test]
@@ -5816,7 +5777,7 @@ mod tests {
         let essence = jxsv_caps("image/x-jxsc", 1920, 1080, gst::Fraction::new(50, 1), None);
         let rtp = rtp_caps_from_video_jxsv(&essence, 96, true).expect("synth");
         let s = rtp.structure(0).expect("rtp");
-        assert_eq!(s.get::<&str>("TP").unwrap(), "2110TPN");
+        assert_eq!(s.get::<&str>("tp").unwrap(), "2110TPN");
     }
 
     #[test]
@@ -5829,7 +5790,7 @@ mod tests {
     }
 
     #[test]
-    fn caps_from_rtp_video_jxsv_yields_both_essence_structures() {
+    fn caps_from_rtp_video_jxsv_yields_image_x_jxsc() {
         init_gst();
         let rtp = gst::Caps::from_str(
             "application/x-rtp,media=(string)video,clock-rate=(int)90000,\
@@ -5839,18 +5800,9 @@ mod tests {
         )
         .unwrap();
         let caps = caps_from_rtp_video_jxsv(&rtp).expect("essence");
-        let names: Vec<String> = (0..caps.size())
-            .filter_map(|i| caps.structure(i).map(|s| s.name().to_string()))
-            .collect();
-        assert!(
-            names.iter().any(|n| n == "image/x-jxsc"),
-            "names: {names:?}",
-        );
-        assert!(
-            names.iter().any(|n| n == "video/x-jxsv"),
-            "names: {names:?}",
-        );
+        assert_eq!(caps.size(), 1);
         let s0 = caps.structure(0).unwrap();
+        assert_eq!(s0.name().as_str(), "image/x-jxsc");
         assert_eq!(s0.get::<i32>("width").unwrap(), 1920);
         assert_eq!(s0.get::<i32>("height").unwrap(), 1080);
         assert_eq!(
@@ -5891,15 +5843,6 @@ mod tests {
         assert!(text.contains("SSN=ST2110-22:2022"), "SSN:\n{text}");
         assert!(text.contains("profile=High444.12"), "profile:\n{text}");
         assert!(text.contains("sublevel=Sublev3bpp"), "sublevel:\n{text}");
-    }
-
-    #[test]
-    fn from_caps_jxsv_accepts_video_x_jxsv_essence() {
-        init_gst();
-        let essence = jxsv_caps("video/x-jxsv", 1920, 1080, gst::Fraction::new(25, 1), None);
-        let input = build_input(&essence, Side::Sender, None);
-        let text = from_caps(&input).expect("synth");
-        assert!(text.contains("a=rtpmap:96 jxsv/90000"), "rtpmap:\n{text}");
     }
 
     #[test]
@@ -6056,20 +5999,14 @@ mod tests {
                 .unwrap()
                 .get::<&str>("encoding-name")
                 .unwrap(),
-            // gst-sdp upper-cases the rtpmap encoding-name on parse.
+            // gst-sdp upper-cases the rtpmap encoding-name on parse;
+            // that form matches `rtpjxsv*` / `rtpvraw*` pad templates.
             "JXSV",
         );
         let names: Vec<String> = (0..media.caps.size())
             .filter_map(|i| media.caps.structure(i).map(|s| s.name().to_string()))
             .collect();
-        assert!(
-            names.iter().any(|n| n == "image/x-jxsc"),
-            "names: {names:?}",
-        );
-        assert!(
-            names.iter().any(|n| n == "video/x-jxsv"),
-            "names: {names:?}",
-        );
+        assert_eq!(names, vec!["image/x-jxsc".to_string()], "names: {names:?}");
         let s0 = media.caps.structure(0).unwrap();
         assert_eq!(s0.get::<i32>("width").unwrap(), 1920);
         assert_eq!(
@@ -6345,12 +6282,10 @@ mod tests {
     }
 
     /// Regression guard for the synthesised raw-video SDP
-    /// case. nmos-cpp's `make_video_raw_sdp_parameters` emits
-    /// the rtpmap encoding name lower-case (`raw`) and the
-    /// ST 2110-20 fmtp keys upper-case (`PM=`, `SSN=`); both
-    /// `get_format` and the fmtp parser are case-sensitive on
-    /// these tokens. If we slip back to upper-case `RAW` /
-    /// lower-case `pm` / `ssn`, libnvnmos's
+    /// case. Caps carry upper-case `encoding-name=RAW` and
+    /// lower-case fmtp keys (`pm`/`ssn`); [`canonicalise_st2110_sdp_case`]
+    /// rewrites the SDP to nmos-cpp's expected form (`raw` /
+    /// `PM=` / `SSN=`). If either rewrite slips, libnvnmos's
     /// `add_nmos_sender_to_node_server` silently returns
     /// `false` (it catches all exceptions including the one
     /// `get_format` throws when the encoding name doesn't
@@ -6521,7 +6456,7 @@ mod tests {
 
     /// Pin the rtpmap-encoding-name table for the JPEG-XS and
     /// ANC essence shapes. The splice path produces these once
-    /// `nmossink`'s caps property accepts `video/x-jxsv` / the
+    /// `nmossink`'s caps property accepts `image/x-jxsc` / the
     /// `meta/x-st-2038` shape, but the canonicaliser already has
     /// to do the right thing today because the table lives at
     /// the build-sdp layer.

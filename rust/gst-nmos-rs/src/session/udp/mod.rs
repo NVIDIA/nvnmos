@@ -576,7 +576,6 @@ mod tests {
                 "video/x-raw,format=v210,width=1920,height=1080,framerate=50/1",
             )
             .expect("static raw caps parse"),
-            bit_rates: sdp::BitRates::UNSET,
         }
     }
 

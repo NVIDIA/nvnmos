@@ -9,8 +9,7 @@
 # `source-ip`, `sender-name`, and `format-bit-rate`.
 #
 # For JPEG XS the bit rate is format-defining: `format-bit-rate` (kbit/s) drives
-# the SDP `b=AS:` / fmtp advertisement and the `rtpjxsvpay max-codestream-bitrate`
-# ceiling. Omit it and the sender advertises no rate.
+# the SDP `b=AS:` / fmtp advertisement. Omit it and the sender advertises no rate.
 #
 # Requires `gst-plugins-rs` (`rsrtp`: rtpjxsvpay) and a JPEG XS encoder
 # (`svtjpegxsenc`).
