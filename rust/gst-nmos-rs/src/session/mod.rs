@@ -306,7 +306,7 @@ pub(crate) struct CommonSettings {
     pub(crate) transport_caps: Option<gst::Caps>,
     /// Coded essence (Flow) bit rate in kilobits per second (1000 bits/s),
     /// excluding RTP/UDP/IP overhead. 0 = unset. On JPEG XS RTP transports,
-    /// threads into SDP synthesis and `rtpjxsvpay` configuration.
+    /// threads into SDP `b=AS:` / fmtp synthesis.
     pub(crate) format_bit_rate: u64,
     /// Transport (Sender) bit rate in kilobits per second (1000 bits/s),
     /// including RTP/UDP/IP overhead. 0 = unset. On JPEG XS RTP transports,

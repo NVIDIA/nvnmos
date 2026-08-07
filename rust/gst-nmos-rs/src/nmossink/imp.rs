@@ -1001,17 +1001,6 @@ fn build_real_sink(
         }
         TransportConfig::Udp { variant, media, .. } => {
             let chain = inner::build_udpsink(media, *variant)?;
-            let property = crate::sdp::bit_rates_from_properties(
-                settings.format_bit_rate,
-                settings.transport_bit_rate,
-            );
-            let bit_rates = crate::sdp::effective_bit_rates(property, media.bit_rates);
-            inner::apply_format_bit_rate_to_jxsv_payloader(
-                media,
-                &chain.pay,
-                bit_rates.format_bit_rate,
-                settings.pay_properties.as_ref(),
-            );
             inner::apply_udp_sink_inner_properties(
                 &CAT,
                 "nmossink",
