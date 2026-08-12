@@ -132,14 +132,14 @@ jobs:
 
       # Build the gst-plugins-rs elements the sync tests need — st2038extractor /
       # st2038combiner (closedcaption), rtpsmpte291pay / rtpsmpte291depay (rtp) and
-      # udpsrc2 (udp) — at a pinned main commit that carries the st2038combiner skew
-      # and rtpsmpte291depay multi-ANC fixes (and, unlike the 0.15 branch, udpsrc2),
-      # and put them on GST_PLUGIN_PATH so the udp av_sync case (and udp2 tests) run
-      # here instead of self-skipping. The mxl and nvdsudp cases still self-skip
-      # (no libmxl / DeepStream on the runner).
+      # udpsrc2 / rtpjxsv — pinned main commit that carries udpsrc2, rtpjxsv
+      # pay/depay, the st2038combiner skew fix, and rtpsmpte291depay multi-ANC
+      # fixes; put them on GST_PLUGIN_PATH so the udp av_sync case (and udp2 /
+      # jxsv tests) run here instead of self-skipping. The mxl and nvdsudp cases
+      # still self-skip (no libmxl / DeepStream on the runner).
       - name: Build gst-plugins-rs plugins (pinned)
         env:
-          GST_PLUGINS_RS_REF: 8d5c60f0a67d3aa8120bf940b46fc3c18209661c
+          GST_PLUGINS_RS_REF: 0332d3d2084df7bae6dbd3c924a2bb62c2e56e89
           RUSTUP_TOOLCHAIN: "1.92"
         run: |
           git init "${RUNNER_TEMP}/gst-plugins-rs"
