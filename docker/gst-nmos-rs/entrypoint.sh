@@ -23,7 +23,7 @@ source "${_nvdir}/entrypoint-setup.sh"
 NVNMOSD_UDS="${NVNMOSD_UDS:-/tmp/nvnmosd.sock}"
 
 export NVNMOSD_UDS
-export LD_LIBRARY_PATH="/opt/nvnmos/lib:/opt/nvnmos/lib/mxl:/opt/nvnmos/lib/mxl/internal${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export LD_LIBRARY_PATH="/opt/nvnmos/lib:/opt/nvnmos/lib/mxl${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 export GST_PLUGIN_PATH="/opt/nvnmos/plugins${GST_PLUGIN_PATH:+:${GST_PLUGIN_PATH}}"
 
 nvnmosd_pid=""

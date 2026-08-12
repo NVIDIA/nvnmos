@@ -69,7 +69,7 @@ This repository does not ship Rivermax or install it in `docker/gst-nmos-rs/Dock
 
 **License (host):** request a developer license from [Rivermax Getting Started](https://developer.nvidia.com/networking/rivermax-getting-started) and store it on the host (Media Gateway convention: `/opt/mellanox/rivermax/rivermax.lic`).
 
-**Install into a derived image** (after `nvnmos-gst:ds` exists). Obtain `rivermax_ubuntu2404_<ver>.tar.gz` from the Rivermax SDK download. For example:
+**Install into a derived image** (after `nvnmos-gst:ds` exists). Obtain `rivermax_ubuntu2404_<ver>.tar.gz` from the Rivermax SDK download. Pin **1.70.32** for DeepStream 9.1: newer packages (e.g. 1.90.18) need `ibverbs-providers (>= 60)`, while the NGC DeepStream 9.1 base ships `ibverbs-providers` 59.1 unless you install matching MOFED/`ibverbs` first.
 
 ```dockerfile
 # Example only — not part of this repository's Dockerfiles.
@@ -80,9 +80,15 @@ COPY rivermax_ubuntu2404_${RMAX_VER}.tar.gz /tmp/
 RUN tar -xzf /tmp/rivermax_ubuntu2404_${RMAX_VER}.tar.gz -C /tmp \
  && dpkg -i /tmp/${RMAX_VER}/Ubuntu.24.04/deb-dist/x86_64/*.deb \
  && rm -rf /tmp/${RMAX_VER} /tmp/rivermax_ubuntu2404_${RMAX_VER}.tar.gz \
+ && printf '%s\n' \
+      /opt/nvnmos/lib/mxl \
+      > /etc/ld.so.conf.d/mxl.conf \
+ && ldconfig \
  && setcap 'CAP_NET_RAW=ep CAP_SYS_NICE=ep CAP_IPC_LOCK=ep CAP_DAC_READ_SEARCH=ep' /usr/bin/gst-launch-1.0
 USER nvnmos
 ```
+
+`setcap` on `gst-launch-1.0` makes the dynamic linker ignore `LD_LIBRARY_PATH`, so register `/opt/nvnmos/lib/mxl` via `ldconfig` before applying capabilities. MXL v1.1 embeds former `internal/` objects in `libmxl.so`, so that path alone is enough.
 
 For `aarch64`, install from `deb-dist/aarch64/` instead of `x86_64/`.
 
