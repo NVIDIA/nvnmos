@@ -36,7 +36,7 @@ ARG RUST_TOOLCHAIN=1.92
 ARG MXL_REPO=https://github.com/dmf-mxl/mxl.git
 ARG MXL_REF=81738a15adb55119a6855343bc1053a4389bf6df
 ARG GST_PLUGINS_RS_REPO=https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git
-ARG GST_PLUGINS_RS_REF=8d5c60f0a67d3aa8120bf940b46fc3c18209661c
+ARG GST_PLUGINS_RS_REF=0332d3d2084df7bae6dbd3c924a2bb62c2e56e89
 
 # Final image arguments
 ARG NVNMOS_UID=10001
