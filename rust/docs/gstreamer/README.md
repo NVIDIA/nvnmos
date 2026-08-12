@@ -16,6 +16,7 @@ alongside the Doxygen C API.
 | Component | Pin | Notes |
 | --------- | --- | ----- |
 | Hotdoc | `~=0.18.0` | Enforced in `meson.build` and CI |
+| Meson (for Hotdoc sdist) | `>=1.0,<1.12` | Meson 1.12+ sandbox-rejects Hotdoc's theme `less_include_path`; CI installs Hotdoc with `--no-build-isolation` |
 | Lumen theme | 0.16 (sha256 in `meson.build`) | Downloaded at build time |
 | Plugin scanner | GStreamer **1.24.2** (`tools/`) | Vendored; newer scanner needs newer GStreamer API |
 | Sitemap generator | gst-docs **1.26.0** (`scripts/generate_sitemap.py`) | See below |
@@ -37,12 +38,19 @@ sudo apt-get install -y \
   libjson-glib-dev flex
 ```
 
-Hotdoc (virtualenv recommended):
+Hotdoc (virtualenv recommended). Match CI: pin Meson below 1.12 and install
+Hotdoc without build isolation so pip does not fetch Meson 1.12+ into an
+isolated build env:
 
 ```sh
 python3 -m venv .venv-hotdoc
 . .venv-hotdoc/bin/activate
-pip install "hotdoc~=0.18.0"
+pip install \
+  "meson>=1.0,<1.12" "meson-python>=0.14" ninja \
+  pkgconfig "lxml>=5.4" "PyYAML>=6.0.2" "schema>=0.7.7" \
+  "toposort>=1.10" "wheezy.template>=3.2.3" "appdirs>=1.4.4" \
+  "feedgen>=1.0.0" "networkx>=3.4" "dbus-deviation>=0.6.1"
+pip install --no-build-isolation "hotdoc~=0.18.0"
 ```
 
 Meson then runs `scripts/patch_hotdoc_gtk_doc_hrefs.py` against the installed
