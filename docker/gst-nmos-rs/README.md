@@ -67,7 +67,7 @@ DeepStream plugins alone are not enough for `transport=nvdsudp`. You also need t
 
 This repository does not ship Rivermax or install it in `docker/gst-nmos-rs/Dockerfile`.
 
-**License (host):** request a developer license from [Rivermax Getting Started](https://developer.nvidia.com/networking/rivermax-getting-started) and store it on the host (Media Gateway convention: `/opt/mellanox/rivermax/rivermax.lic`).
+**License (host):** request a developer license from [Rivermax Getting Started](https://developer.nvidia.com/networking/rivermax-getting-started) and store it on the host (conventionally, `/opt/mellanox/rivermax/rivermax.lic`).
 
 **Install into a derived image** (after `nvnmos-gst:ds` exists). Obtain `rivermax_ubuntu2404_<ver>.tar.gz` from the Rivermax SDK download. Pin **1.70.32** for DeepStream 9.1: newer packages (e.g. 1.90.18) need `ibverbs-providers (>= 60)`, while the NGC DeepStream 9.1 base ships `ibverbs-providers` 59.1 unless you install matching MOFED/`ibverbs` first.
 
