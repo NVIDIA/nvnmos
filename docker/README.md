@@ -10,7 +10,7 @@ Build context for every image in this directory is the **repository root** (`.`)
 | Directory | Image | Purpose |
 |-----------|-------|---------|
 | [`nvnmos/`](nvnmos/) | `nvnmos` | Build `libnvnmos` + Rust workspace, produce `nvnmos-<platform>.tar.gz`, smoke-test `nvnmos-example` / `nvnmosd` / `nvnmosd-example` on start. Used by CI. |
-| [`gst-nmos-rs/`](gst-nmos-rs/) | `nvnmos-gst` | Operator runtime: `nvnmosd` + `gst-nmos-rs` + plugins for `transport=mxl` and `transport=udp`/`udp2`. |
+| [`gst-nmos-rs/`](gst-nmos-rs/) | `nvnmos-gst` | Operator runtime: `nvnmosd` + `gst-nmos-rs` + plugins for `transport=mxl` and `transport=udp`/`udp2`. Optional DeepStream base via `BASE_IMAGE` (see [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md#deepstream-base-image)). |
 
 Shared [`nvnmos/entrypoint-setup.sh`](nvnmos/entrypoint-setup.sh) starts user-mode D-Bus and Avahi without systemd or `CAP_SYS_CHROOT`.
 

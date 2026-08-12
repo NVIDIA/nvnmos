@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # gst-nmos-rs Container Image
 
-Operator runtime image: `nvnmosd`, `gst-nmos-rs` (`libgstnmos.so`), MXL (`libmxl` + `libgstmxl.so`), and GStreamer plugins for **linux/amd64** (Ubuntu 24.04, non-root UID/GID **10001**).
+Operator runtime image: `nvnmosd`, `gst-nmos-rs` (`libgstnmos.so`), MXL (`libmxl` + `libgstmxl.so`), and GStreamer plugins for **linux/amd64** (default base `ubuntu:24.04`, non-root UID/GID **10001**).
 
 Use this image to run `gst-launch-1.0` pipelines with `nmossrc` / `nmossink`:
 
@@ -14,6 +14,7 @@ Use this image to run `gst-launch-1.0` pipelines with `nmossrc` / `nmossink`:
 | `mxl` | `mxlsrc` / `mxlsink` (`libgstmxl.so`) |
 | `udp` | gst-plugins-good `udpsrc` / `udpsink` + `rtp*pay` / `rtp*depay` |
 | `udp2` | gst-plugins-rs `udpsrc2` + `rtp*pay2` / `rtp*depay2` (falls back to gst-plugins-good per element when a v2 factory is missing) |
+| `nvdsudp` | DeepStream `nvdsudpsrc` / `nvdsudpsink` — **not** in the default Ubuntu image; see [DeepStream base image](#deepstream-base-image) and [pipeline examples](../../rust/gst-nmos-rs/pipeline-examples.md#deepstream-rivermax) |
 
 Build from the **repository root**:
 
@@ -27,7 +28,7 @@ The nvnmos tree is taken from the build context (`COPY src/`, `COPY rust/` via t
 
 | Argument | Default | Explanation |
 |----------|---------|-------------|
-| `BASE_IMAGE` | `ubuntu:24.04` | Base image for all stages; controls runtime compatibility. |
+| `BASE_IMAGE` | `ubuntu:24.04` | Base for **every** stage, including the final runtime. Override with a DeepStream image to be able to use DeepStream plugins (see below). |
 | `CONAN_LOCKFILE` | `src/conan.lock` | Input lockfile for `conan install`. Pass an empty value to resolve the latest compatible graph instead. |
 | `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for all Rust stages in this image. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); gst-plugins-rs MSRV is **1.92**. Workspace MSRV is **1.85** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
 | `MXL_REPO` | `https://github.com/dmf-mxl/mxl.git` | MXL source repository (`libmxl`, `gst-mxl-rs`). |
@@ -44,6 +45,68 @@ Example with extra plugins:
 docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst \
   --build-arg EXTRA_APT_PACKAGES="gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly" .
 ```
+
+## DeepStream Base Image
+
+The default `ubuntu:24.04` runtime has the plugins for MXL and OSS RTP/UDP transports only. To get DeepStream's GStreamer plugins in the same image as `nvnmosd` / `nmossrc` / `nmossink`, build with a DeepStream base via `BASE_IMAGE` (all stages use that base, so the final image has the full DeepStream stack and is correspondingly large):
+
+```bash
+docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst:ds \
+  --build-arg BASE_IMAGE=nvcr.io/nvidia/deepstream:9.1-triton-multiarch .
+```
+
+NGC pull may require `docker login nvcr.io`. Pin the DeepStream tag you need. This Dockerfile has been smoke-built against `9.1-triton-multiarch`.
+
+**Runtime (GPU):** use the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/index.html) (e.g. `docker run --gpus all …`). Many DeepStream plugins need `libcuda` from the GPU runtime and will not load in a plain CPU-only `docker run`.
+
+CI builds and smoke-tests only the default Ubuntu-based `docker/nvnmos` package image, not a DeepStream or Rivermax `gst-nmos-rs` variant.
+
+### Rivermax for `transport=nvdsudp`
+
+DeepStream plugins alone are not enough for `transport=nvdsudp`. You also need the [Rivermax SDK](https://developer.nvidia.com/networking/rivermax) libraries in the image, a Rivermax license at runtime, a ConnectX-5 (or newer) NIC, and host MOFED drivers. Pipeline property details are in the [DeepStream Rivermax pipeline examples](../../rust/gst-nmos-rs/pipeline-examples.md#deepstream-rivermax).
+
+This repository does not ship Rivermax or install it in `docker/gst-nmos-rs/Dockerfile`.
+
+**License (host):** request a developer license from [Rivermax Getting Started](https://developer.nvidia.com/networking/rivermax-getting-started) and store it on the host (Media Gateway convention: `/opt/mellanox/rivermax/rivermax.lic`).
+
+**Install into a derived image** (after `nvnmos-gst:ds` exists). Obtain `rivermax_ubuntu2404_<ver>.tar.gz` from the Rivermax SDK download. Pin **1.70.32** for DeepStream 9.1: newer packages (e.g. 1.90.18) need `ibverbs-providers (>= 60)`, while the NGC DeepStream 9.1 base ships `ibverbs-providers` 59.1 unless you install matching MOFED/`ibverbs` first.
+
+```dockerfile
+# Example only — not part of this repository's Dockerfiles.
+FROM nvnmos-gst:ds
+USER root
+ARG RMAX_VER=1.70.32
+COPY rivermax_ubuntu2404_${RMAX_VER}.tar.gz /tmp/
+RUN tar -xzf /tmp/rivermax_ubuntu2404_${RMAX_VER}.tar.gz -C /tmp \
+ && dpkg -i /tmp/${RMAX_VER}/Ubuntu.24.04/deb-dist/x86_64/*.deb \
+ && rm -rf /tmp/${RMAX_VER} /tmp/rivermax_ubuntu2404_${RMAX_VER}.tar.gz \
+ && printf '%s\n' \
+      /opt/nvnmos/lib/mxl \
+      > /etc/ld.so.conf.d/mxl.conf \
+ && ldconfig \
+ && setcap 'CAP_NET_RAW=ep CAP_SYS_NICE=ep CAP_IPC_LOCK=ep CAP_DAC_READ_SEARCH=ep' /usr/bin/gst-launch-1.0
+USER nvnmos
+```
+
+`setcap` on `gst-launch-1.0` makes the dynamic linker ignore `LD_LIBRARY_PATH`, so register `/opt/nvnmos/lib/mxl` via `ldconfig` before applying capabilities. MXL v1.1 embeds former `internal/` objects in `libmxl.so`, so that path alone is enough.
+
+For `aarch64`, install from `deb-dist/aarch64/` instead of `x86_64/`.
+
+```bash
+docker build -t nvnmos-gst:ds-rivermax -f Dockerfile.rivermax .
+```
+
+**Run** with the license mounted at the path Rivermax expects, GPU and host network access, and the required capabilities:
+
+```bash
+docker run --rm --gpus all --net=host \
+  --cap-add=NET_RAW --cap-add=SYS_NICE --cap-add=IPC_LOCK --cap-add=DAC_READ_SEARCH \
+  -v /opt/mellanox/rivermax/rivermax.lic:/opt/mellanox/rivermax/rivermax.lic:ro \
+  nvnmos-gst:ds-rivermax \
+  gst-launch-1.0 -e … nmossink transport=nvdsudp …
+```
+
+Host OFED / NIC setup must follow the Rivermax documentation; it is outside the scope of this image build.
 
 ## Run
 

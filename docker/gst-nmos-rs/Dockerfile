@@ -13,6 +13,10 @@
 #   docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst \
 #     --build-arg EXTRA_APT_PACKAGES="gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly" .
 #
+# Optional DeepStream base (to get DeepStream plugins in the final image; large):
+#   docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst:ds \
+#     --build-arg BASE_IMAGE=nvcr.io/nvidia/deepstream:9.1-triton-multiarch .
+#
 # Run:
 #
 #   docker run --rm -v /path/to/mxl-domain:/mxl/domain:rw nvnmos-gst \
