@@ -64,7 +64,16 @@ jobs:
           libjson-glib-dev flex
         python3 -m venv .venv-hotdoc
         . .venv-hotdoc/bin/activate
-        pip install "hotdoc~=0.18.0"
+        # Hotdoc's bootstrap theme passes hotdoc/less into the theme subproject
+        # via depend_files; Meson 1.12+ treats that as a sandbox violation.
+        # pip build isolation would pull latest Meson, so pin <1.12 and install
+        # without isolation (runtime deps listed so the sdist can build).
+        pip install \
+          "meson>=1.0,<1.12" "meson-python>=0.14" ninja \
+          pkgconfig "lxml>=5.4" "PyYAML>=6.0.2" "schema>=0.7.7" \
+          "toposort>=1.10" "wheezy.template>=3.2.3" "appdirs>=1.4.4" \
+          "feedgen>=1.0.0" "networkx>=3.4" "dbus-deviation>=0.6.1"
+        pip install --no-build-isolation "hotdoc~=0.18.0"
         echo "$PWD/.venv-hotdoc/bin" >> "$GITHUB_PATH"
 
     - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
