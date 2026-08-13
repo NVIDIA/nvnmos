@@ -38,8 +38,12 @@ sudo apt-get install --no-install-recommends -y \
   build-essential cmake python3 python3-venv \
   clang \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-  gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+  iproute2 curl jq
 ```
+
+`iproute2` (for `ss`), `curl`, and `jq` are only required by the example
+pipeline scripts and the interactive demo.
 
 CMake must be **3.17+**. Ubuntu 24.04's `cmake` package is sufficient; on older
 distros use `pip install cmake~=3.17` inside the venv below (see
