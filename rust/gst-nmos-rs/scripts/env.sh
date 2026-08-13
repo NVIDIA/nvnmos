@@ -195,11 +195,34 @@ is_udp_transport() {
     esac
 }
 
+# Fail-fast if a required tool is missing. Args: command [package-name]
+# (package defaults to the command name).
+require_cmd() {
+    local cmd=$1
+    local pkg=${2:-$1}
+    command -v "$cmd" >/dev/null 2>&1 || {
+        echo "[error] required command '$cmd' not found (install the $pkg package)" >&2
+        exit 1
+    }
+}
+
+# Example pipelines prerequisites.
 require_nvnmosd() {
-    if ! ss -xlpn 2>/dev/null | rg -F "LISTEN" | rg -qF "$DEMO_DAEMON_SOCK"; then
+    require_cmd ss iproute2
+    if ! ss -xlpn 2>/dev/null | grep -F "LISTEN" | grep -qF "$DEMO_DAEMON_SOCK"; then
         echo "[error] $DEMO_DAEMON_SOCK is not listening — start nvnmosd first" >&2
         exit 1
     fi
+}
+
+# Interactive demo prerequisites.
+require_demo_tools() {
+    # for daemon socket checks
+    require_cmd ss iproute2
+    # for making IS-04/IS-05/IS-08 HTTP requests
+    require_cmd curl curl
+    # for JSON body parsing/creation
+    require_cmd jq jq
 }
 
 bootstrap_mxl_domain() {

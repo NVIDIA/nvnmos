@@ -63,6 +63,13 @@ is not supported on `transport=nvdsudp`.
 Pipelines below use `daemon-uri=$DEMO_DAEMON_URI` (default
 `unix:/tmp/nvnmosd.sock`) unless noted.
 
+**Tools** — example pipeline scripts need `ss` (from `iproute2`) to check
+that `nvnmosd` is running. The interactive demo also needs `curl` and `jq`
+for IS-04 / IS-05 / IS-08 HTTP requests. Missing tools fail fast with an
+install hint (`require_cmd` in `env.sh`). Exporting pipeline diagrams
+additionally needs `dot` (from `graphviz`); that is optional and checked
+only when you use that action.
+
 **MXL domain** — example scripts call `bootstrap_mxl_domain` (from
 [`env.sh`](https://github.com/NVIDIA/nvnmos/blob/main/rust/gst-nmos-rs/scripts/env.sh)), which creates `domain_def.json` on first use
 or reuses the `id` already stored under `DEMO_MXL_DOMAIN_PATH`. Override the

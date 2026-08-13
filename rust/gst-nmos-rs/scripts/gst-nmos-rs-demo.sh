@@ -107,6 +107,7 @@ DEMO_MXL_DOMAIN_PATH=${DEMO_MXL_DOMAIN_PATH:-/dev/shm/gst-nmos-rs-demo}
 # Shared flow identity, caps, NIC, and UDP multicast defaults.
 # shellcheck source=env.sh
 source "$_SCRIPT_DIR/env.sh"
+require_demo_tools
 
 # `libnvnmos.so` (consumed by nvnmosd) and the gst-mxl-rs plugin +
 # libmxl.so runtime (required for the MXL inner transport chain).
@@ -148,15 +149,13 @@ _demo_gst_launch() {
 # No listener / missing path in ss → return 1.
 _uds_socket_listening() {
     local path=$1
-    command -v ss >/dev/null 2>&1 || return 1
-    ss -xlpn 2>/dev/null | rg -F "LISTEN" | rg -qF "$path"
+    ss -xlpn 2>/dev/null | grep -F "LISTEN" | grep -qF "$path"
 }
 
 # Return 0 when ss reports pid is listening on the socket path.
 _uds_listener_owned_by_pid() {
     local pid=$1 path=$2
-    command -v ss >/dev/null 2>&1 || return 0
-    ss -xlpn 2>/dev/null | rg -F "$path" | rg -q "pid=$pid[,)]"
+    ss -xlpn 2>/dev/null | grep -F "$path" | grep -qE "pid=$pid[,)]"
 }
 
 # Fail if more than one nvnmosd was started with this --uds path.
@@ -506,7 +505,7 @@ if ! _uds_socket_listening "$SOCK"; then
 fi
 if ! _uds_listener_owned_by_pid "$DAEMON_PID" "$SOCK"; then
     echo "[daemon] $SOCK is not owned by nvnmosd pid $DAEMON_PID"
-    ss -xlpn 2>/dev/null | rg 'gst-nmos-rs-demo\.sock' || true
+    ss -xlpn 2>/dev/null | grep -F 'gst-nmos-rs-demo.sock' || true
     pgrep -af "nvnmosd --uds $SOCK" 2>/dev/null || true
     cat "$DAEMON_LOG"
     exit 1
@@ -987,11 +986,7 @@ sleep 1
 # non-deterministic order, so we don't rely on daemon-log line order.
 # Instead query each Node's IS-04 senders/receivers endpoints and
 # match by `tags["urn:x-nvnmos:tag:name"]` (which gst-nmos-rs sets
-# from sender-name / receiver-name). Requires `jq`.
-
-if ! command -v jq >/dev/null 2>&1; then
-    echo "[warn] 'jq' not found; the URL discovery and example PATCHes will be incomplete."
-fi
+# from sender-name / receiver-name).
 
 # curl defaults to no timeout at all, which can wedge the whole demo
 # script if the daemon's IS-04 / IS-05 HTTP server is briefly slow
@@ -2234,14 +2229,6 @@ menu_is08_unrouted() {
 }
 
 interactive_loop() {
-    if ! command -v jq >/dev/null 2>&1; then
-        echo
-        echo "[warn] 'jq' not found; the interactive menu builds JSON via jq."
-        echo "        Install jq or use the copy/paste curl recipes above."
-        echo "        Falling through to bare \`wait\` — Ctrl+C to quit."
-        wait
-        return
-    fi
     local ans
     while true; do
         echo
