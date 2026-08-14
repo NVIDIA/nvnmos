@@ -226,7 +226,7 @@ fn choose_packets_per_line(stride: u32, max_rtp_payload: u32) -> Result<u32, any
         );
     }
     for ppl in min_ppl..=max_ppl {
-        if stride % ppl == 0 {
+        if stride.is_multiple_of(ppl) {
             return Ok(ppl);
         }
     }

@@ -2369,7 +2369,7 @@ fn format_exact_framerate(num: u32, den: u32) -> String {
 /// in the wild handle both forms because RFC 4566 §6 defines
 /// the value as `<integer> | <floating-point>`.
 fn format_ptime_ns_as_ms(ns: u64) -> String {
-    if ns % 1_000_000 == 0 {
+    if ns.is_multiple_of(1_000_000) {
         format!("{}", ns / 1_000_000)
     } else {
         let ms = ns as f64 / 1_000_000.0;

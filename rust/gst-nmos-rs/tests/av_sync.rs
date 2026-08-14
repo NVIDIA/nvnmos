@@ -655,7 +655,7 @@ fn assert_synchronised(video: &[VideoFrame], pips: &[u64], anc_tol: usize) {
                     let i = i as u8;
                     (i != 0
                         && (i as i32) < NUM_FRAMES
-                        && (i as u64) % FRAMES_PER_INTERVAL == 0
+                        && (i as u64).is_multiple_of(FRAMES_PER_INTERVAL)
                         && expected_caption(i) == c.as_str())
                     .then_some(i)
                 });
@@ -706,7 +706,7 @@ fn assert_synchronised(video: &[VideoFrame], pips: &[u64], anc_tol: usize) {
     let mut in_span = 0;
     for frame in video
         .iter()
-        .filter(|f| (f.idx as u64) != 0 && (f.idx as u64) % FRAMES_PER_INTERVAL == 0)
+        .filter(|f| (f.idx as u64) != 0 && (f.idx as u64).is_multiple_of(FRAMES_PER_INTERVAL))
     {
         if frame.rt + FRAME_PERIOD_NS < first_pip || frame.rt > last_pip + FRAME_PERIOD_NS {
             continue;

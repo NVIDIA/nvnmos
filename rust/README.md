@@ -177,7 +177,7 @@ For a combined image with `nvnmosd` + `gst-nmos-rs` + plugins for `transport=mxl
 
 ## Building
 
-The workspace **MSRV** is **Rust 1.85** (`rust-version` in [`Cargo.toml`](Cargo.toml)). Development, CI, and container builds pin **1.92** in [`rust-toolchain.toml`](rust-toolchain.toml) — the minimum needed for gst-plugins-rs `0.15.2` in [`docker/gst-nmos-rs`](../docker/gst-nmos-rs/).
+The workspace **MSRV** is **Rust 1.87** (`rust-version` in [`Cargo.toml`](Cargo.toml)). Development, CI, and container builds pin **1.92** in [`rust-toolchain.toml`](rust-toolchain.toml) — the minimum needed for gst-plugins-rs `0.15.2` in [`docker/gst-nmos-rs`](../docker/gst-nmos-rs/).
 
 `nvnmos-sys` links against a pre-built `libnvnmos.so`. The Rust crate does **not** build the C library itself; use the CMake/Conan flow under `../src/` ([Quick start — Build `libnvnmos.so`](#build-libnvnmosso)), then:
 

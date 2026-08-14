@@ -30,7 +30,7 @@ The nvnmos tree is taken from the build context (`COPY src/`, `COPY rust/` via t
 |----------|---------|-------------|
 | `BASE_IMAGE` | `ubuntu:24.04` | Base for **every** stage, including the final runtime. Override with a DeepStream image to be able to use DeepStream plugins (see below). |
 | `CONAN_LOCKFILE` | `src/conan.lock` | Input lockfile for `conan install`. Pass an empty value to resolve the latest compatible graph instead. |
-| `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for all Rust stages in this image. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); gst-plugins-rs MSRV is **1.92**. Workspace MSRV is **1.85** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
+| `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for all Rust stages in this image. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); gst-plugins-rs MSRV is **1.92**. Workspace MSRV is **1.87** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
 | `MXL_REPO` | `https://github.com/dmf-mxl/mxl.git` | MXL source repository (`libmxl`, `gst-mxl-rs`). |
 | `MXL_REF` | `81738a15adb55119a6855343bc1053a4389bf6df` | Pinned MXL commit (`81738a1`, tip of `release/v1.1` at time of writing). Use a full 40-character SHA or a branch/tag name. |
 | `GST_PLUGINS_RS_REPO` | `https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git` | gst-plugins-rs source for `transport=udp2`. |
