@@ -197,7 +197,7 @@ If user pre-sets `payload-size` / `packets-per-line` in `transport-properties`, 
 
 When building SDP from caps (`from_caps`), set:
 
-- `TP=2110TPN` (narrow traffic profile) — parent design and `sdp.rs` comment; today omitted for `udp` / `udp2` transports.
+- `TP=2110TPN` (ST 2110-21 Type N) — parent design and `sdp.rs` `type_n`; today omitted for `udp` / `udp2` transports.
 - Keep `PM=2110GPM`, `SSN=…`, `colorimetry`, etc. as today.
 
 Cross-check `caps` vs `transport-file` unchanged.
@@ -338,7 +338,7 @@ Three layers, in precedence order:
 
 **Deferred / out of scope for now:** a dedicated `clock-refclk` (or IS-04-clocks) element property, container-time interface-name adaptation, env-var fallbacks. Revisit when we support wholesale pipeline-description arguments where IP/MAC are unknown until runtime.
 
-**Status:** **Done** — `build_sdp` emits PTP traceable when `narrow_traffic_profile && Side::Sender`; udp/udp2 omit; receivers omit.
+**Status:** **Done** — `build_sdp` emits PTP traceable when `type_n && Side::Sender`; udp/udp2 omit; receivers omit.
 
 ## Resolved decisions (was: open questions)
 

@@ -42,8 +42,8 @@ pub(crate) const DEFAULT_MAX_VIDEO_RTP_PAYLOAD: u32 = 1452;
 /// Default `a=ptime:` when SDP omits it — 1 ms.
 pub(crate) const DEFAULT_PTIME_NS: u64 = 1_000_000;
 
-/// Default `nvdsudpsrc.payload-multiple` cadence: 16 ms of audio per
-/// output buffer when `ptime` is 1 ms (matches nvds_nmos_bin examples).
+/// Default audio aggregation window for `nvdsudpsrc.payload-multiple`:
+/// 16 ms of audio per output buffer.
 pub(crate) const DEFAULT_AUDIO_BUFFER_NS: u64 = 16_000_000;
 
 /// Minimum raw bytes per video packet (`nvdsudpsrc.payload-size`).

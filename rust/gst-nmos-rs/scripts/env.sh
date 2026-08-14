@@ -49,7 +49,7 @@ export DEMO_UDP_VIDEO_JXSV_CAPS='image/x-jxsc,width=1920,height=1080,framerate=2
 export DEMO_UDP_VIDEO_JXSV_BIT_RATE=110000
 export DEMO_MXL_AUDIO_CAPS='audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved'
 export DEMO_UDP_AUDIO_CAPS='audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved'
-# Truncated human-readable essence name for NMOS `label=` — keep in sync with *_CAPS.
+# Truncated human-readable essence name for NMOS `label` — keep in sync with *_CAPS.
 export DEMO_MXL_VIDEO_LABEL=${DEMO_MXL_VIDEO_LABEL:-1080p25 v210}
 export DEMO_UDP_VIDEO_LABEL=${DEMO_UDP_VIDEO_LABEL:-1080p25 UYVP}
 export DEMO_UDP_VIDEO_JXSV_LABEL=${DEMO_UDP_VIDEO_JXSV_LABEL:-1080p25 JPEG XS}

@@ -231,10 +231,10 @@ pub(crate) struct CommonSettings {
     /// If the directory contains a `domain_def.json` its `id` is used
     /// to populate `mxl_domain_id` when the property is unset, or
     /// cross-checked against it when both are supplied. Fed into the
-    /// inner `mxlsink` / `mxlsrc` `domain=` property.
+    /// inner `mxlsink` / `mxlsrc` `domain` property.
     pub(crate) mxl_domain_path: String,
-    /// MXL flow id (UUID) to bind the inner `mxlsink.flow-id=` or the
-    /// matching `mxlsrc.{video,audio,data}-flow-id=`. Cross-checked
+    /// MXL flow id (UUID) to bind the inner `mxlsink.flow-id` or the
+    /// matching `mxlsrc.{video,audio,data}-flow-id`. Cross-checked
     /// against the transport file's top-level `id` when both are
     /// supplied; either source alone is enough.
     pub(crate) mxl_flow_id: String,

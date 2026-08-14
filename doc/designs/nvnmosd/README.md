@@ -299,7 +299,7 @@ For RTP, the element fills the SDP from essence caps + per-format defaults + per
 - **`clock-rate`** — video / ANC / JXSV → `90000`; audio → `rate` from the essence caps.
 - **`payload` (PT)** — by media: video → `96`, audio → `97`, ancillary → `98`. Override via `transport-caps` if a deployment requires specific PT values.
 - **`depth`, `sampling`** — from the essence format string (`v210` / `UYVP` → `depth=10, sampling=YCbCr-4:2:2`; similar mappings for the other supported formats).
-- **`colorimetry`** — from `video/x-raw, colorimetry=` if present (mapped to the ST 2110 form, e.g. `bt709` → `BT709`); otherwise `BT709`.
+- **`colorimetry`** — from `video/x-raw, colorimetry` if present (mapped to the ST 2110 form, e.g. `bt709` → `BT709`); otherwise `BT709`.
 - **`PM` (Packing Mode)** — `2110GPM`. `2110BPM` requires explicit override.
 - **`SSN`** — by essence: `ST2110-20:2017` / `ST2110-30:2017` / `ST2110-40:2018` / `ST2110-22:2022`.
 - **`TP` (Traffic Profile)** — by `transport`: `nvdsudp` (Rivermax-paced) → `2110TPN` (narrow); `udp` / `udp2` → `2110TPW` (wide).

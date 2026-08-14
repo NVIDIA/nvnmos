@@ -7,7 +7,7 @@
 //! whose top-level `id` is the MXL flow id (when present) and whose
 //! `format` is the NMOS format URN (`urn:x-nmos:format:video|audio|data`).
 //! At activation time the element consumes `id` to configure the inner
-//! `mxlsink` / `mxlsrc` (`flow-id=` / `{video,audio,data}-flow-id=`).
+//! `mxlsink` (`flow-id`) / `mxlsrc` (`{video,audio,data}-flow-id`).
 //!
 //! [`read_flow_def_meta`] parses the JSON into [`FlowDefMeta`].
 //! [`resolve_mxl_flow_meta`] combines that with the `mxl-flow-id`
@@ -507,8 +507,8 @@ pub(crate) fn indicates_unconstrained_receiver_caps(text: &str) -> Result<bool, 
 #[derive(Debug)]
 pub(crate) struct FlowDefBuildInput<'a> {
     /// MXL flow id (UUID). When non-empty, emitted as the top-level
-    /// `id` and later passed to `mxlsink.flow-id=` /
-    /// `mxlsrc.{video,audio,data}-flow-id=`. When empty, omitted from
+    /// `id` and later passed to `mxlsink.flow-id` /
+    /// `mxlsrc.{video,audio,data}-flow-id`. When empty, omitted from
     /// the configuring JSON so libnvnmos can register without a
     /// concrete MXL flow id (the inner chain stays fake until IS-05
     /// activation supplies one).

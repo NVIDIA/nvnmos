@@ -5,7 +5,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 require_nvnmosd
 
-# Deferred AddSender: no `caps=` on nmossink — peer caps at READY→PAUSED
+# Deferred AddSender: no `caps` on nmossink — peer caps at READY→PAUSED
 # drive SDP synthesis. Endpoint props must still be set.
 exec gst-launch-1.0 -e \
     videotestsrc pattern=smpte is-live=true ! \

@@ -12,7 +12,7 @@ use gstreamer as gst;
 ///
 /// `caps` is the minimal essence shape (from [`crate::flow_def::caps_from`]
 /// or SDP parse). When `rtp_caps` is supplied, audio `channel-order`
-/// is taken from the fmtp slot on the companion `application/x-rtp`
+/// is taken from the fmtp parameter on the companion `application/x-rtp`
 /// caps; otherwise audio defaults use channel count (`M` / `ST` / `Uxx`).
 pub(crate) fn caps_from(caps: &gst::Caps, rtp_caps: Option<&gst::Caps>) -> gst::Caps {
     if caps.structure(0).is_some_and(|s| s.name() == "audio/x-raw") {
@@ -108,7 +108,7 @@ pub(crate) fn default_smpte2110_channel_order(channels: i32) -> String {
 }
 
 /// Read `channel-order` from parsed `application/x-rtp` caps (the
-/// fmtp `channel-order=` slot from SDP).
+/// fmtp `channel-order` parameter from SDP).
 pub(crate) fn channel_order_from_rtp_structure(s: &gst::StructureRef) -> Option<String> {
     s.get::<&str>("channel-order").ok().map(str::to_owned)
 }
