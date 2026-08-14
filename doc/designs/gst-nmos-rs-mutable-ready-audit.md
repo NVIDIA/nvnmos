@@ -62,7 +62,7 @@ PLAYING
 
 ## `nmossink` properties
 
-*Add-resource rows:* `mutable_ready`, NULL or READY. If eager registration already ran at NULL→READY, later READY-time changes have no effect. Setting `transport-file`, `transport-file-path`, or `caps` at READY (before PAUSED) triggers eager add-resource and skips deferred. Deferred add-resource is currently only implemented for `transport=mxl`. `source-ip` … `destination-port` are honoured when `transport` is `udp`, `udp2`, or `nvdsudp`; ignored on `mxl`. *Inner build rows:* `mxl-domain-path` is optional at add-resource (can populate or cross-check `mxl-domain-id` via `domain_def.json`); first required at inner build for `mxlsink domain=`.
+*Add-resource rows:* `mutable_ready`, NULL or READY. If eager registration already ran at NULL→READY, later READY-time changes have no effect. Setting `transport-file`, `transport-file-path`, or `caps` at READY (before PAUSED) triggers eager add-resource and skips deferred. Deferred add-resource is currently only implemented for `transport=mxl`. `source-ip` … `destination-port` are honoured when `transport` is `udp`, `udp2`, or `nvdsudp`; ignored on `mxl`. *Inner build rows:* `mxl-domain-path` is optional at add-resource (can populate or cross-check `mxl-domain-id` via `domain_def.json`); first required at inner build for `mxlsink.domain`.
 
 | Property | First step |
 |----------|------------|
@@ -96,7 +96,7 @@ PLAYING
 
 ## `nmossrc` properties
 
-*Open-session and add-resource rows:* no `mutable_ready()` — set in **NULL** (eager add-resource only). `mxl-domain-id` is optional at add-resource (UUID tag when set; application-resolved when unset). `mxl-flow-id` property is ignored at activation-event (PATCH transport file wins). *Inner build rows:* `mutable_ready`, NULL or READY. `mxl-domain-path` is optional at add-resource; first required at inner build for `mxlsrc domain=`. `depay-properties` applies when `transport` is `udp` or `udp2`.
+*Open-session and add-resource rows:* no `mutable_ready()` — set in **NULL** (eager add-resource only). `mxl-domain-id` is optional at add-resource (UUID tag when set; application-resolved when unset). `mxl-flow-id` property is ignored at activation-event (PATCH transport file wins). *Inner build rows:* `mutable_ready`, NULL or READY. `mxl-domain-path` is optional at add-resource; first required at inner build for `mxlsrc.domain`. `depay-properties` applies when `transport` is `udp` or `udp2`.
 
 | Property | First step |
 |----------|------------|

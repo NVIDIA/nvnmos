@@ -6,7 +6,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 require_nvnmosd
 bootstrap_mxl_domain
 
-# Deferred AddSender: no `caps=` on nmossink — peer caps at READY→PAUSED
+# Deferred AddSender: no `caps` on nmossink — peer caps at READY→PAUSED
 # drive flow_def synthesis. Domain + flow identity props must still be set.
 exec gst-launch-1.0 -e \
     videotestsrc pattern=smpte is-live=true ! \

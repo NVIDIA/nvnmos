@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! NMOS network-services URL parsing. Mirrors the `parse_nmos_url` /
-//! `NvNmosNetworkServicesConfig` path in `nvds_nmos_bin`.
+//! NMOS network-services URL parsing.
 
 use regex::Regex;
 use url::{Host, Url};
@@ -58,7 +57,6 @@ pub(crate) fn parse_nmos_url(url_str: &str, service_type: &str) -> NmosUrlParts 
 }
 
 fn parse_version_from_path(path: &str, service_type: &str, version: &mut String) {
-    // Same path/version pattern as nvds_nmos_bin::parse_nmos_url.
     let pattern = format!(r"^/x-nmos/{service_type}/(v[0-9]+\.[0-9]+)/?$");
     let re = Regex::new(&pattern).expect("NMOS version path pattern is valid");
     if let Some(caps) = re.captures(path) {

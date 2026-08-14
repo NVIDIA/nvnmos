@@ -165,7 +165,7 @@ pub(super) fn sdp_build_input<'a>(
         interface_ip: &settings.interface_ip,
         advertise_caps,
         node_seed: &settings.node.node_seed,
-        narrow_traffic_profile: settings.transport == Transport::NvDsUdp,
+        type_n: settings.transport == Transport::NvDsUdp,
         format_bit_rate: settings.format_bit_rate,
         transport_bit_rate: settings.transport_bit_rate,
     }

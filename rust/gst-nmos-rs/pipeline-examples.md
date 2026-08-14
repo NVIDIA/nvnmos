@@ -110,7 +110,7 @@ sudo sysctl -w net.core.rmem_max=16777216 net.core.wmem_max=16777216
 
 Pick **`transport=udp`** (gst-plugins-good), **`transport=udp2`**
 (gst-plugins-rs), or **`transport=nvdsudp`** (DeepStream Rivermax).
-Example UDP scripts use `DEMO_UDP_TRANSPORT` for the `transport=` property
+Example UDP scripts use `DEMO_UDP_TRANSPORT` for the `transport` property
 (default `udp`).
 
 ## Environment variables
@@ -121,17 +121,17 @@ prefix. Example scripts and the interactive demo both source this file.
 | Variable | Role |
 |----------|------|
 | `DEMO_DAEMON_SOCK` | gRPC UDS path for `nvnmosd` (default `/tmp/nvnmosd.sock`) |
-| `DEMO_DAEMON_URI` | `unix:` URI derived from `DEMO_DAEMON_SOCK` (used as `daemon-uri=`) |
+| `DEMO_DAEMON_URI` | `unix:` URI derived from `DEMO_DAEMON_SOCK` (used as `daemon-uri`) |
 | `DEMO_NIC_IP` | Local NIC for UDP IS-05 endpoint props and SDP source-filter |
-| `DEMO_UDP_TRANSPORT` | `transport=` on example pipelines: `udp`, `udp2`, or `nvdsudp` |
+| `DEMO_UDP_TRANSPORT` | `transport` on example pipelines: `udp`, `udp2`, or `nvdsudp` |
 | `DEMO_MXL_DOMAIN_ID` / `DEMO_MXL_DOMAIN_PATH` | MXL shared-memory domain |
 | `DEMO_MXL_{VIDEO,AUDIO}_FLOW_ID{1-4}` | MXL flow identity (paired per index) |
 | `DEMO_UDP_{VIDEO,AUDIO}_MCAST_{IP,PORT}{1-4}` | UDP multicast groups (paired per index) |
 | `DEMO_{MXL,UDP}_{VIDEO,AUDIO}_CAPS` | Primary essence caps |
-| `DEMO_{MXL,UDP}_{VIDEO,AUDIO}_LABEL` | Primary essence name for NMOS `label=` (keep in sync with `*_CAPS`) |
+| `DEMO_{MXL,UDP}_{VIDEO,AUDIO}_LABEL` | Primary essence name for NMOS `label` (keep in sync with `*_CAPS`) |
 | `DEMO_{MXL,UDP}_{VIDEO,AUDIO}_CAPS_ALT` | Alternate essence (demo Node 4) |
-| `DEMO_{MXL,UDP}_{VIDEO,AUDIO}_LABEL_ALT` | Alternate essence name for NMOS `label=` (keep in sync with `*_CAPS_ALT`) |
-| `DEMO_UDP_VIDEO_JXSV_{CAPS,RAW_CAPS,BIT_RATE,LABEL}` | JPEG XS essence caps (`image/x-jxsc`), encoder input (`video/x-raw`), format bit rate (kbit/s), and NMOS `label=` |
+| `DEMO_{MXL,UDP}_{VIDEO,AUDIO}_LABEL_ALT` | Alternate essence name for NMOS `label` (keep in sync with `*_CAPS_ALT`) |
+| `DEMO_UDP_VIDEO_JXSV_{CAPS,RAW_CAPS,BIT_RATE,LABEL}` | JPEG XS essence caps (`image/x-jxsc`), encoder input (`video/x-raw`), format bit rate (kbit/s), and NMOS `label` |
 | `DEMO_UDP_AUDIO_TRANSPORT_CAPS_ALT` | Alt UDP audio `transport-caps` (`a-ptime=0.125` ms; demo Node 4) |
 | `DEMO_UDP_VIDEO_BUFFER_SIZE` | `udpsrc`/`udpsink` socket buffer (`udp`/`udp2` only) |
 | `DEMO_VIDEO_QUEUE_MAX_BUFFERS` | Queue after video `nmossrc` on receiver / flipper paths |
@@ -410,7 +410,7 @@ The element auto-calculates `payload-size`, `packets-per-line` (video), and
 `nvdsudpsrc` properties via `transport-properties` when needed (any number of
 fields in one structure, e.g. `properties,gpu-id=0,sync=false`).
 
-SDP synthesis from `caps` emits `TP=2110TPN` (narrow traffic profile). Use
+SDP synthesis from `caps` emits `TP=2110TPN` (ST 2110-21 Type N). Use
 `video/x-raw(memory:NVMM),…` in `caps` for GPU Direct; set `gpu-id` via
 `transport-properties`.
 
