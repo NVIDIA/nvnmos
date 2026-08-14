@@ -57,6 +57,7 @@
 #include "nmos/is05_versions.h"
 #include "nmos/is08_versions.h"
 #include "nmos/media_type.h"
+#include "nmos/mxl.h"
 #include "nmos/model.h"
 #include "nmos/node_interfaces.h"
 #include "nmos/node_resource.h"
@@ -297,7 +298,7 @@ namespace nvnmos
 
         if (impl::format::video == format)
         {
-            if (nmos::media_types::video_raw == media_type)
+            if (nmos::equals_media_type(nmos::media_types::video_raw, media_type))
             {
                 const auto video = nmos::get_video_raw_parameters(sdp_params);
 
@@ -310,7 +311,7 @@ namespace nvnmos
                     settings
                 );
             }
-            else if (nmos::media_types::video_jxsv == media_type)
+            else if (nmos::equals_media_type(nmos::media_types::video_jxsv, media_type))
             {
                 const auto video = nmos::get_video_jxsv_parameters(sdp_params);
                 const auto format_bit_rate = impl::get_format_bit_rate(sdp_params);
@@ -373,7 +374,7 @@ namespace nvnmos
         auto sender = nmos::make_sender(sender_id, flow_id, nmos::transports::rtp, device_id, manifest_href.to_string(), interface_names, settings);
         if (impl::format::video == format)
         {
-            if (nmos::media_types::video_jxsv == media_type)
+            if (nmos::equals_media_type(nmos::media_types::video_jxsv, media_type))
             {
                 const auto video = nmos::get_video_jxsv_parameters(sdp_params);
 
@@ -489,7 +490,7 @@ namespace nvnmos
 
             if (want_caps)
             {
-                if (nmos::media_types::video_raw == media_type)
+                if (nmos::equals_media_type(nmos::media_types::video_raw, media_type))
                 {
                     const auto video = nmos::get_video_raw_parameters(sdp_params);
 
@@ -506,7 +507,7 @@ namespace nvnmos
                         })
                     });
                 }
-                else if (nmos::media_types::video_jxsv == media_type)
+                else if (nmos::equals_media_type(nmos::media_types::video_jxsv, media_type))
                 {
                     const auto video = nmos::get_video_jxsv_parameters(sdp_params);
 
@@ -1068,7 +1069,7 @@ namespace nvnmos
         {
             const auto validate_sdp_parameters = [](const web::json::value& receiver, const nmos::sdp_parameters& sdp_params)
             {
-                if (nmos::media_types::video_jxsv == nmos::get_media_type(sdp_params))
+                if (nmos::equals_media_type(nmos::media_types::video_jxsv, nmos::get_media_type(sdp_params)))
                 {
                     nmos::validate_video_jxsv_sdp_parameters(receiver, sdp_params);
                 }
@@ -1840,17 +1841,17 @@ namespace nvnmos
         // identify supported format from media type
         format get_format(const nmos::media_type& media_type)
         {
-            // ST 2110 media types
-            if (nmos::media_types::video_raw == media_type) return format::video;
-            if (nmos::media_types::video_jxsv == media_type) return format::video;
-            if (nmos::media_types::audio_L(24) == media_type) return format::audio;
-            if (nmos::media_types::audio_L(16) == media_type) return format::audio;
-            if (nmos::media_types::video_smpte291 == media_type) return format::data;
-            if (nmos::media_types::video_SMPTE2022_6 == media_type) return format::mux;
-            // MXL media types
-            if (nmos::media_type{ U("video/v210") } == media_type) return format::video;
-            if (nmos::media_type{ U("video/v210a") } == media_type) return format::video;
-            if (nmos::media_type{ U("audio/float32") } == media_type) return format::audio;
+            // ST 2110 / SDP-derived: case-insensitive per RFC 4855
+            if (nmos::equals_media_type(nmos::media_types::video_raw, media_type)) return format::video;
+            if (nmos::equals_media_type(nmos::media_types::video_jxsv, media_type)) return format::video;
+            if (nmos::equals_media_type(nmos::media_types::audio_L(24), media_type)) return format::audio;
+            if (nmos::equals_media_type(nmos::media_types::audio_L(16), media_type)) return format::audio;
+            if (nmos::equals_media_type(nmos::media_types::video_smpte291, media_type)) return format::data;
+            if (nmos::equals_media_type(nmos::media_types::video_SMPTE2022_6, media_type)) return format::mux;
+            // MXL: configured / stored values — keep these as exact match
+            if (nmos::media_types::video_v210 == media_type) return format::video;
+            if (nmos::media_types::video_v210a == media_type) return format::video;
+            if (nmos::media_types::audio_float32 == media_type) return format::audio;
             throw std::invalid_argument("Unsupported media type: " + utility::us2s(media_type.name));
         }
 

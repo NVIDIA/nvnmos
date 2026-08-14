@@ -333,7 +333,12 @@ typedef struct _NvNmosNodeConfig
         logging callbacks. */
     int log_level;
     /** Holds topics for which to make logging callbacks. The array's size
-        must be equal to #num_log_categories. May be null. */
+        must be equal to #num_log_categories. May be null, in which case
+        all topics are included. When set, the list is an allowlist
+        ("" matches uncategorized) unless there are only negative
+        entries (prefixed with '!', e.g. "!access"), in which case it is
+        a blocklist; in an allowlist a matching negative overrides any
+        positive match. */
     const char **log_categories;
     /** Holds the number of #log_categories. May be zero. */
     unsigned int num_log_categories;

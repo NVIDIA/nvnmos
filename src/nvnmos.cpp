@@ -27,7 +27,10 @@
 
 #include <cstring>
 #include <boost/algorithm/string/join.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/range/adaptor/transformed.hpp>
+#include <boost/range/algorithm/find.hpp>
+#include <boost/range/algorithm/find_if.hpp>
 #include <boost/range/iterator_range_core.hpp>
 #include "cpprest/host_utils.h"
 #include "nmos/asset.h"
@@ -66,15 +69,65 @@ namespace nvnmos
 
         virtual void log(const slog::log_message& message) const
         {
-            if (callback)
-            {
-                auto categories = nmos::get_categories_stash(message.stream());
-                auto csv = boost::join(categories, ",");
-                callback(server, csv.c_str(), message.level(), message.str().c_str());
-            }
+            if (!callback) return;
+
+            auto categories = nmos::get_categories_stash(message.stream());
+            if (!pertinent(categories)) return;
+
+            auto csv = boost::join(categories, ",");
+            callback(server, csv.c_str(), message.level(), message.str().c_str());
         }
 
     private:
+        // Matches nmos::experimental::log_gate::pertinent(categories) for
+        // logging_categories (including '!' blocklist / allowlist rules).
+        bool pertinent(const std::list<nmos::category>& categories) const
+        {
+            if (!model.settings.has_field(nmos::fields::logging_categories))
+            {
+                return true;
+            }
+
+            const auto& pertinent_categories = nmos::fields::logging_categories(model.settings);
+
+            const auto is_negative = [](const web::json::value& category)
+            {
+                return boost::starts_with(category.as_string(), U("!"));
+            };
+            const bool default_pertinent = 0 != pertinent_categories.size()
+                && pertinent_categories.end() == boost::range::find_if(pertinent_categories, [&](const web::json::value& category)
+                {
+                    return !is_negative(category);
+                });
+
+            if (categories.empty())
+            {
+                static const auto no_category_negative = web::json::value::string(U("!"));
+                if (pertinent_categories.end() != boost::range::find(pertinent_categories, no_category_negative))
+                {
+                    return false;
+                }
+
+                static const auto no_category = web::json::value::string(utility::string_t());
+                return default_pertinent || pertinent_categories.end() != boost::range::find(pertinent_categories, no_category);
+            }
+
+            if (categories.end() != boost::range::find_if(categories, [&](const nmos::category& c)
+            {
+                const auto category_negative = web::json::value::string(utility::s2us(("!" + c).c_str()));
+                return pertinent_categories.end() != boost::range::find(pertinent_categories, category_negative);
+            }))
+            {
+                return false;
+            }
+
+            return default_pertinent || categories.end() != boost::range::find_if(categories, [&](const nmos::category& c)
+            {
+                const auto category = web::json::value::string(utility::s2us(c.c_str()));
+                return pertinent_categories.end() != boost::range::find(pertinent_categories, category);
+            });
+        }
+
         NvNmosNodeServer* server;
         nmos_logging_callback callback;
         nmos::experimental::log_model& model;
@@ -462,7 +515,9 @@ namespace nvnmos
             web::json::insert(settings, std::make_pair(nmos::fields::logging_level, config.log_level));
         }
 
-        if (0 != config.num_log_categories)
+        // null: omit logging_categories (log everything); non-null: insert
+        // that array (length 0 => log nothing)
+        if (0 != config.log_categories)
         {
             auto categories = value_from_elements(boost::make_iterator_range_n(config.log_categories, config.num_log_categories) | boost::adaptors::transformed([](const char* category)
             {
