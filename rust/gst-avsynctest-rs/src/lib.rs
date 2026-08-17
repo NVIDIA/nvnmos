@@ -31,6 +31,7 @@ use gst::glib;
 use gstreamer as gst;
 
 pub mod analyze;
+pub mod ancillary;
 pub mod audiosrc;
 pub mod captions;
 pub(crate) mod imp_error;

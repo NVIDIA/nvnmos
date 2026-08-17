@@ -22,7 +22,7 @@ With default build arguments the image produces a tarball named `nvnmos-ubuntu-2
 | `BASE_IMAGE` | `ubuntu:24.04` | Base image for all stages; controls the compatibility of the created package and tarball name. |
 | `PACKAGE_SUFFIX` | _(derived from `BASE_IMAGE`)_ | Package directory and tarball suffix. Default is `-ubuntu-24.04` for the default base image, yielding `nvnmos-ubuntu-24.04.tar.gz`. |
 | `CONAN_LOCKFILE` | `src/conan.lock` | Input lockfile for `conan install`. Pass an empty value, e.g. `--build-arg CONAN_LOCKFILE=`, to resolve the latest compatible graph instead. |
-| `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for the workspace build. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); workspace MSRV is **1.85** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
+| `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for the workspace build. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); workspace MSRV is **1.87** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
 
 The image installs the Conan Center `nmos-cpp` dependency graph via `conan install` (using `CONAN_LOCKFILE` when set), writes the resolved `conan.lock` into the package tarball, then builds the Rust workspace (`nvnmosd`, `gst-nmos-rs`, …) against the built `libnvnmos.so`. Conan (`~=2.2`) and CMake (`~=3.17`) versions match the manual build instructions in the top-level README and CI.
 
