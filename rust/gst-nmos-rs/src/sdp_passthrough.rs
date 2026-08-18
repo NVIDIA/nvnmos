@@ -267,10 +267,10 @@ fn replace_connection_address(m: &mut SDPMediaRef, address: &str) -> Result<(), 
     let conn = m.connection(0).ok_or(SdpError::MissingConnection)?;
     let nettype = conn.nettype().unwrap_or("IN");
     let addrtype = conn.addrtype().unwrap_or("IP4");
-    let ttl = if is_multicast_address(address) {
-        defaults::MULTICAST_TTL
-    } else {
-        conn.ttl()
+    let ttl = match (is_multicast_address(address), conn.ttl()) {
+        (true, 0) => defaults::MULTICAST_TTL,
+        (true, ttl) => ttl,
+        (false, _) => 0,
     };
     let new_conn = SDPConnection::new(nettype, addrtype, address, ttl, conn.addr_number());
     m.replace_connection(0, new_conn)
@@ -446,6 +446,59 @@ mod tests {
         assert!(
             !out.contains("x-nvnmos-iface:"),
             "unresolvable override must drop stale iface: {out}",
+        );
+    }
+
+    #[test]
+    fn multicast_destination_override_preserves_nonzero_ttl() {
+        init_gst();
+        let input = VIDEO_WITH_STALE_IFACE.replace("239.1.1.1/64", "239.1.1.1/127");
+        let overrides = SdpOverrides {
+            destination_ip: Some("239.1.1.2"),
+            ..Default::default()
+        };
+        let out =
+            passthrough_with_overrides(&input, &overrides, DualLegPassthroughPolicy::RejectDualLeg)
+                .expect("splice");
+        assert!(
+            out.contains("c=IN IP4 239.1.1.2/127"),
+            "multicast override must preserve a non-zero TTL: {out}",
+        );
+    }
+
+    #[test]
+    fn unicast_to_multicast_destination_override_uses_default_ttl() {
+        init_gst();
+        let input = VIDEO_WITH_STALE_IFACE.replace("239.1.1.1/64", "192.0.2.20");
+        let overrides = SdpOverrides {
+            destination_ip: Some("239.1.1.2"),
+            ..Default::default()
+        };
+        let out =
+            passthrough_with_overrides(&input, &overrides, DualLegPassthroughPolicy::RejectDualLeg)
+                .expect("splice");
+        assert!(
+            out.contains(&format!("c=IN IP4 239.1.1.2/{}", defaults::MULTICAST_TTL)),
+            "multicast override must supply the default TTL: {out}",
+        );
+    }
+
+    #[test]
+    fn multicast_to_unicast_destination_override_omits_ttl() {
+        init_gst();
+        let overrides = SdpOverrides {
+            destination_ip: Some("192.0.2.20"),
+            ..Default::default()
+        };
+        let out = passthrough_with_overrides(
+            VIDEO_WITH_STALE_IFACE,
+            &overrides,
+            DualLegPassthroughPolicy::RejectDualLeg,
+        )
+        .expect("splice");
+        assert!(
+            out.contains("c=IN IP4 192.0.2.20\r\n"),
+            "unicast override must omit the TTL suffix: {out}",
         );
     }
 }

@@ -1224,6 +1224,12 @@ namespace nvnmos
                 sdp_params.origin.session_version = utility::ostringstreamed(sdp::ntp_now() >> 32);
 
                 auto& transport_params = nmos::fields::transport_params(nmos::fields::endpoint_active(connection_sender.data));
+                if (0 == sdp_params.connection_data.ttl)
+                {
+                    // match the nmos::sdp_parameters value-constructor default; ignored by nmos::make_session_description
+                    // for IPv4 unicast addresses
+                    sdp_params.connection_data.ttl = 32;
+                }
 
                 // use nmos::make_session_description rather than impl::make_session_description for /transportfile
                 // because e.g. the custom SDP attributes in nvnmos::attributes are only for 'internal' use
