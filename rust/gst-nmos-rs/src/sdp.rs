@@ -160,7 +160,7 @@ pub(crate) mod defaults {
     /// for unicast destinations (pinned by
     /// `gst_sdp_strips_ttl_for_unicast_c_lines`), so this
     /// constant only takes effect for multicast `c=` lines.
-    pub(crate) const MULTICAST_TTL: u32 = 64;
+    pub(crate) const MULTICAST_TTL: u32 = 32;
 
     /// RTP clock rate for RFC 4175 video (§6.1 `rate`).
     /// Fixed at 90 kHz regardless of frame rate, depth, or
@@ -946,7 +946,7 @@ pub(crate) fn resource_name_from_transport(text: &str) -> Result<Option<String>,
 ///                                                             when no `t=` block was added
 /// a=x-nvnmos-name:<session.name>                              ← if Some (session-level)
 /// m=<media> <destination_port> RTP/AVP <pt>
-/// c=IN IP4 <destination_ip>/64
+/// c=IN IP4 <destination_ip>/32
 /// a=rtpmap:<pt> ...      ← from `set_media_from_caps`
 /// a=fmtp:<pt> ...        ← from `set_media_from_caps`
 /// a=ts-refclk:ptp=IEEE1588-2008:traceable                     ← if session.emit_ptp_ts_refclk
@@ -2843,8 +2843,8 @@ mod tests {
     }
 
     #[test]
-    fn defaults_multicast_ttl_is_64() {
-        assert_eq!(defaults::MULTICAST_TTL, 64);
+    fn defaults_multicast_ttl_is_32() {
+        assert_eq!(defaults::MULTICAST_TTL, 32);
     }
 
     /// Pins `gst-sdp`'s `SDPMedia::add_connection` behaviour so
