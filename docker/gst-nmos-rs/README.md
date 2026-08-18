@@ -5,7 +5,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # gst-nmos-rs Container Image
 
-Operator runtime image: `nvnmosd`, `gst-nmos-rs` (`libgstnmos.so`), MXL (`libmxl` + `libgstmxl.so`), and GStreamer plugins for **linux/amd64** (default base `ubuntu:24.04`, non-root UID/GID **10001**).
+Operator runtime image for **linux/amd64** (default base `ubuntu:24.04`, non-root UID/GID **10001**):
+
+- `nvnmosd`, `gst-nmos-rs` (`libgstnmos.so`)
+- MXL (`libmxl` + `libgstmxl.so`)
+- A/V sync testing — `gst-avsynctest-rs` (`avsyncvideotestsrc` / `avsyncaudiotestsrc`)
+- Ancillary data — `gst-plugins-rs` closedcaption (`st2038extractor` / `st2038combiner`) for ST 2110-40 / RFC 8331 / ST 291 ANC
 
 Use this image to run `gst-launch-1.0` pipelines with `nmossrc` / `nmossink`:
 
@@ -33,13 +38,13 @@ The nvnmos tree is taken from the build context (`COPY src/`, `COPY rust/` via t
 | `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for all Rust stages in this image. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); gst-plugins-rs MSRV is **1.92**. Workspace MSRV is **1.87** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
 | `MXL_REPO` | `https://github.com/dmf-mxl/mxl.git` | MXL source repository (`libmxl`, `gst-mxl-rs`). |
 | `MXL_REF` | `81738a15adb55119a6855343bc1053a4389bf6df` | Pinned MXL commit (`81738a1`, tip of `release/v1.1` at time of writing). Use a full 40-character SHA or a branch/tag name. |
-| `GST_PLUGINS_RS_REPO` | `https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git` | gst-plugins-rs source for `transport=udp2`. |
-| `GST_PLUGINS_RS_REF` | `0332d3d2084df7bae6dbd3c924a2bb62c2e56e89` | Pinned gst-plugins-rs commit on `main` (`udpsrc2`, `rtpjxsv` pay/depay, `st2038combiner` skew and `rtpsmpte291depay` multi-ANC fixes). Builds `gst-plugin-udp` + `gst-plugin-rtp`. Use a full 40-character SHA or a branch/tag name. |
+| `GST_PLUGINS_RS_REPO` | `https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git` | gst-plugins-rs source. |
+| `GST_PLUGINS_RS_REF` | `8fe3cc1195d7d54990a84d85ca189624db29b096` | Pinned gst-plugins-rs commit on `main` (`udpsrc2`, `rtpjxsv` pay/depay, `st2038combiner` skew, `rtpsmpte291depay` multi-ANC, and `st2038` ST 291 ADF parity fixes). Builds `gst-plugin-udp` + `gst-plugin-rtp` + `gst-plugin-closedcaption`. Use a full 40-character SHA or a branch/tag name. |
 | `NVNMOS_UID` | `10001` | Fixed runtime user UID (`nvnmos`). |
 | `NVNMOS_GID` | `10001` | Fixed runtime group GID (`nvnmos`). |
 | `EXTRA_APT_PACKAGES` | *(empty)* | Optional space-separated apt package names added in the final image stage (e.g. `gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly`). Installed to the default GStreamer plugin path. |
 
-Example with extra plugins:
+Example with extra apt packages:
 
 ```bash
 docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst \
@@ -60,6 +65,21 @@ NGC pull may require `docker login nvcr.io`. Pin the DeepStream tag you need. Th
 **Runtime (GPU):** use the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/index.html) (e.g. `docker run --gpus all …`). Many DeepStream plugins need `libcuda` from the GPU runtime and will not load in a plain CPU-only `docker run`.
 
 CI builds and smoke-tests only the default Ubuntu-based `docker/nvnmos` package image, not a DeepStream or Rivermax `gst-nmos-rs` variant.
+
+### Optional GStreamer codecs on DeepStream
+
+On the default Ubuntu base, `--build-arg EXTRA_APT_PACKAGES="gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly"` is enough to make elements such as `srtsink` and `x264enc` available. On DeepStream 9.1 those packages are already installed, but `x264enc` still does not load until you run DeepStream's restore script (it reinstalls the plugins and missing codec libraries such as `libx264`).
+
+In a **derived** image:
+
+```dockerfile
+# Example only — not part of this repository's Dockerfiles.
+FROM nvnmos-gst:ds
+USER root
+RUN /opt/nvidia/deepstream/deepstream/user_additional_install.sh \
+ && rm -rf /var/lib/apt/lists/*
+USER nvnmos
+```
 
 ### Rivermax for `transport=nvdsudp`
 
@@ -144,7 +164,7 @@ One container per pod; pass the pipeline as `args`. Mount a volume and set `mxl-
 | `NVNMOSD_UDS` | `/tmp/nvnmosd.sock` | `nvnmosd` Unix socket; must match `daemon-uri=unix:…` in the pipeline |
 | `NVNMOS_PUBLISH_MDNS` | `1` | Publish `${HOSTNAME}.local`; set `0` to disable |
 
-The entrypoint sets `LD_LIBRARY_PATH` and `GST_PLUGIN_PATH` for the fixed install under `/opt/nvnmos/plugins` (`libgstnmos.so`, `libgstmxl.so`, `libgstrsudp.so`, `libgstrsrtp.so`). System gst-plugins-good/-base remain on the default GStreamer search path for `transport=udp`.
+The entrypoint sets `LD_LIBRARY_PATH` and `GST_PLUGIN_PATH` for the fixed install under `/opt/nvnmos/plugins` (`libgstnmos.so`, `libgstmxl.so`, `libgstrsudp.so`, `libgstrsrtp.so`, `libgstrsclosedcaption.so`, `libgstavsynctest.so`). System gst-plugins-good/-base remain on the default GStreamer search path for `transport=udp`.
 
 ## Shared Infrastructure
 
