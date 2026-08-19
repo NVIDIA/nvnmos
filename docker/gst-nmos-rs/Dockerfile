@@ -5,11 +5,13 @@
 #   transport=mxl — gst-mxl-rs (mxlsrc/mxlsink)
 #   transport=udp — gst-plugins-good (udpsrc/udpsink + rtp*pay/depay)
 #   transport=udp2 — gst-plugins-rs (udpsrc2 + rtp*pay2/rtp*depay2; falls back to gst-plugins-good)
+#   ancillary data — gst-plugins-rs closedcaption (st2038extractor / st2038combiner)
+#   A/V sync testing — gst-avsynctest-rs (avsyncvideotestsrc / avsyncaudiotestsrc)
 #
 # Build from the repository root:
 #   docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst .
 #
-# Optional extra distro packages (space-separated apt names), e.g. gst-plugins-bad/-ugly plugins:
+# Optional extra distro packages (space-separated apt names), e.g. gst-plugins-bad/-ugly:
 #   docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst \
 #     --build-arg EXTRA_APT_PACKAGES="gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly" .
 #
@@ -36,7 +38,7 @@ ARG RUST_TOOLCHAIN=1.92
 ARG MXL_REPO=https://github.com/dmf-mxl/mxl.git
 ARG MXL_REF=81738a15adb55119a6855343bc1053a4389bf6df
 ARG GST_PLUGINS_RS_REPO=https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git
-ARG GST_PLUGINS_RS_REF=0332d3d2084df7bae6dbd3c924a2bb62c2e56e89
+ARG GST_PLUGINS_RS_REF=8fe3cc1195d7d54990a84d85ca189624db29b096
 
 # Final image arguments
 ARG NVNMOS_UID=10001
@@ -172,11 +174,12 @@ COPY rust/ /nvnmos/rust/
 WORKDIR /nvnmos
 RUN NVNMOS_LIB_DIR=/nvnmos/build \
     cargo build --manifest-path rust/Cargo.toml \
-    -p nvnmosd -p gst-nmos-rs \
+    -p nvnmosd -p gst-nmos-rs -p gst-avsynctest-rs \
     --release --locked
 
 # -----------------------------------------------------------------------------
-# gst-plugins-rs — udpsrc2 (udp2) and rtp*pay2 / *depay2 / rtpsmpte291*.
+# gst-plugins-rs — udpsrc2, rtp*pay2 / *depay2 (for udp2), and
+# st2038extractor / st2038combiner (for ST 2110-40 / RFC 8331 / ST 291 ANC).
 # -----------------------------------------------------------------------------
 FROM ${BASE_IMAGE} AS gst-plugins-rs-builder
 
@@ -190,9 +193,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
+    libcairo2-dev \
     libglib2.0-dev \
     libgstreamer-plugins-base1.0-dev \
     libgstreamer1.0-dev \
+    libpango1.0-dev \
     libssl-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/* \
@@ -209,7 +214,7 @@ RUN git init /gst-plugins-rs && cd /gst-plugins-rs \
     && git checkout FETCH_HEAD
 
 WORKDIR /gst-plugins-rs
-RUN cargo cbuild -p gst-plugin-udp -p gst-plugin-rtp --release
+RUN cargo cbuild -p gst-plugin-udp -p gst-plugin-rtp -p gst-plugin-closedcaption --release
 
 # -----------------------------------------------------------------------------
 # Stage runtime libraries and binaries into a fixed layout under /opt/nvnmos.
@@ -221,17 +226,22 @@ COPY --from=nvnmos-cpp-builder /nvnmos/build/libnvnmos.so /nvnmos-lib/
 COPY --from=mxl-builder /mxl/install/lib /mxl-lib
 COPY --from=nvnmos-rust-builder /nvnmos/rust/target/release/nvnmosd /bin/nvnmosd
 COPY --from=nvnmos-rust-builder /nvnmos/rust/target/release/libgstnmos.so /plugins/
+COPY --from=nvnmos-rust-builder /nvnmos/rust/target/release/libgstavsynctest.so /plugins/
 COPY --from=mxl-builder /mxl/rust/target/release/libgstmxl.so /plugins/
 COPY --from=gst-plugins-rs-builder \
     /gst-plugins-rs/target/x86_64-unknown-linux-gnu/release/libgstrsudp.so /plugins/
 COPY --from=gst-plugins-rs-builder \
     /gst-plugins-rs/target/x86_64-unknown-linux-gnu/release/libgstrsrtp.so /plugins/
+COPY --from=gst-plugins-rs-builder \
+    /gst-plugins-rs/target/x86_64-unknown-linux-gnu/release/libgstrsclosedcaption.so /plugins/
 
 RUN mkdir -p /opt/nvnmos/bin /opt/nvnmos/lib /opt/nvnmos/lib/mxl/internal \
         /opt/nvnmos/plugins \
     && cp /bin/nvnmosd /opt/nvnmos/bin/ \
     && cp /plugins/libgstnmos.so /plugins/libgstmxl.so \
-       /plugins/libgstrsudp.so /plugins/libgstrsrtp.so /opt/nvnmos/plugins/ \
+       /plugins/libgstrsudp.so /plugins/libgstrsrtp.so \
+       /plugins/libgstrsclosedcaption.so \
+       /plugins/libgstavsynctest.so /opt/nvnmos/plugins/ \
     && cp -a /nvnmos-lib/. /opt/nvnmos/lib/ \
     && cp -a /mxl-lib/. /opt/nvnmos/lib/mxl/ \
     && if [ -d /opt/nvnmos/lib/mxl/internal ]; then :; \
@@ -283,6 +293,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-tools \
+    libpangocairo-1.0-0 \
     ${EXTRA_APT_PACKAGES} \
     && rm -rf /var/lib/apt/lists/*
 
