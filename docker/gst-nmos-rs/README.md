@@ -37,7 +37,7 @@ The nvnmos tree is taken from the build context (`COPY src/`, `COPY rust/` via t
 | `CONAN_LOCKFILE` | `src/conan.lock` | Input lockfile for `conan install`. Pass an empty value to resolve the latest compatible graph instead. |
 | `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for all Rust stages in this image. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); gst-plugins-rs MSRV is **1.92**. Workspace MSRV is **1.87** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
 | `MXL_REPO` | `https://github.com/dmf-mxl/mxl.git` | MXL source repository (`libmxl`, `gst-mxl-rs`). |
-| `MXL_REF` | `81738a15adb55119a6855343bc1053a4389bf6df` | Pinned MXL commit (`81738a1`, tip of `release/v1.1` at time of writing). Use a full 40-character SHA or a branch/tag name. |
+| `MXL_REF` | `5201833c68293525a87507bb734e9b80148bb71d` | Pinned MXL commit (`5201833`, tip of `release/v1.1` at time of writing). Use a full 40-character SHA or a branch/tag name. |
 | `GST_PLUGINS_RS_REPO` | `https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git` | gst-plugins-rs source. |
 | `GST_PLUGINS_RS_REF` | `8fe3cc1195d7d54990a84d85ca189624db29b096` | Pinned gst-plugins-rs commit on `main` (`udpsrc2`, `rtpjxsv` pay/depay, `st2038combiner` skew, `rtpsmpte291depay` multi-ANC, and `st2038` ST 291 ADF parity fixes). Builds `gst-plugin-udp` + `gst-plugin-rtp` + `gst-plugin-closedcaption`. Use a full 40-character SHA or a branch/tag name. |
 | `NVNMOS_UID` | `10001` | Fixed runtime user UID (`nvnmos`). |
