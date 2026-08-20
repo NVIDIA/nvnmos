@@ -195,6 +195,12 @@ pub(crate) mod defaults {
     /// to. `ST2110-22:2022` is what nmos-cpp emits for `video/jxsv`.
     pub(crate) const ST2110_22_SSN: &str = "ST2110-22:2022";
 
+    /// ST 2110-40 §7 required `SSN` parameter. Identifies the SDP
+    /// specification revision the ANC sender conforms to. Default
+    /// `ST2110-40:2018` matches nmos-cpp when `TM` is omitted;
+    /// `ST2110-40:2023` is required when signalling `TM`.
+    pub(crate) const ST2110_40_SSN: &str = "ST2110-40:2018";
+
     // ST 2110-21 §8.1 `TP` (type parameter) is intentionally omitted
     // from caps-only **video** synthesis for now — see
     // [`rtp_caps_from_video`]. Without `TP=2110TPW` or `TP=2110TPN`
@@ -2722,6 +2728,11 @@ fn rtp_caps_from_audio(
 /// | (fixed)                | `media=video`, `encoding-name=SMPTE291` |
 /// | `framerate` (optional) | `exactframerate`                        |
 ///
+/// Always-emitted ST 2110-40 §7 fmtp parameter:
+/// `ssn=ST2110-40:2018` (see [`defaults::ST2110_40_SSN`]). Optional
+/// RFC 8331 / ST 2110-40 fmtp (`VPID_Code`, repeated `DID_SDID`,
+/// `TM`) are not synthesised from essence caps.
+///
 /// ANC is carried on `m=video` per RFC 8331 §3; the dispatch
 /// over to ANC handling is keyed off `encoding-name=SMPTE291`
 /// in [`parse_sdp`].
@@ -2743,14 +2754,18 @@ fn rtp_caps_from_data(caps: &gst::Caps, payload_type: u8) -> Result<gst::Caps, S
         )));
     }
     let framerate = s.get::<gst::Fraction>("framerate").ok();
+    // Fmtp keys are lower-case in caps (`ssn`); SDP upper-case
+    // `SSN` is restored by [`canonicalise_st2110_sdp_case`].
     let mut caps_text = format!(
         "application/x-rtp,\
          media=(string)video,\
          clock-rate=(int){clk},\
          encoding-name=(string)SMPTE291,\
-         payload=(int){pt}",
+         payload=(int){pt},\
+         ssn=(string){ssn}",
         clk = defaults::ANC_CLOCK_RATE,
         pt = payload_type,
+        ssn = defaults::ST2110_40_SSN,
     );
     if let Some(f) = framerate {
         let exactframerate = format_exact_framerate(f.numer() as u32, f.denom() as u32);
@@ -5334,6 +5349,7 @@ mod tests {
             defaults::ANC_CLOCK_RATE
         );
         assert_eq!(s.get::<i32>("payload").unwrap(), 100);
+        assert_eq!(s.get::<&str>("ssn").unwrap(), defaults::ST2110_40_SSN);
         assert!(
             s.get::<&str>("exactframerate").is_err(),
             "ANC without framerate must omit `exactframerate=`",
@@ -5393,6 +5409,13 @@ mod tests {
     fn defaults_st2110_20_pm_and_ssn_match_nmos_cpp() {
         assert_eq!(defaults::ST2110_20_PM, "2110GPM");
         assert_eq!(defaults::ST2110_20_SSN, "ST2110-20:2017");
+    }
+
+    #[test]
+    fn defaults_st2110_40_ssn_matches_nmos_cpp() {
+        // nmos-cpp `make_video_smpte291_parameters` emits
+        // `ST2110-40:2018` when `TM` is omitted (ST 2110-40 §7).
+        assert_eq!(defaults::ST2110_40_SSN, "ST2110-40:2018");
     }
 
     /// `colorimetry` is REQUIRED by nmos-cpp's
@@ -6096,6 +6119,10 @@ mod tests {
             "ANC rtpmap must be lower-case in the SDP per RFC 8331 §3.1 / §4:\n{text}",
         );
         assert!(text.contains("exactframerate=25"));
+        assert!(
+            text.contains("SSN=ST2110-40:2018"),
+            "ST 2110-40 §7 required SSN:\n{text}",
+        );
     }
 
     #[test]
