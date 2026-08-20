@@ -442,7 +442,8 @@ impl Default for CommonSettings {
 
 /// Best-available caps for a fake inner chain (appsrc / capsfilter),
 /// resolved in priority order:
-///   1. `caps` property (user-supplied; authoritative).
+///   1. `caps` property (user-supplied fields win; absent optional
+///      fields filled via [`crate::essence_caps::caps_from`]).
 ///   2. Caps derived from the literal `transport-file`.
 ///   3. Caps derived from the file at `transport-file-path`.
 pub(crate) fn fake_caps_from_settings(
@@ -453,7 +454,7 @@ pub(crate) fn fake_caps_from_settings(
     transport_file_path: &str,
 ) -> Result<Option<gst::Caps>, anyhow::Error> {
     if let Some(caps) = caps {
-        return Ok(Some(caps.clone()));
+        return Ok(Some(crate::essence_caps::caps_from(caps, None)));
     }
     if !transport_file.is_empty() {
         return caps_from_transport_file(element, transport, transport_file);
@@ -1849,6 +1850,59 @@ mod tests {
             assert!(
                 err.to_string().contains("does not carry a name"),
                 "expected missing-name error: {err:#}"
+            );
+        }
+    }
+
+    mod fake_caps {
+        use std::str::FromStr;
+
+        use super::*;
+
+        #[test]
+        fn caps_property_gets_essence_defaults_like_file_path() {
+            init_gst();
+            let caps = gst::Caps::from_str(
+                "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved",
+            )
+            .expect("caps");
+            let out =
+                super::fake_caps_from_settings("nmossrc", Transport::NvDsUdp, Some(&caps), "", "")
+                    .expect("fake caps")
+                    .expect("Some");
+            let s = out.structure(0).expect("structure");
+            assert_eq!(
+                s.get::<&str>("channel-order").unwrap(),
+                "SMPTE2110.(ST)",
+                "stereo default channel-order",
+            );
+            assert_eq!(
+                s.get::<gst::Bitmask>("channel-mask").unwrap(),
+                gst::Bitmask::new(0x3),
+                "stereo default channel-mask",
+            );
+        }
+
+        #[test]
+        fn caps_property_preserves_explicit_channel_order() {
+            init_gst();
+            // Parentheses in SMPTE2110.(…) need a quoted (string) value;
+            // bare `channel-order=SMPTE2110.(U02)` fails Caps::from_str.
+            let caps = gst::Caps::from_str(
+                "audio/x-raw,format=S24BE,rate=48000,channels=2,layout=interleaved,\
+                 channel-order=(string)\"SMPTE2110.(U02)\"",
+            )
+            .expect("caps");
+            let out =
+                super::fake_caps_from_settings("nmossrc", Transport::Udp, Some(&caps), "", "")
+                    .expect("fake caps")
+                    .expect("Some");
+            assert_eq!(
+                out.structure(0)
+                    .unwrap()
+                    .get::<&str>("channel-order")
+                    .unwrap(),
+                "SMPTE2110.(U02)",
             );
         }
     }
