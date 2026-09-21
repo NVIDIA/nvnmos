@@ -114,11 +114,19 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # VS 2026 (MSVC 195) needs cmake >= 4.2 for the "Visual Studio 18 2026"
+          # generator when nmos-cpp and dependencies build from source.
+          # See conan-io/conan-center-index#28884.
           $profile = conan profile path default
           (Get-Content $profile) `
             -replace '^compiler\.cppstd=.*$', 'compiler.cppstd=17' `
-            -replace '^compiler\.version=.*$', 'compiler.version=194' |
+            -replace '^compiler\.version=.*$', 'compiler.version=195' |
             Set-Content $profile
+          Add-Content -Path $profile -Value @(
+            '',
+            '[replace_tool_requires]',
+            'cmake/*: cmake/[>=4.2.0 <5]'
+          )
       - name: Install dependencies without lockfile
         id: conan_install
         run: |
