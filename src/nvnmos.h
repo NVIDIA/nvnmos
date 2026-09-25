@@ -150,6 +150,29 @@ typedef enum _NvNmosSide
 } NvNmosSide;
 
 /**
+ * Identifies an IS-04 resource type. Used by
+ * @ref nmos_annotation_callback, @ref nmos_make_id and @ref nmos_get_id.
+ * Node and Device have no caller-chosen name (one Device per Node).
+ * Source, Flow and Sender share the sender name; Receiver uses the
+ * receiver name.
+ */
+typedef enum _NvNmosResourceType
+{
+    /** An NMOS Node (IS-04 Node API /self). */
+    NVNMOS_RESOURCE_NODE = 0,
+    /** An NMOS Device. NvNmos creates one Device per Node. */
+    NVNMOS_RESOURCE_DEVICE = 1,
+    /** An NMOS Source associated with a Sender. */
+    NVNMOS_RESOURCE_SOURCE = 2,
+    /** An NMOS Flow associated with a Sender. */
+    NVNMOS_RESOURCE_FLOW = 3,
+    /** An NMOS Sender. */
+    NVNMOS_RESOURCE_SENDER = 4,
+    /** An NMOS Receiver. */
+    NVNMOS_RESOURCE_RECEIVER = 5
+} NvNmosResourceType;
+
+/**
  * Type for a callback from NvNmos library when an IS-05 Connection API
  * activation occurs.
  *
@@ -235,6 +258,88 @@ typedef bool (* nmos_channelmapping_activation_callback)(
     const char *output_id,
     const NvNmosChannelMappingActiveMapEntry *active_map,
     size_t num_active_map);
+
+/**
+ * One writable IS-04 tags entry. Read-only tags (including
+ * 'urn:x-nvnmos:tag:name' and group hint) are not represented here.
+ */
+typedef struct _NvNmosTag
+{
+    /** Holds the tag key. Must not be null or empty. */
+    const char *key;
+    /** Holds the tag values. The array's size must be equal to
+        #num_values. May be null when #num_values is zero (empty
+        array). Must not be null when #num_values is non-zero.
+        Each entry must not be null; use "" for an empty string. */
+    const char **values;
+    /** Holds the number of #values. May be zero. */
+    unsigned int num_values;
+} NvNmosTag;
+
+/**
+ * IS-13 annotation applied at create, or carried on
+ * @ref nmos_annotation_callback for properties that this merge
+ * changed.
+ *
+ * A null #label or #description omits that property at create.
+ * On the callback, those members are meaningful only when the
+ * matching changed flag is true; then null is a reset and a
+ * non-null empty string is an annotated empty value, not a reset.
+ */
+typedef struct _NvNmosAnnotation
+{
+    /** Holds the label. May be null. */
+    const char *label;
+    /** Holds the description. May be null. */
+    const char *description;
+    /** Holds writable tags. The array's size must be equal to
+        #num_tags. May be null when #num_tags is zero. Must not be
+        null when #num_tags is non-zero. */
+    const NvNmosTag *tags;
+    /** Holds the number of #tags. May be zero. */
+    unsigned int num_tags;
+} NvNmosAnnotation;
+
+/**
+ * Type for a callback from NvNmos after a successful IS-13 Annotation
+ * API merge.
+ *
+ * JSON merge-patch; the three bools say which members of @p annotation
+ * to apply.
+ *
+ * Pointers in @p annotation and its members are valid only for the
+ * duration of the call. @p annotation is never null.
+ *
+ * @param[in] server               The server issuing the callback.
+ * @param[in] type                 Which IS-04 resource was updated.
+ * @param[in] name                 The caller-chosen sender or receiver
+ *                                 name, unique for that side on the
+ *                                 Node. Null when @p type is
+ *                                 ::NVNMOS_RESOURCE_NODE or
+ *                                 ::NVNMOS_RESOURCE_DEVICE.
+ * @param[in] annotation           Values for properties this merge
+ *                                 changed. Must not be null.
+ * @param[in] label_changed        True if this merge included
+ *                                 'label'. Then a null
+ *                                 #NvNmosAnnotation::label is a
+ *                                 reset; a string is the overlay.
+ * @param[in] description_changed  True if this merge included
+ *                                 'description'. Same null/string
+ *                                 rule as #label_changed.
+ * @param[in] tags_changed         True if this merge included
+ *                                 'tags'. Then #NvNmosAnnotation::tags
+ *                                 is the full writable-tag overlay
+ *                                 after this merge (empty array is
+ *                                 a whole-object reset).
+ */
+typedef void (* nmos_annotation_callback)(
+    NvNmosNodeServer *server,
+    NvNmosResourceType type,
+    const char *name,
+    const NvNmosAnnotation *annotation,
+    bool label_changed,
+    bool description_changed,
+    bool tags_changed);
 
 /**
  * Defines some common severity/logging levels for log messages from
@@ -335,6 +440,14 @@ typedef struct _NvNmosNodeConfig
         activation (one Output at a time). May be null. */
     nmos_channelmapping_activation_callback channelmapping_activated;
 
+    /** IS-13 annotation for the Node resource. May be null. */
+    const NvNmosAnnotation *node_annotation;
+    /** IS-13 annotation for the Device resource. May be null. */
+    const NvNmosAnnotation *device_annotation;
+    /** Called after a successful IS-13 merge. May be null, which leaves
+        the Annotation API unmounted. */
+    nmos_annotation_callback annotation_changed;
+
     /** Holds the callback for handling log messages. May be null. */
     nmos_logging_callback log_callback;
     /** Holds the minimum severity/verbosity level for which to make
@@ -430,6 +543,8 @@ typedef struct _NvNmosReceiverConfig
         receiver itself (since the MXL flow id is set dynamically by
         IS-05). */
     const char *transport_file;
+    /** IS-13 annotation for the Receiver resource. May be null. */
+    const NvNmosAnnotation *receiver_annotation;
 } NvNmosReceiverConfig;
 
 /**
@@ -482,6 +597,14 @@ typedef struct _NvNmosSenderConfig
         'mxl_flow_id' is unconstrained; a Controller may supply the
         id, or staging 'auto' generates a new UUID at activation. */
     const char *transport_file;
+    /** IS-13 annotation for the Source associated with this sender.
+        May be null. */
+    const NvNmosAnnotation *source_annotation;
+    /** IS-13 annotation for the Flow associated with this sender.
+        May be null. */
+    const NvNmosAnnotation *flow_annotation;
+    /** IS-13 annotation for the Sender resource. May be null. */
+    const NvNmosAnnotation *sender_annotation;
 } NvNmosSenderConfig;
 
 /**
@@ -1085,6 +1208,46 @@ NVNMOS_API
 bool nmos_get_flow_id(
     const NvNmosNodeServer *server,
     const char *sender_name,
+    char *out,
+    size_t out_len);
+
+/**
+ * Compute the NMOS resource id that an @ref NvNmosNodeServer created
+ * with the given @p seed will use for the given @p type and @p name.
+ *
+ * Same contract as the named nmos_make_*_id functions.
+ *
+ * @param[in]  seed    Seed string. Must not be null.
+ * @param[in]  type    Resource type.
+ * @param[in]  name    Caller-chosen sender or receiver name. Must be
+ *                     null when @p type is ::NVNMOS_RESOURCE_NODE or
+ *                     ::NVNMOS_RESOURCE_DEVICE. For Source, Flow and
+ *                     Sender this is the sender name; for Receiver
+ *                     the receiver name.
+ * @param[out] out     Buffer to receive the id.
+ * @param[in]  out_len Size of @p out, at least @ref NVNMOS_ID_LEN.
+ * @return Whether the id has been written to @p out.
+ */
+NVNMOS_API
+bool nmos_make_id(
+    const char *seed,
+    NvNmosResourceType type,
+    const char *name,
+    char *out,
+    size_t out_len);
+
+/**
+ * Get the NMOS resource id of a resource currently registered with
+ * the specified server.
+ *
+ * Same contract as the named nmos_get_*_id functions. Returns false
+ * when the resource is not present.
+ */
+NVNMOS_API
+bool nmos_get_id(
+    const NvNmosNodeServer *server,
+    NvNmosResourceType type,
+    const char *name,
     char *out,
     size_t out_len);
 

@@ -25,12 +25,12 @@ Identity in the C API stays **caller-chosen name**, not IS-04 UUID. Node and Dev
 | Layer | Owns | Does not own |
 |-------|------|----------------|
 | **nmos-cpp** | Merge-patch, `null` restore via `default_value`, read-only tag predicate | Files, names, seeds |
-| **libnvnmos** | Apply annotations at insert; restore defaults from configuring transport file / node config; callback after every successful IS-13 merge | Overlay map, checkpoint file |
+| **libnvnmos** | Apply annotations at insert; retain exact label / description reset defaults captured from each resource before annotation; callback after every successful IS-13 merge | Overlay map, checkpoint file |
 | **nvnmosd** | Process-wide store, debounce checkpoint, pass stored annotations on OpenSession / AddSender / AddReceiver | IS-13 HTTP |
 
-The library **does not keep** the `NvNmosAnnotation` pointers it was given. After insert they are gone. Defaults used on a later `null` PATCH are recomputed from the configuring transport file already stored in settings, or from `NvNmosNodeConfig` label / description / asset tags for node and device.
+The public `NvNmos*` types terminate in `nvnmos.cpp`: that adapter validates and converts annotations to nmos-cpp-style JSON before calling `nvnmos_impl.*`, and converts the internal callback back to the C API. The library **does not keep** the `NvNmosAnnotation` pointers it was given. After insert they are gone.
 
-While a resource exists, current values live only in nmos-cpp resource data.
+While a resource exists, current values live only in nmos-cpp resource data. libnvnmos retains only the exact default label and description captured from the normally constructed resource before applying its annotation. This avoids a second implementation of resource-default construction without retaining an overlay.
 
 No gst-nmos-rs change is necessary for GStreamer-based apps to take advantage of this. Persistence is entirely a daemon feature.
 
@@ -295,6 +295,8 @@ Today the merger is not installed, so a tags PATCH can drop `urn:x-nvnmos:tag:na
 This design does not support default values for writable tags. `"tags": { "foo": null }` removes `foo`; it does not restore a default array. (Name, group hint, and asset tags are read-only, so they are not in this set.) Label and description do have defaults, which is why those callback members come from the PATCH, not from `merged`.
 
 The configuring transport file in `senders` / `receivers` settings is written only at Add and is **not** replaced by IS-05 activation. Activation reads it; `/transportfile` is recomputed each time. That file remains the sender/receiver default for the life of the resource.
+
+Do not reconstruct these defaults in a separate switch over resource types. Capture label and description from the resource after its normal construction and NvNmos-specific overrides, immediately before applying the create annotation. Store that small default object in internal settings keyed by resource id, and erase it when the resource is removed.
 
 ### 4.4 Apply at insert
 
