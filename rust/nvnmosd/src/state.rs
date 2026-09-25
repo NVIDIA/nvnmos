@@ -171,10 +171,14 @@ impl Side {
             Self::Sender => server.add_sender(&SenderConfig {
                 transport,
                 transport_file: transport_file.to_string(),
+                source_annotation: None,
+                flow_annotation: None,
+                sender_annotation: None,
             }),
             Self::Receiver => server.add_receiver(&ReceiverConfig {
                 transport,
                 transport_file: transport_file.to_string(),
+                receiver_annotation: None,
             }),
         }
     }
@@ -2480,6 +2484,8 @@ pub fn translate_config(proto: Option<&ProtoNodeConfig>) -> Result<NodeConfig, S
         asset_tags,
         network_services,
         log_level: log_bridge::LIBNVNMOS_LOG_LEVEL,
+        node_annotation: None,
+        device_annotation: None,
     })
 }
 

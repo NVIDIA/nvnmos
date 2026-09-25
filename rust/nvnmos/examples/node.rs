@@ -384,6 +384,9 @@ fn main() -> ExitCode {
                 SenderConfig {
                     transport: r.transport,
                     transport_file: build_transport_file(r, true, &iface_ip),
+                    source_annotation: None,
+                    flow_annotation: None,
+                    sender_annotation: None,
                 },
             )
         })
@@ -396,6 +399,7 @@ fn main() -> ExitCode {
                 ReceiverConfig {
                     transport: r.transport,
                     transport_file: build_transport_file(r, false, &iface_ip),
+                    receiver_annotation: None,
                 },
             )
         })
