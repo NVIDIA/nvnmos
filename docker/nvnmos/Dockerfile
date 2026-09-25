@@ -11,7 +11,6 @@ ARG BASE_IMAGE=ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PACKAGE_SUFFIX
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
-ARG CONAN_LOCKFILE=src/conan.lock
 ARG RUST_TOOLCHAIN=1.92
 
 # use pattern replacement to clean up '/' and ':'
@@ -26,13 +25,13 @@ FROM ${BASE_IMAGE} AS cpp-builder
 ARG DEBIAN_FRONTEND
 ARG PACKAGE_NAME
 ARG PIP_BREAK_SYSTEM_PACKAGES
-ARG CONAN_LOCKFILE
 
 ENV PIP_BREAK_SYSTEM_PACKAGES=${PIP_BREAK_SYSTEM_PACKAGES}
 
 RUN apt update && apt install -y --no-install-recommends \
     build-essential \
     ca-certificates \
+    git \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install cmake~=3.17
@@ -42,17 +41,28 @@ WORKDIR /nvnmos
 
 COPY src/ src/
 
+# IS-13 is not in Conan Center nmos-cpp/cci.20260812. Pin a sony/nmos-cpp
+# master commit that has it (sony/nmos-cpp#331) and build it from source until
+# CCI publishes it. Cloned next to /nvnmos, where CMake's default
+# NMOS_CPP_DIRECTORY (../../nmos-cpp/Development from src/) finds it.
+ARG NMOS_CPP_SHA=fe303849527394b03bdedc8f161f377fe458bb62
+RUN git init /nmos-cpp \
+    && git -C /nmos-cpp remote add origin https://github.com/sony/nmos-cpp.git \
+    && git -C /nmos-cpp fetch --depth 1 origin ${NMOS_CPP_SHA} \
+    && git -C /nmos-cpp checkout --detach FETCH_HEAD
+
 RUN conan install src \
     --settings:all build_type=Release \
     --build=missing \
     --output-folder=src/conan \
-    --lockfile=${CONAN_LOCKFILE} \
-    --lockfile-out=src/conan.lock
+    --lockfile="" \
+    -o "&:nmos_cpp_from_source=True"
 
 RUN cmake -B build \
     -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=ON \
+    -DUSE_ADD_SUBDIRECTORY=ON \
     src
 
 RUN cmake --build build --parallel 2

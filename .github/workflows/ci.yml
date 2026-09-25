@@ -37,19 +37,31 @@ jobs:
             -replace '^compiler\.cppstd=.*$', 'compiler.cppstd=17' `
             -replace '^compiler\.version=.*$', 'compiler.version=194' |
             Set-Content $profile
+      # IS-13 (sony/nmos-cpp#331) is on sony/nmos-cpp master but not yet in
+      # Conan Center nmos-cpp/cci.20260812. Pin a master commit until CCI does.
+      - name: Clone nmos-cpp (IS-13) alongside nvnmos
+        run: |
+          parent="$(dirname "${GITHUB_WORKSPACE}")"
+          sha=fe303849527394b03bdedc8f161f377fe458bb62
+          git init "${parent}/nmos-cpp"
+          git -C "${parent}/nmos-cpp" remote add origin https://github.com/sony/nmos-cpp.git
+          git -C "${parent}/nmos-cpp" fetch --depth 1 origin "$sha"
+          git -C "${parent}/nmos-cpp" checkout --detach FETCH_HEAD
       - name: Install dependencies
         run: |
           conan install src \
             --settings:all build_type=${{ matrix.config }} \
             --build=missing \
             --output-folder=src/conan \
-            --lockfile=src/conan.lock
+            --lockfile="" \
+            -o "&:nmos_cpp_from_source=True"
       - name: Generate nvnmos (Linux)
         if: runner.os == 'Linux'
         run: |
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
             -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
+            -DUSE_ADD_SUBDIRECTORY=ON \
             src
       - name: Generate nvnmos (Windows)
         if: runner.os == 'Windows'
@@ -57,6 +69,7 @@ jobs:
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
             -DCMAKE_CONFIGURATION_TYPES=${{ matrix.config }} \
+            -DUSE_ADD_SUBDIRECTORY=ON \
             src
       - name: Build nvnmos (Linux)
         if: runner.os == 'Linux'
