@@ -34,6 +34,7 @@
 #include "nmos/id.h"
 #include "nmos/settings.h"
 #include "nmos/transport.h"
+#include "nmos/annotation_api.h"
 #include "nmos/type.h"
 
 namespace slog
@@ -46,6 +47,7 @@ namespace nmos
     typedef utility::string_t channelmapping_id;
 
     struct node_model;
+    struct resource;
 
     namespace experimental
     {
@@ -65,6 +67,9 @@ namespace nvnmos
 
         // generate URLs for the Node API and Connection API
         std::pair<utility::string_t, utility::string_t> make_api_base_urls(const nmos::settings& settings);
+
+        // whether a tag key is read-only, including every urn:x-nvnmos:tag: key
+        bool is_read_only_annotation_tag(const utility::string_t& key);
     }
 
     // custom settings fields
@@ -80,6 +85,7 @@ namespace nvnmos
 
         const web::json::field_as_value senders{ U("senders") }; // object with ids as keys
         const web::json::field_as_value receivers{ U("receivers") }; // object with ids as keys
+        const web::json::field_as_value annotation_defaults{ U("annotation_defaults") }; // object with resource ids as keys
         const web::json::field_as_value channelmappings{ U("channelmappings") }; // keyed by caller-chosen channel mapping name
         const web::json::field_as_value channelmapping_inputs{ U("inputs") }; // array of IS-08 input ids
         const web::json::field_as_value channelmapping_outputs{ U("outputs") }; // array of IS-08 output ids
@@ -181,16 +187,16 @@ namespace nvnmos
     };
 
     // This constructs and inserts a node resource and a device resource into the model, based on the model settings.
-    void node_implementation_init(nmos::node_model& model, slog::base_gate& gate);
+    void node_implementation_init(nmos::node_model& model, const web::json::value& node_annotation, const web::json::value& device_annotation, slog::base_gate& gate);
 
     // This constructs and inserts sources/flows/senders into the model, based on the specified transport file.
-    void node_implementation_add_sender(nmos::node_model& model, const nmos::transport& transport, const std::string& transport_file, slog::base_gate& gate);
+    void node_implementation_add_sender(nmos::node_model& model, const nmos::transport& transport, const std::string& transport_file, const web::json::value& source_annotation, const web::json::value& flow_annotation, const web::json::value& sender_annotation, slog::base_gate& gate);
 
     // This removes sources/flows/senders from the model corresponding to the specified name.
     void node_implementation_remove_sender(nmos::node_model& model, const nvnmos::name& sender_name, slog::base_gate& gate);
 
     // This constructs and inserts a receiver into the model, based on the specified transport file.
-    void node_implementation_add_receiver(nmos::node_model& model, const nmos::transport& transport, const std::string& transport_file, slog::base_gate& gate);
+    void node_implementation_add_receiver(nmos::node_model& model, const nmos::transport& transport, const std::string& transport_file, const web::json::value& receiver_annotation, slog::base_gate& gate);
 
     // This removes the receiver from the model corresponding to the specified name.
     void node_implementation_remove_receiver(nmos::node_model& model, const nvnmos::name& receiver_name, slog::base_gate& gate);
@@ -212,8 +218,15 @@ namespace nvnmos
     // `active_map` is dense per output channel index; unrouted channels have an empty input id (empty pair.first).
     typedef std::function<void(const nvnmos::name& name, const nmos::channelmapping_id& output_id, const channelmapping_active_map& active_map)> channelmapping_activation_handler;
 
+    // This is an application callback notified after an IS-13 Annotation API merge.
+    // The merge has already been applied. `merged` is the resulting label, description and tags.
+    // `patch` is the merge as received. An absent member is unchanged; JSON null is a reset.
+    typedef std::function<void(const nmos::resource& resource, const web::json::value& merged, const web::json::value& patch)> annotation_handler;
+
     // This constructs all the callbacks used to integrate the application into the server instance for the NMOS Node.
-    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, channelmapping_activation_handler channelmapping_activated, slog::base_gate& gate);
+    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, channelmapping_activation_handler channelmapping_activated, annotation_handler annotation_changed, slog::base_gate& gate);
+
+    nmos::annotation_patch_merger make_node_implementation_annotation_patch_merger(annotation_handler callback, nmos::settings& settings);
 
     // This updates the transport parameters and transport file for the specified sender or receiver based on the specified transport file.
     // `type` selects between a sender and a receiver with the same `name` on the Node.

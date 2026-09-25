@@ -1310,6 +1310,7 @@ impl NodeServer {
         let sys_cfg = sys::NvNmosSenderConfig {
             transport: config.transport.to_ffi(),
             transport_file: ctf.as_ptr(),
+            ..Default::default()
         };
         let ok = unsafe { sys::add_nmos_sender_to_node_server(self.raw_ptr_mut(), &sys_cfg) };
         if !ok {
@@ -1329,6 +1330,7 @@ impl NodeServer {
         let sys_cfg = sys::NvNmosReceiverConfig {
             transport: config.transport.to_ffi(),
             transport_file: ctf.as_ptr(),
+            ..Default::default()
         };
         let ok = unsafe { sys::add_nmos_receiver_to_node_server(self.raw_ptr_mut(), &sys_cfg) };
         if !ok {

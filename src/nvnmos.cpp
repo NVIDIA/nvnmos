@@ -27,6 +27,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/range/adaptor/transformed.hpp>
@@ -161,6 +162,91 @@ namespace nvnmos
         throw std::logic_error("invalid NvNmosTransport");
     }
 
+    inline nmos::type type_from_resource_type(NvNmosResourceType type)
+    {
+        switch (type)
+        {
+        case NVNMOS_RESOURCE_NODE: return nmos::types::node;
+        case NVNMOS_RESOURCE_DEVICE: return nmos::types::device;
+        case NVNMOS_RESOURCE_SOURCE: return nmos::types::source;
+        case NVNMOS_RESOURCE_FLOW: return nmos::types::flow;
+        case NVNMOS_RESOURCE_SENDER: return nmos::types::sender;
+        case NVNMOS_RESOURCE_RECEIVER: return nmos::types::receiver;
+        }
+        throw std::logic_error("invalid NvNmosResourceType");
+    }
+
+    inline NvNmosResourceType resource_type_from_type(const nmos::type& type)
+    {
+        if (nmos::types::node == type) return NVNMOS_RESOURCE_NODE;
+        if (nmos::types::device == type) return NVNMOS_RESOURCE_DEVICE;
+        if (nmos::types::source == type) return NVNMOS_RESOURCE_SOURCE;
+        if (nmos::types::flow == type) return NVNMOS_RESOURCE_FLOW;
+        if (nmos::types::sender == type) return NVNMOS_RESOURCE_SENDER;
+        if (nmos::types::receiver == type) return NVNMOS_RESOURCE_RECEIVER;
+        throw std::logic_error("invalid nmos::type");
+    }
+
+    web::json::value make_annotation(const NvNmosAnnotation* annotation)
+    {
+        using web::json::value;
+
+        auto patch = value::object();
+        if (!annotation) return patch;
+        if (annotation->label)
+        {
+            patch[nmos::fields::label] = value::string(utility::s2us(annotation->label));
+        }
+        if (annotation->description)
+        {
+            patch[nmos::fields::description] = value::string(utility::s2us(annotation->description));
+        }
+        if (annotation->num_tags > 0 && !annotation->tags)
+        {
+            throw std::invalid_argument("invalid annotation tags");
+        }
+
+        std::set<utility::string_t> keys;
+        auto tags = value::object();
+        for (unsigned int i = 0; i < annotation->num_tags; ++i)
+        {
+            const auto& tag = annotation->tags[i];
+            if (!tag.key || 0 == tag.key[0])
+            {
+                throw std::invalid_argument("invalid annotation tag key");
+            }
+            const auto key = utility::s2us(tag.key);
+            if (impl::is_read_only_annotation_tag(key))
+            {
+                throw std::invalid_argument("read-only annotation tag");
+            }
+            if (!keys.insert(key).second)
+            {
+                throw std::invalid_argument("duplicate annotation tag key");
+            }
+            if (tag.num_values > 0 && !tag.values)
+            {
+                throw std::invalid_argument("invalid annotation tag values");
+            }
+
+            auto values = value::array();
+            for (unsigned int j = 0; j < tag.num_values; ++j)
+            {
+                if (!tag.values[j])
+                {
+                    throw std::invalid_argument("invalid annotation tag value");
+                }
+                values[j] = value::string(utility::s2us(tag.values[j]));
+            }
+            tags[key] = std::move(values);
+        }
+        if (annotation->num_tags > 0)
+        {
+            patch[nmos::fields::tags] = std::move(tags);
+        }
+        return patch;
+    }
+
     channelmapping_config make_channelmapping_config(const NvNmosChannelMappingConfig& mapping)
     {
         if (!mapping.inputs || !mapping.outputs) throw std::logic_error("invalid channel mapping config");
@@ -291,6 +377,7 @@ namespace nvnmos
 
             const auto& connection_activated = config.connection_activated;
             const auto& channelmapping_activated = config.channelmapping_activated;
+            const auto& annotation_changed = config.annotation_changed;
             auto connection_activated_handler = [connection_activated, server](const nmos::type& type, const nvnmos::name& name_, const std::string& transport_file)
             {
                 if (!connection_activated) return;
@@ -329,7 +416,78 @@ namespace nvnmos
                     throw std::runtime_error("Channel mapping activation failed for " + name + " output " + output_id);
                 }
             };
-            node_implementation = make_node_implementation(node_model, connection_activated_handler, channelmapping_activated_handler, gate);
+            auto annotation_changed_handler = [annotation_changed, server](const nmos::resource& resource, const web::json::value& merged, const web::json::value& patch)
+            {
+                if (!annotation_changed) return;
+
+                NvNmosAnnotation annotation{};
+                const bool label_changed = patch.has_field(nmos::fields::label);
+                const bool description_changed = patch.has_field(nmos::fields::description);
+                const bool tags_changed = patch.has_field(nmos::fields::tags);
+
+                std::string label;
+                std::string description;
+                if (label_changed && !patch.at(nmos::fields::label).is_null())
+                {
+                    label = utility::us2s(patch.at(nmos::fields::label).as_string());
+                    annotation.label = label.c_str();
+                }
+                if (description_changed && !patch.at(nmos::fields::description).is_null())
+                {
+                    description = utility::us2s(patch.at(nmos::fields::description).as_string());
+                    annotation.description = description.c_str();
+                }
+
+                std::vector<std::string> tag_keys;
+                std::vector<std::vector<std::string>> tag_value_strings;
+                std::vector<std::vector<const char*>> tag_value_ptrs;
+                std::vector<NvNmosTag> tags;
+                if (tags_changed)
+                {
+                    const auto& merged_tags = merged.at(nmos::fields::tags).as_object();
+                    for (const auto& field : merged_tags)
+                    {
+                        if (impl::is_read_only_annotation_tag(field.first)) continue;
+                        tag_keys.push_back(utility::us2s(field.first));
+                        std::vector<std::string> values;
+                        for (const auto& value : field.second.as_array())
+                        {
+                            values.push_back(utility::us2s(value.as_string()));
+                        }
+                        tag_value_strings.push_back(std::move(values));
+                    }
+                    tag_value_ptrs.resize(tag_value_strings.size());
+                    tags.resize(tag_keys.size());
+                    for (size_t i = 0; i < tag_keys.size(); ++i)
+                    {
+                        tag_value_ptrs[i].reserve(tag_value_strings[i].size());
+                        for (const auto& value : tag_value_strings[i])
+                        {
+                            tag_value_ptrs[i].push_back(value.c_str());
+                        }
+                        tags[i].key = tag_keys[i].c_str();
+                        tags[i].values = tag_value_ptrs[i].empty() ? nullptr : tag_value_ptrs[i].data();
+                        tags[i].num_values = (unsigned int)tag_value_ptrs[i].size();
+                    }
+                }
+
+                annotation.tags = !tags.empty() ? tags.data() : nullptr;
+                annotation.num_tags = (unsigned int)tags.size();
+
+                const auto type = resource_type_from_type(resource.type);
+                std::string name;
+                if (NVNMOS_RESOURCE_NODE != type && NVNMOS_RESOURCE_DEVICE != type)
+                {
+                    const auto& names = nvnmos::fields::name(resource.data.at(nmos::fields::tags)).as_array();
+                    if (!web::json::empty(names))
+                    {
+                        name = utility::us2s(web::json::front(names).as_string());
+                    }
+                }
+
+                annotation_changed(server, type, !name.empty() ? name.c_str() : nullptr, &annotation, label_changed, description_changed, tags_changed);
+            };
+            node_implementation = make_node_implementation(node_model, connection_activated_handler, channelmapping_activated_handler, annotation_changed_handler, gate);
 
             // Set up the node server
 
@@ -344,7 +502,7 @@ namespace nvnmos
 
             // Set up the node resources, etc.
 
-            node_implementation_init(node_model, gate);
+            node_implementation_init(node_model, make_annotation(config.node_annotation), make_annotation(config.device_annotation), gate);
 
             {
                 const auto urls = impl::make_api_base_urls(node_model.settings);
@@ -354,13 +512,13 @@ namespace nvnmos
             for (auto& receiver : boost::make_iterator_range_n(config.receivers, config.num_receivers))
             {
                 if (!receiver.transport_file) throw std::logic_error("invalid receiver config");
-                node_implementation_add_receiver(node_model, make_transport(receiver.transport), receiver.transport_file, gate);
+                node_implementation_add_receiver(node_model, make_transport(receiver.transport), receiver.transport_file, make_annotation(receiver.receiver_annotation), gate);
             }
 
             for (auto& sender : boost::make_iterator_range_n(config.senders, config.num_senders))
             {
                 if (!sender.transport_file) throw std::logic_error("invalid sender config");
-                node_implementation_add_sender(node_model, make_transport(sender.transport), sender.transport_file, gate);
+                node_implementation_add_sender(node_model, make_transport(sender.transport), sender.transport_file, make_annotation(sender.source_annotation), make_annotation(sender.flow_annotation), make_annotation(sender.sender_annotation), gate);
             }
 
             // Open the API ports and start up node operation (including the DNS-SD advertisements)
@@ -492,6 +650,11 @@ namespace nvnmos
         web::json::insert(settings, std::make_pair(nmos::fields::events_ws_port, -1));
         web::json::insert(settings, std::make_pair(nmos::fields::control_protocol_ws_port, -1));
         web::json::insert(settings, std::make_pair(nmos::fields::configuration_port, -1));
+        // IS-05 and IS-08 still run when their callbacks are null; IS-13 is mounted only when annotation_changed is set.
+        if (!config.annotation_changed)
+        {
+            web::json::insert(settings, std::make_pair(nmos::fields::annotation_port, -1));
+        }
         // nmos-cpp experimental Settings API (GET/PATCH /settings/all) is a debug
         // backdoor on the Node HTTP port. Off unless NVNMOS_EXPERIMENTAL_SETTINGS
         // is 1/true/on/yes (process environment of whoever loads libnvnmos).
@@ -640,7 +803,7 @@ namespace nvnmos
         try
         {
             if (!config.transport_file) throw std::logic_error("invalid receiver config");
-            node_implementation_add_receiver(node_model, make_transport(config.transport), config.transport_file, gate);
+            node_implementation_add_receiver(node_model, make_transport(config.transport), config.transport_file, make_annotation(config.receiver_annotation), gate);
         }
         catch (...)
         {
@@ -669,7 +832,7 @@ namespace nvnmos
         try
         {
             if (!config.transport_file) throw std::logic_error("invalid sender config");
-            node_implementation_add_sender(node_model, make_transport(config.transport), config.transport_file, gate);
+            node_implementation_add_sender(node_model, make_transport(config.transport), config.transport_file, make_annotation(config.source_annotation), make_annotation(config.flow_annotation), make_annotation(config.sender_annotation), gate);
         }
         catch (...)
         {
@@ -1010,8 +1173,10 @@ namespace nvnmos
 }
 
 NVNMOS_API
-bool nmos_make_node_id(
+bool nmos_make_id(
     const char* seed,
+    NvNmosResourceType type,
+    const char* name,
     char* out,
     size_t out_len)
 {
@@ -1019,7 +1184,16 @@ bool nmos_make_node_id(
     try
     {
         const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
-        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::node), out, out_len);
+        const auto resource_type = nvnmos::type_from_resource_type(type);
+        if (NVNMOS_RESOURCE_NODE == type || NVNMOS_RESOURCE_DEVICE == type)
+        {
+            if (name) return false;
+        }
+        else
+        {
+            if (!name) return false;
+        }
+        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, resource_type, utility::s2us(name)), out, out_len);
     }
     catch (...)
     {
@@ -1028,21 +1202,21 @@ bool nmos_make_node_id(
 }
 
 NVNMOS_API
+bool nmos_make_node_id(
+    const char* seed,
+    char* out,
+    size_t out_len)
+{
+    return nmos_make_id(seed, NVNMOS_RESOURCE_NODE, 0, out, out_len);
+}
+
+NVNMOS_API
 bool nmos_make_device_id(
     const char* seed,
     char* out,
     size_t out_len)
 {
-    if (!seed) return false;
-    try
-    {
-        const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
-        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::device), out, out_len);
-    }
-    catch (...)
-    {
-        return false;
-    }
+    return nmos_make_id(seed, NVNMOS_RESOURCE_DEVICE, 0, out, out_len);
 }
 
 NVNMOS_API
@@ -1052,16 +1226,7 @@ bool nmos_make_sender_id(
     char* out,
     size_t out_len)
 {
-    if (!seed || !sender_name) return false;
-    try
-    {
-        const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
-        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::sender, utility::s2us(sender_name)), out, out_len);
-    }
-    catch (...)
-    {
-        return false;
-    }
+    return nmos_make_id(seed, NVNMOS_RESOURCE_SENDER, sender_name, out, out_len);
 }
 
 NVNMOS_API
@@ -1071,16 +1236,7 @@ bool nmos_make_receiver_id(
     char* out,
     size_t out_len)
 {
-    if (!seed || !receiver_name) return false;
-    try
-    {
-        const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
-        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::receiver, utility::s2us(receiver_name)), out, out_len);
-    }
-    catch (...)
-    {
-        return false;
-    }
+    return nmos_make_id(seed, NVNMOS_RESOURCE_RECEIVER, receiver_name, out, out_len);
 }
 
 NVNMOS_API
@@ -1090,16 +1246,7 @@ bool nmos_make_source_id(
     char* out,
     size_t out_len)
 {
-    if (!seed || !sender_name) return false;
-    try
-    {
-        const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
-        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::source, utility::s2us(sender_name)), out, out_len);
-    }
-    catch (...)
-    {
-        return false;
-    }
+    return nmos_make_id(seed, NVNMOS_RESOURCE_SOURCE, sender_name, out, out_len);
 }
 
 NVNMOS_API
@@ -1109,11 +1256,45 @@ bool nmos_make_flow_id(
     char* out,
     size_t out_len)
 {
-    if (!seed || !sender_name) return false;
+    return nmos_make_id(seed, NVNMOS_RESOURCE_FLOW, sender_name, out, out_len);
+}
+
+NVNMOS_API
+bool nmos_get_id(
+    const NvNmosNodeServer* server,
+    NvNmosResourceType type,
+    const char* name,
+    char* out,
+    size_t out_len)
+{
+    if (!server) return false;
+    auto impl = (nvnmos::server*)server->impl;
+    if (!impl) return false;
     try
     {
-        const auto seed_id = nmos::make_repeatable_id(nvnmos::seed_namespace_id, utility::s2us(seed));
-        return nvnmos::copy_id_to_buffer(nvnmos::impl::make_id(seed_id, nmos::types::flow, utility::s2us(sender_name)), out, out_len);
+        if (NVNMOS_RESOURCE_NODE == type || NVNMOS_RESOURCE_DEVICE == type)
+        {
+            if (name) return false;
+        }
+        else
+        {
+            if (!name) return false;
+        }
+
+        const auto id = [&]() -> nmos::id
+        {
+            switch (type)
+            {
+            case NVNMOS_RESOURCE_NODE: return impl->node_id();
+            case NVNMOS_RESOURCE_DEVICE: return impl->device_id();
+            case NVNMOS_RESOURCE_SOURCE: return impl->source_id(name);
+            case NVNMOS_RESOURCE_FLOW: return impl->flow_id(name);
+            case NVNMOS_RESOURCE_SENDER: return impl->sender_id(name);
+            case NVNMOS_RESOURCE_RECEIVER: return impl->receiver_id(name);
+            default: return {};
+            }
+        }();
+        return nvnmos::copy_id_to_buffer(id, out, out_len);
     }
     catch (...)
     {
@@ -1127,17 +1308,7 @@ bool nmos_get_node_id(
     char* out,
     size_t out_len)
 {
-    if (!server) return false;
-    auto impl = (nvnmos::server*)server->impl;
-    if (!impl) return false;
-    try
-    {
-        return nvnmos::copy_id_to_buffer(impl->node_id(), out, out_len);
-    }
-    catch (...)
-    {
-        return false;
-    }
+    return nmos_get_id(server, NVNMOS_RESOURCE_NODE, 0, out, out_len);
 }
 
 NVNMOS_API
@@ -1146,17 +1317,7 @@ bool nmos_get_device_id(
     char* out,
     size_t out_len)
 {
-    if (!server) return false;
-    auto impl = (nvnmos::server*)server->impl;
-    if (!impl) return false;
-    try
-    {
-        return nvnmos::copy_id_to_buffer(impl->device_id(), out, out_len);
-    }
-    catch (...)
-    {
-        return false;
-    }
+    return nmos_get_id(server, NVNMOS_RESOURCE_DEVICE, 0, out, out_len);
 }
 
 NVNMOS_API
@@ -1166,17 +1327,7 @@ bool nmos_get_sender_id(
     char* out,
     size_t out_len)
 {
-    if (!server || !sender_name) return false;
-    auto impl = (nvnmos::server*)server->impl;
-    if (!impl) return false;
-    try
-    {
-        return nvnmos::copy_id_to_buffer(impl->sender_id(sender_name), out, out_len);
-    }
-    catch (...)
-    {
-        return false;
-    }
+    return nmos_get_id(server, NVNMOS_RESOURCE_SENDER, sender_name, out, out_len);
 }
 
 NVNMOS_API
@@ -1186,17 +1337,7 @@ bool nmos_get_receiver_id(
     char* out,
     size_t out_len)
 {
-    if (!server || !receiver_name) return false;
-    auto impl = (nvnmos::server*)server->impl;
-    if (!impl) return false;
-    try
-    {
-        return nvnmos::copy_id_to_buffer(impl->receiver_id(receiver_name), out, out_len);
-    }
-    catch (...)
-    {
-        return false;
-    }
+    return nmos_get_id(server, NVNMOS_RESOURCE_RECEIVER, receiver_name, out, out_len);
 }
 
 NVNMOS_API
@@ -1206,17 +1347,7 @@ bool nmos_get_source_id(
     char* out,
     size_t out_len)
 {
-    if (!server || !sender_name) return false;
-    auto impl = (nvnmos::server*)server->impl;
-    if (!impl) return false;
-    try
-    {
-        return nvnmos::copy_id_to_buffer(impl->source_id(sender_name), out, out_len);
-    }
-    catch (...)
-    {
-        return false;
-    }
+    return nmos_get_id(server, NVNMOS_RESOURCE_SOURCE, sender_name, out, out_len);
 }
 
 NVNMOS_API
@@ -1226,15 +1357,5 @@ bool nmos_get_flow_id(
     char* out,
     size_t out_len)
 {
-    if (!server || !sender_name) return false;
-    auto impl = (nvnmos::server*)server->impl;
-    if (!impl) return false;
-    try
-    {
-        return nvnmos::copy_id_to_buffer(impl->flow_id(sender_name), out, out_len);
-    }
-    catch (...)
-    {
-        return false;
-    }
+    return nmos_get_id(server, NVNMOS_RESOURCE_FLOW, sender_name, out, out_len);
 }
