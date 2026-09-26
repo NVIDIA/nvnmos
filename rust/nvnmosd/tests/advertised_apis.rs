@@ -145,3 +145,26 @@ async fn experimental_settings_env_enables_settings_api() {
         .await;
     drop(harness);
 }
+
+#[tokio::test]
+async fn annotation_api_env_leaves_annotation_unmounted() {
+    let (harness, mut client, session, port) =
+        open_empty_node(&[("NVNMOSD_ANNOTATION_API", "0")]).await;
+
+    let x_nmos = json_string_set(&http_get_json(port, "/x-nmos/").await);
+    assert_eq!(
+        x_nmos,
+        ["channelmapping/", "connection/", "node/"],
+        "unexpected APIs"
+    );
+
+    let services = http_get_json(port, "/x-nmos/node/v1.3/self").await["services"].clone();
+    assert_eq!(services, Value::Array(vec![]), "unexpected Node services");
+
+    let _ = client
+        .close_session(CloseSessionRequest {
+            session_handle: session,
+        })
+        .await;
+    drop(harness);
+}

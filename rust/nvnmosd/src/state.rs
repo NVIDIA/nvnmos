@@ -56,7 +56,7 @@ use std::time::Duration;
 use nvnmos::{
     Activation, AssetConfig, ChannelMappingActivation, ChannelMappingActiveMapEntry,
     ChannelMappingConfig, ChannelMappingInput, ChannelMappingOutput, ChannelMappingParentType,
-    NetworkServicesConfig, NodeConfig, NodeServer, ReceiverConfig, SenderConfig,
+    NetworkServicesConfig, NodeConfig, NodeServer, ReceiverConfig, ResourceType, SenderConfig,
     Side as WrapperSide, Transport,
 };
 use nvnmos_rpc::v1::{
@@ -70,6 +70,7 @@ use nvnmos_rpc::v1::{
 use tokio::sync::mpsc as tokio_mpsc;
 use tonic::Status;
 
+use crate::annotation_store::AnnotationStore;
 use crate::http_port::{self, PortRange};
 use crate::log_bridge;
 
@@ -166,19 +167,26 @@ impl Side {
         server: &NodeServer,
         transport: Transport,
         transport_file: &str,
+        annotations: Option<&AnnotationStore>,
+        node_seed: &str,
+        name: &str,
     ) -> nvnmos::Result<()> {
         match self {
             Self::Sender => server.add_sender(&SenderConfig {
                 transport,
                 transport_file: transport_file.to_string(),
-                source_annotation: None,
-                flow_annotation: None,
-                sender_annotation: None,
+                source_annotation: annotations
+                    .and_then(|store| store.get(node_seed, ResourceType::Source, name)),
+                flow_annotation: annotations
+                    .and_then(|store| store.get(node_seed, ResourceType::Flow, name)),
+                sender_annotation: annotations
+                    .and_then(|store| store.get(node_seed, ResourceType::Sender, name)),
             }),
             Self::Receiver => server.add_receiver(&ReceiverConfig {
                 transport,
                 transport_file: transport_file.to_string(),
-                receiver_annotation: None,
+                receiver_annotation: annotations
+                    .and_then(|store| store.get(node_seed, ResourceType::Receiver, name)),
             }),
         }
     }
@@ -631,9 +639,19 @@ pub enum AddResourceReady {
 }
 
 impl AddResourcePrep {
-    pub fn run_ffi(self) -> Result<AddResourceReady, Status> {
+    pub fn run_ffi(
+        self,
+        annotations: Option<&AnnotationStore>,
+    ) -> Result<AddResourceReady, Status> {
         self.side
-            .add_to_server(&self.server, self.transport, &self.transport_file)
+            .add_to_server(
+                &self.server,
+                self.transport,
+                &self.transport_file,
+                annotations,
+                &self.node_seed,
+                &self.name,
+            )
             .map_err(|e| {
                 Status::invalid_argument(format!(
                     "libnvnmos add_{} failed (transport_file parse error or \
@@ -827,9 +845,10 @@ impl CreateNodePrep {
     /// by the daemon because they route into
     /// [`State::dispatch_activation`].
     pub fn run_ffi<A, C>(
-        self,
+        mut self,
         on_activation: A,
         on_channelmapping_activation: C,
+        annotations: Option<Arc<AnnotationStore>>,
     ) -> Result<CreateNodeReady, Status>
     where
         A: Fn(&Activation<'_>) -> std::result::Result<(), String> + Send + Sync + 'static,
@@ -838,10 +857,20 @@ impl CreateNodePrep {
             + Sync
             + 'static,
     {
-        let server = NodeServer::builder(self.config.as_ref())
+        if let Some(annotations) = &annotations {
+            self.config.node_annotation = annotations.get(&self.seed, ResourceType::Node, "");
+            self.config.device_annotation = annotations.get(&self.seed, ResourceType::Device, "");
+        }
+        let seed = self.seed.clone();
+        let mut builder = NodeServer::builder(self.config.as_ref())
             .on_log(log_bridge::forward)
             .on_activation(on_activation)
-            .on_channelmapping_activation(on_channelmapping_activation)
+            .on_channelmapping_activation(on_channelmapping_activation);
+        if let Some(annotation_store) = annotations {
+            builder =
+                builder.on_annotation_changed(move |change| annotation_store.apply(&seed, change));
+        }
+        let server = builder
             .build()
             .map_err(|e| Status::internal(format!("create_nmos_node_server failed: {e}")))?;
 

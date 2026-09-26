@@ -112,6 +112,21 @@ activation subscription is missing or interrupted.
 
 When `NodeConfig.http_port` is **`0`**, the daemon picks the first port in `[MIN, MAX]` that is not already used by another Node and that the host can bind. When **`http_port` is non-zero**, the client chooses the port; the daemon rejects the create if that port is already taken by another Node or unavailable on the host.
 
+### IS-13 annotations
+
+The daemon remembers label, description, and writable tags for each `(seed, resource type, name)`. Node and Device use an empty name. Source, Flow, and Sender are separate entries that share the sender name. The gRPC API does not carry annotations: a new Node or a new sender/receiver is created with whatever the store already has for that key.
+
+Names are configuration. Removing a sender, or destroying the node when its last session closes, does not forget annotations. A fresh name on every pipeline run leaves an entry behind. The only automatic removal is an IS-13 reset that clears the last annotated property on that key.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `NVNMOSD_ANNOTATION_API` | on | Mount the Annotation API and keep the checkpoint. Disable with `0`, `false`, `off`, or `no`. While off, the checkpoint is not opened and nodes do not advertise the API. |
+| `NVNMOSD_ANNOTATION_CHECKPOINT_FILE` | `<socket-filename>-annotations.json` in the socket's directory | JSON file for the store. `/tmp/nvnmosd.sock` uses `/tmp/nvnmosd.sock-annotations.json`. |
+| `NVNMOSD_ANNOTATION_DEBOUNCE_MS` | `1000` | How long after the last change before rewriting the file. |
+| `NVNMOSD_ANNOTATION_ENTRY_LIMIT` | `10000` | At the limit, a new key is not stored and an error is logged. Keys already stored still apply and can still be updated. |
+
+A missing file is created empty at start. An existing file that cannot be read or parsed, a read-only tag in the file, or a directory the process cannot write, makes the daemon exit at start. Delete or edit the file, or point `NVNMOSD_ANNOTATION_CHECKPOINT_FILE` at a directory this user can write. Two daemons given the same path would overwrite each other's updates, because each write replaces the whole file. A checkpoint write that fails after startup is logged and the daemon keeps running. Stop the daemon before deleting the file (that clears every annotation) or editing it. A graceful stop writes the file. A crash can lose changes still inside the debounce window. The file lasts as long as its directory: the default sits next to the socket, a `/tmp` one does not survive a reboot.
+
 ### libnvnmos (inherited by the daemon process)
 
 These are read by **libnvnmos** when a Node is created.

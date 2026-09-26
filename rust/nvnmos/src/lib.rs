@@ -152,7 +152,7 @@ impl Side {
 ///
 /// Node and Device have no caller-chosen name. Source, Flow, and Sender share
 /// the sender name; Receiver uses the receiver name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceType {
     /// The IS-04 Node (`/self`).
     Node,
