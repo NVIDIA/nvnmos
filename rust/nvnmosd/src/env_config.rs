@@ -6,7 +6,8 @@
 //! Boolean knobs use a small token vocabulary shared across the daemon:
 //!
 //! * [`EnvDefault::OptOut`] — unset → **on**; `0` / `false` / `off` / `no` → **off**;
-//!   anything else → **on** (`NVNMOSD_MALLOC_TRIM`, `NVNMOSD_SESSION_GC`).
+//!   anything else → **on** (`NVNMOSD_MALLOC_TRIM`, `NVNMOSD_SESSION_GC`,
+//!   `NVNMOSD_ANNOTATION_API`).
 //! * [`EnvDefault::OptIn`] — unset → **off**; `1` / `true` / `yes` / `on` → **on**;
 //!   anything else → **off** (`NVNMOSD_MALLOC_INFO`).
 

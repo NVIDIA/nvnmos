@@ -79,6 +79,26 @@ impl DaemonHarness {
             _ => None,
         }
     }
+
+    /// Send SIGTERM and wait until the process has exited. Returns stderr.
+    /// The daemon shuts down on SIGTERM: in-flight RPCs finish, then it flushes
+    /// the annotation checkpoint. Drop open gRPC streams first.
+    pub fn terminate(&mut self) -> String {
+        if self.child.try_wait().ok().flatten().is_none() {
+            // kill(1) -s TERM is SIGTERM. Child::kill() sends SIGKILL.
+            let pid = self.child.id().to_string();
+            let _ = Command::new("kill").args(["-s", "TERM", &pid]).status();
+            let _ = self.child.wait();
+        }
+        child_stderr(&mut self.child)
+    }
+
+    /// Wait until the process exits on its own, without signalling it.
+    /// Used when startup is expected to fail.
+    pub fn wait_for_exit(&mut self) -> (std::process::ExitStatus, String) {
+        let status = self.child.wait().expect("wait for nvnmosd");
+        (status, child_stderr(&mut self.child))
+    }
 }
 
 impl Drop for DaemonHarness {
@@ -91,6 +111,7 @@ impl Drop for DaemonHarness {
                 }
             }
             _ => {
+                // SIGKILL skips shutdown, including the annotation checkpoint flush.
                 let _ = self.child.kill();
                 let _ = self.child.wait();
             }
