@@ -187,13 +187,31 @@ pub(crate) fn rebuild_chain_with_opts(
 
     release_fake_sink_clock_wait(cat, ghost);
 
+    // Stop a source before the anchor probe goes in. The source task
+    // holds its stream lock for the whole push, so a task waiting in that
+    // probe would leave `gst_pad_stop_task` in `set_state(Null)` waiting
+    // for the lock while the probe waits for this thread to remove it.
+    if ghost.direction() == gst::PadDirection::Src {
+        if let Some(old_chain) = current_chain(ghost) {
+            release_fake_src_create_wait(cat, &old_chain);
+            stop_chain(cat, &old_chain).with_context(|| {
+                format!(
+                    "stopping old source chain `{}` before the anchor block",
+                    old_chain.name()
+                )
+            })?;
+        }
+    }
+
+    // For a source chain, stopped above, the anchor is already idle and this
+    // returns at once; both directions then share the same swap.
     let probe_id =
         block_and_wait(cat, &probe_pad).context("blocking anchor pad before chain rebuild")?;
 
     // Always remove the probe on the way out, even on error, so the
     // pipeline can drain — a stuck probe with no chain behind it is a
     // worse failure than a partially-completed rebuild.
-    let result = swap_chain_inner(cat, bin, &anchor, &probe_pad, new_chain, pad_name, ghost);
+    let result = swap_chain_inner(cat, bin, &anchor, new_chain, pad_name, ghost);
     probe_pad.remove_probe(probe_id);
     gst::debug!(
         cat,
@@ -259,7 +277,6 @@ fn swap_chain_inner(
     cat: &gst::DebugCategory,
     bin: &gst::Bin,
     anchor: &gst::Element,
-    probe_pad: &gst::Pad,
     new_chain: &gst::Element,
     new_chain_pad_name: &str,
     ghost: &gst::GhostPad,
@@ -287,12 +304,7 @@ fn swap_chain_inner(
         let old_chain = old_chain_pad
             .parent_element()
             .ok_or_else(|| anyhow!("old chain pad has no parent element"))?;
-        gst::debug!(
-            cat,
-            "rebuild_chain: old chain = `{}`; probe held on `{}`",
-            old_chain.name(),
-            probe_pad.name(),
-        );
+        gst::debug!(cat, "rebuild_chain: old chain = `{}`", old_chain.name());
 
         // Unlink in the direction-appropriate order: src.unlink(sink).
         match ghost.direction() {
@@ -307,6 +319,9 @@ fn swap_chain_inner(
             )
         })?;
 
+        // A source chain was already taken to Null before the anchor
+        // probe was installed. Sink chains are stopped here, under the
+        // probe. `set_state(Null)` on an element already at Null returns.
         stop_chain(cat, &old_chain)
             .with_context(|| format!("stopping old chain `{}`", old_chain.name()))?;
         bin.remove(&old_chain)
@@ -560,9 +575,10 @@ fn ready_chain(cat: &gst::DebugCategory, chain: &gst::Element) -> Result<(), any
     )
 }
 
-/// Take `chain` to `Null` with a bounded wait. Called from the
-/// `call_async` worker while the anchor block probe is installed, so
-/// an unbounded `set_state(Null)` would wedge the data path.
+/// Take `chain` to `Null` with a bounded wait. An unbounded
+/// `set_state(Null)` would wedge the data path. Source chains are stopped
+/// before the anchor probe is installed, so the source task is not sitting
+/// in that probe holding the stream lock `gst_pad_stop_task` needs.
 fn stop_chain(cat: &gst::DebugCategory, chain: &gst::Element) -> Result<(), anyhow::Error> {
     let name = chain.name();
     chain
@@ -671,6 +687,50 @@ fn release_fake_sink_clock_wait(cat: &gst::DebugCategory, ghost: &gst::GhostPad)
     if let Some(pad) = sink.static_pad("sink") {
         let _ = pad.send_event(gst::event::FlushStart::new());
     }
+}
+
+/// Make an outgoing fake source leave its `appsrc` `create()` wait when it
+/// is stopped. This changes only the fake chain that is about to be removed.
+fn release_fake_src_create_wait(cat: &gst::DebugCategory, chain: &gst::Element) {
+    if !chain.name().ends_with("-fake")
+        || chain
+            .factory()
+            .is_none_or(|factory| factory.name() != "appsrc")
+    {
+        return;
+    }
+    let Some(pad) = chain.static_pad("src") else {
+        return;
+    };
+    gst::debug!(
+        cat,
+        "rebuild_chain: ending the stream on outgoing fake source `{}`",
+        chain.name(),
+    );
+    // For a live source, BaseSrc defers the unlock_stop() that follows
+    // PAUSED→PLAYING to the streaming thread's next create(); stopping just
+    // after PLAYING can have it undo the stop's unlock(), leaving appsrc
+    // waiting for data while gst_pad_stop_task waits for its stream lock
+    // (https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5331).
+    // unlock() cannot be called again from here, but appsrc's EOS survives
+    // unlock_stop(), so once end-of-stream is accepted create() returns.
+    // appsrc refuses it while still flushing; need-data, emitted before
+    // every wait, ends the stream then. The EOS is dropped at the fake's
+    // own pad so nothing downstream sees it.
+    pad.add_probe(
+        gst::PadProbeType::EVENT_DOWNSTREAM,
+        |_pad, info| match info.event() {
+            Some(event) if event.type_() == gst::EventType::Eos => gst::PadProbeReturn::Drop,
+            _ => gst::PadProbeReturn::Ok,
+        },
+    );
+    chain.connect("need-data", false, |args| {
+        if let Some(Ok(appsrc)) = args.first().map(|arg| arg.get::<gst::Element>()) {
+            let _ = appsrc.emit_by_name::<gst::FlowReturn>("end-of-stream", &[]);
+        }
+        None
+    });
+    let _ = chain.emit_by_name::<gst::FlowReturn>("end-of-stream", &[]);
 }
 
 /// Build the `nmossink` fake chain: a bin of `valve ! fakesink`,
@@ -3793,13 +3853,11 @@ mod tests {
         }
     }
 
-    /// Minimal nmossrc topology at PLAYING: fake `appsrc` (no caps, so
-    /// `start()` does not push CAPS) behind the identity anchor, ghosted
-    /// out to a `fakesink`.
-    fn playing_nmossrc_sim_bin() -> (gst::Pipeline, gst::Bin, gst::GhostPad) {
+    /// Minimal nmossrc topology, still at NULL: `initial` behind the
+    /// identity anchor, ghosted out to a `fakesink`.
+    fn nmossrc_sim_bin(initial: gst::Element) -> (gst::Pipeline, gst::Bin, gst::GhostPad) {
         let pipeline = gst::Pipeline::new();
         let nmos_bin = gst::Bin::with_name("nmossrc-sim");
-        let initial = build_fake_src(None).expect("initial fake src");
         let ghost = build_initial(&nmos_bin, initial, "src", gst::PadDirection::Src)
             .expect("build_initial");
         nmos_bin.add_pad(&ghost).expect("add ghost pad");
@@ -3815,12 +3873,206 @@ mod tests {
         nmos_bin
             .link_pads(Some("src"), &sink, Some("sink"))
             .expect("link nmossrc ghost to fakesink");
-        pipeline
-            .set_state(gst::State::Playing)
-            .expect("pipeline -> PLAYING");
-        let (_ret, state, _pending) = pipeline.state(gst::ClockTime::from_seconds(5));
-        assert_eq!(state, gst::State::Playing, "pipeline must reach PLAYING");
         (pipeline, nmos_bin, ghost)
+    }
+
+    /// [`nmossrc_sim_bin`] at PLAYING, with a fake `appsrc` (no caps, so
+    /// `start()` does not push CAPS) as the initial chain.
+    fn playing_nmossrc_sim_bin() -> (gst::Pipeline, gst::Bin, gst::GhostPad) {
+        let initial = build_fake_src(None).expect("initial fake src");
+        let (pipeline, nmos_bin, ghost) = nmossrc_sim_bin(initial);
+        set_state_and_wait(&pipeline, gst::State::Playing);
+        (pipeline, nmos_bin, ghost)
+    }
+
+    fn set_state_and_wait(pipeline: &gst::Pipeline, state: gst::State) {
+        pipeline
+            .set_state(state)
+            .unwrap_or_else(|e| panic!("pipeline -> {state:?}: {e:?}"));
+        let (_ret, current, _pending) = pipeline.state(gst::ClockTime::from_seconds(5));
+        assert_eq!(current, state, "pipeline must reach {state:?}");
+    }
+
+    /// Runs `release_fake_src_create_wait` on the fake `appsrc` of a PLAYING
+    /// nmossrc chain without stopping it, and checks that the fake's
+    /// streaming thread leaves `create()` with EOS that goes no further than
+    /// the fake's own pad. Nothing is pushed into the fake, so `unlock()` is
+    /// the only other way out of `create()`.
+    ///
+    /// With `pause_first`, the pipeline is paused before the call and
+    /// resumed after it. The pause's `unlock()` leaves `appsrc` flushing,
+    /// so it refuses `end-of-stream`; on resume `BaseSrc` runs the deferred
+    /// `unlock_stop()` and `create()` emits `need-data`.
+    fn fake_src_leaves_create_after_release(pause_first: bool) {
+        init_gst();
+        let cat = test_log_cat();
+        let initial = build_fake_src(None).expect("initial fake src");
+        let (pipeline, _nmos_bin, ghost) = nmossrc_sim_bin(initial);
+        let fake = current_chain(&ghost).expect("fake chain");
+        let fake_pad = fake.static_pad("src").expect("fake src pad");
+        let sink_pad = ghost.peer().expect("fakesink pad");
+
+        let (need_data_tx, need_data_rx) = std::sync::mpsc::channel();
+        fake.connect("need-data", false, move |_| {
+            let _ = need_data_tx.send(());
+            None
+        });
+        let (eos_at_fake_tx, eos_at_fake_rx) = std::sync::mpsc::channel();
+        fake_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+            if info
+                .event()
+                .is_some_and(|e| e.type_() == gst::EventType::Eos)
+            {
+                let _ = eos_at_fake_tx.send(());
+            }
+            gst::PadProbeReturn::Ok
+        });
+        let (eos_downstream_tx, eos_downstream_rx) = std::sync::mpsc::channel();
+        sink_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+            if info
+                .event()
+                .is_some_and(|e| e.type_() == gst::EventType::Eos)
+            {
+                let _ = eos_downstream_tx.send(());
+            }
+            gst::PadProbeReturn::Ok
+        });
+
+        set_state_and_wait(&pipeline, gst::State::Playing);
+        need_data_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("fake appsrc must emit need-data after PLAYING");
+        if pause_first {
+            set_state_and_wait(&pipeline, gst::State::Paused);
+        }
+
+        release_fake_src_create_wait(cat, &fake);
+        if pause_first {
+            set_state_and_wait(&pipeline, gst::State::Playing);
+        }
+
+        eos_at_fake_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("fake appsrc must leave create() with EOS");
+        let _ = pipeline.set_state(gst::State::Null);
+        assert!(
+            eos_downstream_rx.try_recv().is_err(),
+            "EOS from the outgoing fake source must not reach downstream"
+        );
+    }
+
+    #[test]
+    fn release_fake_src_create_wait_ends_create_while_playing() {
+        fake_src_leaves_create_after_release(false);
+    }
+
+    #[test]
+    fn release_fake_src_create_wait_ends_create_after_resume() {
+        fake_src_leaves_create_after_release(true);
+    }
+
+    /// Source whose `create()` returns immediately. `unlock()` records that
+    /// `stop_chain` has asked the streaming thread to leave, which tells the
+    /// anchor-probe test that the source is being stopped before the anchor
+    /// probe is installed.
+    mod fast_push_src {
+        pub static UNLOCK_REQUESTED: AtomicBool = AtomicBool::new(false);
+        use super::*;
+        use gst::glib;
+        use gstreamer_base as gst_base;
+        use gstreamer_base::prelude::*;
+        use gstreamer_base::subclass::prelude::*;
+
+        glib::wrapper! {
+            pub struct FastPushSrc(ObjectSubclass<imp::FastPushSrc>) @extends gst_base::PushSrc, gst_base::BaseSrc, gst::Element, gst::Object;
+        }
+
+        pub fn make() -> gst::Element {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                gst::Element::register(
+                    None,
+                    "nmostestfastpushsrc",
+                    gst::Rank::NONE,
+                    FastPushSrc::static_type(),
+                )
+                .expect("register nmostestfastpushsrc");
+            });
+            gst::ElementFactory::make("nmostestfastpushsrc")
+                .build()
+                .expect("nmostestfastpushsrc")
+        }
+
+        mod imp {
+            use super::*;
+
+            #[derive(Default)]
+            pub struct FastPushSrc;
+
+            #[glib::object_subclass]
+            impl ObjectSubclass for FastPushSrc {
+                const NAME: &'static str = "NmosTestFastPushSrc";
+                type Type = super::FastPushSrc;
+                type ParentType = gst_base::PushSrc;
+            }
+
+            impl ObjectImpl for FastPushSrc {}
+            impl GstObjectImpl for FastPushSrc {}
+
+            impl ElementImpl for FastPushSrc {
+                fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
+                    static M: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
+                        gst::subclass::ElementMetadata::new(
+                            "Test source that pushes as fast as create() is called",
+                            "Source",
+                            "Test double for a source task inside the anchor probe",
+                            "NVIDIA",
+                        )
+                    });
+                    Some(&*M)
+                }
+
+                fn pad_templates() -> &'static [gst::PadTemplate] {
+                    static T: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
+                        vec![
+                            gst::PadTemplate::new(
+                                "src",
+                                gst::PadDirection::Src,
+                                gst::PadPresence::Always,
+                                &gst::Caps::new_any(),
+                            )
+                            .unwrap(),
+                        ]
+                    });
+                    T.as_ref()
+                }
+            }
+
+            impl BaseSrcImpl for FastPushSrc {
+                fn start(&self) -> Result<(), gst::ErrorMessage> {
+                    let caps = gst::Caps::builder("application/x-nmos-test").build();
+                    let _ = self.obj().set_caps(&caps);
+                    Ok(())
+                }
+
+                fn unlock(&self) -> Result<(), gst::ErrorMessage> {
+                    super::UNLOCK_REQUESTED.store(true, Ordering::SeqCst);
+                    Ok(())
+                }
+            }
+
+            impl PushSrcImpl for FastPushSrc {
+                fn create(
+                    &self,
+                    _buffer: Option<&mut gst::BufferRef>,
+                ) -> Result<gst_base::subclass::base_src::CreateSuccess, gst::FlowError>
+                {
+                    Ok(gst_base::subclass::base_src::CreateSuccess::NewBuffer(
+                        gst::Buffer::with_size(16).unwrap(),
+                    ))
+                }
+            }
+        }
     }
 
     /// Mid-stream [`rebuild_chain`] holds `BLOCK_DOWNSTREAM` on the
@@ -3828,36 +4080,132 @@ mod tests {
     /// state-change thread (as `udpsrc2` does) deadlocks against that
     /// probe — the IS-05 `auto-activate=false` hang while PLAYING.
     ///
-    /// A hang watchdog converts a wedged swap into a hard failure; after
+    /// A hang watchdog converts a wedged swap into a test failure; after
     /// the source-direction READY-under-block split this must return.
     #[test]
     fn rebuild_chain_mid_playing_src_set_caps_in_start_does_not_hang() {
         init_gst();
-        let cat = test_log_cat();
         let (pipeline, nmos_bin, ghost) = playing_nmossrc_sim_bin();
 
         let new_src = caps_in_start_src::make();
+        rebuild_chain_or_panic_on_hang(
+            &nmos_bin,
+            &ghost,
+            &new_src,
+            "likely CAPS from BaseSrc::start blocked on the anchor probe",
+        )
+        .expect("source that set_caps in start() must swap while PLAYING");
 
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    /// Runs a source-direction [`rebuild_chain`] on another thread and
+    /// panics if it has not returned within 5 s, so a hung swap fails the
+    /// test with `hang` as the reason. The hung thread is left behind.
+    fn rebuild_chain_or_panic_on_hang(
+        bin: &gst::Bin,
+        ghost: &gst::GhostPad,
+        new_chain: &gst::Element,
+        hang: &str,
+    ) -> Result<(), anyhow::Error> {
         const HANG_TIMEOUT: Duration = Duration::from_secs(5);
-        let finished = Arc::new(AtomicBool::new(false));
-        {
-            let finished = Arc::clone(&finished);
-            std::thread::spawn(move || {
-                std::thread::sleep(HANG_TIMEOUT);
-                if !finished.load(Ordering::SeqCst) {
-                    eprintln!(
-                        "nmossrc-sim rebuild_chain hung for {HANG_TIMEOUT:?} — \
-                         likely CAPS from BaseSrc::start blocked on the anchor probe"
-                    );
-                    std::process::abort();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let (bin, ghost, new_chain) = (bin.clone(), ghost.clone(), new_chain.clone());
+        std::thread::spawn(move || {
+            let _ = done_tx.send(rebuild_chain(
+                test_log_cat(),
+                &bin,
+                &ghost,
+                &new_chain,
+                "src",
+            ));
+        });
+        done_rx.recv_timeout(HANG_TIMEOUT).unwrap_or_else(|_| {
+            panic!("nmossrc-sim rebuild_chain hung for {HANG_TIMEOUT:?}: {hang}")
+        })
+    }
+
+    /// A source task in the middle of a push holds its stream lock, so
+    /// [`rebuild_chain`] must stop the old source before blocking the
+    /// anchor: stopping it with the anchor blocked waits in
+    /// `gst_pad_stop_task` for a push that the block keeps from returning.
+    ///
+    /// The source's first buffer waits in a test probe on the anchor until
+    /// either the rebuild's block probe is installed or the source's
+    /// `unlock()` runs because it is being stopped first. If the block
+    /// comes first, a downstream block then holds that push, as the anchor
+    /// block would hold a later one.
+    #[test]
+    fn rebuild_chain_mid_playing_src_task_in_anchor_probe_does_not_hang() {
+        init_gst();
+        fast_push_src::UNLOCK_REQUESTED.store(false, Ordering::SeqCst);
+        let (pipeline, nmos_bin, ghost) = nmossrc_sim_bin(fast_push_src::make());
+
+        let anchor_sink = ghost
+            .target()
+            .expect("ghost target")
+            .parent_element()
+            .expect("anchor")
+            .static_pad("sink")
+            .expect("anchor sink");
+        let hold = Arc::new(AtomicBool::new(false));
+        let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+        let parked = AtomicBool::new(false);
+        let hold_at_anchor = Arc::clone(&hold);
+        anchor_sink
+            .add_probe(gst::PadProbeType::BUFFER, move |pad, _info| {
+                // Only the first buffer. Later pushes must not wait here or a
+                // stopped source cannot leave its task.
+                if parked.swap(true, Ordering::SeqCst) {
+                    return gst::PadProbeReturn::Ok;
                 }
-            });
-        }
+                let _ = parked_tx.send(());
+                // Blocked first: when the anchor is blocked before the stop,
+                // unlock() follows at once, and both may be seen together.
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                loop {
+                    if pad.is_blocked() {
+                        hold_at_anchor.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    if fast_push_src::UNLOCK_REQUESTED.load(Ordering::SeqCst)
+                        || std::time::Instant::now() >= deadline
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_micros(100));
+                }
+                gst::PadProbeReturn::Ok
+            })
+            .expect("anchor test probe");
+        ghost
+            .peer()
+            .expect("fakesink sink")
+            .add_probe(
+                gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER,
+                move |_pad, _info| {
+                    if hold.load(Ordering::SeqCst) {
+                        gst::PadProbeReturn::Ok
+                    } else {
+                        gst::PadProbeReturn::Pass
+                    }
+                },
+            )
+            .expect("downstream probe");
 
-        rebuild_chain(cat, &nmos_bin, &ghost, &new_src, "src")
-            .expect("source that set_caps in start() must swap while PLAYING");
+        set_state_and_wait(&pipeline, gst::State::Playing);
+        parked_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("source buffer must reach the anchor");
 
-        finished.store(true, Ordering::SeqCst);
+        let new_src = caps_in_start_src::make();
+        rebuild_chain_or_panic_on_hang(
+            &nmos_bin,
+            &ghost,
+            &new_src,
+            "old source task waiting in the anchor probe",
+        )
+        .expect("source whose task is in the anchor probe must swap while PLAYING");
         let _ = pipeline.set_state(gst::State::Null);
     }
 
