@@ -6,8 +6,8 @@
 //! data path is a *real* transport chain (`mxlsink`, `udpsink` with
 //! RTP payloader, or `nvdsudpsink`) when configuration is complete
 //! for the chosen `transport`; otherwise the bin keeps a *fake* chain
-//! (`capsfilter ! fakesink` when essence caps are known, else bare
-//! `fakesink`) so the element looks valid in the pipeline until an
+//! (`valve ! fakesink`, preceded by a `capsfilter` when essence caps
+//! are known) so the element looks valid in the pipeline until an
 //! IS-05 activation (or a later configuration update) supplies the
 //! missing pieces.
 //!

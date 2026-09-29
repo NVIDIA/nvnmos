@@ -11,8 +11,8 @@
 //!
 //! The chain is one of two flavours:
 //!
-//! * a **fake chain** while no real flow is wired up (`fakesink` for
-//!   sinks, `appsrc` for sources, both idle in PLAYING), or
+//! * a **fake chain** while no real flow is wired up (`valve ! fakesink`
+//!   for sinks, `appsrc` for sources, both idle in PLAYING), or
 //! * a **real chain** for the selected transport once enough
 //!   configuration is pinned to instantiate it:
 //!   * **MXL** — `capsfilter ! mxlsink` on the sink side; on the
@@ -645,70 +645,84 @@ fn release_fake_sink_clock_wait(cat: &gst::DebugCategory, ghost: &gst::GhostPad)
     if ghost.direction() != gst::PadDirection::Sink {
         return;
     }
-    let Some(chain) = current_chain(ghost).filter(|chain| chain.name().ends_with("-fake")) else {
+    let Some(chain) = current_chain(ghost)
+        .filter(|chain| chain.name().ends_with("-fake"))
+        .and_then(|chain| chain.downcast::<gst::Bin>().ok())
+    else {
         return;
     };
-    let sink = chain
-        .downcast_ref::<gst::Bin>()
-        .and_then(|bin| bin.by_name("nmossink-fake-sink"))
-        .unwrap_or(chain);
+    let (Some(valve), Some(sink)) = (
+        chain.by_name("nmossink-fake-valve"),
+        chain.by_name("nmossink-fake-sink"),
+    ) else {
+        return;
+    };
     gst::debug!(
         cat,
         "rebuild_chain: interrupting clock wait on outgoing fake sink `{}`",
         sink.name(),
     );
-    // Flipping `sync` does not unschedule an in-flight GstBaseSink wait,
-    // and PLAYING→PAUSED would take the stream lock and block on it.
-    // FLUSH_START on the sink pad is the normal way to unblock from this
-    // thread. No FLUSH_STOP: that event is serialized, and stop_chain
-    // takes this fake to Null immediately after.
-    sink.set_property("sync", false);
+    // A buffer may be stuck in the fakesink's clock wait. FLUSH_START
+    // wakes it; clearing `sync` does not. Set `drop` first so the valve
+    // returns OK for that buffer instead of FLUSHING, which would pause
+    // the upstream task until a FLUSH_STOP that never comes (this fake
+    // goes to Null next).
+    valve.set_property("drop", true);
     if let Some(pad) = sink.static_pad("sink") {
         let _ = pad.send_event(gst::event::FlushStart::new());
     }
 }
 
-/// Build the `nmossink` fake chain: a `fakesink`, optionally preceded
-/// by a `capsfilter` when essence caps are known. The `-fake` suffix
-/// on the chain name is what [`current_chain_is_real`] checks to
+/// Build the `nmossink` fake chain: a bin of `valve ! fakesink`,
+/// preceded by a `capsfilter` when essence caps are known. The `-fake`
+/// suffix on the chain name is what [`current_chain_is_real`] checks to
 /// decide whether to insert a fake hop into real → real re-activations.
+/// The valve is what lets [`release_fake_sink_clock_wait`] interrupt
+/// the fakesink without the interrupted push failing upstream.
 ///
 /// When `caps` is `Some`, upstream negotiation is pinned to that
 /// template so sticky caps at the anchor match the advertised Sender
 /// essence before IS-05 swaps in the real payloader chain. When
 /// `caps` is `None` (constructed-time or deferred mode before peer
-/// query) the bare `fakesink` accepts any caps.
+/// query) the chain accepts any caps.
 pub(crate) fn build_fake_sink(caps: Option<&gst::Caps>) -> Result<gst::Element, anyhow::Error> {
-    let Some(caps) = caps else {
-        return gst::ElementFactory::make("fakesink")
-            .name("nmossink-fake")
-            .property("sync", true)
-            .property("async", false)
-            .build()
-            .map_err(|e| anyhow!("creating fakesink for nmossink fake chain: {e}"));
-    };
-
+    let valve = gst::ElementFactory::make("valve")
+        .name("nmossink-fake-valve")
+        .property("drop", false)
+        .build()
+        .map_err(|e| anyhow!("creating valve for nmossink fake chain: {e}"))?;
     let fakesink = gst::ElementFactory::make("fakesink")
         .name("nmossink-fake-sink")
         .property("sync", true)
         .property("async", false)
         .build()
         .map_err(|e| anyhow!("creating fakesink for nmossink fake chain: {e}"))?;
-
-    let capsfilter = gst::ElementFactory::make("capsfilter")
-        .name("nmossink-fake-caps")
-        .property("caps", caps)
-        .build()
-        .context("creating capsfilter for nmossink fake chain")?;
     let bin = gst::Bin::with_name("nmossink-fake");
-    bin.add_many([&capsfilter, &fakesink])
-        .map_err(|e| anyhow!("adding fake-chain capsfilter + fakesink: {e}"))?;
-    capsfilter
+    bin.add_many([&valve, &fakesink])
+        .map_err(|e| anyhow!("adding fake-chain valve + fakesink: {e}"))?;
+    valve
         .link(&fakesink)
-        .context("linking fake-chain capsfilter to fakesink")?;
-    let sink_pad = capsfilter
+        .context("linking fake-chain valve to fakesink")?;
+
+    let head = match caps {
+        Some(caps) => {
+            let capsfilter = gst::ElementFactory::make("capsfilter")
+                .name("nmossink-fake-caps")
+                .property("caps", caps)
+                .build()
+                .context("creating capsfilter for nmossink fake chain")?;
+            bin.add(&capsfilter)
+                .map_err(|e| anyhow!("adding fake-chain capsfilter: {e}"))?;
+            capsfilter
+                .link(&valve)
+                .context("linking fake-chain capsfilter to valve")?;
+            capsfilter
+        }
+        None => valve,
+    };
+    let sink_pad = head
         .static_pad("sink")
-        .ok_or_else(|| anyhow!("fake-chain capsfilter missing sink pad"))?;
+        .ok_or_else(|| anyhow!("fake-chain `{}` missing sink pad", head.name()))?;
     let ghost = gst::GhostPad::builder(gst::PadDirection::Sink)
         .name("sink")
         .build();
@@ -2144,17 +2158,25 @@ mod tests {
             "capped fake chain must include capsfilter",
         );
         assert!(
+            bin.by_name("nmossink-fake-valve").is_some(),
+            "capped fake chain must include valve",
+        );
+        assert!(
             bin.static_pad("sink").is_some(),
             "capped fake chain must expose ghost sink pad",
         );
     }
 
     #[test]
-    fn build_fake_sink_without_caps_is_bare_fakesink() {
+    fn build_fake_sink_without_caps_is_valve_fakesink_bin() {
         init_gst();
-        let chain = build_fake_sink(None).expect("bare fake sink");
+        let chain = build_fake_sink(None).expect("uncapped fake sink");
         assert_eq!(chain.name(), "nmossink-fake");
         assert!(chain.static_pad("sink").is_some());
+        let bin = chain.downcast::<gst::Bin>().expect("returns a bin");
+        assert!(bin.by_name("nmossink-fake-caps").is_none());
+        assert!(bin.by_name("nmossink-fake-valve").is_some());
+        assert!(bin.by_name("nmossink-fake-sink").is_some());
     }
 
     fn mxl_advertise_caps() -> gst::Caps {
@@ -3636,6 +3658,15 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
 
         let replacement = fakesink_for_rebuild_test("inner-replacement", false);
+        let (replacement_seen_tx, replacement_seen_rx) = std::sync::mpsc::channel();
+        replacement
+            .static_pad("sink")
+            .expect("replacement sink pad")
+            .add_probe(gst::PadProbeType::BUFFER, move |_pad, _info| {
+                let _ = replacement_seen_tx.send(());
+                gst::PadProbeReturn::Ok
+            })
+            .expect("replacement buffer probe");
         let started = std::time::Instant::now();
         rebuild_chain(cat, &nmos_bin, &ghost, &replacement, "sink")
             .expect("swap must interrupt the fake sink's clock wait");
@@ -3644,6 +3675,16 @@ mod tests {
             "rebuild_chain waited out the 30s timestamp instead of interrupting it ({:?})",
             started.elapsed(),
         );
+
+        // A FLUSHING return from the interrupted wait pauses appsrc's
+        // streaming task, and nothing sends the FLUSH_STOP that restarts it.
+        src.downcast_ref::<gstreamer_app::AppSrc>()
+            .expect("appsrc type")
+            .push_buffer(gst::Buffer::with_size(1).expect("buffer"))
+            .expect("push buffer after swap");
+        replacement_seen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("buffer pushed after the swap must reach the replacement sink");
 
         let _ = pipeline.set_state(gst::State::Null);
     }
