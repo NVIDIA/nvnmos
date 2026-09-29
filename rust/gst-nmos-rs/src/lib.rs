@@ -75,8 +75,8 @@
 //! has to look like a valid GStreamer element to the rest of the
 //! pipeline — the ghost pad needs to answer caps queries and the
 //! bin needs to reach PLAYING. `nmossink`'s fake chain is
-//! `capsfilter ! fakesink` when essence caps are known (`caps` or
-//! `transport-file*`), or a bare `fakesink` until then. Known caps
+//! `capsfilter ! valve ! fakesink` when essence caps are known (`caps`
+//! or `transport-file*`), or `valve ! fakesink` until then. Known caps
 //! are pinned at NULL→READY; deferred senders query upstream peer
 //! caps to pin the fake chain at READY→PAUSED *before* child negotiation.
 //! `nmossrc`'s fake chain is an `appsrc` configured with the
