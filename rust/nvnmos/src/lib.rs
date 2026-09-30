@@ -23,11 +23,13 @@
 //! * [`make_node_id`] / [`make_device_id`] / [`make_sender_id`] /
 //!   [`make_receiver_id`] / [`make_source_id`] / [`make_flow_id`] — pure
 //!   functions that compute the same UUIDs deterministically from a seed,
-//!   without needing a running server.
-//! * [`NodeServer::builder`] — opt into IS-05 [`Activation`] handling and / or
-//!   forward libnvnmos's slog output via [`LogMessage`]. Both knobs are
-//!   chainable on the returned [`NodeServerBuilder`]; the bare
-//!   [`NodeServer::new`] is shorthand for "no callbacks".
+//!   without needing a running server. [`make_id`] and [`NodeServer::get_id`]
+//!   are the generic forms.
+//! * [`NodeServer::builder`] — opt into IS-05 [`Activation`] handling, IS-13
+//!   [`AnnotationChange`] handling, and / or forward libnvnmos's slog output
+//!   via [`LogMessage`]. The knobs are chainable on the returned
+//!   [`NodeServerBuilder`]; the bare [`NodeServer::new`] is shorthand for
+//!   "no callbacks".
 //!
 //! ## Building
 //!
@@ -36,6 +38,7 @@
 
 #![warn(missing_docs)]
 
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, NulError};
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -136,6 +139,55 @@ impl Side {
         match side {
             sys::_NvNmosSide_NVNMOS_SIDE_SENDER => Some(Self::Sender),
             sys::_NvNmosSide_NVNMOS_SIDE_RECEIVER => Some(Self::Receiver),
+            _ => None,
+        }
+    }
+}
+
+// ============================================================================
+// Resource type
+// ============================================================================
+
+/// Which IS-04 resource an id or annotation refers to.
+///
+/// Node and Device have no caller-chosen name. Source, Flow, and Sender share
+/// the sender name; Receiver uses the receiver name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResourceType {
+    /// The IS-04 Node (`/self`).
+    Node,
+    /// The single IS-04 Device on this Node.
+    Device,
+    /// The IS-04 Source associated with a sender name.
+    Source,
+    /// The IS-04 Flow associated with a sender name.
+    Flow,
+    /// An IS-04 Sender.
+    Sender,
+    /// An IS-04 Receiver.
+    Receiver,
+}
+
+impl ResourceType {
+    fn to_ffi(self) -> sys::NvNmosResourceType {
+        match self {
+            Self::Node => sys::_NvNmosResourceType_NVNMOS_RESOURCE_NODE,
+            Self::Device => sys::_NvNmosResourceType_NVNMOS_RESOURCE_DEVICE,
+            Self::Source => sys::_NvNmosResourceType_NVNMOS_RESOURCE_SOURCE,
+            Self::Flow => sys::_NvNmosResourceType_NVNMOS_RESOURCE_FLOW,
+            Self::Sender => sys::_NvNmosResourceType_NVNMOS_RESOURCE_SENDER,
+            Self::Receiver => sys::_NvNmosResourceType_NVNMOS_RESOURCE_RECEIVER,
+        }
+    }
+
+    fn from_ffi(resource_type: sys::NvNmosResourceType) -> Option<Self> {
+        match resource_type {
+            sys::_NvNmosResourceType_NVNMOS_RESOURCE_NODE => Some(Self::Node),
+            sys::_NvNmosResourceType_NVNMOS_RESOURCE_DEVICE => Some(Self::Device),
+            sys::_NvNmosResourceType_NVNMOS_RESOURCE_SOURCE => Some(Self::Source),
+            sys::_NvNmosResourceType_NVNMOS_RESOURCE_FLOW => Some(Self::Flow),
+            sys::_NvNmosResourceType_NVNMOS_RESOURCE_SENDER => Some(Self::Sender),
+            sys::_NvNmosResourceType_NVNMOS_RESOURCE_RECEIVER => Some(Self::Receiver),
             _ => None,
         }
     }
@@ -288,9 +340,52 @@ pub struct LogMessage<'a> {
 
 type LogCallback = Box<dyn Fn(&LogMessage<'_>) + Send + Sync + 'static>;
 
+/// IS-13 annotation applied when a resource is created.
+///
+/// `None` for [`Self::label`] or [`Self::description`] omits that property.
+/// `Some("")` is an annotated empty string.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Annotation {
+    /// Label overlay. `None` omits `label`.
+    pub label: Option<String>,
+    /// Description overlay. `None` omits `description`.
+    pub description: Option<String>,
+    /// Writable tags. Empty omits `tags`; an empty value `Vec` is an empty
+    /// JSON array, not a removed key.
+    pub tags: BTreeMap<String, Vec<String>>,
+}
+
+/// An IS-13 Annotation API merge reported through
+/// [`NodeServerBuilder::on_annotation_changed`].
+///
+/// `annotation` and `name` are only valid for the duration of the callback.
+/// Copy anything that must outlive the call. A `None` label or description is
+/// meaningful only when the matching `*_changed` flag is true; then it is a
+/// reset, while `Some("")` is an annotated empty value.
+#[derive(Debug)]
+pub struct AnnotationChange<'a> {
+    /// Which IS-04 resource was updated.
+    pub resource_type: ResourceType,
+    /// Caller-chosen sender or receiver name. `None` for Node and Device.
+    pub name: Option<&'a str>,
+    /// Values for the properties this merge changed.
+    pub annotation: &'a Annotation,
+    /// This merge included `label`.
+    pub label_changed: bool,
+    /// This merge included `description`.
+    pub description_changed: bool,
+    /// This merge included `tags`. Then [`Annotation::tags`] is the full
+    /// writable-tag overlay after the merge.
+    pub tags_changed: bool,
+}
+
+type AnnotationCallback =
+    Box<dyn Fn(&AnnotationChange<'_>) -> std::result::Result<(), String> + Send + Sync + 'static>;
+
 struct CallbackState {
     activation: Option<ActivationCallback>,
     channelmapping_activation: Option<ChannelMappingActivationCallback>,
+    annotation: Option<AnnotationCallback>,
     log: Option<LogCallback>,
 }
 
@@ -458,6 +553,98 @@ unsafe extern "C" fn log_trampoline(
     let _ = catch_unwind(AssertUnwindSafe(|| callback(&log)));
 }
 
+unsafe extern "C" fn annotation_trampoline(
+    server: *mut sys::NvNmosNodeServer,
+    resource_type: sys::NvNmosResourceType,
+    name: *const c_char,
+    annotation: *const sys::NvNmosAnnotation,
+    label_changed: bool,
+    description_changed: bool,
+    tags_changed: bool,
+) -> bool {
+    if server.is_null() || annotation.is_null() {
+        return false;
+    }
+    let Some(resource_type) = ResourceType::from_ffi(resource_type) else {
+        return false;
+    };
+    let user_data = unsafe { (*server).user_data };
+    if user_data.is_null() {
+        return false;
+    }
+    let state = unsafe { &*(user_data as *const CallbackState) };
+    let Some(callback) = state.annotation.as_ref() else {
+        return false;
+    };
+
+    let name = if name.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(name) }.to_str() {
+            Ok(s) => Some(s),
+            Err(_) => return false,
+        }
+    };
+    let raw = unsafe { &*annotation };
+    let label = match cstr_option(raw.label) {
+        Ok(value) => value.map(str::to_owned),
+        Err(()) => return false,
+    };
+    let description = match cstr_option(raw.description) {
+        Ok(value) => value.map(str::to_owned),
+        Err(()) => return false,
+    };
+    let mut tags = BTreeMap::new();
+    if !raw.tags.is_null() {
+        for index in 0..raw.num_tags as usize {
+            let tag = unsafe { &*raw.tags.add(index) };
+            let key = match cstr_option(tag.key) {
+                Ok(Some(key)) => key.to_owned(),
+                _ => return false,
+            };
+            let mut values = Vec::with_capacity(tag.num_values as usize);
+            if !tag.values.is_null() {
+                for value_index in 0..tag.num_values as usize {
+                    let value = unsafe { *tag.values.add(value_index) };
+                    match cstr_option(value) {
+                        Ok(Some(value)) => values.push(value.to_owned()),
+                        _ => return false,
+                    }
+                }
+            }
+            tags.insert(key, values);
+        }
+    }
+    let annotation = Annotation {
+        label,
+        description,
+        tags,
+    };
+    let change = AnnotationChange {
+        resource_type,
+        name,
+        annotation: &annotation,
+        label_changed,
+        description_changed,
+        tags_changed,
+    };
+    matches!(
+        catch_unwind(AssertUnwindSafe(|| callback(&change))),
+        Ok(Ok(()))
+    )
+}
+
+fn cstr_option<'a>(ptr: *const c_char) -> std::result::Result<Option<&'a str>, ()> {
+    if ptr.is_null() {
+        Ok(None)
+    } else {
+        unsafe { CStr::from_ptr(ptr) }
+            .to_str()
+            .map(Some)
+            .map_err(|_| ())
+    }
+}
+
 // ============================================================================
 // ID accessors (pure)
 // ============================================================================
@@ -581,6 +768,30 @@ pub fn make_flow_id(seed: &str, sender_name: &str) -> Result<String> {
     };
     if !ok {
         return Err(Error::Failed("nmos_make_flow_id"));
+    }
+    capture_id(&buf)
+}
+
+/// Compute the IS-04 resource id for `seed`, `resource_type`, and `name`.
+///
+/// `name` must be `None` for [`ResourceType::Node`] and [`ResourceType::Device`],
+/// and `Some` for the other types. The named helpers such as [`make_node_id`]
+/// produce the same ids.
+pub fn make_id(seed: &str, resource_type: ResourceType, name: Option<&str>) -> Result<String> {
+    let cseed = CString::new(seed)?;
+    let cname = name.map(CString::new).transpose()?;
+    let mut buf = [0u8; ID_BUF_LEN];
+    let ok = unsafe {
+        sys::nmos_make_id(
+            cseed.as_ptr(),
+            resource_type.to_ffi(),
+            cname.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len(),
+        )
+    };
+    if !ok {
+        return Err(Error::Failed("nmos_make_id"));
     }
     capture_id(&buf)
 }
@@ -734,6 +945,72 @@ fn store_optional_string(strings: &mut Vec<CString>, value: &str) -> *const c_ch
     }
 }
 
+struct MarshalledAnnotation {
+    #[allow(dead_code)] // pins the tag array referenced by `annotation`
+    tags: Vec<sys::NvNmosTag>,
+    _value_ptrs: Vec<Vec<*const c_char>>,
+    _strings: Vec<CString>,
+    annotation: sys::NvNmosAnnotation,
+}
+
+impl MarshalledAnnotation {
+    fn new(annotation: &Annotation) -> Result<Self> {
+        let mut strings = Vec::new();
+        let label = store_exact_string(&mut strings, annotation.label.as_deref())?;
+        let description = store_exact_string(&mut strings, annotation.description.as_deref())?;
+        let mut value_ptrs = Vec::new();
+        let mut tags = Vec::with_capacity(annotation.tags.len());
+        for (tag, tag_values) in &annotation.tags {
+            let key = store_exact_string(&mut strings, Some(tag.as_str()))?;
+            let mut values = Vec::with_capacity(tag_values.len());
+            for value in tag_values {
+                values.push(store_exact_string(&mut strings, Some(value.as_str()))?);
+            }
+            value_ptrs.push(values);
+            let values = value_ptrs.last().unwrap();
+            tags.push(sys::NvNmosTag {
+                key,
+                values: if values.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    values.as_ptr() as *mut _
+                },
+                num_values: values.len() as u32,
+            });
+        }
+        let annotation = sys::NvNmosAnnotation {
+            label,
+            description,
+            tags: if tags.is_empty() {
+                ptr::null()
+            } else {
+                tags.as_ptr()
+            },
+            num_tags: tags.len() as u32,
+        };
+        Ok(Self {
+            tags,
+            _value_ptrs: value_ptrs,
+            _strings: strings,
+            annotation,
+        })
+    }
+
+    fn as_ptr(&self) -> *const sys::NvNmosAnnotation {
+        &self.annotation
+    }
+}
+
+fn store_exact_string(strings: &mut Vec<CString>, value: Option<&str>) -> Result<*const c_char> {
+    match value {
+        None => Ok(ptr::null()),
+        Some(value) => {
+            strings.push(CString::new(value)?);
+            Ok(strings.last().unwrap().as_ptr())
+        }
+    }
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -780,6 +1057,10 @@ pub struct NodeConfig {
     /// dropped by libnvnmos before the callback installed via
     /// [`NodeServerBuilder::on_log`] is invoked.
     pub log_level: i32,
+    /// IS-13 annotation for the Node resource. `None` leaves the node defaults.
+    pub node_annotation: Option<Annotation>,
+    /// IS-13 annotation for the Device resource. `None` leaves the device defaults.
+    pub device_annotation: Option<Annotation>,
 }
 
 impl Default for NodeConfig {
@@ -794,6 +1075,8 @@ impl Default for NodeConfig {
             asset_tags: None,
             network_services: None,
             log_level: LOG_LEVEL_INFO,
+            node_annotation: None,
+            device_annotation: None,
         }
     }
 }
@@ -984,6 +1267,12 @@ pub struct SenderConfig {
     /// [`Transport::Mxl`]. See the C header for the supported attributes /
     /// properties and the `x-nvnmos-*` extensions.
     pub transport_file: String,
+    /// IS-13 annotation for the Source. `None` leaves the source defaults.
+    pub source_annotation: Option<Annotation>,
+    /// IS-13 annotation for the Flow. `None` leaves the flow defaults.
+    pub flow_annotation: Option<Annotation>,
+    /// IS-13 annotation for the Sender. `None` leaves the sender defaults.
+    pub sender_annotation: Option<Annotation>,
 }
 
 /// Configuration for a receiver to add to a running [`NodeServer`].
@@ -995,6 +1284,8 @@ pub struct ReceiverConfig {
     /// [`Transport::Mxl`]. See the C header for the supported attributes /
     /// properties and the `x-nvnmos-*` extensions.
     pub transport_file: String,
+    /// IS-13 annotation for the Receiver. `None` leaves the receiver defaults.
+    pub receiver_annotation: Option<Annotation>,
 }
 
 // ============================================================================
@@ -1078,6 +1369,7 @@ pub struct NodeServerBuilder<'a> {
     config: &'a NodeConfig,
     activation: Option<ActivationCallback>,
     channelmapping_activation: Option<ChannelMappingActivationCallback>,
+    annotation: Option<AnnotationCallback>,
     log: Option<LogCallback>,
 }
 
@@ -1126,6 +1418,25 @@ impl<'a> NodeServerBuilder<'a> {
         self
     }
 
+    /// Install an IS-13 annotation callback. This also mounts the Annotation API.
+    /// Without it, libnvnmos leaves that API unmounted.
+    ///
+    /// Invoked synchronously on a libnvnmos worker thread when an Annotation
+    /// API request patches a resource, once the patch data has been validated
+    /// and merged with the resource's current values, before the resource is
+    /// updated and before the HTTP response. Returning `Ok(())` accepts the
+    /// change. `Err(_)` leaves the resource unchanged and fails the request
+    /// with 500 Internal Error. Panics are caught and treated as `Err`.
+    /// [`AnnotationChange`] borrows are valid only for this call; copy
+    /// anything that must be kept. Must be `Send + Sync + 'static`.
+    pub fn on_annotation_changed<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&AnnotationChange<'_>) -> std::result::Result<(), String> + Send + Sync + 'static,
+    {
+        self.annotation = Some(Box::new(callback));
+        self
+    }
+
     /// Install a log-message callback.
     ///
     /// Invoked from any libnvnmos worker thread for every message at or above
@@ -1148,6 +1459,7 @@ impl<'a> NodeServerBuilder<'a> {
             self.config,
             self.activation,
             self.channelmapping_activation,
+            self.annotation,
             self.log,
         )
     }
@@ -1163,7 +1475,7 @@ impl NodeServer {
     ///
     /// Shorthand for `NodeServer::builder(config).build()`.
     pub fn new(config: &NodeConfig) -> Result<Self> {
-        Self::create(config, None, None, None)
+        Self::create(config, None, None, None, None)
     }
 
     /// Begin building a server with one or more optional callbacks. See
@@ -1173,6 +1485,7 @@ impl NodeServer {
             config,
             activation: None,
             channelmapping_activation: None,
+            annotation: None,
             log: None,
         }
     }
@@ -1181,6 +1494,7 @@ impl NodeServer {
         config: &NodeConfig,
         activation_callback: Option<ActivationCallback>,
         channelmapping_activation_callback: Option<ChannelMappingActivationCallback>,
+        annotation_callback: Option<AnnotationCallback>,
         log_callback: Option<LogCallback>,
     ) -> Result<Self> {
         // Marshal Rust strings to C strings. These have to outlive the
@@ -1239,16 +1553,29 @@ impl NodeServer {
 
         let callback_state = if activation_callback.is_some()
             || channelmapping_activation_callback.is_some()
+            || annotation_callback.is_some()
             || log_callback.is_some()
         {
             Some(Box::new(CallbackState {
                 activation: activation_callback,
                 channelmapping_activation: channelmapping_activation_callback,
+                annotation: annotation_callback,
                 log: log_callback,
             }))
         } else {
             None
         };
+
+        let node_annotation = config
+            .node_annotation
+            .as_ref()
+            .map(MarshalledAnnotation::new)
+            .transpose()?;
+        let device_annotation = config
+            .device_annotation
+            .as_ref()
+            .map(MarshalledAnnotation::new)
+            .transpose()?;
 
         let sys_config = sys::NvNmosNodeConfig {
             seed: cseed.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
@@ -1279,6 +1606,14 @@ impl NodeServer {
                 .as_ref()
                 .filter(|s| s.log.is_some())
                 .map(|_| log_trampoline as unsafe extern "C" fn(_, _, _, _)),
+            node_annotation: node_annotation.as_ref().map_or(ptr::null(), |m| m.as_ptr()),
+            device_annotation: device_annotation
+                .as_ref()
+                .map_or(ptr::null(), |m| m.as_ptr()),
+            annotation_changed: callback_state
+                .as_ref()
+                .filter(|s| s.annotation.is_some())
+                .map(|_| annotation_trampoline as unsafe extern "C" fn(_, _, _, _, _, _, _) -> _),
             ..Default::default()
         };
 
@@ -1307,9 +1642,31 @@ impl NodeServer {
     /// `config.transport_file`.
     pub fn add_sender(&self, config: &SenderConfig) -> Result<()> {
         let ctf = CString::new(config.transport_file.as_str())?;
+        let source_annotation = config
+            .source_annotation
+            .as_ref()
+            .map(MarshalledAnnotation::new)
+            .transpose()?;
+        let flow_annotation = config
+            .flow_annotation
+            .as_ref()
+            .map(MarshalledAnnotation::new)
+            .transpose()?;
+        let sender_annotation = config
+            .sender_annotation
+            .as_ref()
+            .map(MarshalledAnnotation::new)
+            .transpose()?;
         let sys_cfg = sys::NvNmosSenderConfig {
             transport: config.transport.to_ffi(),
             transport_file: ctf.as_ptr(),
+            source_annotation: source_annotation
+                .as_ref()
+                .map_or(ptr::null(), |m| m.as_ptr()),
+            flow_annotation: flow_annotation.as_ref().map_or(ptr::null(), |m| m.as_ptr()),
+            sender_annotation: sender_annotation
+                .as_ref()
+                .map_or(ptr::null(), |m| m.as_ptr()),
         };
         let ok = unsafe { sys::add_nmos_sender_to_node_server(self.raw_ptr_mut(), &sys_cfg) };
         if !ok {
@@ -1326,9 +1683,17 @@ impl NodeServer {
     /// `config.transport_file`.
     pub fn add_receiver(&self, config: &ReceiverConfig) -> Result<()> {
         let ctf = CString::new(config.transport_file.as_str())?;
+        let receiver_annotation = config
+            .receiver_annotation
+            .as_ref()
+            .map(MarshalledAnnotation::new)
+            .transpose()?;
         let sys_cfg = sys::NvNmosReceiverConfig {
             transport: config.transport.to_ffi(),
             transport_file: ctf.as_ptr(),
+            receiver_annotation: receiver_annotation
+                .as_ref()
+                .map_or(ptr::null(), |m| m.as_ptr()),
         };
         let ok = unsafe { sys::add_nmos_receiver_to_node_server(self.raw_ptr_mut(), &sys_cfg) };
         if !ok {
@@ -1565,6 +1930,33 @@ impl NodeServer {
         Ok(Some(capture_id(&buf)?))
     }
 
+    /// Look up an IS-04 resource id on this running server.
+    ///
+    /// `name` must be `None` for [`ResourceType::Node`] and [`ResourceType::Device`],
+    /// and `Some` otherwise. Returns `Ok(None)` when the C helper returns false
+    /// (the resource is absent, or `name` is not valid for `resource_type`).
+    pub fn get_id(
+        &self,
+        resource_type: ResourceType,
+        name: Option<&str>,
+    ) -> Result<Option<String>> {
+        let cname = name.map(CString::new).transpose()?;
+        let mut buf = [0u8; ID_BUF_LEN];
+        let ok = unsafe {
+            sys::nmos_get_id(
+                &*self.raw,
+                resource_type.to_ffi(),
+                cname.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len(),
+            )
+        };
+        if !ok {
+            return Ok(None);
+        }
+        Ok(Some(capture_id(&buf)?))
+    }
+
     fn raw_ptr_mut(&self) -> *mut sys::NvNmosNodeServer {
         // SAFETY (justifying the `&self` → `*mut` cast): the C API takes
         // `NvNmosNodeServer *` for every mutating call, but its internal model
@@ -1676,6 +2068,82 @@ mod tests {
         let a = make_sender_id("seed", "video-1").unwrap();
         let b = make_sender_id("seed", "video-2").unwrap();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn make_id_matches_named_helpers() {
+        let seed = "seed";
+        let name = "video";
+        assert_eq!(
+            make_id(seed, ResourceType::Node, None).unwrap(),
+            make_node_id(seed).unwrap()
+        );
+        assert_eq!(
+            make_id(seed, ResourceType::Device, None).unwrap(),
+            make_device_id(seed).unwrap()
+        );
+        assert_eq!(
+            make_id(seed, ResourceType::Source, Some(name)).unwrap(),
+            make_source_id(seed, name).unwrap()
+        );
+        assert_eq!(
+            make_id(seed, ResourceType::Flow, Some(name)).unwrap(),
+            make_flow_id(seed, name).unwrap()
+        );
+        assert_eq!(
+            make_id(seed, ResourceType::Sender, Some(name)).unwrap(),
+            make_sender_id(seed, name).unwrap()
+        );
+        assert_eq!(
+            make_id(seed, ResourceType::Receiver, Some(name)).unwrap(),
+            make_receiver_id(seed, name).unwrap()
+        );
+    }
+
+    #[test]
+    fn make_id_rejects_name_mismatch() {
+        assert!(make_id("seed", ResourceType::Node, Some("video")).is_err());
+        assert!(make_id("seed", ResourceType::Sender, None).is_err());
+    }
+
+    #[test]
+    fn annotation_marshalling_preserves_empty_values() {
+        let annotation = Annotation {
+            label: Some(String::new()),
+            description: None,
+            tags: BTreeMap::from([
+                ("empty".to_string(), Vec::new()),
+                (
+                    "values".to_string(),
+                    vec![String::new(), "value".to_string()],
+                ),
+            ]),
+        };
+        let marshalled = MarshalledAnnotation::new(&annotation).unwrap();
+        let raw = unsafe { &*marshalled.as_ptr() };
+
+        assert_eq!(unsafe { CStr::from_ptr(raw.label) }.to_str().unwrap(), "");
+        assert!(raw.description.is_null());
+        assert_eq!(raw.num_tags, 2);
+
+        let tags = unsafe { std::slice::from_raw_parts(raw.tags, raw.num_tags as usize) };
+        assert_eq!(
+            unsafe { CStr::from_ptr(tags[0].key) }.to_str().unwrap(),
+            "empty"
+        );
+        assert_eq!(tags[0].num_values, 0);
+        assert!(tags[0].values.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(tags[1].key) }.to_str().unwrap(),
+            "values"
+        );
+        let values =
+            unsafe { std::slice::from_raw_parts(tags[1].values, tags[1].num_values as usize) };
+        assert_eq!(unsafe { CStr::from_ptr(values[0]) }.to_str().unwrap(), "");
+        assert_eq!(
+            unsafe { CStr::from_ptr(values[1]) }.to_str().unwrap(),
+            "value"
+        );
     }
 
     #[test]

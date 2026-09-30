@@ -36,7 +36,7 @@ use common::{
 /// (5 s) elapses. So the budget must exceed that ack timeout with margin.
 const CONCURRENT_RPC_BUDGET: Duration = Duration::from_secs(15);
 
-fn sender_sdp(name: &str, iface_ip: &str) -> String {
+fn minimal_sender_sdp(name: &str, iface_ip: &str) -> String {
     format!(
         "v=0\r\n\
          o=- 0 0 IN IP4 {iface_ip}\r\n\
@@ -141,7 +141,7 @@ async fn in_band_activation_does_not_deadlock_add_sender() {
             session_handle: session.clone(),
             name: "s1".to_string(),
             transport: ProtoTransport::Rtp as i32,
-            transport_file: sender_sdp("s1", &iface),
+            transport_file: minimal_sender_sdp("s1", &iface),
         })
         .await
         .expect("AddSender s1")
@@ -158,7 +158,7 @@ async fn in_band_activation_does_not_deadlock_add_sender() {
                 session_handle: add_session,
                 name: "s2".to_string(),
                 transport: ProtoTransport::Rtp as i32,
-                transport_file: sender_sdp("s2", &add_iface),
+                transport_file: minimal_sender_sdp("s2", &add_iface),
             })
             .await
     })
@@ -203,7 +203,7 @@ async fn in_band_activation_does_not_deadlock_close_session() {
             session_handle: session.clone(),
             name: "s1".to_string(),
             transport: ProtoTransport::Rtp as i32,
-            transport_file: sender_sdp("s1", &iface),
+            transport_file: minimal_sender_sdp("s1", &iface),
         })
         .await
         .expect("AddSender s1")

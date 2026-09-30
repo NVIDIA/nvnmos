@@ -13,7 +13,7 @@ Build from the **repository root**:
 docker build -f docker/nvnmos/Dockerfile -t nvnmos .
 ```
 
-With default build arguments the image produces a tarball named `nvnmos-ubuntu-24.04.tar.gz` (from `BASE_IMAGE=ubuntu:24.04` and `CONAN_LOCKFILE=src/conan.lock`). See the [top-level README](../../README.md#container-images) for copying that package to the host.
+With default build arguments the image produces a tarball named `nvnmos-ubuntu-24.04.tar.gz` (from `BASE_IMAGE=ubuntu:24.04`). See the [top-level README](../../README.md#container-images) for copying that package to the host.
 
 ## Build Arguments
 
@@ -21,10 +21,10 @@ With default build arguments the image produces a tarball named `nvnmos-ubuntu-2
 |----------|---------|-------------|
 | `BASE_IMAGE` | `ubuntu:24.04` | Base image for all stages; controls the compatibility of the created package and tarball name. |
 | `PACKAGE_SUFFIX` | _(derived from `BASE_IMAGE`)_ | Package directory and tarball suffix. Default is `-ubuntu-24.04` for the default base image, yielding `nvnmos-ubuntu-24.04.tar.gz`. |
-| `CONAN_LOCKFILE` | `src/conan.lock` | Input lockfile for `conan install`. Pass an empty value, e.g. `--build-arg CONAN_LOCKFILE=`, to resolve the latest compatible graph instead. |
+| `NMOS_CPP_SHA` | `fe303849527394b03bdedc8f161f377fe458bb62` | `sony/nmos-cpp` commit built from source. IS-13 is not in Conan Center `nmos-cpp/cci.20260812`. |
 | `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for the workspace build. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); workspace MSRV is **1.87** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
 
-The image installs the Conan Center `nmos-cpp` dependency graph via `conan install` (using `CONAN_LOCKFILE` when set), writes the resolved `conan.lock` into the package tarball, then builds the Rust workspace (`nvnmosd`, `gst-nmos-rs`, …) against the built `libnvnmos.so`. Conan (`~=2.2`) and CMake (`~=3.17`) versions match the manual build instructions in the top-level README and CI.
+The image builds that nmos-cpp commit from source (`nmos_cpp_from_source`, `USE_ADD_SUBDIRECTORY`), then builds the Rust workspace (`nvnmosd`, `gst-nmos-rs`, …) against the built `libnvnmos.so`. Conan (`~=2.2`) and CMake (`~=3.17`) versions match the manual build instructions in the top-level README and CI.
 
 ## Run
 

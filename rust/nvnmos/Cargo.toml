@@ -16,3 +16,6 @@ repository.workspace = true
 [dependencies]
 nvnmos-sys = { path = "../nvnmos-sys" }
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
