@@ -2688,14 +2688,7 @@ namespace nvnmos
             }
 
             const auto parsed = impl::parse_active_map_from_output(channelmapping_output);
-            const bool success = channelmapping_activated
-                ? channelmapping_activated(name, output_id, parsed)
-                : true;
-            if (!success)
-            {
-                slog::log<slog::severities::warning>(gate, SLOG_FLF)
-                    << "Channel mapping activation failed for " << name << " output " << output_id;
-            }
+            if (channelmapping_activated) channelmapping_activated(name, output_id, parsed);
         };
     }
 

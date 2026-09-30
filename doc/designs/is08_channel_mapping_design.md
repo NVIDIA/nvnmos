@@ -343,7 +343,7 @@ No separate IS-08 port configuration surface in v1.
 
 **Activation granularity:** nmos-cpp activates **one Output at a time**. The NvNmos callback and nvnmosd event carry **`output_id`** plus that output’s **active map** only — not a flattened map across all outputs.
 
-**Application ack vs HTTP ack:** HTTP success/failure is decided by nmos-cpp **before** the activation callback (schema, caps, output lock). The callback runs **after** `endpoint_active.map` is already updated. A `false` return from `nmos_channelmapping_activation_callback` (or failed `AckChannelMappingActivation`) is logged and may affect the immediate-activation wait, but **does not roll back** the IS-08 model (same constraint as `nmos-cpp` documents for `on_channelmapping_activated`).
+**Application ack vs HTTP ack:** nmos-cpp validates the request **before** the activation callback (schema, caps, output lock) and rejects an invalid one without invoking it. The callback runs **after** `endpoint_active.map` is already updated. A `false` return from `nmos_channelmapping_activation_callback` (or failed `AckChannelMappingActivation`) makes an immediate activation's request fail with 500 Internal Error; a scheduled activation's request has already been answered, so its failure is only logged. Either way it **does not roll back** the IS-08 model (same constraint as `nmos-cpp` documents for `on_channelmapping_activated`).
 
 ### 5.1 Public types
 

@@ -75,11 +75,11 @@ service NvnmosDaemon {
   // `ALREADY_EXISTS` if a stream is already active.
   rpc SubscribeActivations(SubscribeActivationsRequest) returns (stream ActivationEvent);
 
-  // Completes a pending IS-05 activation and, on success, updates the NMOS
-  // state. For an immediate activation, the result is returned to the IS-05
-  // controller; a scheduled activation occurs after the controller request
-  // has already completed. Returns `NOT_FOUND` unless the activation is
-  // pending for this session.
+  // Completes a pending IS-05 activation. For an immediate activation, a
+  // failure makes the IS-05 controller request fail with 500 Internal Error;
+  // a scheduled activation occurs after that request has already completed,
+  // so its failure is only logged. The active parameters are not rolled back.
+  // Returns `NOT_FOUND` unless the activation is pending for this session.
   rpc AckActivation(AckActivationRequest) returns (Empty);
 
   // Updates NMOS state after a client-originated data-plane change. A present
@@ -109,8 +109,11 @@ service NvnmosDaemon {
   rpc SubscribeChannelMappingActivations(SubscribeChannelMappingActivationsRequest)
       returns (stream ChannelMappingActivationEvent);
 
-  // Completes a pending IS-08 activation. Returns `NOT_FOUND` unless the
-  // activation is pending for this session.
+  // Completes a pending IS-08 activation. For an immediate activation, a
+  // failure makes the IS-08 controller request fail with 500 Internal Error;
+  // a scheduled activation's failure is only logged. The active map is not
+  // rolled back. Returns `NOT_FOUND` unless the activation is pending for
+  // this session.
   rpc AckChannelMappingActivation(AckChannelMappingActivationRequest) returns (Empty);
 }
 
@@ -375,8 +378,8 @@ message AckActivationRequest {
   // Whether the client applied the activation successfully.
   bool success = 3;
 
-  // Free-form failure reason, surfaced to the IS-05 controller. Set
-  // only when `success` is false.
+  // Free-form failure reason, logged by the daemon. Set only when
+  // `success` is false.
   string failure_reason = 4;
 }
 
@@ -518,7 +521,7 @@ message AckChannelMappingActivationRequest {
   string activation_handle = 2;
   // Whether the client applied the activation successfully.
   bool success = 3;
-  // Free-form failure reason returned to the IS-08 controller. Set only when
-  // `success` is false.
+  // Free-form failure reason, logged by the daemon. Set only when `success`
+  // is false.
   string failure_reason = 4;
 }
