@@ -210,7 +210,7 @@ namespace nvnmos
     // This is an application callback to apply the active map for the specified output, as a result of an IS-08 Channel Mapping API activation.
     // `name` is the caller-chosen channel mapping name (unique per Node). `output_id` is the IS-08 output id just activated.
     // `active_map` is dense per output channel index; unrouted channels have an empty input id (empty pair.first).
-    typedef std::function<bool(const nvnmos::name& name, const nmos::channelmapping_id& output_id, const channelmapping_active_map& active_map)> channelmapping_activation_handler;
+    typedef std::function<void(const nvnmos::name& name, const nmos::channelmapping_id& output_id, const channelmapping_active_map& active_map)> channelmapping_activation_handler;
 
     // This constructs all the callbacks used to integrate the application into the server instance for the NMOS Node.
     nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, channelmapping_activation_handler channelmapping_activated, slog::base_gate& gate);

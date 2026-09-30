@@ -291,8 +291,7 @@ namespace nvnmos
 
             const auto& connection_activated = config.connection_activated;
             const auto& channelmapping_activated = config.channelmapping_activated;
-            auto& gate_ = gate;
-            auto connection_activated_handler = [connection_activated, server, &gate_](const nmos::type& type, const nvnmos::name& name_, const std::string& transport_file)
+            auto connection_activated_handler = [connection_activated, server](const nmos::type& type, const nvnmos::name& name_, const std::string& transport_file)
             {
                 if (!connection_activated) return;
                 const auto side = nvnmos::side_from_type(type);
@@ -300,12 +299,12 @@ namespace nvnmos
                 const bool success = connection_activated(server, side, name.c_str(), !transport_file.empty() ? transport_file.c_str() : 0);
                 if (!success)
                 {
-                    slog::log<slog::severities::warning>(gate_, SLOG_FLF) << "Activation failed for " << type.name << ": " << name;
+                    throw std::runtime_error("Activation failed for " + utility::us2s(type.name) + ": " + name);
                 }
             };
-            auto channelmapping_activated_handler = [channelmapping_activated, server, &gate_](const nvnmos::name& name_, const nmos::channelmapping_id& output_id_, const channelmapping_active_map& active_map_)
+            auto channelmapping_activated_handler = [channelmapping_activated, server](const nvnmos::name& name_, const nmos::channelmapping_id& output_id_, const channelmapping_active_map& active_map_)
             {
-                if (!channelmapping_activated) return true;
+                if (!channelmapping_activated) return;
                 const auto name = utility::us2s(name_);
                 const auto output_id = utility::us2s(output_id_);
                 std::vector<std::string> input_ids;
@@ -327,9 +326,8 @@ namespace nvnmos
                 const bool success = channelmapping_activated(server, name.c_str(), output_id.c_str(), active_map.empty() ? nullptr : active_map.data(), active_map.size());
                 if (!success)
                 {
-                    slog::log<slog::severities::warning>(gate_, SLOG_FLF) << "Channel mapping activation failed for " << name << " output " << output_id;
+                    throw std::runtime_error("Channel mapping activation failed for " + name + " output " + output_id);
                 }
-                return success;
             };
             node_implementation = make_node_implementation(node_model, connection_activated_handler, channelmapping_activated_handler, gate);
 

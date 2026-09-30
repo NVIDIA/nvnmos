@@ -193,7 +193,10 @@ typedef enum _NvNmosSide
  *                           The application is expected to dispatch on
  *                           (@p side, @p name) (both of which it specified)
  *                           to determine the transport, if needed.
- * @return Whether the activation could be applied.
+ * @return Whether the activation could be applied. When false, an
+ *         immediate activation fails with 500 Internal Error; a
+ *         scheduled activation's failure is only logged. The active
+ *         parameters are not rolled back in either case.
  */
 typedef bool (* nmos_connection_activation_callback)(
     NvNmosNodeServer *server,
@@ -221,7 +224,10 @@ typedef struct _NvNmosChannelMappingActiveMapEntry NvNmosChannelMappingActiveMap
  *                           Unrouted channels have NULL @p input_id.
  * @param[in] num_active_map Length of @p active_map; must equal that
  *                           output's @p num_channel_labels.
- * @return Whether the data plane applied the active map.
+ * @return Whether the data plane applied the active map. When false,
+ *         an immediate activation fails with 500 Internal Error; a
+ *         scheduled activation's failure is only logged. The active
+ *         map is not rolled back in either case.
  */
 typedef bool (* nmos_channelmapping_activation_callback)(
     NvNmosNodeServer *server,

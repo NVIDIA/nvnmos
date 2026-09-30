@@ -780,7 +780,14 @@ fn route_activation(
 
     match result {
         Ok(outcome) if outcome.success => Ok(()),
-        Ok(outcome) => Err(outcome.failure_reason),
+        Ok(outcome) => {
+            tracing::warn!(
+                activation_handle,
+                reason = %outcome.failure_reason,
+                "client NACKed activation",
+            );
+            Err(outcome.failure_reason)
+        }
         Err(std_mpsc::RecvTimeoutError::Timeout) => {
             tracing::warn!(activation_handle, "activation ack timed out; NACKing",);
             Err("activation ack timed out".to_string())
@@ -853,7 +860,14 @@ fn route_channelmapping_activation(
 
     match result {
         Ok(outcome) if outcome.success => Ok(()),
-        Ok(outcome) => Err(outcome.failure_reason),
+        Ok(outcome) => {
+            tracing::warn!(
+                activation_handle,
+                reason = %outcome.failure_reason,
+                "client NACKed channelmapping activation",
+            );
+            Err(outcome.failure_reason)
+        }
         Err(std_mpsc::RecvTimeoutError::Timeout) => {
             tracing::warn!(
                 activation_handle,

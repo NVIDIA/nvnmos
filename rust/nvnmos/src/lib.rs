@@ -344,7 +344,7 @@ unsafe extern "C" fn activation_trampoline(
 
     // Catch panics so they don't unwind across the FFI boundary. Map any
     // panic — and any returned `Err(reason)` — to `false`, which libnvnmos
-    // surfaces to IS-05 as activation failure.
+    // reports as activation failure.
     match catch_unwind(AssertUnwindSafe(|| callback(&activation))) {
         Ok(Ok(())) => true,
         Ok(Err(_reason)) => false,
@@ -1087,11 +1087,11 @@ impl<'a> NodeServerBuilder<'a> {
     /// The callback runs on a libnvnmos worker thread (it must therefore be
     /// `Send + Sync + 'static`) and is invoked synchronously: libnvnmos
     /// blocks the IS-05 PATCH request until the callback returns. Returning
-    /// `Ok(())` reports success to the IS-05 controller; returning
-    /// `Err(reason)` reports failure. The `reason` is currently consumed by
-    /// the trampoline because the C callback signature has no place to
-    /// surface it — it can still be logged or recorded inside the closure if
-    /// useful.
+    /// `Err(reason)` makes an immediate activation fail with 500 Internal
+    /// Error; a scheduled activation's failure is only logged. The active
+    /// parameters are not rolled back. The `reason` is dropped by the
+    /// trampoline because the C callback signature has no place for it; log
+    /// it inside the closure if useful.
     ///
     /// Panics inside the callback are caught and treated as failure (a panic
     /// must not unwind across the FFI boundary).
@@ -1110,10 +1110,11 @@ impl<'a> NodeServerBuilder<'a> {
     /// Install an IS-08 channel mapping activation callback.
     ///
     /// Invoked synchronously on a libnvnmos worker thread when an IS-08
-    /// controller activates an output. Returning `Ok(())` reports success;
-    /// `Err(_)` NACKs the activation. Panics are caught and treated as
-    /// failure. [`NodeServer::activate_channelmapping`] does **not** invoke
-    /// this callback.
+    /// controller activates an output. Returning `Err(_)` makes an immediate
+    /// activation fail with 500 Internal Error; a scheduled activation's
+    /// failure is only logged. The active map is not rolled back. Panics are
+    /// caught and treated as failure. [`NodeServer::activate_channelmapping`]
+    /// does **not** invoke this callback.
     pub fn on_channelmapping_activation<F>(mut self, callback: F) -> Self
     where
         F: Fn(&ChannelMappingActivation<'_>) -> std::result::Result<(), String>

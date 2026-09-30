@@ -119,7 +119,10 @@ application's `connection_activated` callback with:
 
 Dispatch on `(side, name)` to identify the Sender or Receiver and reconfigure
 its data plane. Return `true` when the requested state was applied, or `false`
-to report failure.
+to report failure. For an immediate activation, `false` makes the controller's
+request fail with 500 Internal Error. A scheduled activation has already been
+answered, so its failure is only logged. In both cases the active parameters
+are not rolled back.
 
 The effective transport file depends on the transport:
 

@@ -349,10 +349,9 @@ pub struct SyncResourceStateOutcome {
 
 /// Client-side outcome of an activation, passed by the `AckActivation`
 /// RPC handler to the activation router via the pending-activation
-/// channel. `success = true` propagates as IS-05 success; `false` plus
-/// `failure_reason` propagates as IS-05 failure (the reason is logged
-/// today; libnvnmos's callback contract has no place to surface it
-/// directly, so this is best-effort context for operators).
+/// channel. `success = false` fails the libnvnmos activation callback.
+/// `failure_reason` is only logged, because that callback has no place
+/// for it.
 #[derive(Debug)]
 pub struct AckOutcome {
     pub success: bool,
