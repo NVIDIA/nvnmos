@@ -379,7 +379,8 @@ pub struct AnnotationChange<'a> {
     pub tags_changed: bool,
 }
 
-type AnnotationCallback = Box<dyn Fn(&AnnotationChange<'_>) + Send + Sync + 'static>;
+type AnnotationCallback =
+    Box<dyn Fn(&AnnotationChange<'_>) -> std::result::Result<(), String> + Send + Sync + 'static>;
 
 struct CallbackState {
     activation: Option<ActivationCallback>,
@@ -560,20 +561,20 @@ unsafe extern "C" fn annotation_trampoline(
     label_changed: bool,
     description_changed: bool,
     tags_changed: bool,
-) {
+) -> bool {
     if server.is_null() || annotation.is_null() {
-        return;
+        return false;
     }
     let Some(resource_type) = ResourceType::from_ffi(resource_type) else {
-        return;
+        return false;
     };
     let user_data = unsafe { (*server).user_data };
     if user_data.is_null() {
-        return;
+        return false;
     }
     let state = unsafe { &*(user_data as *const CallbackState) };
     let Some(callback) = state.annotation.as_ref() else {
-        return;
+        return false;
     };
 
     let name = if name.is_null() {
@@ -581,17 +582,17 @@ unsafe extern "C" fn annotation_trampoline(
     } else {
         match unsafe { CStr::from_ptr(name) }.to_str() {
             Ok(s) => Some(s),
-            Err(_) => return,
+            Err(_) => return false,
         }
     };
     let raw = unsafe { &*annotation };
     let label = match cstr_option(raw.label) {
         Ok(value) => value.map(str::to_owned),
-        Err(()) => return,
+        Err(()) => return false,
     };
     let description = match cstr_option(raw.description) {
         Ok(value) => value.map(str::to_owned),
-        Err(()) => return,
+        Err(()) => return false,
     };
     let mut tags = BTreeMap::new();
     if !raw.tags.is_null() {
@@ -599,7 +600,7 @@ unsafe extern "C" fn annotation_trampoline(
             let tag = unsafe { &*raw.tags.add(index) };
             let key = match cstr_option(tag.key) {
                 Ok(Some(key)) => key.to_owned(),
-                _ => return,
+                _ => return false,
             };
             let mut values = Vec::with_capacity(tag.num_values as usize);
             if !tag.values.is_null() {
@@ -607,7 +608,7 @@ unsafe extern "C" fn annotation_trampoline(
                     let value = unsafe { *tag.values.add(value_index) };
                     match cstr_option(value) {
                         Ok(Some(value)) => values.push(value.to_owned()),
-                        _ => return,
+                        _ => return false,
                     }
                 }
             }
@@ -627,7 +628,10 @@ unsafe extern "C" fn annotation_trampoline(
         description_changed,
         tags_changed,
     };
-    let _ = catch_unwind(AssertUnwindSafe(|| callback(&change)));
+    matches!(
+        catch_unwind(AssertUnwindSafe(|| callback(&change))),
+        Ok(Ok(()))
+    )
 }
 
 fn cstr_option<'a>(ptr: *const c_char) -> std::result::Result<Option<&'a str>, ()> {
@@ -1417,14 +1421,17 @@ impl<'a> NodeServerBuilder<'a> {
     /// Install an IS-13 annotation callback. This also mounts the Annotation API.
     /// Without it, libnvnmos leaves that API unmounted.
     ///
-    /// Invoked synchronously on a libnvnmos worker thread after a successful
-    /// Annotation API merge, before the HTTP response. The merge has already
-    /// been applied. [`AnnotationChange`] borrows are valid only for this
-    /// call; copy anything that must be kept. Must be `Send + Sync + 'static`.
-    /// Panics are caught and swallowed.
+    /// Invoked synchronously on a libnvnmos worker thread when an Annotation
+    /// API request patches a resource, once the patch data has been validated
+    /// and merged with the resource's current values, before the resource is
+    /// updated and before the HTTP response. Returning `Ok(())` accepts the
+    /// change. `Err(_)` leaves the resource unchanged and fails the request
+    /// with 500 Internal Error. Panics are caught and treated as `Err`.
+    /// [`AnnotationChange`] borrows are valid only for this call; copy
+    /// anything that must be kept. Must be `Send + Sync + 'static`.
     pub fn on_annotation_changed<F>(mut self, callback: F) -> Self
     where
-        F: Fn(&AnnotationChange<'_>) + Send + Sync + 'static,
+        F: Fn(&AnnotationChange<'_>) -> std::result::Result<(), String> + Send + Sync + 'static,
     {
         self.annotation = Some(Box::new(callback));
         self
@@ -1606,7 +1613,7 @@ impl NodeServer {
             annotation_changed: callback_state
                 .as_ref()
                 .filter(|s| s.annotation.is_some())
-                .map(|_| annotation_trampoline as unsafe extern "C" fn(_, _, _, _, _, _, _)),
+                .map(|_| annotation_trampoline as unsafe extern "C" fn(_, _, _, _, _, _, _) -> _),
             ..Default::default()
         };
 

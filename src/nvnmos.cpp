@@ -485,7 +485,10 @@ namespace nvnmos
                     }
                 }
 
-                annotation_changed(server, type, !name.empty() ? name.c_str() : nullptr, &annotation, label_changed, description_changed, tags_changed);
+                if (!annotation_changed(server, type, !name.empty() ? name.c_str() : nullptr, &annotation, label_changed, description_changed, tags_changed))
+                {
+                    throw std::runtime_error("Annotation not accepted for " + utility::us2s(resource.type.name) + ": " + utility::us2s(resource.id) + (!name.empty() ? " (" + name + ")" : ""));
+                }
             };
             node_implementation = make_node_implementation(node_model, connection_activated_handler, channelmapping_activated_handler, annotation_changed_handler, gate);
 

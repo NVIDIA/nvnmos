@@ -371,7 +371,7 @@ async fn unwritable_checkpoint_exits() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn limit_refuses_a_new_entry_and_keeps_the_stored_one() {
+async fn limit_fails_a_new_patch_and_keeps_the_stored_one() {
     let dir = TempDir::new().expect("checkpoint dir");
     let checkpoint = dir.path().join("annotations.json");
     let iface = autodetect_iface_ip();
@@ -390,12 +390,22 @@ async fn limit_refuses_a_new_entry_and_keeps_the_stored_one() {
         serde_json::json!({ "label": "kept" }),
     )
     .await;
-    patch_annotation(
+    let (status, response) = http_patch(
+        "127.0.0.1",
         port,
         &format!("/x-nmos/annotation/v1.0/node/senders/{dropped_id}/"),
-        serde_json::json!({ "label": "dropped" }),
+        &serde_json::json!({ "label": "dropped" }).to_string(),
     )
-    .await;
+    .await
+    .expect("PATCH past the limit");
+    assert_eq!(status, 500, "{response}");
+    assert!(
+        response.contains(&format!(
+            "Annotation not accepted for sender: {dropped_id} (dropped)"
+        )),
+        "{response}"
+    );
+    assert_eq!(label(port, "senders", &dropped_id).await, "session-default");
     drop(session);
     drop(client);
     harness.terminate();
