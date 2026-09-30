@@ -70,7 +70,8 @@ impl std::error::Error for CheckpointError {}
 impl AnnotationStore {
     /// Load `path`, or start empty when the file is absent, then replace
     /// `path` with that store. Fails when an existing file cannot be read
-    /// or parsed, or when the replacement write fails.
+    /// or parsed, holds more entries than the limit, or when the
+    /// replacement write fails.
     ///
     /// Debounce and the entry limit come from the environment.
     pub fn open(path: &Path) -> Result<Self, CheckpointError> {
@@ -84,6 +85,13 @@ impl AnnotationStore {
 
     fn with_file(path: &Path, debounce: Duration, limit: usize) -> Result<Self, CheckpointError> {
         let entries = read_checkpoint(path)?;
+        if entries.len() > limit {
+            return Err(CheckpointError(format!(
+                "{} holds {} entries, more than {ENV_ENTRY_LIMIT}={limit}",
+                path.display(),
+                entries.len()
+            )));
+        }
         // Prove the file can be replaced before serving. A later write
         // failure is logged and the process keeps running.
         write_checkpoint(path, &entries)?;
@@ -132,9 +140,10 @@ impl AnnotationStore {
         self.lock().entries.get(&key).cloned()
     }
 
-    /// Apply one callback. A new key at the limit is logged and ignored.
+    /// Apply one callback. A new key at the limit is logged and refused,
+    /// so the caller can fail the Annotation API request.
     /// An entry with nothing left annotated is deleted.
-    pub fn apply(&self, seed: &str, change: &AnnotationChange<'_>) {
+    pub fn apply(&self, seed: &str, change: &AnnotationChange<'_>) -> Result<(), String> {
         let name = change.name.unwrap_or("");
         let key = Key {
             seed: seed.to_string(),
@@ -142,17 +151,7 @@ impl AnnotationStore {
             name: name.to_string(),
         };
         let mut inner = self.lock();
-        if !inner.entries.contains_key(&key) && inner.entries.len() >= inner.limit {
-            tracing::error!(
-                seed,
-                resource_type = resource_type_name(change.resource_type),
-                name,
-                limit = inner.limit,
-                "annotation store is full; not remembering a new annotation"
-            );
-            return;
-        }
-        let entry = inner.entries.entry(key.clone()).or_default();
+        let mut entry = inner.entries.get(&key).cloned().unwrap_or_default();
         if change.label_changed {
             entry.label.clone_from(&change.annotation.label);
         }
@@ -164,9 +163,24 @@ impl AnnotationStore {
         }
         if entry.label.is_none() && entry.description.is_none() && entry.tags.is_empty() {
             inner.entries.remove(&key);
+        } else if !inner.entries.contains_key(&key) && inner.entries.len() >= inner.limit {
+            tracing::error!(
+                seed,
+                resource_type = resource_type_name(change.resource_type),
+                name,
+                limit = inner.limit,
+                "annotation store is full; refusing a new annotation"
+            );
+            return Err(format!(
+                "annotation store is full ({} entries)",
+                inner.limit
+            ));
+        } else {
+            inner.entries.insert(key, entry);
         }
         drop(inner);
         self.notify(Msg::Dirty);
+        Ok(())
     }
 
     /// Write the current map and wait for that write to finish.
@@ -487,48 +501,54 @@ mod tests {
             label: Some("overlay".into()),
             ..Annotation::default()
         };
-        store.apply(
-            "seed",
-            &change(
-                ResourceType::Sender,
-                Some("video"),
-                &labeled,
-                true,
-                false,
-                false,
-            ),
-        );
+        store
+            .apply(
+                "seed",
+                &change(
+                    ResourceType::Sender,
+                    Some("video"),
+                    &labeled,
+                    true,
+                    false,
+                    false,
+                ),
+            )
+            .unwrap();
         let described = Annotation {
             description: Some("info".into()),
             ..Annotation::default()
         };
-        store.apply(
-            "seed",
-            &change(
-                ResourceType::Sender,
-                Some("video"),
-                &described,
-                false,
-                true,
-                false,
-            ),
-        );
+        store
+            .apply(
+                "seed",
+                &change(
+                    ResourceType::Sender,
+                    Some("video"),
+                    &described,
+                    false,
+                    true,
+                    false,
+                ),
+            )
+            .unwrap();
         let stored = store.get("seed", ResourceType::Sender, "video").unwrap();
         assert_eq!(stored.label.as_deref(), Some("overlay"));
         assert_eq!(stored.description.as_deref(), Some("info"));
 
         let reset = Annotation::default();
-        store.apply(
-            "seed",
-            &change(
-                ResourceType::Sender,
-                Some("video"),
-                &reset,
-                true,
-                true,
-                false,
-            ),
-        );
+        store
+            .apply(
+                "seed",
+                &change(
+                    ResourceType::Sender,
+                    Some("video"),
+                    &reset,
+                    true,
+                    true,
+                    false,
+                ),
+            )
+            .unwrap();
         assert!(store.get("seed", ResourceType::Sender, "video").is_none());
     }
 
@@ -539,34 +559,49 @@ mod tests {
             label: Some("one".into()),
             ..Annotation::default()
         };
-        store.apply(
-            "seed",
-            &change(ResourceType::Sender, Some("a"), &first, true, false, false),
-        );
+        store
+            .apply(
+                "seed",
+                &change(ResourceType::Sender, Some("a"), &first, true, false, false),
+            )
+            .unwrap();
         let second = Annotation {
             label: Some("two".into()),
             ..Annotation::default()
         };
-        store.apply(
-            "seed",
-            &change(ResourceType::Sender, Some("b"), &second, true, false, false),
+        assert!(
+            store
+                .apply(
+                    "seed",
+                    &change(ResourceType::Sender, Some("b"), &second, true, false, false),
+                )
+                .is_err()
         );
         assert!(store.get("seed", ResourceType::Sender, "b").is_none());
+        let reset = Annotation::default();
+        store
+            .apply(
+                "seed",
+                &change(ResourceType::Sender, Some("b"), &reset, true, false, false),
+            )
+            .unwrap();
         let updated = Annotation {
             label: Some("one-b".into()),
             ..Annotation::default()
         };
-        store.apply(
-            "seed",
-            &change(
-                ResourceType::Sender,
-                Some("a"),
-                &updated,
-                true,
-                false,
-                false,
-            ),
-        );
+        store
+            .apply(
+                "seed",
+                &change(
+                    ResourceType::Sender,
+                    Some("a"),
+                    &updated,
+                    true,
+                    false,
+                    false,
+                ),
+            )
+            .unwrap();
         assert_eq!(
             store
                 .get("seed", ResourceType::Sender, "a")
@@ -596,10 +631,12 @@ mod tests {
                 tags: BTreeMap::from([("foo".into(), vec!["a".into()])]),
                 ..Annotation::default()
             };
-            store.apply(
-                "seed",
-                &change(ResourceType::Node, None, &labeled, true, false, true),
-            );
+            store
+                .apply(
+                    "seed",
+                    &change(ResourceType::Node, None, &labeled, true, false, true),
+                )
+                .unwrap();
             store.flush();
         }
         let restored = AnnotationStore::with_file(&path, Duration::ZERO, 8).unwrap();
@@ -613,6 +650,21 @@ mod tests {
         std::fs::write(&path, b"not-json").unwrap();
         assert!(AnnotationStore::with_file(&path, Duration::ZERO, 8).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"not-json");
+    }
+
+    #[test]
+    fn checkpoint_over_the_limit_fails_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("annotations.json");
+        let body = r#"{"version":1,"annotations":[{"seed":"s","resource_type":"sender","name":"a","label":"one"},{"seed":"s","resource_type":"sender","name":"b","label":"two"}]}"#;
+        std::fs::write(&path, body).unwrap();
+        assert!(AnnotationStore::with_file(&path, Duration::ZERO, 2).is_ok());
+        let error = match AnnotationStore::with_file(&path, Duration::ZERO, 1) {
+            Err(error) => error,
+            Ok(_) => panic!("a checkpoint over the limit should fail open"),
+        };
+        let message = error.to_string();
+        assert!(message.contains(ENV_ENTRY_LIMIT), "{message}");
     }
 
     #[test]

@@ -178,6 +178,7 @@ fn annotation_http_round_trip() {
                 description_changed: change.description_changed,
                 tags_changed: change.tags_changed,
             });
+            Ok(())
         })
         .build()
         .expect("node server");

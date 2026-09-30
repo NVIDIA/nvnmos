@@ -301,8 +301,10 @@ typedef struct _NvNmosAnnotation
 } NvNmosAnnotation;
 
 /**
- * Type for a callback from NvNmos after a successful IS-13 Annotation
- * API merge.
+ * Type for a callback from NvNmos when an IS-13 Annotation API request
+ * patches an IS-04 resource. Called once the patch data has been
+ * validated and merged with the resource's current values, before the
+ * resource is updated.
  *
  * JSON merge-patch; the three bools say which members of @p annotation
  * to apply.
@@ -331,8 +333,11 @@ typedef struct _NvNmosAnnotation
  *                                 is the full writable-tag overlay
  *                                 after this merge (empty array is
  *                                 a whole-object reset).
+ * @return Whether the application accepted the change. When false,
+ *         the resource is left unchanged and the Annotation API
+ *         request fails with 500 Internal Error.
  */
-typedef void (* nmos_annotation_callback)(
+typedef bool (* nmos_annotation_callback)(
     NvNmosNodeServer *server,
     NvNmosResourceType type,
     const char *name,
@@ -444,8 +449,9 @@ typedef struct _NvNmosNodeConfig
     const NvNmosAnnotation *node_annotation;
     /** IS-13 annotation for the Device resource. May be null. */
     const NvNmosAnnotation *device_annotation;
-    /** Called after a successful IS-13 merge. May be null, which leaves
-        the Annotation API unmounted. */
+    /** Called for each IS-13 Annotation API patch, before the resource
+        is updated; may refuse the change. May be null, which leaves the
+        Annotation API unmounted. */
     nmos_annotation_callback annotation_changed;
 
     /** Holds the callback for handling log messages. May be null. */

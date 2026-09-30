@@ -25,7 +25,7 @@ Identity in the C API stays **caller-chosen name**, not IS-04 UUID. Node and Dev
 | Layer | Owns | Does not own |
 |-------|------|----------------|
 | **nmos-cpp** | Merge-patch, `null` restore via `default_value`, read-only tag predicate | Files, names, seeds |
-| **libnvnmos** | Apply annotations at insert; retain exact label / description reset defaults captured from each resource before annotation; callback after every successful IS-13 merge | Overlay map, checkpoint file |
+| **libnvnmos** | Apply annotations at insert; retain exact label / description reset defaults captured from each resource before annotation; callback for every IS-13 patch, before the resource is updated | Overlay map, checkpoint file |
 | **nvnmosd** | Process-wide store, debounce checkpoint, pass stored annotations on OpenSession / AddSender / AddReceiver | IS-13 HTTP |
 
 The public `NvNmos*` types terminate in `nvnmos.cpp`: that adapter validates and converts annotations to nmos-cpp-style JSON before calling `nvnmos_impl.*`, and converts the internal callback back to the C API. The library **does not keep** the `NvNmosAnnotation` pointers it was given. After insert they are gone.
@@ -106,8 +106,10 @@ typedef struct _NvNmosAnnotation
 } NvNmosAnnotation;
 
 /**
- * Type for a callback from NvNmos after a successful IS-13 Annotation
- * API merge.
+ * Type for a callback from NvNmos when an IS-13 Annotation API request
+ * patches an IS-04 resource. Called once the patch data has been
+ * validated and merged with the resource's current values, before the
+ * resource is updated.
  *
  * JSON merge-patch; the three bools say which members of @p annotation
  * to apply.
@@ -136,8 +138,11 @@ typedef struct _NvNmosAnnotation
  *                                 is the full writable-tag overlay
  *                                 after this merge (empty array is
  *                                 a whole-object reset).
+ * @return Whether the application accepted the change. When false,
+ *         the resource is left unchanged and the Annotation API
+ *         request fails with 500 Internal Error.
  */
-typedef void (* nmos_annotation_callback)(
+typedef bool (* nmos_annotation_callback)(
     NvNmosNodeServer *server,
     NvNmosResourceType type,
     const char *name,
@@ -211,7 +216,8 @@ On `NvNmosNodeConfig` (in addition to existing `label` / `description` / `asset_
     const NvNmosAnnotation *node_annotation;
     /** IS-13 annotation for the Device resource. May be null. */
     const NvNmosAnnotation *device_annotation;
-    /** Called after a successful IS-13 merge. May be null. */
+    /** Called for each IS-13 Annotation API patch, before the resource
+        is updated; may refuse the change. May be null. */
     nmos_annotation_callback annotation_changed;
 ```
 
@@ -334,6 +340,8 @@ Invoke `annotation_changed` from the merger with that struct and the three bools
 
 Do this on the PATCH thread, before the HTTP response, so a concurrent re-Add cannot read a stale application store.
 
+When the callback returns false, the merger throws `std::runtime_error`. nmos-cpp leaves the resource unchanged and responds 500, which IS-13 defines for a request that did not meet the API's additional constraints. nmos-cpp puts the exception message in `debug`; `error` is the default reason phrase.
+
 ### 4.7 Remove
 
 `remove_nmos_sender_from_node_server` / `remove_nmos_receiver_from_node_server` do not invoke `annotation_changed`.
@@ -377,7 +385,7 @@ Optional follow-up if a gRPC client needs to seed or read the store without IS-1
 - `description_changed`: same for description.
 - `tags_changed`: **replace** stored writable tags with the callback array (empty → no tag overlay).
 
-If the entry then has nothing annotated, **delete** the key.
+If the entry then has nothing annotated, **delete** the key. Otherwise, a new key at the limit (§5.5) is not stored and the callback returns false.
 
 Do this before returning from the libnvnmos callback.
 
@@ -392,7 +400,7 @@ IS-05 and IS-08 stay mounted when their callbacks are null. Those callbacks only
 One JSON file for the process. On-disk layout (nesting, version field) is an implementation detail; tests treat the file as opaque except that a restart with the same path restores the store.
 
 - Path: `NVNMOSD_ANNOTATION_CHECKPOINT_FILE`. Unset, the file is `<socket-filename>-annotations.json` in the socket's directory (`/tmp/nvnmosd.sock` uses `/tmp/nvnmosd.sock-annotations.json`). Setting the variable to the same path for two daemons will not work: each write replaces the whole file, so they overwrite each other's updates. Tests point the variable at a temp file.
-- Load at daemon start, before any `OpenSession`. Missing file: empty store. Then replace the file with the loaded store, including when that store is empty, using the same temp-file write. If the existing file cannot be read or parsed, or that replacement fails, the daemon exits. It does not start empty in place of a file it could not load, and it does not keep serving when this start cannot persist. The user deletes a bad file or points the variable at a directory the process can write.
+- Load at daemon start, before any `OpenSession`. Missing file: empty store. A file with more entries than the limit (§5.5) is an error. Then replace the file with the loaded store, including when that store is empty, using the same temp-file write. If the existing file cannot be read or parsed, or that replacement fails, the daemon exits. It does not start empty in place of a file it could not load, and it does not keep serving when this start cannot persist. The user deletes a bad file or points the variable at a directory the process can write.
 - After a store mutation, debounce (~1 s after last change; tests may shorten via env) then snapshot: clone the map, compact JSON, write temp, `fsync`, rename. Do not serialize under the state mutex or on the PATCH thread.
 - A checkpoint write that fails after startup is logged. The process keeps running; live sessions are already up.
 - Flush on graceful shutdown (so a test that PATCHes then stops the daemon does not need to wait out the debounce).
@@ -410,7 +418,7 @@ Entries are not dropped when a resource is removed or a node destroyed (§5.1), 
 - **In-band deletion is IS-13 reset.** Resetting the last annotated property deletes the key (§5.3). That is the only automatic removal.
 - **Size is bounded by distinct `(seed, type, name)`, not by uptime**, as long as names are configuration. That is already the contract: a caller-chosen name is unique per side on a Node, and the daemon's `by_name` index assumes it.
 - **The failure mode is name churn.** An application that invents a fresh sender name per pipeline run leaves a dead entry per run. Document that names are configured, not generated.
-- **Limit, do not evict.** `NVNMOSD_ANNOTATION_ENTRY_LIMIT` (default 10000). At the limit, log an error and refuse new entries while existing annotations keep working. Silently dropping a user's label is worse than refusing to remember a new one, so no LRU.
+- **Limit, do not evict.** `NVNMOSD_ANNOTATION_ENTRY_LIMIT` (default 10000). At the limit, log an error and fail the IS-13 PATCH that would add a new entry, while existing annotations keep working and can still be updated or reset. Accepting a PATCH that a restart would lose, or silently dropping a user's label to make room, are both worse than refusing, so no LRU.
 - **User path:** the checkpoint is a single JSON file. With the daemon stopped, deleting it clears all annotations and editing it is supported. Document both in the nvnmosd README.
 
 A prune or forget RPC belongs with the §5.2 gRPC follow-up, if churn turns out to be real.
@@ -484,7 +492,7 @@ Checkpoint path pointed at a temp dir. Graceful stop flushes; tests should not s
 - **Corrupt checkpoint:** start fails (does not wipe and continue).
 - **Unwritable checkpoint:** the directory cannot accept the replacement write; start fails.
 - **Two seeds:** annotations for seed A do not appear on seed B.
-- **Limit:** with `NVNMOSD_ANNOTATION_ENTRY_LIMIT` set low, the entry past the limit is refused and logged; annotations already stored still restore after a restart.
+- **Limit:** with `NVNMOSD_ANNOTATION_ENTRY_LIMIT` set low, the PATCH past the limit returns 500 and the resource keeps its default; annotations already stored still restore after a restart. A checkpoint with more entries than the limit fails start.
 - **Disabled:** `NVNMOSD_ANNOTATION_API=0` starts without reading the checkpoint, including when that file is corrupt. `/x-nmos/` has no `annotation/` and `/self` `services` is empty.
 
 Not required: gst-nmos-rs; gRPC annotation fields; `kill -9` durability (accepted loss).
