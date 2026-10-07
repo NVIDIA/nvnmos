@@ -135,13 +135,16 @@ impl ChannelMappingSession {
         if self.channelmapping.is_some() {
             return Err(DaemonError::AlreadyAdded);
         }
-        let resp = self
+        let rpc = self
             .client
             .as_mut()
             .expect("session client missing")
-            .add_channel_mapping(request)
-            .await?
-            .into_inner();
+            .add_channel_mapping(request);
+        let resp = match tokio::time::timeout(RPC_TIMEOUT, rpc).await {
+            Ok(Ok(resp)) => resp.into_inner(),
+            Ok(Err(status)) => return Err(status.into()),
+            Err(_elapsed) => return Err(DaemonError::TimedOut),
+        };
         self.channelmapping = Some(AddedChannelMapping {
             handle: resp.channelmapping_handle.clone(),
         });
@@ -174,7 +177,8 @@ impl ChannelMappingSession {
             .as_ref()
             .map(|cm| cm.handle.clone())
             .ok_or(DaemonError::NoResource)?;
-        self.client
+        let rpc = self
+            .client
             .as_mut()
             .expect("session client missing")
             .sync_channel_mapping_state(SyncChannelMappingStateRequest {
@@ -182,9 +186,12 @@ impl ChannelMappingSession {
                 channelmapping_handle: handle,
                 output_id: output_id.to_owned(),
                 active_map,
-            })
-            .await?;
-        Ok(())
+            });
+        match tokio::time::timeout(RPC_TIMEOUT, rpc).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(status)) => Err(status.into()),
+            Err(_elapsed) => Err(DaemonError::TimedOut),
+        }
     }
 
     pub(crate) async fn close(mut self) -> Result<(), DaemonError> {

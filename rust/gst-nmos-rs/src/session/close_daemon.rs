@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! `CloseSession` against a daemon that answers, or does not.
+//! `CloseSession`, `AddChannelMapping`, and `SyncChannelMappingState`
+//! against a daemon that answers, or does not.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,25 +17,34 @@ use tonic::{Request, Response, Status};
 use crate::channel_mapping_session::{
     ChannelMappingActivationHandler, ChannelMappingActivationOutcome, ChannelMappingSession,
 };
-use crate::daemon::{ActivationHandler, ActivationOutcome, Session};
+use crate::daemon::{ActivationHandler, ActivationOutcome, DaemonError, Session};
 use crate::runtime::SHARED_RUNTIME;
 
 use super::channel_mapping::{self, ChannelMappingSettings};
 use super::support::{cat, init_gst, settings};
 use super::{NodeSettings, OPEN_TIMEOUT, Side, close, transport_to_proto};
 
-/// How long the stub holds `CloseSession` in the outstanding-RPC tests.
-/// Twice [`OPEN_TIMEOUT`], so a close bounded by that timeout returns
+/// How long the stub holds the outstanding RPC.
+/// Twice [`OPEN_TIMEOUT`], so a call bounded by that timeout returns
 /// while this hold is still running.
 fn hold_for() -> Duration {
     OPEN_TIMEOUT + OPEN_TIMEOUT
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeldCall {
+    CloseSession,
+    AddChannelMapping,
+    SyncChannelMappingState,
+}
+
 enum Mode {
     /// Complete `CloseSession` and notify the test.
     Answer(std::sync::mpsc::Sender<()>),
-    /// Complete `CloseSession` only after [`hold_for`], then set the flag.
+    /// Complete `call` only after [`hold_for`], then set the flag.
+    /// Every other RPC returns immediately.
     Hold {
+        call: HeldCall,
         replied: Arc<AtomicBool>,
         hold: Duration,
     },
@@ -88,14 +98,9 @@ impl NvnmosDaemon for Stub {
         &self,
         _request: Request<rpc::CloseSessionRequest>,
     ) -> Result<Response<Empty>, Status> {
-        match &self.mode {
-            Mode::Answer(closed) => {
-                let _ = closed.send(());
-            }
-            Mode::Hold { replied, hold } => {
-                tokio::time::sleep(*hold).await;
-                replied.store(true, Ordering::SeqCst);
-            }
+        self.hold_if(HeldCall::CloseSession).await;
+        if let Mode::Answer(closed) = &self.mode {
+            let _ = closed.send(());
         }
         Ok(Response::new(Empty {}))
     }
@@ -148,7 +153,12 @@ impl NvnmosDaemon for Stub {
         &self,
         _request: Request<rpc::AddChannelMappingRequest>,
     ) -> Result<Response<rpc::AddChannelMappingResponse>, Status> {
-        unused()
+        self.hold_if(HeldCall::AddChannelMapping).await;
+        Ok(Response::new(rpc::AddChannelMappingResponse {
+            channelmapping_handle: "cm-1".to_owned(),
+            input_ids: vec!["in-1".to_owned()],
+            output_ids: vec!["out-1".to_owned()],
+        }))
     }
 
     async fn remove_channel_mapping(
@@ -162,7 +172,8 @@ impl NvnmosDaemon for Stub {
         &self,
         _request: Request<rpc::SyncChannelMappingStateRequest>,
     ) -> Result<Response<Empty>, Status> {
-        unused()
+        self.hold_if(HeldCall::SyncChannelMappingState).await;
+        Ok(Response::new(Empty {}))
     }
 
     type SubscribeChannelMappingActivationsStream = EventStream<rpc::ChannelMappingActivationEvent>;
@@ -179,6 +190,24 @@ impl NvnmosDaemon for Stub {
         _request: Request<rpc::AckChannelMappingActivationRequest>,
     ) -> Result<Response<Empty>, Status> {
         unused()
+    }
+}
+
+impl Stub {
+    async fn hold_if(&self, call: HeldCall) {
+        let Mode::Hold {
+            call: held,
+            replied,
+            hold,
+        } = &self.mode
+        else {
+            return;
+        };
+        if *held != call {
+            return;
+        }
+        tokio::time::sleep(*hold).await;
+        replied.store(true, Ordering::SeqCst);
     }
 }
 
@@ -262,6 +291,7 @@ fn close_returns_while_close_session_is_outstanding() {
     let replied = Arc::new(AtomicBool::new(false));
     let hold = hold_for();
     let daemon = TestDaemon::start(Mode::Hold {
+        call: HeldCall::CloseSession,
         replied: Arc::clone(&replied),
         hold,
     });
@@ -304,6 +334,7 @@ fn channel_mapping_close_returns_while_close_session_is_outstanding() {
     let replied = Arc::new(AtomicBool::new(false));
     let hold = hold_for();
     let daemon = TestDaemon::start(Mode::Hold {
+        call: HeldCall::CloseSession,
         replied: Arc::clone(&replied),
         hold,
     });
@@ -328,4 +359,71 @@ fn dropped_channel_mapping_session_sends_close_session() {
     drop(open_channel_mapping(&daemon.uri));
     rx.recv_timeout(OPEN_TIMEOUT)
         .expect("CloseSession after drop");
+}
+
+fn add_request() -> rpc::AddChannelMappingRequest {
+    rpc::AddChannelMappingRequest {
+        session_handle: "session-1".to_owned(),
+        name: "test-map".to_owned(),
+        ..Default::default()
+    }
+}
+
+/// READY→PAUSED `AddChannelMapping` returns while that RPC is still unanswered.
+/// The daemon holds it for twice [`OPEN_TIMEOUT`].
+#[test]
+fn add_channel_mapping_returns_while_the_rpc_is_outstanding() {
+    let replied = Arc::new(AtomicBool::new(false));
+    let hold = hold_for();
+    let daemon = TestDaemon::start(Mode::Hold {
+        call: HeldCall::AddChannelMapping,
+        replied: Arc::clone(&replied),
+        hold,
+    });
+    let mut session = open_channel_mapping(&daemon.uri);
+    let started = Instant::now();
+    let result = SHARED_RUNTIME.block_on(session.add_channel_mapping(add_request()));
+    assert!(
+        started.elapsed() < hold,
+        "add waited for AddChannelMapping to finish"
+    );
+    assert!(
+        !replied.load(Ordering::SeqCst),
+        "add returned only after the daemon answered AddChannelMapping"
+    );
+    assert!(
+        matches!(result, Err(DaemonError::TimedOut)),
+        "AddChannelMapping returned {result:?}"
+    );
+}
+
+/// `SyncChannelMappingState` returns while that RPC is still unanswered.
+/// The daemon holds it for twice [`OPEN_TIMEOUT`].
+#[test]
+fn sync_channel_mapping_state_returns_while_the_rpc_is_outstanding() {
+    let replied = Arc::new(AtomicBool::new(false));
+    let hold = hold_for();
+    let daemon = TestDaemon::start(Mode::Hold {
+        call: HeldCall::SyncChannelMappingState,
+        replied: Arc::clone(&replied),
+        hold,
+    });
+    let mut session = open_channel_mapping(&daemon.uri);
+    SHARED_RUNTIME
+        .block_on(session.add_channel_mapping(add_request()))
+        .expect("AddChannelMapping");
+    let started = Instant::now();
+    let result = SHARED_RUNTIME.block_on(session.sync_channel_mapping_state("out-1", Vec::new()));
+    assert!(
+        started.elapsed() < hold,
+        "sync waited for SyncChannelMappingState to finish"
+    );
+    assert!(
+        !replied.load(Ordering::SeqCst),
+        "sync returned only after the daemon answered SyncChannelMappingState"
+    );
+    assert!(
+        matches!(result, Err(DaemonError::TimedOut)),
+        "SyncChannelMappingState returned {result:?}"
+    );
 }
