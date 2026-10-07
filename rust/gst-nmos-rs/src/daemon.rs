@@ -50,6 +50,13 @@ use crate::session::types::Side;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a caller waits when a daemon RPC does not return.
+///
+/// `OpenSession`, deferred `AddSender`, `SyncResourceState`, and
+/// `CloseSession` use this ceiling. If the daemon answers, these
+/// calls return sooner.
+pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Per-event input to an [`ActivationHandler`]. Mirrors
 /// `nvnmos.daemon.v1.ActivationEvent` with the `side` decoded into
 /// the crate-local enum and the proto `optional string transport_file`
@@ -89,11 +96,12 @@ pub(crate) type ActivationHandler =
 
 /// A live session against `nvnmosd`.
 ///
-/// Open with [`Session::open`]; tear down with [`Session::close`]. Drop
-/// silently aborts the activation task but does **not** call
-/// `CloseSession` — prefer the explicit close path. `CloseSession`
-/// implicitly removes any resource the session added, so no explicit
-/// `RemoveResource` is needed in the close path.
+/// Open with [`Session::open`]; tear down with [`Session::close`].
+/// `close` waits for `CloseSession` and gives up after [`RPC_TIMEOUT`]
+/// if the daemon does not answer. Drop sends `CloseSession` too, without
+/// waiting; that background call gives up after the same timeout.
+/// `CloseSession` removes any resource the session added, so no
+/// `RemoveResource` is sent.
 pub(crate) struct Session {
     pub(crate) session_handle: String,
     pub(crate) node_id: String,
@@ -104,8 +112,8 @@ pub(crate) struct Session {
     /// called with a non-empty `transport_file` and the daemon
     /// accepted the `AddSender` / `AddReceiver`. `None` otherwise.
     resource: Option<AddedResource>,
-    client: NvnmosDaemonClient<Channel>,
-    activation_task: JoinHandle<()>,
+    client: Option<NvnmosDaemonClient<Channel>>,
+    activation_task: Option<JoinHandle<()>>,
 }
 
 struct AddedResource {
@@ -129,6 +137,8 @@ pub(crate) enum DaemonError {
         "session has no resource added yet; auto-activate sync cannot run before AddSender / AddReceiver"
     )]
     NoResource,
+    #[error("timed out waiting for the daemon")]
+    TimedOut,
 }
 
 impl From<tonic::transport::Error> for DaemonError {
@@ -243,8 +253,8 @@ impl Session {
             created_node,
             http_port,
             resource,
-            client,
-            activation_task,
+            client: Some(client),
+            activation_task: Some(activation_task),
         })
     }
 
@@ -275,8 +285,9 @@ impl Session {
         if self.resource.is_some() {
             return Err(DaemonError::AlreadyAdded);
         }
+        let client = self.client.as_mut().expect("session client missing");
         let resource = add_resource(
-            &mut self.client,
+            client,
             &self.session_handle,
             side,
             name,
@@ -318,6 +329,8 @@ impl Session {
             .map(|r| r.handle.clone())
             .ok_or(DaemonError::NoResource)?;
         self.client
+            .as_mut()
+            .expect("session client missing")
             .sync_resource_state(SyncResourceStateRequest {
                 session_handle: self.session_handle.clone(),
                 resource_handle,
@@ -328,26 +341,69 @@ impl Session {
     }
 
     /// Cancel the background activation task and tell the daemon to
-    /// close this session. The daemon removes any resource the
-    /// session contributed as part of `CloseSession`, so no explicit
-    /// `RemoveResource` is sent here. Errors are returned so callers
-    /// can log them; the session is consumed either way.
-    pub(crate) async fn close(self) -> Result<(), DaemonError> {
-        let Session {
+    /// close this session. Waits until `CloseSession` returns or
+    /// [`RPC_TIMEOUT`] elapses. The daemon removes any resource the
+    /// session contributed, so no `RemoveResource` is sent here. Errors
+    /// are returned so callers can log them; the session is consumed
+    /// either way.
+    pub(crate) async fn close(mut self) -> Result<(), DaemonError> {
+        match self.detach() {
+            Some(detached) => detached.close().await,
+            None => Ok(()),
+        }
+    }
+
+    fn detach(&mut self) -> Option<DetachedSession> {
+        Some(DetachedSession {
+            session_handle: self.session_handle.clone(),
+            client: self.client.take()?,
+            activation_task: self.activation_task.take(),
+        })
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let Some(detached) = self.detach() else {
+            return;
+        };
+        let handle = detached.session_handle.clone();
+        SHARED_RUNTIME.spawn(async move {
+            match detached.close().await {
+                Ok(()) => gst::info!(CAT, "session closed: handle={handle}"),
+                Err(e) => gst::warning!(CAT, "CloseSession (handle={handle}): {e}"),
+            }
+        });
+    }
+}
+
+struct DetachedSession {
+    session_handle: String,
+    client: NvnmosDaemonClient<Channel>,
+    activation_task: Option<JoinHandle<()>>,
+}
+
+impl DetachedSession {
+    async fn close(self) -> Result<(), DaemonError> {
+        let Self {
             session_handle,
             mut client,
             activation_task,
-            ..
         } = self;
-
-        activation_task.abort();
-        let _ = activation_task.await;
-
-        client
-            .close_session(CloseSessionRequest { session_handle })
-            .await?;
-
-        Ok(())
+        if let Some(task) = activation_task {
+            task.abort();
+            let _ = task.await;
+        }
+        match tokio::time::timeout(
+            RPC_TIMEOUT,
+            client.close_session(CloseSessionRequest { session_handle }),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(status)) => Err(status.into()),
+            Err(_elapsed) => Err(DaemonError::TimedOut),
+        }
     }
 }
 

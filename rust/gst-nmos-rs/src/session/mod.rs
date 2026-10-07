@@ -17,18 +17,20 @@ use anyhow::{Context, bail};
 use gstreamer as gst;
 use nvnmos_rpc::v1::Transport as ProtoTransport;
 
-use crate::daemon::{ActivationHandler, ActivationRequest, Session};
+use crate::daemon::{ActivationHandler, ActivationRequest, RPC_TIMEOUT, Session};
 use crate::runtime::SHARED_RUNTIME;
 use crate::types::{CapsMode, DEFAULT_DAEMON_URI, FlowFormat, Transport};
 
-/// Open-session timeout. Aligned with the daemon's activation ack
-/// timeout — same order of magnitude, no special meaning.
-const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+/// [`RPC_TIMEOUT`] for the open call.
+const OPEN_TIMEOUT: Duration = RPC_TIMEOUT;
 
 pub(crate) mod channel_mapping;
 pub(crate) mod connection_active;
 pub(crate) mod node;
 pub(crate) mod types;
+
+#[cfg(test)]
+mod close_daemon;
 
 pub(crate) use node::NodeSettings;
 
@@ -1164,8 +1166,8 @@ pub(crate) fn sync_active(
     }
 }
 
-/// Drop the session and tell the daemon to close it. Logged-only on
-/// error so state-change cleanup always succeeds.
+/// Explicit close: wait for `CloseSession` and log the result. An
+/// error is logged only, so state-change cleanup always succeeds.
 pub(crate) fn close(cat: &gst::DebugCategory, element: &str, session: &Mutex<Option<Session>>) {
     let to_close = session.lock().unwrap().take();
     if let Some(s) = to_close {
