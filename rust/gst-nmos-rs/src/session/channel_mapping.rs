@@ -10,12 +10,14 @@ use anyhow::{Context, bail};
 use gstreamer as gst;
 
 use crate::channel_mapping_session::{ChannelMappingActivationHandler, ChannelMappingSession};
+use crate::daemon::RPC_TIMEOUT;
 use crate::runtime::SHARED_RUNTIME;
 use crate::types::DEFAULT_DAEMON_URI;
 
 use super::NodeSettings;
 
-const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+/// [`RPC_TIMEOUT`] for the open call.
+const OPEN_TIMEOUT: Duration = RPC_TIMEOUT;
 
 pub(crate) const CHANNELMAPPING_NAME_BLURB: &str = "\
     Caller-chosen name for this channel mapping. It must be unique within the \
