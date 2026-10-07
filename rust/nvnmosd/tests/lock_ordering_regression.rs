@@ -292,8 +292,7 @@ async fn single_worker_serves_ack_while_add_sender_waits_on_model() {
 
     let staged_path = staged_sender_path(&s1.sender_id);
     let patch = tokio::spawn(async move {
-        let _ =
-            http_patch_activate_immediate("127.0.0.1", http_port, &staged_path, None, None).await;
+        http_patch_activate_immediate("127.0.0.1", http_port, &staged_path, None, None).await
     });
     let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
         .await
@@ -346,7 +345,10 @@ async fn single_worker_serves_ack_while_add_sender_waits_on_model() {
 
     // Keep the activation stream open until the ack has been applied.
     drop(stream);
-    let _ = patch.await;
+    patch
+        .await
+        .expect("activation PATCH task")
+        .expect("IS-05 activation PATCH");
     let _ = client
         .close_session(CloseSessionRequest {
             session_handle: session,
