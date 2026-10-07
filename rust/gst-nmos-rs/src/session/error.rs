@@ -87,7 +87,7 @@ pub(crate) fn error_code(err: &anyhow::Error) -> ErrorCode {
                     }
                     _ => gst::ResourceError::OpenReadWrite,
                 },
-                DaemonError::AlreadyAdded | DaemonError::NoResource => {
+                DaemonError::AlreadyAdded | DaemonError::NoResource | DaemonError::TimedOut => {
                     gst::ResourceError::OpenReadWrite
                 }
             });
@@ -189,7 +189,11 @@ mod tests {
             error_code(&anyhow::Error::new(elapsed).context("OpenSession timed out")),
             ErrorCode::Resource(gst::ResourceError::OpenReadWrite)
         );
-        for e in [DaemonError::AlreadyAdded, DaemonError::NoResource] {
+        for e in [
+            DaemonError::AlreadyAdded,
+            DaemonError::NoResource,
+            DaemonError::TimedOut,
+        ] {
             assert_eq!(
                 error_code(&anyhow::Error::new(e)),
                 ErrorCode::Resource(gst::ResourceError::OpenReadWrite)
