@@ -52,9 +52,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a caller waits when a daemon RPC does not return.
 ///
-/// `OpenSession`, deferred `AddSender`, `SyncResourceState`, and
-/// `CloseSession` use this ceiling. If the daemon answers, these
-/// calls return sooner.
+/// `OpenSession`, deferred `AddSender`, `SyncResourceState`,
+/// `AddChannelMapping`, `SyncChannelMappingState`, and `CloseSession`
+/// use this ceiling. If the daemon answers, these calls return sooner.
 pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Per-event input to an [`ActivationHandler`]. Mirrors
