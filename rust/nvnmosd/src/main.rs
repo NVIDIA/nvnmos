@@ -28,6 +28,7 @@ mod malloc_trim;
 mod session_gc;
 mod state;
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::mpsc as std_mpsc;
@@ -143,6 +144,25 @@ where
     }
 }
 
+/// Finish `work` even when the RPC handler is dropped.
+///
+/// The handler awaits the task, so a client that stays connected receives
+/// the result. Dropping that await does not cancel the task. `work` awaits
+/// [`blocking_ffi`] and then commits or aborts while holding `state` on an
+/// async worker.
+async fn finish_ffi<T, Fut>(work: Fut) -> Result<T, Status>
+where
+    Fut: Future<Output = Result<T, Status>> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::spawn(work).await {
+        Ok(result) => result,
+        Err(join) => Err(Status::internal(format!(
+            "daemon follow-up to a libnvnmos call panicked: {join}"
+        ))),
+    }
+}
+
 #[tonic::async_trait]
 impl NvnmosDaemon for Daemon {
     async fn add_node(
@@ -159,14 +179,23 @@ impl NvnmosDaemon for Daemon {
         let node_seed = prep.seed.clone();
         let http_port = prep.http_port;
         let daemon = self.clone();
-        // Build the NodeServer outside the lock.
-        let built = blocking_ffi(move || daemon.run_ffi(prep)).await;
-        if built.is_err() {
-            self.lock_state().abort_pending_node(&node_seed, http_port);
-        }
-        let ready = built?;
-        let mut state = self.lock_state();
-        let outcome = state.commit_add_node(ready);
+        // Build the NodeServer outside the lock. Commit or abort still runs
+        // if the client drops this RPC during the build.
+        let outcome = finish_ffi(async move {
+            let built = blocking_ffi({
+                let daemon = daemon.clone();
+                move || daemon.run_ffi(prep)
+            })
+            .await;
+            if built.is_err() {
+                daemon
+                    .lock_state()
+                    .abort_pending_node(&node_seed, http_port);
+            }
+            let ready = built?;
+            Ok(daemon.lock_state().commit_add_node(ready))
+        })
+        .await?;
         tracing::info!(
             node_seed = %seed,
             node_id = %outcome.node_id,
@@ -225,21 +254,38 @@ impl NvnmosDaemon for Daemon {
             state.prepare_open_session(config, &self.http_port_range)?
         };
         let outcome = match plan {
-            state::OpenSessionPlan::Attached(outcome) => outcome,
+            state::OpenSessionPlan::Attached(outcome) => {
+                self.session_gc
+                    .start_subscribe_timeout(&outcome.session_handle);
+                outcome
+            }
             state::OpenSessionPlan::Create(prep) => {
                 let node_seed = prep.seed.clone();
                 let http_port = prep.http_port;
                 let daemon = self.clone();
-                let built = blocking_ffi(move || daemon.run_ffi(prep)).await;
-                if built.is_err() {
-                    self.lock_state().abort_pending_node(&node_seed, http_port);
-                }
-                let ready = built?;
-                self.lock_state().commit_open_session(ready)
+                let session_gc = self.session_gc.clone();
+                // Build the NodeServer outside the lock. Commit or abort,
+                // and the subscribe timeout, still run if the client drops
+                // this RPC during the build.
+                finish_ffi(async move {
+                    let built = blocking_ffi({
+                        let daemon = daemon.clone();
+                        move || daemon.run_ffi(prep)
+                    })
+                    .await;
+                    if built.is_err() {
+                        daemon
+                            .lock_state()
+                            .abort_pending_node(&node_seed, http_port);
+                    }
+                    let ready = built?;
+                    let outcome = daemon.lock_state().commit_open_session(ready);
+                    session_gc.start_subscribe_timeout(&outcome.session_handle);
+                    Ok(outcome)
+                })
+                .await?
             }
         };
-        self.session_gc
-            .start_subscribe_timeout(&outcome.session_handle);
 
         tracing::info!(
             node_seed = %seed,
@@ -309,18 +355,22 @@ impl NvnmosDaemon for Daemon {
                 &req.name,
             )?
         };
-        // The libnvnmos add runs outside the lock.
+        // The libnvnmos add runs outside the lock. The commit still runs
+        // if the client drops this RPC during the add.
         let annotations = self.annotations.clone();
-        let ready = blocking_ffi(move || prep.run_ffi(annotations.as_deref())).await?;
-        let outcome = match ready {
-            state::AddResourceReady::Sender(ready) => {
-                let mut state = self.lock_state();
-                state.commit_add_sender(ready)
+        let daemon = self.clone();
+        let outcome = finish_ffi(async move {
+            let ready = blocking_ffi(move || prep.run_ffi(annotations.as_deref())).await?;
+            match ready {
+                state::AddResourceReady::Sender(ready) => {
+                    daemon.lock_state().commit_add_sender(ready)
+                }
+                state::AddResourceReady::Receiver(_) => Err(Status::internal(
+                    "AddSender prep produced a Receiver ready result",
+                )),
             }
-            state::AddResourceReady::Receiver(_) => Err(Status::internal(
-                "AddSender prep produced a Receiver ready result",
-            )),
-        }?;
+        })
+        .await?;
         tracing::info!(
             session_handle = %req.session_handle,
             node_seed = %outcome.node_seed,
@@ -355,18 +405,22 @@ impl NvnmosDaemon for Daemon {
                 &req.name,
             )?
         };
-        // The libnvnmos add runs outside the lock.
+        // The libnvnmos add runs outside the lock. The commit still runs
+        // if the client drops this RPC during the add.
         let annotations = self.annotations.clone();
-        let ready = blocking_ffi(move || prep.run_ffi(annotations.as_deref())).await?;
-        let outcome = match ready {
-            state::AddResourceReady::Receiver(ready) => {
-                let mut state = self.lock_state();
-                state.commit_add_receiver(ready)
+        let daemon = self.clone();
+        let outcome = finish_ffi(async move {
+            let ready = blocking_ffi(move || prep.run_ffi(annotations.as_deref())).await?;
+            match ready {
+                state::AddResourceReady::Receiver(ready) => {
+                    daemon.lock_state().commit_add_receiver(ready)
+                }
+                state::AddResourceReady::Sender(_) => Err(Status::internal(
+                    "AddReceiver prep produced a Sender ready result",
+                )),
             }
-            state::AddResourceReady::Sender(_) => Err(Status::internal(
-                "AddReceiver prep produced a Sender ready result",
-            )),
-        }?;
+        })
+        .await?;
         tracing::info!(
             session_handle = %req.session_handle,
             node_seed = %outcome.node_seed,
@@ -504,10 +558,14 @@ impl NvnmosDaemon for Daemon {
                 &req.outputs,
             )?
         };
-        // The libnvnmos add runs outside the lock.
-        let ready = blocking_ffi(move || prep.run_ffi()).await?;
-        let mut state = self.lock_state();
-        let outcome = state.commit_add_channelmapping(ready)?;
+        // The libnvnmos add runs outside the lock. The commit still runs
+        // if the client drops this RPC during the add.
+        let daemon = self.clone();
+        let outcome = finish_ffi(async move {
+            let ready = blocking_ffi(move || prep.run_ffi()).await?;
+            daemon.lock_state().commit_add_channelmapping(ready)
+        })
+        .await?;
         tracing::info!(
             session_handle = %req.session_handle,
             name = %req.name,

@@ -203,7 +203,9 @@ post-fix split removes that stall.
 Note: `AddSender` may still block on `model` while an in-band activation is
 parked on the ack — that is correct serialization, not a deadlock. Only
 the libnvnmos call runs on the blocking pool (`blocking_ffi`); the daemon
-`state` lock stays on the async worker. `AckActivation` stays on the async
+`state` lock stays on the async worker. Create and add commit or abort in
+`finish_ffi`. The handler awaits the task; a drop does not cancel it. Remove,
+close, and sync are recorded beforehand. `AckActivation` stays on the async
 worker: it only takes `state`. If the libnvnmos call occupied the only
 async worker, the ack would not be polled and the activation would wait
 out `ACTIVATION_ACK_TIMEOUT`. `#[tokio::main]` sizes that pool from
@@ -235,7 +237,10 @@ thread is parked on the ack, then concurrently issues `AddSender` and
 `single_worker_serves_ack_while_add_sender_waits_on_model` starts the
 daemon with `TOKIO_WORKER_THREADS=1`, parks an in-band activation, and
 issues `AddSender` before `AckActivation`. The ack must return inside one
-second, well under the five-second activation timeout.
+second, well under the five-second activation timeout, and the IS-05
+PATCH must succeed. `cancelled_add_sender_still_records_the_name` drops
+that `AddSender` while it is blocked and then checks that a repeat add of
+the same name is `already_exists`.
 
 Also run the full `nvnmosd` test suite under default parallelism and
 `--test-threads=1` (`http_port_release_repro`, `session_gc`, etc.).

@@ -33,6 +33,7 @@ use common::{
 };
 
 const ACK_WORKER_PORTS: PortRange = 18_220..=18_229;
+const ACK_CANCEL_PORTS: PortRange = 18_230..=18_239;
 
 /// Upper bound the concurrent RPC is allowed to take. On the pre-fix daemon the
 /// RPC deadlocks and never returns, so any finite budget fails it. Post-fix the
@@ -292,8 +293,7 @@ async fn single_worker_serves_ack_while_add_sender_waits_on_model() {
 
     let staged_path = staged_sender_path(&s1.sender_id);
     let patch = tokio::spawn(async move {
-        let _ =
-            http_patch_activate_immediate("127.0.0.1", http_port, &staged_path, None, None).await;
+        http_patch_activate_immediate("127.0.0.1", http_port, &staged_path, None, None).await
     });
     let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
         .await
@@ -346,7 +346,105 @@ async fn single_worker_serves_ack_while_add_sender_waits_on_model() {
 
     // Keep the activation stream open until the ack has been applied.
     drop(stream);
-    let _ = patch.await;
+    patch
+        .await
+        .expect("activation PATCH task")
+        .expect("IS-05 activation PATCH");
+    let _ = client
+        .close_session(CloseSessionRequest {
+            session_handle: session,
+        })
+        .await;
+}
+
+/// Dropping `AddSender` while it is blocked on `model` must not skip the
+/// commit. A repeat add of that name is `already_exists`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_add_sender_still_records_the_name() {
+    let mut harness = DaemonHarness::spawn(ACK_CANCEL_PORTS, &[("TOKIO_WORKER_THREADS", "1")]);
+    harness.ready().await;
+    let mut client = connect(&harness.uds).await;
+    let iface = autodetect_iface_ip();
+    let (session, http_port) = open_session_with_port(&mut client, "ack-cancel").await;
+
+    let mut stream = subscribe_activations(&mut client, &session).await;
+
+    let s1 = client
+        .add_sender(AddSenderRequest {
+            session_handle: session.clone(),
+            name: "s1".to_string(),
+            transport: ProtoTransport::Rtp as i32,
+            transport_file: minimal_sender_sdp("s1", &iface),
+        })
+        .await
+        .expect("AddSender s1")
+        .into_inner();
+
+    let staged_path = staged_sender_path(&s1.sender_id);
+    let patch = tokio::spawn(async move {
+        http_patch_activate_immediate("127.0.0.1", http_port, &staged_path, None, None).await
+    });
+    let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("timed out waiting for in-band activation event")
+        .expect("activation stream ended")
+        .expect("activation stream error");
+
+    let mut add_client = client.clone();
+    let add_session = session.clone();
+    let add_iface = iface.clone();
+    let add_s2 = tokio::spawn(async move {
+        add_client
+            .add_sender(AddSenderRequest {
+                session_handle: add_session,
+                name: "s2".to_string(),
+                transport: ProtoTransport::Rtp as i32,
+                transport_file: minimal_sender_sdp("s2", &add_iface),
+            })
+            .await
+    });
+
+    tokio::time::sleep(ADD_SENDER_BLOCKS_FOR).await;
+    assert!(
+        !add_s2.is_finished(),
+        "AddSender s2 returned before the ack; the activation was not holding the model lock"
+    );
+    add_s2.abort();
+
+    client
+        .ack_activation(AckActivationRequest {
+            session_handle: session.clone(),
+            activation_handle: event.activation_handle,
+            success: true,
+            failure_reason: String::new(),
+        })
+        .await
+        .expect("AckActivation");
+
+    // The ack has released `model`. Wait for the detached commit to record
+    // the name before the repeat add.
+    tokio::time::sleep(ADD_SENDER_BLOCKS_FOR).await;
+
+    let repeat = client
+        .add_sender(AddSenderRequest {
+            session_handle: session.clone(),
+            name: "s2".to_string(),
+            transport: ProtoTransport::Rtp as i32,
+            transport_file: minimal_sender_sdp("s2", &iface),
+        })
+        .await
+        .expect_err("repeat AddSender s2");
+    assert_eq!(
+        repeat.code(),
+        tonic::Code::AlreadyExists,
+        "repeat AddSender s2: {repeat}"
+    );
+
+    drop(stream);
+    patch
+        .await
+        .expect("activation PATCH task")
+        .expect("IS-05 activation PATCH");
     let _ = client
         .close_session(CloseSessionRequest {
             session_handle: session,
