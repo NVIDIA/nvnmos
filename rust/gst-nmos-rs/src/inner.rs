@@ -137,8 +137,11 @@ pub(crate) struct RebuildChainOpts {
 ///
 /// Steps 5 and 7 both end in a synchronous `state(timeout)` check. If the
 /// chain doesn't settle within [`STATE_WAIT`], return `Err` so the caller
-/// can ack the IS-05 activation as `Failed` — the probe is removed either
-/// way so the data path doesn't wedge.
+/// can ack the IS-05 activation as `Failed`. When `fallback` is set, a
+/// sink-direction failure after the old chain has been removed calls it
+/// and links that sink before the probe is removed. The function still
+/// returns `Err`. The probe is removed either way so the data path
+/// doesn't wedge.
 ///
 /// `pad_name` is the outer-facing pad name on `new_chain` —
 /// `"sink"` for sink-direction bins, `"src"` for source-direction
@@ -152,6 +155,7 @@ pub(crate) fn rebuild_chain_with_opts(
     new_chain: &gst::Element,
     pad_name: &str,
     opts: RebuildChainOpts,
+    fallback: Option<&mut dyn FnMut() -> Result<gst::Element, anyhow::Error>>,
 ) -> Result<(), anyhow::Error> {
     let anchor_outer_pad = ghost
         .target()
@@ -211,7 +215,7 @@ pub(crate) fn rebuild_chain_with_opts(
     // Always remove the probe on the way out, even on error, so the
     // pipeline can drain — a stuck probe with no chain behind it is a
     // worse failure than a partially-completed rebuild.
-    let result = swap_chain_inner(cat, bin, &anchor, new_chain, pad_name, ghost);
+    let result = swap_chain_inner(cat, bin, &anchor, new_chain, pad_name, ghost, fallback);
     probe_pad.remove_probe(probe_id);
     gst::debug!(
         cat,
@@ -227,6 +231,7 @@ pub(crate) fn rebuild_chain_with_opts(
 }
 
 /// [`rebuild_chain_with_opts`] with default options (no downstream drain).
+#[cfg(test)]
 pub(crate) fn rebuild_chain(
     cat: &gst::DebugCategory,
     bin: &gst::Bin,
@@ -241,6 +246,7 @@ pub(crate) fn rebuild_chain(
         new_chain,
         pad_name,
         RebuildChainOpts::default(),
+        None,
     )
 }
 
@@ -280,6 +286,7 @@ fn swap_chain_inner(
     new_chain: &gst::Element,
     new_chain_pad_name: &str,
     ghost: &gst::GhostPad,
+    fallback: Option<&mut dyn FnMut() -> Result<gst::Element, anyhow::Error>>,
 ) -> Result<StateSync, anyhow::Error> {
     // Chain-facing pad on the anchor — the same pad `rebuild_chain`
     // blocked. Sink-direction: `anchor.src` ↔ old_chain.sink.
@@ -334,6 +341,45 @@ fn swap_chain_inner(
         );
     }
 
+    // The old chain is gone. A sink failure has to link `fallback` before
+    // the caller lifts the probe, or the anchor stays unlinked.
+    let result = install_new_chain(cat, bin, ghost, &link_pad, new_chain, new_chain_pad_name);
+
+    if let Err(err) = result {
+        if ghost.direction() == gst::PadDirection::Sink
+            && let Some(build_fallback) = fallback
+        {
+            match build_fallback() {
+                Ok(fallback) => link_fallback_sink(
+                    cat,
+                    bin,
+                    ghost,
+                    &link_pad,
+                    new_chain,
+                    new_chain_pad_name,
+                    &fallback,
+                ),
+                Err(build_err) => {
+                    gst::warning!(cat, "rebuild_chain: building fallback sink: {build_err:#}");
+                }
+            }
+        }
+        return Err(err);
+    }
+    result
+}
+
+/// Add `new_chain`, link it to `link_pad`, and advance it while the anchor
+/// probe is held. The old chain has already been removed. A link failure
+/// stops and removes `new_chain` before returning.
+fn install_new_chain(
+    cat: &gst::DebugCategory,
+    bin: &gst::Bin,
+    ghost: &gst::GhostPad,
+    link_pad: &gst::Pad,
+    new_chain: &gst::Element,
+    new_chain_pad_name: &str,
+) -> Result<StateSync, anyhow::Error> {
     bin.add(new_chain)
         .with_context(|| format!("adding new chain `{}`", new_chain.name()))?;
 
@@ -349,7 +395,7 @@ fn swap_chain_inner(
     // then fail with "Pads do not have common format" even when the
     // new chain would negotiate correctly. Link with empty checks;
     // the identity anchor forwards stickies to the new chain.
-    if let Err(e) = link_pads_for_chain_swap(ghost, &link_pad, &new_chain_pad) {
+    if let Err(e) = link_pads_for_chain_swap(ghost, link_pad, &new_chain_pad) {
         let _ = stop_chain(cat, new_chain);
         let _ = bin.remove(new_chain);
         return Err(anyhow!(
@@ -368,6 +414,78 @@ fn swap_chain_inner(
             Ok(StateSync::Done)
         }
         _ => unreachable!("checked in rebuild_chain"),
+    }
+}
+
+/// Unlink and stop `failed`, remove it when it is in the bin, then link
+/// and advance `fallback`, while the anchor probe is still held. `failed`
+/// may never have been added. Failures here are logged; the caller still
+/// returns the error from the failed swap.
+fn link_fallback_sink(
+    cat: &gst::DebugCategory,
+    bin: &gst::Bin,
+    ghost: &gst::GhostPad,
+    link_pad: &gst::Pad,
+    failed: &gst::Element,
+    pad_name: &str,
+    fallback: &gst::Element,
+) {
+    if let Some(failed_pad) = failed.static_pad(pad_name) {
+        let _ = link_pad.unlink(&failed_pad);
+    }
+    if let Err(err) = stop_chain(cat, failed) {
+        gst::warning!(
+            cat,
+            "rebuild_chain: stopping failed sink `{}`: {err:#}",
+            failed.name()
+        );
+    }
+    // If `failed` was never added, skip removal.
+    if failed.parent().is_some()
+        && let Err(err) = bin.remove(failed)
+    {
+        gst::warning!(
+            cat,
+            "rebuild_chain: removing failed sink `{}`: {err:#}",
+            failed.name()
+        );
+        return;
+    }
+    if let Err(err) = bin.add(fallback) {
+        gst::warning!(
+            cat,
+            "rebuild_chain: adding fallback `{}`: {err:#}",
+            fallback.name()
+        );
+        return;
+    }
+    let Some(fallback_pad) = fallback.static_pad(pad_name) else {
+        gst::warning!(
+            cat,
+            "rebuild_chain: fallback `{}` missing `{pad_name}` pad",
+            fallback.name()
+        );
+        let _ = bin.remove(fallback);
+        return;
+    };
+    if let Err(err) = link_pads_for_chain_swap(ghost, link_pad, &fallback_pad) {
+        gst::warning!(
+            cat,
+            "rebuild_chain: linking fallback `{}`: {err}",
+            fallback.name()
+        );
+        let _ = stop_chain(cat, fallback);
+        let _ = bin.remove(fallback);
+        return;
+    }
+    if let Err(err) = advance_chain_to_parent_target(cat, bin, fallback) {
+        gst::warning!(
+            cat,
+            "rebuild_chain: fallback `{}` did not reach the parent state: {err:#}",
+            fallback.name()
+        );
+        let _ = stop_chain(cat, fallback);
+        let _ = bin.remove(fallback);
     }
 }
 
@@ -2062,6 +2180,10 @@ mod tests {
 
     use crate::test_support::init_gst;
 
+    fn current_chain_is(ghost: &gst::GhostPad, element: &gst::Element) -> bool {
+        current_chain(ghost).is_some_and(|chain| &chain == element)
+    }
+
     fn test_log_cat() -> &'static gst::DebugCategory {
         static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
             gst::DebugCategory::new(
@@ -3650,6 +3772,197 @@ mod tests {
         let _ = pipeline.set_state(gst::State::Null);
     }
 
+    /// A sink that does not reach the parent state is replaced by `fallback`
+    /// before the anchor probe is removed. The next buffer arrives there,
+    /// and a following swap still receives one.
+    #[test]
+    fn rebuild_chain_links_fallback_when_sink_fails_to_start() {
+        init_gst();
+        let cat = test_log_cat();
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("appsrc")
+            .property("is-live", true)
+            .property("format", gst::Format::Time)
+            .build()
+            .expect("appsrc");
+        let nmos_bin = gst::Bin::with_name("nmossink-sim");
+        let initial = build_fake_sink(None).expect("initial fake sink");
+        let ghost = build_initial(&nmos_bin, initial, "sink", gst::PadDirection::Sink)
+            .expect("build_initial");
+        nmos_bin.add_pad(&ghost).expect("add ghost pad");
+        let nmos_elem: &gst::Element = nmos_bin.upcast_ref();
+        pipeline
+            .add_many([&src, nmos_elem])
+            .expect("add pipeline children");
+        src.link_pads(Some("src"), &nmos_bin, Some("sink"))
+            .expect("link appsrc to nmossink ghost");
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline -> PLAYING");
+        let (_ret, state, _pending) = pipeline.state(gst::ClockTime::from_seconds(5));
+        assert_eq!(state, gst::State::Playing, "pipeline must reach PLAYING");
+
+        let location = std::env::temp_dir();
+        let location = location.to_str().expect("temp dir");
+        let failing = gst::ElementFactory::make("filesink")
+            .name("inner-fail")
+            .property("location", location)
+            .property("async", false)
+            .build()
+            .expect("filesink");
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let built = std::sync::Mutex::new(None);
+        let mut build_fallback = || {
+            let fallback = fakesink_for_rebuild_test("inner-fallback", false);
+            fallback.set_property("sync", false);
+            let seen_tx = seen_tx.clone();
+            fallback
+                .static_pad("sink")
+                .expect("fallback pad")
+                .add_probe(gst::PadProbeType::BUFFER, move |_pad, _info| {
+                    let _ = seen_tx.send(());
+                    gst::PadProbeReturn::Ok
+                })
+                .expect("fallback probe");
+            *built.lock().unwrap() = Some(fallback.clone());
+            Ok(fallback)
+        };
+
+        let err = rebuild_chain_with_opts(
+            cat,
+            &nmos_bin,
+            &ghost,
+            &failing,
+            "sink",
+            RebuildChainOpts::default(),
+            Some(&mut build_fallback),
+        )
+        .expect_err("filesink pointed at a directory must fail to start");
+        let fallback = built
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("fallback is built only after the new sink fails");
+        assert!(
+            current_chain_is(&ghost, &fallback),
+            "fallback must be the current chain after the failed start: {err:#}",
+        );
+
+        let appsrc = src
+            .downcast_ref::<gstreamer_app::AppSrc>()
+            .expect("appsrc type");
+        appsrc
+            .push_buffer(gst::Buffer::with_size(1).expect("buffer"))
+            .expect("push after failed start");
+        seen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("buffer must reach the fallback sink");
+
+        let next = fakesink_for_rebuild_test("inner-next", false);
+        next.set_property("sync", false);
+        let (next_tx, next_rx) = std::sync::mpsc::channel();
+        next.static_pad("sink")
+            .expect("next pad")
+            .add_probe(gst::PadProbeType::BUFFER, move |_pad, _info| {
+                let _ = next_tx.send(());
+                gst::PadProbeReturn::Ok
+            })
+            .expect("next probe");
+        rebuild_chain(cat, &nmos_bin, &ghost, &next, "sink").expect("later swap");
+        appsrc
+            .push_buffer(gst::Buffer::with_size(1).expect("buffer"))
+            .expect("push after later swap");
+        next_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("buffer must reach the sink installed after the failed start");
+
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    /// Adding a chain with no sink pad fails after the old chain is gone.
+    /// The fallback is linked before the anchor probe is removed.
+    #[test]
+    fn rebuild_chain_links_fallback_when_new_chain_has_no_sink_pad() {
+        init_gst();
+        let cat = test_log_cat();
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("appsrc")
+            .property("is-live", true)
+            .property("format", gst::Format::Time)
+            .build()
+            .expect("appsrc");
+        let nmos_bin = gst::Bin::with_name("nmossink-sim");
+        let initial = build_fake_sink(None).expect("initial fake sink");
+        let ghost = build_initial(&nmos_bin, initial, "sink", gst::PadDirection::Sink)
+            .expect("build_initial");
+        nmos_bin.add_pad(&ghost).expect("add ghost pad");
+        let nmos_elem: &gst::Element = nmos_bin.upcast_ref();
+        pipeline
+            .add_many([&src, nmos_elem])
+            .expect("add pipeline children");
+        src.link_pads(Some("src"), &nmos_bin, Some("sink"))
+            .expect("link appsrc to nmossink ghost");
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline -> PLAYING");
+        let (_ret, state, _pending) = pipeline.state(gst::ClockTime::from_seconds(5));
+        assert_eq!(state, gst::State::Playing, "pipeline must reach PLAYING");
+
+        let failing = gst::ElementFactory::make("fakesrc")
+            .name("inner-no-sink-pad")
+            .build()
+            .expect("fakesrc");
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let built = std::sync::Mutex::new(None);
+        let mut build_fallback = || {
+            let fallback = fakesink_for_rebuild_test("inner-fallback", false);
+            fallback.set_property("sync", false);
+            let seen_tx = seen_tx.clone();
+            fallback
+                .static_pad("sink")
+                .expect("fallback pad")
+                .add_probe(gst::PadProbeType::BUFFER, move |_pad, _info| {
+                    let _ = seen_tx.send(());
+                    gst::PadProbeReturn::Ok
+                })
+                .expect("fallback probe");
+            *built.lock().unwrap() = Some(fallback.clone());
+            Ok(fallback)
+        };
+
+        let err = rebuild_chain_with_opts(
+            cat,
+            &nmos_bin,
+            &ghost,
+            &failing,
+            "sink",
+            RebuildChainOpts::default(),
+            Some(&mut build_fallback),
+        )
+        .expect_err("a chain with no sink pad must fail the swap");
+        let fallback = built
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("fallback is built only after the new chain fails");
+        assert!(
+            current_chain_is(&ghost, &fallback),
+            "fallback must be the current chain when the new chain has no sink pad: {err:#}",
+        );
+
+        let appsrc = src
+            .downcast_ref::<gstreamer_app::AppSrc>()
+            .expect("appsrc type");
+        appsrc
+            .push_buffer(gst::Buffer::with_size(1).expect("buffer"))
+            .expect("push after failed swap");
+        seen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("buffer must reach the fallback sink");
+
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
     /// `async=false` lets READY→PAUSED complete synchronously while the
     /// anchor probe blocks downstream preroll.
     #[test]
@@ -3661,6 +3974,34 @@ mod tests {
 
         rebuild_chain(cat, &nmos_bin, &ghost, &sync_sink, "sink")
             .expect("async=false inner must swap while PLAYING");
+
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    /// The fallback builder runs only after the new chain has failed.
+    #[test]
+    fn rebuild_chain_skips_fallback_when_swap_succeeds() {
+        init_gst();
+        let cat = test_log_cat();
+        let (pipeline, nmos_bin, ghost) = playing_nmossink_sim_bin();
+        let sync_sink = fakesink_for_rebuild_test("inner-ok", false);
+        let builds = std::sync::Mutex::new(0u32);
+        let mut build_fallback = || {
+            *builds.lock().unwrap() += 1;
+            Ok(fakesink_for_rebuild_test("unused-fallback", false))
+        };
+
+        rebuild_chain_with_opts(
+            cat,
+            &nmos_bin,
+            &ghost,
+            &sync_sink,
+            "sink",
+            RebuildChainOpts::default(),
+            Some(&mut build_fallback),
+        )
+        .expect("async=false inner must swap while PLAYING");
+        assert_eq!(*builds.lock().unwrap(), 0);
 
         let _ = pipeline.set_state(gst::State::Null);
     }
