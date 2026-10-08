@@ -32,7 +32,12 @@ impl DaemonHarness {
     /// Spawn `nvnmosd` on a temp UDS. Default env: session GC off, malloc trim
     /// off, `NVNMOS_EXPERIMENTAL_SETTINGS` cleared. `extra_env` overlays that
     /// (and can re-enable Settings or session GC).
-    pub fn spawn(extra_env: &[(&str, &str)]) -> Self {
+    ///
+    /// `http_port_min` and `http_port_max` are this daemon's allocation range.
+    /// Each caller passes a disjoint block (`18080-18089`, then
+    /// `18090-18099`, ...). A daemon scans from its minimum, so the rest of
+    /// the block stays free for another Node in that test.
+    pub fn spawn(http_port_min: u16, http_port_max: u16, extra_env: &[(&str, &str)]) -> Self {
         let dir = TempDir::new().expect("tempdir");
         let uds = dir.path().join("nvnmosd.sock");
         nvnmosd::uds::prepare_listen_path(&uds).expect("prepare UDS path");
@@ -45,6 +50,8 @@ impl DaemonHarness {
             .arg(&uds)
             .env("NVNMOSD_SESSION_GC", "0")
             .env("NVNMOSD_MALLOC_TRIM", "0")
+            .env("NVNMOSD_HTTP_PORT_MIN", http_port_min.to_string())
+            .env("NVNMOSD_HTTP_PORT_MAX", http_port_max.to_string())
             .env("RUST_LOG", "error")
             .env("LD_LIBRARY_PATH", &ld_library_path)
             .env_remove("NVNMOS_EXPERIMENTAL_SETTINGS")
@@ -191,16 +198,19 @@ pub async fn connect(uds: &Path) -> NvnmosDaemonClient<Channel> {
     NvnmosDaemonClient::new(channel)
 }
 
+/// Open a session and return `(session_handle, http_port)`.
+///
+/// `http_port` is 0 so the daemon allocates from `NVNMOSD_HTTP_PORT_MIN`..`MAX`.
+/// A fixed port races when these tests run in parallel.
 pub async fn open_session_with_port(
     client: &mut NvnmosDaemonClient<Channel>,
     seed: &str,
-    http_port: u16,
-) -> String {
+) -> (String, u16) {
     let resp = client
         .open_session(OpenSessionRequest {
             node_config: Some(NodeConfig {
                 seed: seed.to_string(),
-                http_port: u32::from(http_port),
+                http_port: 0,
                 host_addresses: vec!["127.0.0.1".to_string()],
                 ..Default::default()
             }),
@@ -208,8 +218,9 @@ pub async fn open_session_with_port(
         .await
         .expect("OpenSession")
         .into_inner();
-    assert_eq!(resp.http_port as u16, http_port);
-    resp.session_handle
+    let http_port = u16::try_from(resp.http_port).expect("allocated http_port");
+    assert_ne!(http_port, 0, "daemon allocated no HTTP port");
+    (resp.session_handle, http_port)
 }
 
 pub fn autodetect_iface_ip() -> String {
@@ -224,14 +235,6 @@ pub fn autodetect_iface_ip() -> String {
     sock.local_addr()
         .map(|a| a.ip().to_string())
         .unwrap_or_else(|_| "127.0.0.1".to_string())
-}
-
-pub fn ephemeral_http_port() -> u16 {
-    std::net::TcpListener::bind("0.0.0.0:0")
-        .expect("bind ephemeral")
-        .local_addr()
-        .expect("addr")
-        .port()
 }
 
 pub async fn http_request(

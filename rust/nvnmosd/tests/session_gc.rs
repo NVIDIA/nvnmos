@@ -17,12 +17,16 @@ use tonic::transport::Channel;
 
 use common::{DaemonHarness, autodetect_iface_ip, connect};
 
-fn spawn_gc_daemon() -> DaemonHarness {
-    DaemonHarness::spawn(&[
-        ("NVNMOSD_SESSION_GC", "1"),
-        ("NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC", "5"),
-        ("NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC", "2"),
-    ])
+fn spawn_gc_daemon(http_port_min: u16, http_port_max: u16) -> DaemonHarness {
+    DaemonHarness::spawn(
+        http_port_min,
+        http_port_max,
+        &[
+            ("NVNMOSD_SESSION_GC", "1"),
+            ("NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC", "5"),
+            ("NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC", "2"),
+        ],
+    )
 }
 
 fn minimal_sender_sdp(name: &str, iface_ip: &str) -> String {
@@ -71,7 +75,7 @@ fn expect_code(err: tonic::Status, expected: Code) {
 /// Case A — subscribe before add.
 #[tokio::test]
 async fn subscribe_required_before_add() {
-    let mut harness = spawn_gc_daemon();
+    let mut harness = spawn_gc_daemon(18_140, 18_149);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let seed = "session-gc-a";
@@ -117,7 +121,7 @@ async fn subscribe_required_before_add() {
 /// Case B — resubscribe within timeout; watchdog cancelled while stream open.
 #[tokio::test]
 async fn resubscribe_cancels_watchdog() {
-    let mut harness = spawn_gc_daemon();
+    let mut harness = spawn_gc_daemon(18_150, 18_159);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let seed = "session-gc-b";
@@ -175,7 +179,7 @@ async fn resubscribe_cancels_watchdog() {
 /// Case C — resubscribe timeout triggers implicit CloseSession.
 #[tokio::test]
 async fn resubscribe_timeout_closes_session() {
-    let mut harness = spawn_gc_daemon();
+    let mut harness = spawn_gc_daemon(18_160, 18_169);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let seed = "session-gc-c";
@@ -240,7 +244,7 @@ async fn resubscribe_timeout_closes_session() {
 /// Case D — subscribe timeout after OpenSession.
 #[tokio::test]
 async fn subscribe_timeout_closes_session() {
-    let mut harness = spawn_gc_daemon();
+    let mut harness = spawn_gc_daemon(18_170, 18_179);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let seed = "session-gc-d";

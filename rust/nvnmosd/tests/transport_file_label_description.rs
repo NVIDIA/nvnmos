@@ -23,7 +23,7 @@ use tonic::Streaming;
 use tonic::transport::Channel;
 
 use common::{
-    DaemonHarness, autodetect_iface_ip, connect, ephemeral_http_port, http_get, http_get_json,
+    DaemonHarness, autodetect_iface_ip, connect, http_get, http_get_json,
     http_patch_activate_immediate, open_session_with_port,
 };
 
@@ -266,12 +266,11 @@ async fn sender_sdp_session_fields_come_from_is04_label_and_description() {
         },
     ];
 
-    let mut harness = DaemonHarness::spawn(&[]);
+    let mut harness = DaemonHarness::spawn(18_180, 18_189, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();
-    let http_port = ephemeral_http_port();
-    let session = open_session_with_port(&mut client, "sdp-sender-si", http_port).await;
+    let (session, http_port) = open_session_with_port(&mut client, "sdp-sender-si").await;
 
     let mut stream = client
         .subscribe_activations(SubscribeActivationsRequest {
@@ -381,12 +380,11 @@ async fn receiver_sdp_session_fields_come_from_staged_sdp() {
         },
     ];
 
-    let mut harness = DaemonHarness::spawn(&[]);
+    let mut harness = DaemonHarness::spawn(18_190, 18_199, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();
-    let http_port = ephemeral_http_port();
-    let session = open_session_with_port(&mut client, "sdp-receiver-staged", http_port).await;
+    let (session, http_port) = open_session_with_port(&mut client, "sdp-receiver-staged").await;
 
     let mut stream = client
         .subscribe_activations(SubscribeActivationsRequest {
@@ -471,12 +469,11 @@ async fn receiver_sdp_session_fields_without_staged_sdp_come_from_is04() {
         },
     ];
 
-    let mut harness = DaemonHarness::spawn(&[]);
+    let mut harness = DaemonHarness::spawn(18_200, 18_209, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();
-    let http_port = ephemeral_http_port();
-    let session = open_session_with_port(&mut client, "sdp-receiver-unstaged", http_port).await;
+    let (session, http_port) = open_session_with_port(&mut client, "sdp-receiver-unstaged").await;
 
     let mut stream = client
         .subscribe_activations(SubscribeActivationsRequest {
@@ -582,11 +579,10 @@ async fn mxl_flow_def_label_and_description_come_from_is04() {
         },
     ];
 
-    let mut harness = DaemonHarness::spawn(&[]);
+    let mut harness = DaemonHarness::spawn(18_210, 18_219, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
-    let http_port = ephemeral_http_port();
-    let session = open_session_with_port(&mut client, "mxl-session-si", http_port).await;
+    let (session, http_port) = open_session_with_port(&mut client, "mxl-session-si").await;
 
     let mut stream = client
         .subscribe_activations(SubscribeActivationsRequest {
