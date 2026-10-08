@@ -24,8 +24,8 @@ use tokio_stream::StreamExt;
 use tonic::transport::Channel;
 
 use common::{
-    DaemonHarness, autodetect_iface_ip, connect, ephemeral_http_port,
-    http_patch_activate_immediate, open_session_with_port,
+    DaemonHarness, autodetect_iface_ip, connect, http_patch_activate_immediate,
+    open_session_with_port,
 };
 
 /// Upper bound the concurrent RPC is allowed to take. On the pre-fix daemon the
@@ -111,28 +111,38 @@ async fn start_parked_in_band_activation_on_stream(
     let (parker, parked_rx) = park_first_activation_on_stream(stream);
     let staged_path = staged_sender_path(resource_id);
     let host = "127.0.0.1";
-    tokio::spawn(async move {
+    let patch = tokio::spawn(async move {
         // CloseSession (and test teardown) can drop the Node HTTP listener
-        // under this PATCH; an empty response is expected, not a failure.
-        let _ = http_patch_activate_immediate(host, http_port, &staged_path, None, None).await;
+        // under this PATCH; an empty response is expected, not a failure,
+        // once the activation event has been delivered.
+        http_patch_activate_immediate(host, http_port, &staged_path, None, None).await
     });
-    tokio::time::timeout(Duration::from_secs(10), parked_rx)
-        .await
-        .expect("timed out waiting for in-band activation event")
-        .expect("activation parker dropped before signalling");
-    parker
+    match tokio::time::timeout(Duration::from_secs(10), parked_rx).await {
+        Ok(Ok(())) => parker,
+        Ok(Err(_)) => panic!("activation parker dropped before signalling"),
+        Err(elapsed) => {
+            let patch_detail = if patch.is_finished() {
+                match patch.await.expect("PATCH task") {
+                    Ok(()) => "PATCH succeeded but no activation event arrived".to_string(),
+                    Err(err) => format!("PATCH failed: {err}"),
+                }
+            } else {
+                "PATCH had not finished".to_string()
+            };
+            panic!("timed out waiting for in-band activation event ({patch_detail}): {elapsed}");
+        }
+    }
 }
 
 /// While an in-band IS-05 activation is parked on the client ack, adding
 /// another sender on the same Node must not wedge the daemon.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn in_band_activation_does_not_deadlock_add_sender() {
-    let mut harness = DaemonHarness::spawn(&[]);
+    let mut harness = DaemonHarness::spawn(18_120, 18_129, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();
-    let http_port = ephemeral_http_port();
-    let session = open_session_with_port(&mut client, "lock-add", http_port).await;
+    let (session, http_port) = open_session_with_port(&mut client, "lock-add").await;
 
     let stream = subscribe_activations(&mut client, &session).await;
 
@@ -189,12 +199,11 @@ async fn in_band_activation_does_not_deadlock_add_sender() {
 /// release the Node HTTP port (no stranded LISTEN socket).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn in_band_activation_does_not_deadlock_close_session() {
-    let mut harness = DaemonHarness::spawn(&[]);
+    let mut harness = DaemonHarness::spawn(18_130, 18_139, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();
-    let http_port = ephemeral_http_port();
-    let session = open_session_with_port(&mut client, "lock-close", http_port).await;
+    let (session, http_port) = open_session_with_port(&mut client, "lock-close").await;
 
     let stream = subscribe_activations(&mut client, &session).await;
 

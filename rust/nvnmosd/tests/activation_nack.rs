@@ -16,8 +16,8 @@ use nvnmos_rpc::v1::{
 use tokio_stream::StreamExt;
 
 use common::{
-    DaemonHarness, autodetect_iface_ip, connect, ephemeral_http_port,
-    http_patch_activate_immediate, http_request, open_session_with_port,
+    DaemonHarness, autodetect_iface_ip, connect, http_patch_activate_immediate, http_request,
+    open_session_with_port,
 };
 
 const EVENT_BUDGET: Duration = Duration::from_secs(10);
@@ -45,12 +45,11 @@ fn minimal_sender_sdp(name: &str, iface_ip: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nacked_immediate_connection_activation_fails_the_patch() {
-    let mut harness = DaemonHarness::spawn(&[]);
+    let mut harness = DaemonHarness::spawn(18_080, 18_089, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();
-    let http_port = ephemeral_http_port();
-    let session = open_session_with_port(&mut client, "activation-nack-is05", http_port).await;
+    let (session, http_port) = open_session_with_port(&mut client, "activation-nack-is05").await;
     let mut stream = client
         .subscribe_activations(SubscribeActivationsRequest {
             session_handle: session.clone(),
@@ -101,11 +100,10 @@ async fn nacked_immediate_connection_activation_fails_the_patch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nacked_immediate_channelmapping_activation_fails_the_post() {
-    let mut harness = DaemonHarness::spawn(&[]);
+    let mut harness = DaemonHarness::spawn(18_090, 18_099, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
-    let http_port = ephemeral_http_port();
-    let session = open_session_with_port(&mut client, "activation-nack-is08", http_port).await;
+    let (session, http_port) = open_session_with_port(&mut client, "activation-nack-is08").await;
     let mut stream = client
         .subscribe_channel_mapping_activations(SubscribeChannelMappingActivationsRequest {
             session_handle: session.clone(),
