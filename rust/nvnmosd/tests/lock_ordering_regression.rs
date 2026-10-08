@@ -138,7 +138,7 @@ async fn start_parked_in_band_activation_on_stream(
 /// another sender on the same Node must not wedge the daemon.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn in_band_activation_does_not_deadlock_add_sender() {
-    let mut harness = DaemonHarness::spawn(18_120, 18_129, &[]);
+    let mut harness = DaemonHarness::spawn(18_120..=18_129, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();
@@ -199,7 +199,7 @@ async fn in_band_activation_does_not_deadlock_add_sender() {
 /// release the Node HTTP port (no stranded LISTEN socket).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn in_band_activation_does_not_deadlock_close_session() {
-    let mut harness = DaemonHarness::spawn(18_130, 18_139, &[]);
+    let mut harness = DaemonHarness::spawn(18_130..=18_139, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();

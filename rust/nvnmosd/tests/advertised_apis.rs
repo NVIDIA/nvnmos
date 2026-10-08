@@ -12,7 +12,7 @@ use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use serde_json::Value;
 use tonic::transport::Channel;
 
-use common::{DaemonHarness, connect, http_get_json, open_session_with_port};
+use common::{DaemonHarness, PortRange, connect, http_get_json, open_session_with_port};
 
 fn json_string_set(value: &Value) -> Vec<String> {
     value
@@ -40,11 +40,10 @@ fn control_types(devices: &Value) -> Vec<String> {
 }
 
 async fn open_empty_node(
-    http_port_min: u16,
-    http_port_max: u16,
+    http_ports: PortRange,
     extra_env: &[(&str, &str)],
 ) -> (DaemonHarness, NvnmosDaemonClient<Channel>, String, u16) {
-    let mut harness = DaemonHarness::spawn(http_port_min, http_port_max, extra_env);
+    let mut harness = DaemonHarness::spawn(http_ports, extra_env);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let seed = format!(
@@ -61,7 +60,7 @@ async fn open_empty_node(
 
 #[tokio::test]
 async fn advertised_apis_match_expected_surface() {
-    let (harness, mut client, session, port) = open_empty_node(18_100, 18_109, &[]).await;
+    let (harness, mut client, session, port) = open_empty_node(18_100..=18_109, &[]).await;
 
     let root = json_string_set(&http_get_json(port, "/").await);
     assert_eq!(root, ["log/", "x-manifest/", "x-nmos/"], "unexpected APIs");
@@ -109,7 +108,7 @@ async fn advertised_apis_match_expected_surface() {
 #[tokio::test]
 async fn experimental_settings_env_enables_settings_api() {
     let (harness, mut client, session, port) =
-        open_empty_node(18_110, 18_119, &[("NVNMOS_EXPERIMENTAL_SETTINGS", "1")]).await;
+        open_empty_node(18_110..=18_119, &[("NVNMOS_EXPERIMENTAL_SETTINGS", "1")]).await;
 
     let root = json_string_set(&http_get_json(port, "/").await);
     assert_eq!(root, ["log/", "settings/", "x-manifest/", "x-nmos/"]);

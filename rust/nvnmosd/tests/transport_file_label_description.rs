@@ -266,7 +266,7 @@ async fn sender_sdp_session_fields_come_from_is04_label_and_description() {
         },
     ];
 
-    let mut harness = DaemonHarness::spawn(18_180, 18_189, &[]);
+    let mut harness = DaemonHarness::spawn(18_180..=18_189, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();
@@ -380,7 +380,7 @@ async fn receiver_sdp_session_fields_come_from_staged_sdp() {
         },
     ];
 
-    let mut harness = DaemonHarness::spawn(18_190, 18_199, &[]);
+    let mut harness = DaemonHarness::spawn(18_190..=18_199, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();
@@ -469,7 +469,7 @@ async fn receiver_sdp_session_fields_without_staged_sdp_come_from_is04() {
         },
     ];
 
-    let mut harness = DaemonHarness::spawn(18_200, 18_209, &[]);
+    let mut harness = DaemonHarness::spawn(18_200..=18_209, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();
@@ -579,7 +579,7 @@ async fn mxl_flow_def_label_and_description_come_from_is04() {
         },
     ];
 
-    let mut harness = DaemonHarness::spawn(18_210, 18_219, &[]);
+    let mut harness = DaemonHarness::spawn(18_210..=18_219, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let (session, http_port) = open_session_with_port(&mut client, "mxl-session-si").await;

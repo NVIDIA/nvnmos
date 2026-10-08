@@ -7,6 +7,7 @@
 // subset, so items unused by a given binary are expected, not dead.
 #![allow(dead_code)]
 
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -22,6 +23,8 @@ use tower::service_fn;
 
 const HTTP_BUDGET: Duration = Duration::from_secs(30);
 
+pub type PortRange = RangeInclusive<u16>;
+
 pub struct DaemonHarness {
     _dir: TempDir,
     pub uds: PathBuf,
@@ -33,11 +36,11 @@ impl DaemonHarness {
     /// off, `NVNMOS_EXPERIMENTAL_SETTINGS` cleared. `extra_env` overlays that
     /// (and can re-enable Settings or session GC).
     ///
-    /// `http_port_min` and `http_port_max` are this daemon's allocation range.
-    /// Each caller passes a disjoint block (`18080-18089`, then
-    /// `18090-18099`, ...). A daemon scans from its minimum, so the rest of
-    /// the block stays free for another Node in that test.
-    pub fn spawn(http_port_min: u16, http_port_max: u16, extra_env: &[(&str, &str)]) -> Self {
+    /// `http_ports` is this daemon's allocation range. Each caller passes a
+    /// disjoint block (`18080..=18089`, then `18090..=18099`, ...). A daemon
+    /// scans from its minimum, so the rest of the block stays free for another
+    /// Node in that test.
+    pub fn spawn(http_ports: PortRange, extra_env: &[(&str, &str)]) -> Self {
         let dir = TempDir::new().expect("tempdir");
         let uds = dir.path().join("nvnmosd.sock");
         nvnmosd::uds::prepare_listen_path(&uds).expect("prepare UDS path");
@@ -50,8 +53,8 @@ impl DaemonHarness {
             .arg(&uds)
             .env("NVNMOSD_SESSION_GC", "0")
             .env("NVNMOSD_MALLOC_TRIM", "0")
-            .env("NVNMOSD_HTTP_PORT_MIN", http_port_min.to_string())
-            .env("NVNMOSD_HTTP_PORT_MAX", http_port_max.to_string())
+            .env("NVNMOSD_HTTP_PORT_MIN", http_ports.start().to_string())
+            .env("NVNMOSD_HTTP_PORT_MAX", http_ports.end().to_string())
             .env("RUST_LOG", "error")
             .env("LD_LIBRARY_PATH", &ld_library_path)
             .env_remove("NVNMOS_EXPERIMENTAL_SETTINGS")
