@@ -17,9 +17,15 @@ use tempfile::TempDir;
 use tonic::Streaming;
 use tonic::transport::Channel;
 
-use common::{
-    DaemonHarness, autodetect_iface_ip, connect, ephemeral_http_port, http_get_json, http_patch,
-};
+use common::{DaemonHarness, PortRange, autodetect_iface_ip, connect, http_get_json, http_patch};
+
+// A second daemon in one test reuses the test's block after the first has exited.
+const ANNOTATIONS_SURVIVE_RESTART_PORTS: PortRange = 18_250..=18_259;
+const LABEL_RESET_PORTS: PortRange = 18_260..=18_269;
+const CORRUPT_CHECKPOINT_PORTS: PortRange = 18_270..=18_279;
+const ANNOTATION_API_DISABLED_PORTS: PortRange = 18_280..=18_289;
+const UNWRITABLE_CHECKPOINT_PORTS: PortRange = 18_290..=18_299;
+const ANNOTATION_ENTRY_LIMIT_PORTS: PortRange = 18_300..=18_309;
 
 fn minimal_sender_sdp(name: &str, iface_ip: &str) -> String {
     format!(
@@ -42,13 +48,13 @@ fn minimal_sender_sdp(name: &str, iface_ip: &str) -> String {
     )
 }
 
-fn spawn(checkpoint: &Path, extra: &[(&str, &str)]) -> DaemonHarness {
+fn spawn(checkpoint: &Path, http_ports: PortRange, extra: &[(&str, &str)]) -> DaemonHarness {
     let mut env = vec![(
         "NVNMOSD_ANNOTATION_CHECKPOINT_FILE",
         checkpoint.to_str().unwrap(),
     )];
     env.extend_from_slice(extra);
-    DaemonHarness::spawn(&env)
+    DaemonHarness::spawn(http_ports, &env)
 }
 
 struct OpenedSession {
@@ -59,13 +65,12 @@ struct OpenedSession {
 async fn open_session(
     client: &mut NvnmosDaemonClient<Channel>,
     seed: &str,
-    http_port: u16,
-) -> OpenedSession {
+) -> (OpenedSession, u16) {
     let resp = client
         .open_session(OpenSessionRequest {
             node_config: Some(NodeConfig {
                 seed: seed.to_string(),
-                http_port: u32::from(http_port),
+                http_port: 0,
                 host_addresses: vec!["127.0.0.1".to_string()],
                 label: "node-default".to_string(),
                 ..NodeConfig::default()
@@ -74,6 +79,8 @@ async fn open_session(
         .await
         .expect("OpenSession")
         .into_inner();
+    let http_port = u16::try_from(resp.http_port).expect("allocated http_port");
+    assert_ne!(http_port, 0, "daemon allocated no HTTP port");
     let handle = resp.session_handle;
     let _activations = client
         .subscribe_activations(SubscribeActivationsRequest {
@@ -82,10 +89,13 @@ async fn open_session(
         .await
         .expect("SubscribeActivations")
         .into_inner();
-    OpenedSession {
-        handle,
-        _activations,
-    }
+    (
+        OpenedSession {
+            handle,
+            _activations,
+        },
+        http_port,
+    )
 }
 
 struct AddedSender {
@@ -155,11 +165,10 @@ async fn annotations_survive_restart_remove_and_node_teardown() {
     let checkpoint = dir.path().join("annotations.json");
     let iface = autodetect_iface_ip();
 
-    let mut harness = spawn(&checkpoint, &[]);
+    let mut harness = spawn(&checkpoint, ANNOTATIONS_SURVIVE_RESTART_PORTS, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
-    let port_a = ephemeral_http_port();
-    let session_a = open_session(&mut client, "seed-a", port_a).await;
+    let (session_a, port_a) = open_session(&mut client, "seed-a").await;
     let added = add_sender(&mut client, &session_a.handle, "video", &iface).await;
     assert_eq!(
         label(port_a, "senders", &added.sender_id).await,
@@ -223,7 +232,7 @@ async fn annotations_survive_restart_remove_and_node_teardown() {
         })
         .await
         .expect("CloseSession");
-    let session_a = open_session(&mut client, "seed-a", port_a).await;
+    let (session_a, port_a) = open_session(&mut client, "seed-a").await;
     assert_eq!(label(port_a, "", "").await, "node-patched");
     let added = add_sender(&mut client, &session_a.handle, "video", &iface).await;
     assert_eq!(
@@ -231,8 +240,7 @@ async fn annotations_survive_restart_remove_and_node_teardown() {
         "sender-patched"
     );
 
-    let port_b = ephemeral_http_port();
-    let session_b = open_session(&mut client, "seed-b", port_b).await;
+    let (session_b, port_b) = open_session(&mut client, "seed-b").await;
     let other = add_sender(&mut client, &session_b.handle, "video", &iface).await;
     assert_eq!(
         label(port_b, "senders", &other.sender_id).await,
@@ -244,11 +252,10 @@ async fn annotations_survive_restart_remove_and_node_teardown() {
     drop(client);
     harness.terminate();
 
-    let mut harness = spawn(&checkpoint, &[]);
+    let mut harness = spawn(&checkpoint, ANNOTATIONS_SURVIVE_RESTART_PORTS, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
-    let port_a = ephemeral_http_port();
-    let session_a = open_session(&mut client, "seed-a", port_a).await;
+    let (session_a, port_a) = open_session(&mut client, "seed-a").await;
     assert_eq!(label(port_a, "", "").await, "node-patched");
     let added = add_sender(&mut client, &session_a.handle, "video", &iface).await;
     assert_eq!(
@@ -268,8 +275,7 @@ async fn annotations_survive_restart_remove_and_node_teardown() {
     );
     assert_eq!(label(port_a, "senders", &only.sender_id).await, only_sender);
     assert_eq!(label(port_a, "flows", &only.flow_id).await, only_flow);
-    let port_b = ephemeral_http_port();
-    let session_b = open_session(&mut client, "seed-b", port_b).await;
+    let (session_b, port_b) = open_session(&mut client, "seed-b").await;
     let other = add_sender(&mut client, &session_b.handle, "video", &iface).await;
     assert_eq!(
         label(port_b, "senders", &other.sender_id).await,
@@ -282,11 +288,10 @@ async fn label_reset_is_not_restored_after_restart() {
     let dir = TempDir::new().expect("checkpoint dir");
     let checkpoint = dir.path().join("annotations.json");
     let iface = autodetect_iface_ip();
-    let mut harness = spawn(&checkpoint, &[]);
+    let mut harness = spawn(&checkpoint, LABEL_RESET_PORTS, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
-    let port = ephemeral_http_port();
-    let session = open_session(&mut client, "seed-reset", port).await;
+    let (session, port) = open_session(&mut client, "seed-reset").await;
     let added = add_sender(&mut client, &session.handle, "video", &iface).await;
     let sender_id = added.sender_id;
     assert_eq!(label(port, "senders", &sender_id).await, "session-default");
@@ -307,11 +312,10 @@ async fn label_reset_is_not_restored_after_restart() {
     drop(client);
     harness.terminate();
 
-    let mut harness = spawn(&checkpoint, &[]);
+    let mut harness = spawn(&checkpoint, LABEL_RESET_PORTS, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
-    let port = ephemeral_http_port();
-    let session = open_session(&mut client, "seed-reset", port).await;
+    let (session, port) = open_session(&mut client, "seed-reset").await;
     let added = add_sender(&mut client, &session.handle, "video", &iface).await;
     let sender_id = added.sender_id;
     assert_eq!(label(port, "senders", &sender_id).await, "session-default");
@@ -322,7 +326,7 @@ async fn corrupt_checkpoint_exits() {
     let dir = TempDir::new().expect("checkpoint dir");
     let checkpoint = dir.path().join("annotations.json");
     std::fs::write(&checkpoint, b"not-json").unwrap();
-    let mut harness = spawn(&checkpoint, &[]);
+    let mut harness = spawn(&checkpoint, CORRUPT_CHECKPOINT_PORTS, &[]);
     let (status, stderr) = harness.wait_for_exit();
     assert!(
         !status.success(),
@@ -336,7 +340,11 @@ async fn disabled_annotation_api_does_not_read_the_checkpoint() {
     let dir = TempDir::new().expect("checkpoint dir");
     let checkpoint = dir.path().join("annotations.json");
     std::fs::write(&checkpoint, b"not-json").unwrap();
-    let mut harness = spawn(&checkpoint, &[("NVNMOSD_ANNOTATION_API", "0")]);
+    let mut harness = spawn(
+        &checkpoint,
+        ANNOTATION_API_DISABLED_PORTS,
+        &[("NVNMOSD_ANNOTATION_API", "0")],
+    );
     harness.ready().await;
     assert_eq!(std::fs::read(&checkpoint).unwrap(), b"not-json");
     harness.terminate();
@@ -353,7 +361,7 @@ async fn unwritable_checkpoint_exits() {
         .permissions();
     perms.set_mode(0o555);
     std::fs::set_permissions(dir.path(), perms).expect("readonly dir");
-    let mut harness = spawn(&checkpoint, &[]);
+    let mut harness = spawn(&checkpoint, UNWRITABLE_CHECKPOINT_PORTS, &[]);
     let (status, stderr) = harness.wait_for_exit();
     let mut perms = std::fs::metadata(dir.path())
         .expect("metadata")
@@ -375,11 +383,14 @@ async fn limit_fails_a_new_patch_and_keeps_the_stored_one() {
     let dir = TempDir::new().expect("checkpoint dir");
     let checkpoint = dir.path().join("annotations.json");
     let iface = autodetect_iface_ip();
-    let mut harness = spawn(&checkpoint, &[("NVNMOSD_ANNOTATION_ENTRY_LIMIT", "1")]);
+    let mut harness = spawn(
+        &checkpoint,
+        ANNOTATION_ENTRY_LIMIT_PORTS,
+        &[("NVNMOSD_ANNOTATION_ENTRY_LIMIT", "1")],
+    );
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
-    let port = ephemeral_http_port();
-    let session = open_session(&mut client, "seed-limit", port).await;
+    let (session, port) = open_session(&mut client, "seed-limit").await;
     let kept = add_sender(&mut client, &session.handle, "kept", &iface).await;
     let dropped = add_sender(&mut client, &session.handle, "dropped", &iface).await;
     let kept_id = kept.sender_id;
@@ -413,11 +424,14 @@ async fn limit_fails_a_new_patch_and_keeps_the_stored_one() {
     assert!(file.contains("\"name\":\"kept\""), "{file}");
     assert!(!file.contains("dropped"), "{file}");
 
-    let mut harness = spawn(&checkpoint, &[("NVNMOSD_ANNOTATION_ENTRY_LIMIT", "1")]);
+    let mut harness = spawn(
+        &checkpoint,
+        ANNOTATION_ENTRY_LIMIT_PORTS,
+        &[("NVNMOSD_ANNOTATION_ENTRY_LIMIT", "1")],
+    );
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
-    let port = ephemeral_http_port();
-    let session = open_session(&mut client, "seed-limit", port).await;
+    let (session, port) = open_session(&mut client, "seed-limit").await;
     let kept = add_sender(&mut client, &session.handle, "kept", &iface).await;
     let dropped = add_sender(&mut client, &session.handle, "dropped", &iface).await;
     let kept_id = kept.sender_id;

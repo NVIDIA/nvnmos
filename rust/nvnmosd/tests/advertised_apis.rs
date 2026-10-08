@@ -14,6 +14,9 @@ use tonic::transport::Channel;
 
 use common::{DaemonHarness, PortRange, connect, http_get_json, open_session_with_port};
 
+// 18220..=18239 belong to the activation-ack lock-ordering tests.
+const ANNOTATION_API_UNMOUNTED_PORTS: PortRange = 18_240..=18_249;
+
 fn json_string_set(value: &Value) -> Vec<String> {
     value
         .as_array()
@@ -148,8 +151,11 @@ async fn experimental_settings_env_enables_settings_api() {
 
 #[tokio::test]
 async fn annotation_api_env_leaves_annotation_unmounted() {
-    let (harness, mut client, session, port) =
-        open_empty_node(&[("NVNMOSD_ANNOTATION_API", "0")]).await;
+    let (harness, mut client, session, port) = open_empty_node(
+        ANNOTATION_API_UNMOUNTED_PORTS,
+        &[("NVNMOSD_ANNOTATION_API", "0")],
+    )
+    .await;
 
     let x_nmos = json_string_set(&http_get_json(port, "/x-nmos/").await);
     assert_eq!(
