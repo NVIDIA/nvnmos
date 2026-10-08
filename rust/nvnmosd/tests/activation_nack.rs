@@ -45,7 +45,7 @@ fn minimal_sender_sdp(name: &str, iface_ip: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nacked_immediate_connection_activation_fails_the_patch() {
-    let mut harness = DaemonHarness::spawn(18_080, 18_089, &[]);
+    let mut harness = DaemonHarness::spawn(18_080..=18_089, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();
@@ -100,7 +100,7 @@ async fn nacked_immediate_connection_activation_fails_the_patch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nacked_immediate_channelmapping_activation_fails_the_post() {
-    let mut harness = DaemonHarness::spawn(18_090, 18_099, &[]);
+    let mut harness = DaemonHarness::spawn(18_090..=18_099, &[]);
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let (session, http_port) = open_session_with_port(&mut client, "activation-nack-is08").await;
