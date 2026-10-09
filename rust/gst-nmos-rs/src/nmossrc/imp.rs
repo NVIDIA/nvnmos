@@ -33,7 +33,9 @@ use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
 use tokio::sync::oneshot;
 
-use crate::daemon::{ActivationHandler, ActivationOutcome, ActivationRequest, Session};
+use crate::daemon::{
+    ActivationHandler, ActivationOutcome, ActivationRequest, Session, SessionPhase,
+};
 use crate::inner;
 use crate::session::{
     ActivationAck, ActivationPlan, CommonSettings, InnerConfig, NodeSettings, TransportConfig,
@@ -139,7 +141,7 @@ pub struct NmosSrc {
     settings: Mutex<Settings>,
     /// Whether the real inner transport chain is installed.
     active: Mutex<bool>,
-    session: Mutex<Option<Session>>,
+    session: Mutex<Option<SessionPhase<Session>>>,
     /// Ghost pad that hides the current inner chain behind the bin.
     /// Created at `constructed`; the chain behind it swaps between
     /// the fake chain and a real inner transport source chain as
@@ -718,14 +720,12 @@ impl NmosSrc {
                 // `/single/receivers/{id}/active` endpoint reflects
                 // `master_enable: true` without an external IS-05
                 // PATCH.
-                if let Err(e) = crate::session::sync_active(
+                crate::session::sync_active(
                     &CAT,
                     "nmossrc",
                     &self.session,
                     transport.transport_file(),
-                ) {
-                    gst::warning!(CAT, "nmossrc auto-activate sync failed: {e:#}");
-                }
+                )?;
                 self.set_connection_active(true, "auto-activate");
             }
             InnerConfig::Fake { .. } => {

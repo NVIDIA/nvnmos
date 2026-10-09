@@ -4,7 +4,7 @@
 //! `CloseSession`, `AddChannelMapping`, and `SyncChannelMappingState`
 //! against a daemon that answers, or does not.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,7 @@ use tonic::{Request, Response, Status};
 use crate::channel_mapping_session::{
     ChannelMappingActivationHandler, ChannelMappingActivationOutcome, ChannelMappingSession,
 };
-use crate::daemon::{ActivationHandler, ActivationOutcome, DaemonError, Session};
+use crate::daemon::{ActivationHandler, ActivationOutcome, DaemonError, Session, SessionPhase};
 use crate::runtime::SHARED_RUNTIME;
 
 use super::channel_mapping::{self, ChannelMappingSettings};
@@ -34,6 +34,7 @@ fn hold_for() -> Duration {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HeldCall {
     CloseSession,
+    AddSender,
     AddChannelMapping,
     SyncChannelMappingState,
 }
@@ -46,6 +47,7 @@ enum Mode {
     Hold {
         call: HeldCall,
         replied: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
         hold: Duration,
     },
 }
@@ -109,7 +111,13 @@ impl NvnmosDaemon for Stub {
         &self,
         _request: Request<rpc::AddSenderRequest>,
     ) -> Result<Response<rpc::AddSenderResponse>, Status> {
-        unused()
+        self.hold_if(HeldCall::AddSender).await;
+        Ok(Response::new(rpc::AddSenderResponse {
+            resource_handle: "res-1".to_owned(),
+            source_id: "source-1".to_owned(),
+            flow_id: "flow-1".to_owned(),
+            sender_id: "sender-1".to_owned(),
+        }))
     }
 
     async fn add_receiver(
@@ -146,7 +154,7 @@ impl NvnmosDaemon for Stub {
         &self,
         _request: Request<rpc::SyncResourceStateRequest>,
     ) -> Result<Response<Empty>, Status> {
-        unused()
+        Ok(Response::new(Empty {}))
     }
 
     async fn add_channel_mapping(
@@ -198,6 +206,7 @@ impl Stub {
         let Mode::Hold {
             call: held,
             replied,
+            calls,
             hold,
         } = &self.mode
         else {
@@ -206,6 +215,7 @@ impl Stub {
         if *held != call {
             return;
         }
+        calls.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(*hold).await;
         replied.store(true, Ordering::SeqCst);
     }
@@ -293,9 +303,10 @@ fn close_returns_while_close_session_is_outstanding() {
     let daemon = TestDaemon::start(Mode::Hold {
         call: HeldCall::CloseSession,
         replied: Arc::clone(&replied),
+        calls: Arc::new(AtomicUsize::new(0)),
         hold,
     });
-    let session = Mutex::new(Some(open_session(&daemon.uri)));
+    let session = Mutex::new(Some(SessionPhase::Open(open_session(&daemon.uri))));
     let started = Instant::now();
     close(&cat(), "nmossink", &session);
     assert!(
@@ -323,7 +334,7 @@ fn dropped_session_sends_close_session() {
 fn close_sends_close_session_when_the_daemon_answers() {
     let (tx, rx) = std::sync::mpsc::channel();
     let daemon = TestDaemon::start(Mode::Answer(tx));
-    let session = Mutex::new(Some(open_session(&daemon.uri)));
+    let session = Mutex::new(Some(SessionPhase::Open(open_session(&daemon.uri))));
     close(&cat(), "nmossink", &session);
     rx.recv_timeout(OPEN_TIMEOUT).expect("CloseSession");
 }
@@ -336,9 +347,10 @@ fn channel_mapping_close_returns_while_close_session_is_outstanding() {
     let daemon = TestDaemon::start(Mode::Hold {
         call: HeldCall::CloseSession,
         replied: Arc::clone(&replied),
+        calls: Arc::new(AtomicUsize::new(0)),
         hold,
     });
-    let session = Mutex::new(Some(open_channel_mapping(&daemon.uri)));
+    let session = Mutex::new(Some(SessionPhase::Open(open_channel_mapping(&daemon.uri))));
     let started = Instant::now();
     channel_mapping::close(&cat(), "nmosaudiochannelmap", &session);
     assert!(
@@ -378,6 +390,7 @@ fn add_channel_mapping_returns_while_the_rpc_is_outstanding() {
     let daemon = TestDaemon::start(Mode::Hold {
         call: HeldCall::AddChannelMapping,
         replied: Arc::clone(&replied),
+        calls: Arc::new(AtomicUsize::new(0)),
         hold,
     });
     let mut session = open_channel_mapping(&daemon.uri);
@@ -406,6 +419,7 @@ fn sync_channel_mapping_state_returns_while_the_rpc_is_outstanding() {
     let daemon = TestDaemon::start(Mode::Hold {
         call: HeldCall::SyncChannelMappingState,
         replied: Arc::clone(&replied),
+        calls: Arc::new(AtomicUsize::new(0)),
         hold,
     });
     let mut session = open_channel_mapping(&daemon.uri);
@@ -426,4 +440,76 @@ fn sync_channel_mapping_state_returns_while_the_rpc_is_outstanding() {
         matches!(result, Err(DaemonError::TimedOut)),
         "SyncChannelMappingState returned {result:?}"
     );
+}
+
+fn hold(call: HeldCall, hold: Duration) -> (TestDaemon, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let daemon = TestDaemon::start(Mode::Hold {
+        call,
+        replied: Arc::new(AtomicBool::new(false)),
+        calls: Arc::clone(&calls),
+        hold,
+    });
+    (daemon, calls)
+}
+
+fn add_sender(session: &mut Session) -> Result<(), DaemonError> {
+    SHARED_RUNTIME.block_on(session.add_resource(
+        Side::Sender,
+        "sender",
+        transport_to_proto(crate::types::Transport::Mxl),
+        "flow",
+    ))
+}
+
+/// A timed-out `AddSender` stays running. The next call does not send
+/// another RPC and does not take the first call's result.
+#[test]
+fn add_sender_retry_does_not_send_another_rpc() {
+    let (daemon, calls) = hold(HeldCall::AddSender, hold_for());
+    let mut session = open_session(&daemon.uri);
+    let first = add_sender(&mut session);
+    assert!(
+        matches!(first, Err(DaemonError::TimedOut)),
+        "AddSender returned {first:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let started = Instant::now();
+    let second = add_sender(&mut session);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "retry waited on the outstanding AddSender"
+    );
+    assert!(
+        matches!(second, Err(DaemonError::Outstanding)),
+        "AddSender retry returned {second:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(session.resource_id().is_none());
+}
+
+/// `NULL` joins a timed-out `AddSender` before `CloseSession`.
+#[test]
+fn close_after_add_sender_timeout_joins_the_add() {
+    let (daemon, calls) = hold(HeldCall::AddSender, OPEN_TIMEOUT + Duration::from_secs(1));
+    let mut session = open_session(&daemon.uri);
+    let first = add_sender(&mut session);
+    assert!(
+        matches!(first, Err(DaemonError::TimedOut)),
+        "AddSender returned {first:?}"
+    );
+    let slot = Mutex::new(Some(SessionPhase::Open(session)));
+    let started = Instant::now();
+    close(&cat(), "nmossink", &slot);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(500),
+        "close did not wait for the outstanding AddSender ({elapsed:?})"
+    );
+    assert!(
+        elapsed < OPEN_TIMEOUT,
+        "close gave up on the outstanding AddSender ({elapsed:?})"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(slot.lock().unwrap().is_none());
 }

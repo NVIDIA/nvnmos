@@ -6,12 +6,12 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{Context, bail};
+use anyhow::bail;
 use gstreamer as gst;
 
 use crate::channel_mapping_session::{ChannelMappingActivationHandler, ChannelMappingSession};
-use crate::daemon::RPC_TIMEOUT;
-use crate::runtime::SHARED_RUNTIME;
+use crate::daemon::{OpenJoin, RPC_TIMEOUT, SessionPhase, finish_opening, take_for_close};
+use crate::runtime::{SHARED_RUNTIME, wait_for_task};
 use crate::types::DEFAULT_DAEMON_URI;
 
 use super::NodeSettings;
@@ -49,7 +49,7 @@ pub(crate) fn validate_and_open(
     cat: &gst::DebugCategory,
     element: &str,
     settings: &ChannelMappingSettings,
-    session: &Mutex<Option<ChannelMappingSession>>,
+    session: &Mutex<Option<SessionPhase<ChannelMappingSession>>>,
     activation_handler: ChannelMappingActivationHandler,
 ) -> Result<(), anyhow::Error> {
     if settings.node.node_seed.is_empty() {
@@ -59,22 +59,48 @@ pub(crate) fn validate_and_open(
         bail!("{element}: `channelmapping-name` is required");
     }
 
-    let settings = settings.clone();
-    let new_session = SHARED_RUNTIME
-        .block_on(async {
-            tokio::time::timeout(
-                OPEN_TIMEOUT,
-                ChannelMappingSession::open(&settings, activation_handler),
-            )
-            .await
-        })
-        .with_context(|| {
-            format!(
+    let slot = session.lock().unwrap().take();
+    match slot {
+        Some(SessionPhase::Pending(handle)) => match finish_opening(handle) {
+            OpenJoin::Running(handle) => {
+                *session.lock().unwrap() = Some(SessionPhase::Pending(handle));
+                bail!(
+                    "{element}: OpenSession against {} is still running",
+                    settings.daemon_uri
+                );
+            }
+            OpenJoin::Ready(opened) => {
+                let _ = SHARED_RUNTIME.block_on(opened.close());
+            }
+            OpenJoin::Finished => {}
+        },
+        Some(SessionPhase::Open(existing)) => {
+            *session.lock().unwrap() = Some(SessionPhase::Open(existing));
+            bail!("{element}: session is already open");
+        }
+        None => {}
+    }
+    let settings_for_open = settings.clone();
+    let handler = activation_handler.clone();
+    let mut opening = SHARED_RUNTIME
+        .spawn(async move { ChannelMappingSession::open(&settings_for_open, handler).await });
+    let new_session = match SHARED_RUNTIME.block_on(wait_for_task(&mut opening, OPEN_TIMEOUT)) {
+        None => {
+            *session.lock().unwrap() = Some(SessionPhase::Pending(opening));
+            bail!(
                 "{element}: OpenSession against {} timed out",
                 settings.daemon_uri
-            )
-        })?
-        .with_context(|| format!("{element}: OpenSession against {}", settings.daemon_uri))?;
+            );
+        }
+        Some(Ok(Ok(opened))) => opened,
+        Some(Ok(Err(error))) => {
+            return Err(anyhow::Error::new(error).context(format!(
+                "{element}: OpenSession against {}",
+                settings.daemon_uri
+            )));
+        }
+        Some(Err(join)) => bail!("{element}: OpenSession ended: {join}"),
+    };
 
     gst::info!(
         cat,
@@ -88,17 +114,19 @@ pub(crate) fn validate_and_open(
         settings.channelmapping_name,
     );
 
-    *session.lock().unwrap() = Some(new_session);
+    *session.lock().unwrap() = Some(SessionPhase::Open(new_session));
     Ok(())
 }
 
 pub(crate) fn close(
     cat: &gst::DebugCategory,
     element: &str,
-    session: &Mutex<Option<ChannelMappingSession>>,
+    session: &Mutex<Option<SessionPhase<ChannelMappingSession>>>,
 ) {
-    let to_close = session.lock().unwrap().take();
-    if let Some(s) = to_close {
+    let Some(s) = take_for_close(session) else {
+        return;
+    };
+    {
         let handle = s.session_handle.clone();
         let result = SHARED_RUNTIME.block_on(s.close());
         match result {
