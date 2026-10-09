@@ -41,6 +41,7 @@
 #include "cpprest/regex_utils.h"
 #include "cpprest/uri_builder.h"
 #include "nmos/activation_mode.h"
+#include "nmos/annotation_api.h"
 #include "nmos/activation_utils.h"
 #include "nmos/api_utils.h"
 #include "nmos/capabilities.h"
@@ -164,6 +165,9 @@ namespace nvnmos
         // get the group hint for the sender or receiver from a resource tag
         utility::string_t get_group_hint(const nmos::resource& resource);
 
+        // store the resource's label and description defaults, then apply an annotation
+        void apply_annotation(nmos::resource& resource, const web::json::value& annotation, nmos::settings& settings);
+
         // find the source for the flow referenced by the source
         nmos::resources::const_iterator find_source_for_sender(const nmos::resources& resources, const nmos::resource& sender);
 
@@ -216,7 +220,7 @@ namespace nvnmos
         std::string make_mxl_flow_def(web::json::value flow_def, const utility::string_t& label, const utility::string_t& description, const utility::string_t& mxl_domain_id, const utility::string_t& mxl_flow_id);
     }
 
-    void node_implementation_init_(nmos::resources& node_resources, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
+    void node_implementation_init_(nmos::resources& node_resources, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, const web::json::value& node_annotation, const web::json::value& device_annotation, slog::base_gate& gate)
     {
         using web::json::value;
         using web::json::value_of;
@@ -224,6 +228,8 @@ namespace nvnmos
         const auto seed_id = nmos::experimental::fields::seed_id(settings);
         const auto node_id = impl::make_id(seed_id, nmos::types::node);
         const auto device_id = impl::make_id(seed_id, nmos::types::device);
+
+        settings[nvnmos::fields::annotation_defaults] = value::object();
 
         // for now, only manage a single clock
         const auto clock = nmos::clock_names::clk0;
@@ -235,6 +241,7 @@ namespace nvnmos
             node.data[nmos::fields::label] = value::string(nvnmos::fields::node_label(settings));
             node.data[nmos::fields::description] = value::string(nvnmos::fields::node_description(settings));
             node.data[nmos::fields::tags] = nvnmos::fields::node_tags(settings);
+            impl::apply_annotation(node, node_annotation, settings);
             impl::insert_resource(node_resources, std::move(node), gate);
         }
 
@@ -250,6 +257,7 @@ namespace nvnmos
             device.data[nmos::fields::label] = value::string(nvnmos::fields::device_label(settings));
             device.data[nmos::fields::description] = value::string(nvnmos::fields::device_description(settings));
             device.data[nmos::fields::tags] = nvnmos::fields::device_tags(settings);
+            impl::apply_annotation(device, device_annotation, settings);
             impl::insert_resource(node_resources, std::move(device), gate);
         }
 
@@ -261,7 +269,7 @@ namespace nvnmos
         settings[nvnmos::fields::interface_bindings] = value::object();
     }
 
-    void node_implementation_add_rtp_sender_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& sdp_, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
+    void node_implementation_add_rtp_sender_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& sdp_, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, const web::json::value& source_annotation, const web::json::value& flow_annotation, const web::json::value& sender_annotation, slog::base_gate& gate)
     {
         using web::json::value;
         using web::json::value_of;
@@ -418,9 +426,15 @@ namespace nvnmos
         sender.data[nmos::fields::label] = value::string(sdp_params.session_name);
         sender.data[nmos::fields::description] = value::string(session_info);
         // set the name as a resource tag
+        impl::set_name(source, name);
+        impl::set_name(flow, name);
         impl::set_name(sender, name);
         // set the group hint as a resource tag
         if (!group_hint.empty()) impl::set_group_hint(sender, group_hint);
+        // apply annotations
+        impl::apply_annotation(source, source_annotation, settings);
+        impl::apply_annotation(flow, flow_annotation, settings);
+        impl::apply_annotation(sender, sender_annotation, settings);
 
         impl::insert_resource(node_resources, std::move(source), gate);
         impl::insert_resource(node_resources, std::move(flow), gate);
@@ -455,7 +469,7 @@ namespace nvnmos
         nvnmos::fields::senders(settings)[sender_id] = impl::make_transport_settings(nmos::transports::rtp, utility::s2us(sdp_));
     }
 
-    void node_implementation_add_rtp_receiver_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& sdp_, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
+    void node_implementation_add_rtp_receiver_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& sdp_, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, const web::json::value& receiver_annotation, slog::base_gate& gate)
     {
         using web::json::value;
         using web::json::value_of;
@@ -602,6 +616,7 @@ namespace nvnmos
         impl::set_name(receiver, name);
         // set the group hint as a resource tag
         if (!group_hint.empty()) impl::set_group_hint(receiver, group_hint);
+        impl::apply_annotation(receiver, receiver_annotation, settings);
 
         impl::insert_resource(node_resources, std::move(receiver), gate);
         impl::insert_resource(connection_resources, std::move(connection_receiver), gate);
@@ -626,7 +641,7 @@ namespace nvnmos
         nvnmos::fields::receivers(settings)[receiver_id] = impl::make_transport_settings(nmos::transports::rtp, utility::s2us(sdp_));
     }
 
-    void node_implementation_add_mxl_sender_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& flow_def_, nmos::settings& settings, slog::base_gate& gate)
+    void node_implementation_add_mxl_sender_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& flow_def_, nmos::settings& settings, const web::json::value& source_annotation, const web::json::value& flow_annotation, const web::json::value& sender_annotation, slog::base_gate& gate)
     {
         using web::json::value;
         using web::json::value_of;
@@ -729,8 +744,14 @@ namespace nvnmos
         // json_exception if absent
         sender.data[nmos::fields::label] = value::string(nmos::fields::label(flow_def));
         sender.data[nmos::fields::description] = value::string(nmos::fields::description(flow_def));
+        impl::set_name(source, name);
+        impl::set_name(flow, name);
         impl::set_name(sender, name);
         if (!group_hint.empty()) impl::set_group_hint(sender, group_hint);
+        // apply annotations
+        impl::apply_annotation(source, source_annotation, settings);
+        impl::apply_annotation(flow, flow_annotation, settings);
+        impl::apply_annotation(sender, sender_annotation, settings);
 
         impl::insert_resource(node_resources, std::move(source), gate);
         impl::insert_resource(node_resources, std::move(flow), gate);
@@ -747,7 +768,7 @@ namespace nvnmos
         nvnmos::fields::senders(settings)[sender_id] = impl::make_transport_settings(nmos::transports::mxl, utility::s2us(flow_def_));
     }
 
-    void node_implementation_add_mxl_receiver_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& flow_def_, nmos::settings& settings, slog::base_gate& gate)
+    void node_implementation_add_mxl_receiver_(nmos::resources& node_resources, nmos::resources& connection_resources, const std::string& flow_def_, nmos::settings& settings, const web::json::value& receiver_annotation, slog::base_gate& gate)
     {
         using web::json::value;
         using web::json::value_of;
@@ -853,6 +874,7 @@ namespace nvnmos
         receiver.data[nmos::fields::description] = value::string(nmos::fields::description(flow_def));
         impl::set_name(receiver, name);
         if (!group_hint.empty()) impl::set_group_hint(receiver, group_hint);
+        impl::apply_annotation(receiver, receiver_annotation, settings);
 
         impl::insert_resource(node_resources, std::move(receiver), gate);
         impl::insert_resource(connection_resources, std::move(connection_receiver), gate);
@@ -930,6 +952,10 @@ namespace nvnmos
             {
                 configs.erase(id);
             }
+            auto& annotation_defaults = nvnmos::fields::annotation_defaults(settings);
+            annotation_defaults.erase(id);
+            if (!flow_id.empty()) annotation_defaults.erase(flow_id);
+            if (!source_id.empty()) annotation_defaults.erase(source_id);
 
             slog::log<slog::severities::info>(gate, SLOG_FLF) << "Destroyed " << id_type << " (" << name << ")";
         }
@@ -940,19 +966,19 @@ namespace nvnmos
     }
 
     // This constructs and inserts a node resource and a device resource into the model, based on the model settings.
-    void node_implementation_init(nmos::node_model& model, slog::base_gate& gate)
+    void node_implementation_init(nmos::node_model& model, const web::json::value& node_annotation, const web::json::value& device_annotation, slog::base_gate& gate)
     {
         auto lock = model.write_lock(); // in order to update the resources
 
         const auto host_interfaces = web::hosts::experimental::host_interfaces();
 
-        node_implementation_init_(model.node_resources, host_interfaces, model.settings, gate);
+        node_implementation_init_(model.node_resources, host_interfaces, model.settings, node_annotation, device_annotation, gate);
 
         model.notify();
     }
 
     // This constructs and inserts sources/flows/senders into the model, based on the specified transport file.
-    void node_implementation_add_sender(nmos::node_model& model, const nmos::transport& transport, const std::string& transport_file, slog::base_gate& gate)
+    void node_implementation_add_sender(nmos::node_model& model, const nmos::transport& transport, const std::string& transport_file, const web::json::value& source_annotation, const web::json::value& flow_annotation, const web::json::value& sender_annotation, slog::base_gate& gate)
     {
         auto lock = model.write_lock(); // in order to update the resources
 
@@ -960,11 +986,11 @@ namespace nvnmos
 
         if (nmos::transports::rtp == nmos::transport_base(transport))
         {
-            node_implementation_add_rtp_sender_(model.node_resources, model.connection_resources, transport_file, host_interfaces, model.settings, gate);
+            node_implementation_add_rtp_sender_(model.node_resources, model.connection_resources, transport_file, host_interfaces, model.settings, source_annotation, flow_annotation, sender_annotation, gate);
         }
         else if (nmos::transports::mxl == nmos::transport_base(transport))
         {
-            node_implementation_add_mxl_sender_(model.node_resources, model.connection_resources, transport_file, model.settings, gate);
+            node_implementation_add_mxl_sender_(model.node_resources, model.connection_resources, transport_file, model.settings, source_annotation, flow_annotation, sender_annotation, gate);
         }
         else
         {
@@ -975,7 +1001,7 @@ namespace nvnmos
     }
 
     // This constructs and inserts a receiver into the model, based on the specified transport file.
-    void node_implementation_add_receiver(nmos::node_model& model, const nmos::transport& transport, const std::string& transport_file, slog::base_gate& gate)
+    void node_implementation_add_receiver(nmos::node_model& model, const nmos::transport& transport, const std::string& transport_file, const web::json::value& receiver_annotation, slog::base_gate& gate)
     {
         auto lock = model.write_lock(); // in order to update the resources
 
@@ -983,11 +1009,11 @@ namespace nvnmos
 
         if (nmos::transports::rtp == nmos::transport_base(transport))
         {
-            node_implementation_add_rtp_receiver_(model.node_resources, model.connection_resources, transport_file, host_interfaces, model.settings, gate);
+            node_implementation_add_rtp_receiver_(model.node_resources, model.connection_resources, transport_file, host_interfaces, model.settings, receiver_annotation, gate);
         }
         else if (nmos::transports::mxl == nmos::transport_base(transport))
         {
-            node_implementation_add_mxl_receiver_(model.node_resources, model.connection_resources, transport_file, model.settings, gate);
+            node_implementation_add_mxl_receiver_(model.node_resources, model.connection_resources, transport_file, model.settings, receiver_annotation, gate);
         }
         else
         {
@@ -2103,6 +2129,29 @@ namespace nvnmos
                 : U("");
         }
 
+        // whether a tag key is read-only, including every urn:x-nvnmos:tag: key
+        bool is_read_only_annotation_tag(const utility::string_t& key)
+        {
+            return nmos::details::is_read_only_tag(key)
+                || boost::algorithm::starts_with(key, U("urn:x-nvnmos:tag:"));
+        }
+
+        // store the resource's label and description defaults, then apply an annotation
+        void apply_annotation(nmos::resource& resource, const web::json::value& annotation, nmos::settings& settings)
+        {
+            using web::json::value_of;
+
+            const auto default_value = value_of({
+                { nmos::fields::label, resource.data.at(nmos::fields::label) },
+                { nmos::fields::description, resource.data.at(nmos::fields::description) }
+            });
+            nvnmos::fields::annotation_defaults(settings)[resource.id] = default_value;
+            if (!web::json::empty(annotation))
+            {
+                nmos::details::merge_annotation_patch(resource.data, annotation, &is_read_only_annotation_tag, default_value);
+            }
+        }
+
         // find the source for the flow referenced by the source
         nmos::resources::const_iterator find_source_for_sender(const nmos::resources& resources, const nmos::resource& sender)
         {
@@ -2692,8 +2741,20 @@ namespace nvnmos
         };
     }
 
+    nmos::annotation_patch_merger make_node_implementation_annotation_patch_merger(
+        annotation_handler callback,
+        nmos::settings& settings)
+    {
+        return [callback, &settings](const nmos::resource& resource, web::json::value& merged, const web::json::value& patch)
+        {
+            const auto& default_value = nvnmos::fields::annotation_defaults(settings).at(resource.id);
+            nmos::details::merge_annotation_patch(merged, patch, &impl::is_read_only_annotation_tag, default_value);
+            if (callback) callback(resource, merged, patch);
+        };
+    }
+
     // This constructs all the callbacks used to integrate the application into the server instance for the NMOS Node.
-    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, channelmapping_activation_handler channelmapping_activated, slog::base_gate& gate)
+    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, channelmapping_activation_handler channelmapping_activated, annotation_handler annotation_changed, slog::base_gate& gate)
     {
         return nmos::experimental::node_implementation()
             .on_load_server_certificates(nmos::make_load_server_certificates_handler(model.settings, gate))
@@ -2706,6 +2767,7 @@ namespace nvnmos
             .on_resolve_auto(make_node_implementation_auto_resolver(model.settings))
             .on_set_transportfile(make_node_implementation_transportfile_setter(model.node_resources, model.settings))
             .on_connection_activated(make_node_implementation_connection_activation_handler(std::move(connection_activated), model.settings, gate))
-            .on_channelmapping_activated(make_node_implementation_channelmapping_activation_handler(std::move(channelmapping_activated), model.settings, gate));
+            .on_channelmapping_activated(make_node_implementation_channelmapping_activation_handler(std::move(channelmapping_activated), model.settings, gate))
+            .on_merge_annotation_patch(make_node_implementation_annotation_patch_merger(std::move(annotation_changed), model.settings));
     }
 }

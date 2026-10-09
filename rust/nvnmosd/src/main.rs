@@ -20,6 +20,7 @@
 // uniformly allow the lint at the crate root instead.
 #![allow(clippy::result_large_err)]
 
+mod annotation_store;
 mod env_config;
 mod http_port;
 mod log_bridge;
@@ -77,10 +78,11 @@ struct Daemon {
     state: Arc<Mutex<State>>,
     session_gc: SessionGc,
     http_port_range: http_port::PortRange,
+    annotations: Option<Arc<annotation_store::AnnotationStore>>,
 }
 
 impl Daemon {
-    fn new() -> Self {
+    fn new(annotations: Option<Arc<annotation_store::AnnotationStore>>) -> Self {
         let http_port_range = read_http_port_range();
         tracing::info!(
             http_port_range = %http_port_range,
@@ -92,6 +94,7 @@ impl Daemon {
             state,
             session_gc,
             http_port_range,
+            annotations,
         }
     }
 
@@ -122,6 +125,7 @@ impl Daemon {
                 let seed = seed.clone();
                 move |act| route_channelmapping_activation(&state, &seed, act)
             },
+            self.annotations.clone(),
         )
         .inspect_err(|_| {
             self.lock_state().abort_pending_node(&seed, http_port);
@@ -183,7 +187,7 @@ impl Daemon {
                 claimed_name,
             )?
         };
-        match prep.run_ffi()? {
+        match prep.run_ffi(self.annotations.as_deref())? {
             state::AddResourceReady::Sender(ready) => {
                 let mut state = self.lock_state();
                 state.commit_add_sender(ready)
@@ -214,7 +218,7 @@ impl Daemon {
                 claimed_name,
             )?
         };
-        match prep.run_ffi()? {
+        match prep.run_ffi(self.annotations.as_deref())? {
             state::AddResourceReady::Receiver(ready) => {
                 let mut state = self.lock_state();
                 state.commit_add_receiver(ready)
@@ -902,18 +906,32 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("binding UDS socket at {}", args.uds.display()))?;
     let incoming = UnixListenerStream::new(listener);
 
-    let daemon = Daemon::new();
+    let annotations =
+        if env_config::read_env_bool("NVNMOSD_ANNOTATION_API", env_config::EnvDefault::OptOut) {
+            let checkpoint = annotation_store::checkpoint_path(&args.uds);
+            Some(Arc::new(
+                annotation_store::AnnotationStore::open(&checkpoint)
+                    .context("annotation checkpoint")?,
+            ))
+        } else {
+            tracing::info!("IS-13 Annotation API disabled");
+            None
+        };
+    let daemon = Daemon::new(annotations.clone());
 
     tracing::info!(uds = %args.uds.display(), "nvnmosd listening");
 
-    tonic::transport::Server::builder()
+    let serve = tonic::transport::Server::builder()
         .add_service(NvnmosDaemonServer::new(daemon))
         .serve_with_incoming_shutdown(incoming, shutdown_signal())
-        .await
-        .context("gRPC server terminated with error")?;
+        .await;
 
     tracing::info!("nvnmosd shutting down");
+    if let Some(annotations) = &annotations {
+        annotations.flush();
+    }
     let _ = std::fs::remove_file(&args.uds);
+    serve.context("gRPC server terminated with error")?;
     Ok(())
 }
 

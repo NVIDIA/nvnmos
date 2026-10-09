@@ -14,6 +14,9 @@ use tonic::transport::Channel;
 
 use common::{DaemonHarness, PortRange, connect, http_get_json, open_session_with_port};
 
+// 18220..=18239 belong to the activation-ack lock-ordering tests.
+const ANNOTATION_API_UNMOUNTED_PORTS: PortRange = 18_240..=18_249;
+
 fn json_string_set(value: &Value) -> Vec<String> {
     value
         .as_array()
@@ -68,12 +71,25 @@ async fn advertised_apis_match_expected_surface() {
     let x_nmos = json_string_set(&http_get_json(port, "/x-nmos/").await);
     assert_eq!(
         x_nmos,
-        ["channelmapping/", "connection/", "node/"],
+        ["annotation/", "channelmapping/", "connection/", "node/"],
         "unexpected APIs"
     );
 
     let services = http_get_json(port, "/x-nmos/node/v1.3/self").await["services"].clone();
-    assert_eq!(services, Value::Array(vec![]), "unexpected Node services");
+    let services = services.as_array().expect("services array");
+    assert!(!services.is_empty(), "expected Annotation service");
+    for service in services {
+        assert_eq!(
+            service["type"].as_str(),
+            Some("urn:x-nmos:service:annotation/v1.0"),
+            "unexpected Node services"
+        );
+        let href = service["href"].as_str().expect("service href");
+        assert!(
+            href.contains(&format!(":{port}/x-nmos/annotation/v1.0")),
+            "unexpected Annotation href: {href}"
+        );
+    }
 
     let types = control_types(&http_get_json(port, "/x-nmos/node/v1.3/devices").await);
     assert!(
@@ -114,13 +130,42 @@ async fn experimental_settings_env_enables_settings_api() {
     assert_eq!(root, ["log/", "settings/", "x-manifest/", "x-nmos/"]);
 
     let x_nmos = json_string_set(&http_get_json(port, "/x-nmos/").await);
-    assert_eq!(x_nmos, ["channelmapping/", "connection/", "node/"]);
+    assert_eq!(
+        x_nmos,
+        ["annotation/", "channelmapping/", "connection/", "node/"]
+    );
 
     let settings = http_get_json(port, "/settings/all/").await;
     assert!(settings.is_object(), "expected settings object: {settings}");
     assert_eq!(settings["http_port"].as_u64(), Some(u64::from(port)));
     assert_eq!(settings["configuration_port"].as_i64(), Some(-1));
     assert_eq!(settings["control_protocol_ws_port"].as_i64(), Some(-1));
+
+    let _ = client
+        .close_session(CloseSessionRequest {
+            session_handle: session,
+        })
+        .await;
+    drop(harness);
+}
+
+#[tokio::test]
+async fn annotation_api_env_leaves_annotation_unmounted() {
+    let (harness, mut client, session, port) = open_empty_node(
+        ANNOTATION_API_UNMOUNTED_PORTS,
+        &[("NVNMOSD_ANNOTATION_API", "0")],
+    )
+    .await;
+
+    let x_nmos = json_string_set(&http_get_json(port, "/x-nmos/").await);
+    assert_eq!(
+        x_nmos,
+        ["channelmapping/", "connection/", "node/"],
+        "unexpected APIs"
+    );
+
+    let services = http_get_json(port, "/x-nmos/node/v1.3/self").await["services"].clone();
+    assert_eq!(services, Value::Array(vec![]), "unexpected Node services");
 
     let _ = client
         .close_session(CloseSessionRequest {
