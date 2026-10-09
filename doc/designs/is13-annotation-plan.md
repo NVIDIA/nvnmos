@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # IS-13 Annotation persistence — plan
 
-Status: proposed design
+Status: implemented
 Scope: `nvnmos.h` / libnvnmos, nvnmosd (store and checkpoint). No gst-nmos-rs change is required for GStreamer-based apps to take advantage of this.
 
 nmos-cpp needs **no API change**. Persistence uses the existing `on_merge_annotation_patch` hook and `nmos::details::merge_annotation_patch`.
@@ -280,8 +280,6 @@ The annotation store keys on type + name and does not use these helpers.
 
 Wire `on_merge_annotation_patch`. The predicate is nmos-cpp's default (`urn:x-nmos:tag:asset:`, `urn:x-nmos:tag:grouphint/`) **plus** every `urn:x-nvnmos:tag:` key (`name` today; others if they appear on IS-04 tags). A PATCH that names a read-only tag is rejected. After merge, read-only tags are restored.
 
-Today the merger is not installed, so a tags PATCH can drop `urn:x-nvnmos:tag:name`.
-
 ### 4.2 Name tag on source and flow
 
 `set_name` already writes `urn:x-nvnmos:tag:name` on Sender and Receiver. Call it on the associated Source and Flow as well (same sender name). Node and Device stay unnamed.
@@ -443,15 +441,17 @@ A local nmos-cpp checkout still builds with `nmos_cpp_from_source=True` and `-DU
 - No gst-nmos-rs change.
 - No removal of named `nmos_make_*_id` / `nmos_get_*_id`.
 
-## 8. Suggested implementation order
+## 8. Implementation order
+
+Landed in this order:
 
 1. Pin Conan Center `nmos-cpp/cci.20261005` (§6).
-2. Merger + read-only `urn:x-nvnmos:tag:` tags; `set_name` on source and flow (§9.1 can fail on current code).
-3. `NvNmosResourceType` and id helpers (§9.2).
-4. Annotation structs, apply-at-insert, reset, callback (§9.1 rest).
+2. Merger and read-only `urn:x-nvnmos:tag:` tags; `set_name` on source and flow.
+3. `NvNmosResourceType` and id helpers.
+4. Annotation structs, apply-at-insert, reset, and callback.
 5. `nvnmos` crate bindings.
-6. nvnmosd store + checkpoint (§9.3).
-7. Delete §10 probes.
+6. nvnmosd store and checkpoint.
+7. The probes in §10 were not added. The tests that shipped are §9.
 
 ## 9. Permanent tests
 
@@ -497,12 +497,12 @@ Checkpoint path pointed at a temp dir. Graceful stop flushes; tests should not s
 
 Not required: gst-nmos-rs; gRPC annotation fields; `kill -9` durability (accepted loss).
 
-## 10. Temporary infrastructure (delete when the permanent tests exist)
+## 10. Probes that were not added
 
-Use these only to order the work in §8. Do not land them.
+These were only a way to order the work in §8. They are not in the tree. The tests in §9 are the ones that were added.
 
-- **Prove current hole:** one test that PATCHes `tags` without the merger and shows `urn:x-nvnmos:tag:name` missing; then enable §4.1 and invert it into §9.1. Same file, do not keep a "document the bug" test.
-- **lib before daemon:** all of §9.1 against `nvnmos` + HTTP, with annotations held in the test process (stand-in for nvnmosd). No checkpoint file yet.
-- **Checkpoint file / debounce / entry-limit env:** production knobs, documented in the nvnmosd README. §9.3 points `NVNMOSD_ANNOTATION_CHECKPOINT_FILE` at a temp file.
-- **Throwaway:** dump one checkpoint after a PATCH to eyeball JSON; delete the dump helper. Tests treat the file as opaque.
-- **Do not:** proto stubs, SQLite spike, gst-nmos-rs hooks, log-line waits for "annotation".
+- No test that PATCHes `tags` with the merger absent and shows `urn:x-nvnmos:tag:name` missing. §9.1 covers the merger keeping that tag.
+- §9.1 runs against `nvnmos` and HTTP, with annotations held in the test process. The daemon checkpoint tests are §9.3.
+- Checkpoint path, debounce (`NVNMOSD_ANNOTATION_DEBOUNCE_MS`, default 1000), and entry limit are daemon settings, documented in the nvnmosd README, including the checkpoint JSON shape. §9.3 points `NVNMOSD_ANNOTATION_CHECKPOINT_FILE` at a temp file. The entry-limit test checks that a refused key is absent from the file.
+- No checkpoint dump helper was added.
+- No proto stubs, SQLite spike, gst-nmos-rs hooks, or log-line waits.
