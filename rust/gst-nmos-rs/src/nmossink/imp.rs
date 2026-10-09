@@ -33,7 +33,7 @@ use tokio::sync::oneshot;
 use anyhow::{Context, anyhow};
 
 use crate::daemon::{
-    ActivationHandler, ActivationOutcome, ActivationRequest, ResourceIds, Session,
+    ActivationHandler, ActivationOutcome, ActivationRequest, ResourceIds, Session, SessionPhase,
 };
 use crate::inner;
 use crate::session::error::{WithCode, post_state_change_error};
@@ -140,7 +140,7 @@ pub struct NmosSink {
     /// NMOS ids assigned by the daemon. Empty until the session is open
     /// and, for the Sender ids, until AddSender returns.
     ids: Mutex<ResourceIds>,
-    session: Mutex<Option<Session>>,
+    session: Mutex<Option<SessionPhase<Session>>>,
     /// Ghost pad that hides the current inner chain behind the bin.
     /// Created at `constructed`; the chain behind it swaps between
     /// the fake chain and a real inner transport chain as configuration
@@ -583,6 +583,16 @@ impl ElementImpl for NmosSink {
                 self.close_session();
             }
             gst::StateChange::ReadyToPaused => {
+                if self.deferred_activation_incomplete() {
+                    gst::element_imp_error!(
+                        self,
+                        gst::CoreError::StateChange,
+                        [
+                            "nmossink READY\u{2192}PAUSED: activation did not finish; set the element to NULL before retrying"
+                        ]
+                    );
+                    return Err(gst::StateChangeError);
+                }
                 // Deferred senders: pin the fake chain from upstream
                 // peer caps *before* child negotiation so sticky caps
                 // match what AddSender will register. Early-known caps
@@ -715,6 +725,7 @@ impl NmosSink {
             .lock()
             .unwrap()
             .as_ref()
+            .and_then(SessionPhase::open)
             .map(Session::resource_ids)
             .unwrap_or_default();
         crate::session::resource_ids::publish(self.obj().upcast_ref(), &self.ids, &next);
@@ -735,17 +746,15 @@ impl NmosSink {
                 // IS-04/IS-05 view up to match the live data path so
                 // external state stays consistent without an external
                 // IS-05 PATCH.
-                if let Err(e) = crate::session::sync_active(
+                // A failed sync fails the state change. NULL joins the call
+                // and closes the session; the pipeline must not stay up
+                // with the daemon's active state unset.
+                crate::session::sync_active(
                     &CAT,
                     "nmossink",
                     &self.session,
                     transport.transport_file(),
-                ) {
-                    // Inner is up and pushing already; don't tear it down
-                    // for a SyncResourceState glitch, but surface the
-                    // failure as a warning so it shows up in logs.
-                    gst::warning!(CAT, "nmossink auto-activate sync failed: {e:#}");
-                }
+                )?;
                 // Must not hold `settings` here — `set_connection_active`
                 // locks it again for the resource name.
                 self.set_connection_active(true, "auto-activate");
@@ -760,6 +769,19 @@ impl NmosSink {
     fn close_session(&self) {
         crate::session::close(&CAT, "nmossink", &self.session);
         self.publish_resource_ids();
+        self.restore_fake_chain();
+    }
+
+    fn deferred_activation_incomplete(&self) -> bool {
+        self.session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(SessionPhase::open)
+            .is_some_and(|session| session.activation_incomplete())
+    }
+
+    fn restore_fake_chain(&self) {
         self.set_connection_active(false, "deactivate");
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
@@ -804,12 +826,19 @@ impl NmosSink {
         {
             return Ok(());
         }
-        let session_open = self.session.lock().unwrap().is_some();
+        let session_open = self
+            .session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(SessionPhase::open)
+            .is_some();
         let resource_added = self
             .session
             .lock()
             .unwrap()
             .as_ref()
+            .and_then(SessionPhase::open)
             .and_then(|s| s.resource_id().map(|_| ()))
             .is_some();
         if !session_open || resource_added {
@@ -891,9 +920,22 @@ impl NmosSink {
             .lock()
             .unwrap()
             .as_ref()
+            .and_then(SessionPhase::open)
             .and_then(|s| s.resource_id().map(|_| ()))
             .is_some();
-        let session_open = self.session.lock().unwrap().is_some();
+        let session_open = self
+            .session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(SessionPhase::open)
+            .is_some();
+        if self.deferred_activation_incomplete() {
+            return Err(anyhow!(
+                "nmossink: activation did not finish; set the element to NULL before retrying"
+            ))
+            .with_code(gst::CoreError::StateChange);
+        }
         if !session_open || resource_added || static_inputs_set {
             return Ok(());
         }
@@ -923,7 +965,21 @@ impl NmosSink {
 
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
-        self.activate_inner(bin_ref, &outcome)?;
+        if let Err(e) = self.activate_inner(bin_ref, &outcome) {
+            // AddSender has committed. A later READY→PAUSED must not
+            // treat that as success while sync has not.
+            if let Some(session) = self
+                .session
+                .lock()
+                .unwrap()
+                .as_mut()
+                .and_then(SessionPhase::open_mut)
+            {
+                session.mark_activation_incomplete();
+            }
+            self.restore_fake_chain();
+            return Err(e);
+        }
         Ok(())
     }
 

@@ -44,7 +44,7 @@ use tower::service_fn;
 use gstreamer as gst;
 
 use crate::CAT;
-use crate::runtime::SHARED_RUNTIME;
+use crate::runtime::{SHARED_RUNTIME, wait_for_task};
 use crate::session::CommonSettings;
 use crate::session::types::Side;
 
@@ -52,9 +52,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a caller waits when a daemon RPC does not return.
 ///
-/// `OpenSession`, deferred `AddSender`, `SyncResourceState`,
-/// `AddChannelMapping`, `SyncChannelMappingState`, and `CloseSession`
-/// use this ceiling. If the daemon answers, these calls return sooner.
+/// The state change fails and the call keeps running. `NULL` joins it,
+/// then sends `CloseSession`. A retry of the upward transition does not
+/// send a second RPC and does not take the result of the first one.
+/// `CloseSession` uses the same ceiling and then gives up. If the daemon
+/// answers, these calls return sooner.
 pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Per-event input to an [`ActivationHandler`]. Mirrors
@@ -116,6 +118,11 @@ pub(crate) struct Session {
     resource: Option<AddedResource>,
     client: Option<NvnmosDaemonClient<Channel>>,
     activation_task: Option<JoinHandle<()>>,
+    inflight_add: Option<JoinHandle<Result<AddedResource, DaemonError>>>,
+    inflight_sync: Option<JoinHandle<Result<(), DaemonError>>>,
+    /// Set when a deferred auto-activate did not finish after AddSender.
+    /// Cleared only by dropping this session at NULL.
+    activation_incomplete: bool,
 }
 
 struct AddedResource {
@@ -171,6 +178,116 @@ pub(crate) enum DaemonError {
     NoResource,
     #[error("timed out waiting for the daemon")]
     TimedOut,
+    #[error("a daemon call is still running; set the element to NULL before retrying")]
+    Outstanding,
+    #[error("daemon call ended before it returned: {0}")]
+    CallEnded(String),
+}
+
+/// An element's session open: still running, or ready to use.
+///
+/// [`SessionPhase::Pending`] is an open the state change stopped waiting
+/// for. The next open joins it. A task that is still running stays
+/// pending and that open fails. A task that produced a session is closed
+/// before a new open starts.
+pub(crate) enum SessionPhase<T> {
+    Pending(JoinHandle<Result<T, DaemonError>>),
+    Open(T),
+}
+
+impl<T> SessionPhase<T> {
+    pub(crate) fn open(&self) -> Option<&T> {
+        match self {
+            SessionPhase::Open(value) => Some(value),
+            SessionPhase::Pending(_) => None,
+        }
+    }
+
+    pub(crate) fn open_mut(&mut self) -> Option<&mut T> {
+        match self {
+            SessionPhase::Open(value) => Some(value),
+            SessionPhase::Pending(_) => None,
+        }
+    }
+}
+
+/// Result of joining a pending open for up to [`RPC_TIMEOUT`].
+pub(crate) enum OpenJoin<T> {
+    /// The open finished and returned a session. The caller closes it.
+    Ready(T),
+    /// The open finished with an error. Its own error path already closed.
+    Finished,
+    /// Still running. The caller keeps this handle; it is not aborted.
+    Running(JoinHandle<Result<T, DaemonError>>),
+}
+
+/// Take the open session, or a pending open that has finished.
+///
+/// A pending open that is still running is put back. `NULL` succeeds
+/// without aborting it, and the next upward transition joins the same task.
+pub(crate) fn take_for_close<T>(slot: &std::sync::Mutex<Option<SessionPhase<T>>>) -> Option<T>
+where
+    T: Send + 'static,
+{
+    let taken = slot.lock().unwrap().take();
+    match taken {
+        Some(SessionPhase::Open(value)) => Some(value),
+        Some(SessionPhase::Pending(handle)) => match finish_opening(handle) {
+            OpenJoin::Ready(value) => Some(value),
+            OpenJoin::Finished => None,
+            OpenJoin::Running(handle) => {
+                *slot.lock().unwrap() = Some(SessionPhase::Pending(handle));
+                None
+            }
+        },
+        None => None,
+    }
+}
+
+/// Join a pending open. Does not abort the task.
+pub(crate) fn finish_opening<T>(mut handle: JoinHandle<Result<T, DaemonError>>) -> OpenJoin<T>
+where
+    T: Send + 'static,
+{
+    match SHARED_RUNTIME.block_on(wait_for_task(&mut handle, RPC_TIMEOUT)) {
+        Some(Ok(Ok(value))) => OpenJoin::Ready(value),
+        Some(_) => OpenJoin::Finished,
+        None => OpenJoin::Running(handle),
+    }
+}
+
+/// Wait up to [`RPC_TIMEOUT`] for `task`. Abort it if it is still running.
+///
+/// Dropping a [`JoinHandle`] detaches the task. A close that gives up
+/// has to abort so the call does not outlive the session.
+pub(crate) async fn settle_task<T>(mut task: JoinHandle<T>) {
+    if wait_for_task(&mut task, RPC_TIMEOUT).await.is_none() {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+/// Start `start` unless `inflight` is already set.
+///
+/// On [`DaemonError::TimedOut`] the handle stays in `inflight` so `NULL`
+/// can join it before `CloseSession`. A later call returns
+/// [`DaemonError::Outstanding`] and does not send another RPC.
+pub(crate) async fn drive_call<T>(
+    inflight: &mut Option<JoinHandle<Result<T, DaemonError>>>,
+    start: impl FnOnce() -> JoinHandle<Result<T, DaemonError>>,
+) -> Result<T, DaemonError> {
+    if inflight.is_some() {
+        return Err(DaemonError::Outstanding);
+    }
+    let mut handle = start();
+    match wait_for_task(&mut handle, RPC_TIMEOUT).await {
+        None => {
+            *inflight = Some(handle);
+            Err(DaemonError::TimedOut)
+        }
+        Some(Ok(result)) => result,
+        Some(Err(join)) => Err(DaemonError::CallEnded(join.to_string())),
+    }
 }
 
 fn root_cause<'a>(
@@ -298,7 +415,20 @@ impl Session {
             resource,
             client: Some(client),
             activation_task: Some(activation_task),
+            inflight_add: None,
+            inflight_sync: None,
+            activation_incomplete: false,
         })
+    }
+
+    /// Deferred auto-activate added the resource but did not finish sync.
+    /// The next `READY→PAUSED` must fail until `NULL` drops this session.
+    pub(crate) fn activation_incomplete(&self) -> bool {
+        self.activation_incomplete
+    }
+
+    pub(crate) fn mark_activation_incomplete(&mut self) {
+        self.activation_incomplete = true;
     }
 
     pub(crate) fn resource_id(&self) -> Option<(&str, &str)> {
@@ -360,15 +490,27 @@ impl Session {
         if self.resource.is_some() {
             return Err(DaemonError::AlreadyAdded);
         }
-        let client = self.client.as_mut().expect("session client missing");
-        let resource = add_resource(
-            client,
-            &self.session_handle,
-            side,
-            name,
-            transport,
-            transport_file,
-        )
+        let mut client = self
+            .client
+            .as_ref()
+            .expect("session client missing")
+            .clone();
+        let session_handle = self.session_handle.clone();
+        let name = name.to_owned();
+        let transport_file = transport_file.to_owned();
+        let resource = drive_call(&mut self.inflight_add, || {
+            SHARED_RUNTIME.spawn(async move {
+                add_resource(
+                    &mut client,
+                    &session_handle,
+                    side,
+                    &name,
+                    transport,
+                    &transport_file,
+                )
+                .await
+            })
+        })
         .await?;
         self.resource = Some(resource);
         Ok(())
@@ -403,16 +545,26 @@ impl Session {
             .as_ref()
             .map(|r| r.handle.clone())
             .ok_or(DaemonError::NoResource)?;
-        self.client
-            .as_mut()
+        let mut client = self
+            .client
+            .as_ref()
             .expect("session client missing")
-            .sync_resource_state(SyncResourceStateRequest {
-                session_handle: self.session_handle.clone(),
-                resource_handle,
-                transport_file: transport_file.map(str::to_owned),
+            .clone();
+        let session_handle = self.session_handle.clone();
+        let transport_file = transport_file.map(str::to_owned);
+        drive_call(&mut self.inflight_sync, || {
+            SHARED_RUNTIME.spawn(async move {
+                client
+                    .sync_resource_state(SyncResourceStateRequest {
+                        session_handle,
+                        resource_handle,
+                        transport_file,
+                    })
+                    .await?;
+                Ok(())
             })
-            .await?;
-        Ok(())
+        })
+        .await
     }
 
     /// Cancel the background activation task and tell the daemon to
@@ -433,6 +585,8 @@ impl Session {
             session_handle: self.session_handle.clone(),
             client: self.client.take()?,
             activation_task: self.activation_task.take(),
+            inflight_add: self.inflight_add.take(),
+            inflight_sync: self.inflight_sync.take(),
         })
     }
 }
@@ -456,6 +610,8 @@ struct DetachedSession {
     session_handle: String,
     client: NvnmosDaemonClient<Channel>,
     activation_task: Option<JoinHandle<()>>,
+    inflight_add: Option<JoinHandle<Result<AddedResource, DaemonError>>>,
+    inflight_sync: Option<JoinHandle<Result<(), DaemonError>>>,
 }
 
 impl DetachedSession {
@@ -464,7 +620,17 @@ impl DetachedSession {
             session_handle,
             mut client,
             activation_task,
+            inflight_add,
+            inflight_sync,
         } = self;
+        // Join add/sync before CloseSession so a commit that is about to
+        // finish is not left behind on a closed session.
+        if let Some(task) = inflight_add {
+            settle_task(task).await;
+        }
+        if let Some(task) = inflight_sync {
+            settle_task(task).await;
+        }
         if let Some(task) = activation_task {
             task.abort();
             let _ = task.await;
