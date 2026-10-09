@@ -493,33 +493,6 @@ fn format_from_transport_kbps(transport_bit_rate: u64) -> u64 {
 const FMTP_FORMAT_BIT_RATE: &str = "x-nvnmos-format-bit-rate";
 const FMTP_TRANSPORT_BIT_RATE: &str = "x-nvnmos-transport-bit-rate";
 
-/// Format-specific parameters from the media's `a=fmtp:` attribute (`<pt> <params>`).
-fn fmtp_params_from_media(m: &SDPMediaRef) -> Option<&str> {
-    for idx in 0..m.attributes_len() {
-        let attr = m.attribute(idx)?;
-        if attr.key() != "fmtp" {
-            continue;
-        }
-        return attr
-            .value()?
-            .split_once(' ')
-            .map(|(_, fmtp_params)| fmtp_params);
-    }
-    None
-}
-
-fn fmtp_param<T: std::str::FromStr>(fmtp_params: &str, key: &str) -> Option<T> {
-    for kv in fmtp_params.split(';') {
-        let Some((k, v)) = kv.split_once('=') else {
-            continue;
-        };
-        if k.eq_ignore_ascii_case(key) {
-            return v.parse().ok();
-        }
-    }
-    None
-}
-
 fn as_bandwidth_from_media(m: &SDPMediaRef) -> Option<u64> {
     for idx in 0..m.bandwidths_len() {
         let bw = m.bandwidth(idx)?;
@@ -536,10 +509,16 @@ fn as_bandwidth_from_media(m: &SDPMediaRef) -> Option<u64> {
 /// `get_transport_bit_rate`: fmtp `x-nvnmos-*-bit-rate` first, then
 /// derive the missing side from the other fmtp key or `b=AS:`.
 pub(crate) fn bit_rates_from_media(m: &SDPMediaRef) -> BitRates {
-    let params = fmtp_params_from_media(m);
-    let fmtp_format = params.and_then(|params| fmtp_param::<u64>(params, FMTP_FORMAT_BIT_RATE));
-    let fmtp_transport =
-        params.and_then(|params| fmtp_param::<u64>(params, FMTP_TRANSPORT_BIT_RATE));
+    let parsed = parse_fmtp_params(media_fmtp_params(m));
+    let fmtp_u64 = |key: &str| {
+        parsed
+            .iter()
+            .find(|param| param.key.eq_ignore_ascii_case(key))
+            .and_then(|param| param.value)
+            .and_then(|value| value.parse().ok())
+    };
+    let fmtp_format = fmtp_u64(FMTP_FORMAT_BIT_RATE);
+    let fmtp_transport = fmtp_u64(FMTP_TRANSPORT_BIT_RATE);
     let b_as = as_bandwidth_from_media(m);
 
     let format_bit_rate = fmtp_format
@@ -891,8 +870,8 @@ pub(crate) fn normalise_to_single_active_leg(text: &str) -> Result<String, SdpEr
         origin_session_id,
         session_name,
         description: msg.information(),
-        name: session_attribute_value(&msg, "x-nvnmos-name"),
-        group_hint: session_attribute_value(&msg, "x-nvnmos-group-hint"),
+        name: msg.attribute_val("x-nvnmos-name"),
+        group_hint: msg.attribute_val("x-nvnmos-group-hint"),
         advertise_caps: false,
         emit_ptp_ts_refclk,
         bit_rates: BitRates::UNSET,
@@ -900,18 +879,12 @@ pub(crate) fn normalise_to_single_active_leg(text: &str) -> Result<String, SdpEr
     build_sdp(&media, session)
 }
 
-fn session_attribute_value<'a>(msg: &'a SDPMessage, key: &str) -> Option<&'a str> {
-    (0..msg.attributes_len()).find_map(|idx| {
-        let attr = msg.attribute(idx)?;
-        (attr.key() == key).then(|| attr.value()).flatten()
-    })
-}
-
 /// Session-level `a=x-nvnmos-name` from configuring SDP text.
 pub(crate) fn resource_name_from_transport(text: &str) -> Result<Option<String>, SdpError> {
     let msg =
         SDPMessage::parse_buffer(text.as_bytes()).map_err(|e| SdpError::Parse(e.to_string()))?;
-    Ok(session_attribute_value(&msg, "x-nvnmos-name")
+    Ok(msg
+        .attribute_val("x-nvnmos-name")
         .filter(|name| !name.is_empty())
         .map(str::to_owned))
 }
@@ -1159,6 +1132,70 @@ fn canonicalise_st2110_sdp_case(m: &mut SDPMedia) {
     }
 }
 
+/// One `a=fmtp:` parameter. `value` is absent for a flag such as `interlace`.
+#[derive(Debug, PartialEq, Eq)]
+struct FmtpParam<'a> {
+    key: &'a str,
+    value: Option<&'a str>,
+}
+
+/// Separator written between fmtp parameters.
+const FMTP_PARAM_SEPARATOR: &str = "; ";
+
+/// Parameter list of the media's `a=fmtp:` attribute, after the payload type.
+fn media_fmtp_params(m: &SDPMediaRef) -> &str {
+    m.attribute_val("fmtp")
+        .and_then(|value| value.split_once(' ').map(|(_, params)| params))
+        .unwrap_or("")
+}
+
+/// Split an fmtp parameter list like `caps_from_media`, but keep key case.
+/// ST 2110-20:2022 §7.1 requires a semicolon followed by whitespace, and no
+/// trailing semicolon. ST 2110-20:2017 required a trailing semicolon.
+/// ST 2110-22:2022 §7.2 makes the space after each semicolon optional.
+/// Thanks, SMPTE.
+fn parse_fmtp_params(params: &str) -> Vec<FmtpParam<'_>> {
+    params
+        .split(';')
+        .filter_map(|raw| {
+            let token = raw.trim();
+            if token.is_empty() {
+                return None;
+            }
+            if let Some((key, value)) = token.split_once('=') {
+                // Trim both sides of the key and value like `caps_from_media`
+                // even though ST 2110-20:2022 §7.1 and ST 2110-22:2022 §7.2
+                // forbid whitespace around `=`.
+                let key = key.trim();
+                if key.is_empty() {
+                    return None;
+                }
+                Some(FmtpParam {
+                    key,
+                    value: Some(value.trim()),
+                })
+            } else {
+                Some(FmtpParam {
+                    key: token,
+                    value: None,
+                })
+            }
+        })
+        .collect()
+}
+
+fn append_fmtp_param(out: &mut String, key: &str, value: Option<&str>) {
+    if !out.is_empty() {
+        out.push_str(FMTP_PARAM_SEPARATOR);
+    }
+    out.push_str(key);
+    if let Some(value) = value {
+        out.push('=');
+        out.push_str(value);
+    }
+}
+
+/// Replace `x-nvnmos-*-bit-rate` on the media's `a=fmtp:` line, or append them.
 fn upsert_nvnmos_bit_rates_in_fmtp(m: &mut SDPMediaRef, bit_rates: BitRates) {
     if bit_rates == BitRates::UNSET {
         return;
@@ -1176,35 +1213,22 @@ fn upsert_nvnmos_bit_rates_in_fmtp(m: &mut SDPMediaRef, bit_rates: BitRates) {
         let Some((pt, fmtp_params)) = value.split_once(' ') else {
             continue;
         };
-        let kept: Vec<&str> = fmtp_params
-            .split(';')
-            .filter(|kv| {
-                kv.split_once('=')
-                    .map(|(key, _)| {
-                        !key.eq_ignore_ascii_case(FMTP_FORMAT_BIT_RATE)
-                            && !key.eq_ignore_ascii_case(FMTP_TRANSPORT_BIT_RATE)
-                    })
-                    .unwrap_or(true)
-            })
-            .collect();
-        let mut new_fmtp_params = kept.join(";");
-        if bit_rates.format_bit_rate > 0 {
-            if !new_fmtp_params.is_empty() {
-                new_fmtp_params.push(';');
+        let mut new_fmtp_params = String::new();
+        for param in parse_fmtp_params(fmtp_params) {
+            if param.key.eq_ignore_ascii_case(FMTP_FORMAT_BIT_RATE)
+                || param.key.eq_ignore_ascii_case(FMTP_TRANSPORT_BIT_RATE)
+            {
+                continue;
             }
-            new_fmtp_params.push_str(&format!(
-                "{FMTP_FORMAT_BIT_RATE}={}",
-                bit_rates.format_bit_rate
-            ));
+            append_fmtp_param(&mut new_fmtp_params, param.key, param.value);
+        }
+        if bit_rates.format_bit_rate > 0 {
+            let value = bit_rates.format_bit_rate.to_string();
+            append_fmtp_param(&mut new_fmtp_params, FMTP_FORMAT_BIT_RATE, Some(&value));
         }
         if bit_rates.transport_bit_rate > 0 {
-            if !new_fmtp_params.is_empty() {
-                new_fmtp_params.push(';');
-            }
-            new_fmtp_params.push_str(&format!(
-                "{FMTP_TRANSPORT_BIT_RATE}={}",
-                bit_rates.transport_bit_rate
-            ));
+            let value = bit_rates.transport_bit_rate.to_string();
+            append_fmtp_param(&mut new_fmtp_params, FMTP_TRANSPORT_BIT_RATE, Some(&value));
         }
         let new_value = format!("{pt} {new_fmtp_params}");
         let _ = m.replace_attribute(idx, SDPAttribute::new("fmtp", Some(&new_value)));
@@ -1268,29 +1292,25 @@ fn canonicalise_rtpmap_value(value: &str) -> Option<String> {
 /// Rewrite the fmtp attribute value
 /// (`<pt> <key>=<value>(;<key>=<value>)*`, RFC 4566 §6) when any
 /// key is not in canonical case. Values are preserved verbatim.
-/// Returns `None` when no key needs rewriting.
+/// Returns `None` when no key needs rewriting. A rewrite is joined with
+/// [`FMTP_PARAM_SEPARATOR`].
 fn canonicalise_fmtp_value(value: &str) -> Option<String> {
     let (pt, rest) = value.split_once(' ')?;
     let mut changed = false;
-    let fixed = rest
-        .split(';')
-        .map(|kv| {
-            let Some((key, val)) = kv.split_once('=') else {
-                return kv.to_owned();
-            };
-            match ST_2110_UPPERCASE_FMTP_KEYS
-                .get(&Ascii::new(key))
-                .map(|m| **m)
-            {
-                Some(canonical) if canonical != key => {
-                    changed = true;
-                    format!("{canonical}={val}")
-                }
-                _ => kv.to_owned(),
+    let mut fixed = String::new();
+    for param in parse_fmtp_params(rest) {
+        let key = match ST_2110_UPPERCASE_FMTP_KEYS
+            .get(&Ascii::new(param.key))
+            .map(|canonical| **canonical)
+        {
+            Some(canonical) if canonical != param.key => {
+                changed = true;
+                canonical
             }
-        })
-        .collect::<Vec<_>>()
-        .join(";");
+            _ => param.key,
+        };
+        append_fmtp_param(&mut fixed, key, param.value);
+    }
     changed.then(|| format!("{pt} {fixed}"))
 }
 
@@ -5885,6 +5905,68 @@ mod tests {
         assert_eq!(rates.format_bit_rate, 110_476);
     }
 
+    /// `;`, `"; "`, a trailing `;`, and a trailing `"; "` are the same
+    /// parameters. Key case is kept. An empty piece and whitespace around
+    /// `=` are dropped.
+    #[test]
+    fn parse_fmtp_params_keeps_keys_across_separators() {
+        let expected = [
+            FmtpParam {
+                key: "PM",
+                value: Some("2110GPM"),
+            },
+            FmtpParam {
+                key: "x-nvnmos-format-bit-rate",
+                value: Some("110000"),
+            },
+            FmtpParam {
+                key: "x-nvnmos-transport-bit-rate",
+                value: Some("116000"),
+            },
+        ];
+        let canonical =
+            "PM=2110GPM;x-nvnmos-format-bit-rate=110000;x-nvnmos-transport-bit-rate=116000";
+        for params in [
+            canonical,
+            &canonical.replace(';', "; "),
+            &format!("{canonical};"),
+            "PM = 2110GPM;;; x-nvnmos-format-bit-rate=110000; ; x-nvnmos-transport-bit-rate=116000; ",
+        ] {
+            assert_eq!(parse_fmtp_params(params), expected, "{params}");
+        }
+    }
+
+    /// An existing rate key is removed, whatever its case, and the fmtp line
+    /// is rewritten with `"; "` and no trailing semicolon.
+    #[test]
+    fn upsert_nvnmos_bit_rates_in_fmtp_replaces_existing_keys() {
+        init_gst();
+        let text = "v=0\r\n\
+            o=- 0 0 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=video 0 RTP/AVP 96\r\n\
+            c=IN IP4 127.0.0.1\r\n\
+            a=fmtp:96 PM=2110GPM;X-NVNMOS-FORMAT-BIT-RATE=1;\
+            x-nvnmos-transport-bit-rate=2;\r\n";
+        let mut msg = SDPMessage::parse_buffer(text.as_bytes()).expect("parse");
+        let media = msg.media_mut(0).expect("media");
+        upsert_nvnmos_bit_rates_in_fmtp(
+            media,
+            BitRates {
+                format_bit_rate: 110_000,
+                transport_bit_rate: 116_000,
+            },
+        );
+        assert_eq!(
+            media.attribute_val("fmtp"),
+            Some(
+                "96 PM=2110GPM; x-nvnmos-format-bit-rate=110000; \
+                 x-nvnmos-transport-bit-rate=116000"
+            ),
+        );
+    }
+
     #[test]
     fn cross_check_bit_rates_rejects_mismatch() {
         let file = BitRates {
@@ -6403,26 +6485,26 @@ mod tests {
             c=IN IP4 232.99.99.1/64\r\n\
             a=rtpmap:96 raw/90000\r\n\
             a=fmtp:96 \
-            sampling=YCbCr-4:2:2;\
-            depth=10;\
-            width=1920;\
-            height=1080;\
-            exactframerate=50;\
-            colorimetry=BT709;\
-            PM=2110BPM;\
-            SSN=ST2110-20:2022;\
-            TCS=ST2115LOGS3;\
-            RANGE=FULLPROTECT;\
-            PAR=12:11;\
-            MAXUDP=1460;\
-            TSMODE=SAMP;\
-            TSDELAY=82;\
-            TP=2110TPW;\
-            TROFF=0;\
-            CMAX=42;\
-            DID_SDID={0x41,0x01};\
-            VPID_Code=133;\
-            TM=Async\r\n";
+            sampling=YCbCr-4:2:2; \
+            depth=10; \
+            width=1920; \
+            height=1080; \
+            exactframerate=50; \
+            colorimetry=BT709; \
+            PM=2110BPM; \
+            SSN=ST2110-20:2022; \
+            TCS=ST2115LOGS3; \
+            RANGE=FULLPROTECT; \
+            PAR=12:11; \
+            MAXUDP=1460; \
+            TSMODE=SAMP; \
+            TSDELAY=82; \
+            TP=2110TPW; \
+            TROFF=0; \
+            CMAX=42; \
+            DID_SDID={0x41,0x01}; \
+            VPID_Code=133; \
+            TM=CTM\r\n";
         let spliced = passthrough_with_overrides(
             raw_sdp,
             &SdpOverrides::default(),
