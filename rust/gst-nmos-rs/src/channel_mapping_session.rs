@@ -21,7 +21,8 @@ use tonic::transport::Channel;
 
 use gstreamer as gst;
 
-use crate::daemon::{DaemonError, connect_uds, parse_unix_uri};
+use crate::CAT;
+use crate::daemon::{DaemonError, RPC_TIMEOUT, connect_uds, parse_unix_uri};
 use crate::runtime::SHARED_RUNTIME;
 use crate::session::channel_mapping::ChannelMappingSettings;
 
@@ -54,8 +55,8 @@ pub(crate) struct ChannelMappingSession {
     pub(crate) created_node: bool,
     pub(crate) http_port: u16,
     channelmapping: Option<AddedChannelMapping>,
-    client: NvnmosDaemonClient<Channel>,
-    activation_task: JoinHandle<()>,
+    client: Option<NvnmosDaemonClient<Channel>>,
+    activation_task: Option<JoinHandle<()>>,
 }
 
 struct AddedChannelMapping {
@@ -118,8 +119,8 @@ impl ChannelMappingSession {
             created_node,
             http_port,
             channelmapping: None,
-            client,
-            activation_task,
+            client: Some(client),
+            activation_task: Some(activation_task),
         })
     }
 
@@ -134,7 +135,16 @@ impl ChannelMappingSession {
         if self.channelmapping.is_some() {
             return Err(DaemonError::AlreadyAdded);
         }
-        let resp = self.client.add_channel_mapping(request).await?.into_inner();
+        let rpc = self
+            .client
+            .as_mut()
+            .expect("session client missing")
+            .add_channel_mapping(request);
+        let resp = match tokio::time::timeout(RPC_TIMEOUT, rpc).await {
+            Ok(Ok(resp)) => resp.into_inner(),
+            Ok(Err(status)) => return Err(status.into()),
+            Err(_elapsed) => return Err(DaemonError::TimedOut),
+        };
         self.channelmapping = Some(AddedChannelMapping {
             handle: resp.channelmapping_handle.clone(),
         });
@@ -147,6 +157,8 @@ impl ChannelMappingSession {
             return Ok(());
         };
         self.client
+            .as_mut()
+            .expect("session client missing")
             .remove_channel_mapping(RemoveChannelMappingRequest {
                 session_handle: self.session_handle.clone(),
                 channelmapping_handle: cm.handle,
@@ -165,42 +177,92 @@ impl ChannelMappingSession {
             .as_ref()
             .map(|cm| cm.handle.clone())
             .ok_or(DaemonError::NoResource)?;
-        self.client
+        let rpc = self
+            .client
+            .as_mut()
+            .expect("session client missing")
             .sync_channel_mapping_state(SyncChannelMappingStateRequest {
                 session_handle: self.session_handle.clone(),
                 channelmapping_handle: handle,
                 output_id: output_id.to_owned(),
                 active_map,
-            })
-            .await?;
-        Ok(())
+            });
+        match tokio::time::timeout(RPC_TIMEOUT, rpc).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(status)) => Err(status.into()),
+            Err(_elapsed) => Err(DaemonError::TimedOut),
+        }
     }
 
     pub(crate) async fn close(mut self) -> Result<(), DaemonError> {
-        let ChannelMappingSession {
+        match self.detach() {
+            Some(detached) => detached.close().await,
+            None => Ok(()),
+        }
+    }
+
+    fn detach(&mut self) -> Option<DetachedChannelMappingSession> {
+        Some(DetachedChannelMappingSession {
+            session_handle: self.session_handle.clone(),
+            client: self.client.take()?,
+            activation_task: self.activation_task.take(),
+            channelmapping: self.channelmapping.take(),
+        })
+    }
+}
+
+impl Drop for ChannelMappingSession {
+    fn drop(&mut self) {
+        let Some(detached) = self.detach() else {
+            return;
+        };
+        let handle = detached.session_handle.clone();
+        SHARED_RUNTIME.spawn(async move {
+            match detached.close().await {
+                Ok(()) => gst::info!(CAT, "channel mapping session closed: handle={handle}"),
+                Err(e) => gst::warning!(CAT, "CloseSession (handle={handle}): {e}"),
+            }
+        });
+    }
+}
+
+struct DetachedChannelMappingSession {
+    session_handle: String,
+    client: NvnmosDaemonClient<Channel>,
+    activation_task: Option<JoinHandle<()>>,
+    channelmapping: Option<AddedChannelMapping>,
+}
+
+impl DetachedChannelMappingSession {
+    async fn close(self) -> Result<(), DaemonError> {
+        let Self {
             session_handle,
             mut client,
             activation_task,
-            ..
+            channelmapping,
         } = self;
-
-        activation_task.abort();
-        let _ = activation_task.await;
-
-        if let Some(cm) = self.channelmapping.take() {
-            let _ = client
-                .remove_channel_mapping(RemoveChannelMappingRequest {
-                    session_handle: session_handle.clone(),
-                    channelmapping_handle: cm.handle,
-                })
-                .await;
+        if let Some(task) = activation_task {
+            task.abort();
+            let _ = task.await;
         }
-
-        client
-            .close_session(CloseSessionRequest { session_handle })
-            .await?;
-
-        Ok(())
+        let close_rpc = async {
+            if let Some(cm) = channelmapping {
+                let _ = client
+                    .remove_channel_mapping(RemoveChannelMappingRequest {
+                        session_handle: session_handle.clone(),
+                        channelmapping_handle: cm.handle,
+                    })
+                    .await;
+            }
+            client
+                .close_session(CloseSessionRequest { session_handle })
+                .await
+        };
+        match tokio::time::timeout(RPC_TIMEOUT, close_rpc).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(status)) => Err(status.into()),
+            Err(_elapsed) => Err(DaemonError::TimedOut),
+        }
     }
 }
 
