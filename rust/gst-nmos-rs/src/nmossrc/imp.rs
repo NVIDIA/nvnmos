@@ -796,7 +796,7 @@ impl NmosSrc {
         let ghost = ghost_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("nmossrc ghost pad missing"))?;
-        inner::rebuild_chain_with_opts(&CAT, bin, ghost, new_inner, "src", opts)
+        inner::rebuild_chain_with_opts(&CAT, bin, ghost, new_inner, "src", opts, None)
     }
 
     /// True iff the bin's current inner chain is a real transport
