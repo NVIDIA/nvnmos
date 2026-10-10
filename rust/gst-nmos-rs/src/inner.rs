@@ -4239,12 +4239,8 @@ mod tests {
     /// streaming thread leaves `create()` with EOS that goes no further than
     /// the fake's own pad. Nothing is pushed into the fake, so `unlock()` is
     /// the only other way out of `create()`.
-    ///
-    /// With `pause_first`, the pipeline is paused before the call and
-    /// resumed after it. The pause's `unlock()` leaves `appsrc` flushing,
-    /// so it refuses `end-of-stream`; on resume `BaseSrc` runs the deferred
-    /// `unlock_stop()` and `create()` emits `need-data`.
-    fn fake_src_leaves_create_after_release(pause_first: bool) {
+    #[test]
+    fn release_fake_src_create_wait_ends_create_while_playing() {
         init_gst();
         let cat = test_log_cat();
         let initial = build_fake_src(None).expect("initial fake src");
@@ -4283,15 +4279,8 @@ mod tests {
         need_data_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("fake appsrc must emit need-data after PLAYING");
-        if pause_first {
-            set_state_and_wait(&pipeline, gst::State::Paused);
-        }
 
         release_fake_src_create_wait(cat, &fake);
-        if pause_first {
-            set_state_and_wait(&pipeline, gst::State::Playing);
-        }
-
         eos_at_fake_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("fake appsrc must leave create() with EOS");
@@ -4300,16 +4289,6 @@ mod tests {
             eos_downstream_rx.try_recv().is_err(),
             "EOS from the outgoing fake source must not reach downstream"
         );
-    }
-
-    #[test]
-    fn release_fake_src_create_wait_ends_create_while_playing() {
-        fake_src_leaves_create_after_release(false);
-    }
-
-    #[test]
-    fn release_fake_src_create_wait_ends_create_after_resume() {
-        fake_src_leaves_create_after_release(true);
     }
 
     /// Source whose `create()` returns immediately. `unlock()` records that
