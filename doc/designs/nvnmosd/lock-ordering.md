@@ -110,7 +110,7 @@ then updated after FFI succeeds.
 | `AddNode` | `prepare_add_node` → `CreateNodePrep` | `Daemon::run_ffi` → `CreateNodePrep::run_ffi` | `commit_add_node` |
 | `OpenSession` (new Node) | `prepare_open_session` → `CreateNodePrep` | `Daemon::run_ffi` → `CreateNodePrep::run_ffi` | `commit_open_session` |
 | `OpenSession` (existing Node) | `prepare_open_session` → `Attached` | — (no FFI) | — |
-| `AddSender` / `AddReceiver` | `prepare_add_resource` | `AddResourcePrep::run_ffi` | `commit_add_resource` |
+| `AddSender` / `AddReceiver` | `prepare_add_resource` | `AddResourcePrep::run_ffi` | `commit_add_sender` / `commit_add_receiver` |
 | `AddChannelMapping` | `prepare_add_channelmapping` | `AddChannelMappingPrep::run_ffi` | `commit_add_channelmapping` |
 
 Node create is special: `CreateNodePrep::run_ffi` builds the
@@ -119,8 +119,8 @@ callbacks are supplied by `Daemon::run_ffi` in `main.rs` because they route
 into `route_activation` / `route_channelmapping_activation` and need
 `Arc<Mutex<State>>` — which `State` cannot capture from inside `&mut self`.
 
-On FFI failure during node create, `Daemon::run_ffi` briefly re-locks
-`state` to call `abort_pending_node` (drops the pending seed and port).
+On FFI failure during node create, the handler re-locks `state` and calls
+`abort_pending_node` (drops the pending seed and port).
 
 ### Two-phase remove / close / sync (bookkeeping → deferred FFI)
 
@@ -155,7 +155,7 @@ the AB-BA deadlock with `model`. Bookkeeping mutations remain serialized by
 | Concern | Mechanism |
 |---------|-----------|
 | Double node create for same `node_seed` | `pending_nodes` + `http_ports` reserved in `prepare_*`; concurrent `OpenSession` / `AddNode` gets `ABORTED` / `ALREADY_EXISTS` |
-| Add resource while session dies | `commit_add_resource` re-checks session exists; returns `NOT_FOUND` if `CloseSession` won the race |
+| Add resource while session dies | `commit_add_sender` / `commit_add_receiver` re-checks session exists; returns `NOT_FOUND` if `CloseSession` won the race |
 | `NodeServer` destroyed while FFI uses it | `Arc<NodeServer>` in `*Prep` / `*Ffi` keeps the C++ object alive until `run_ffi` / `run()` completes |
 | Conflicting FFI on one Node | libnvnmos `model` lock serialises internally |
 
@@ -201,7 +201,16 @@ any FFI serialised every RPC behind one Node's blocking C++ work. The
 post-fix split removes that stall.
 
 Note: `AddSender` may still block on `model` while an in-band activation is
-parked on the ack — that is correct serialization, not a deadlock.
+parked on the ack — that is correct serialization, not a deadlock. Only
+the libnvnmos call runs on the blocking pool (`blocking_ffi`); the daemon
+`state` lock stays on the async worker. Create and add commit or abort in
+`finish_ffi`. The handler awaits the task; a drop does not cancel it. Remove,
+close, and sync are recorded beforehand. `AckActivation` stays on the async
+worker: it only takes `state`. If the libnvnmos call occupied the only
+async worker, the ack would not be polled and the activation would wait
+out `ACTIVATION_ACK_TIMEOUT`. `#[tokio::main]` sizes that pool from
+`available_parallelism()`, which follows a cgroup CPU quota, and from
+`TOKIO_WORKER_THREADS`.
 
 ## Trigger surface
 
@@ -224,6 +233,14 @@ thread is parked on the ack, then concurrently issues `AddSender` and
 - `AddSender` may wait for the activation ack timeout while `model` is held
   — expected;
 - `CloseSession` returns promptly and the HTTP port is released after close.
+
+`single_worker_serves_ack_while_add_sender_waits_on_model` starts the
+daemon with `TOKIO_WORKER_THREADS=1`, parks an in-band activation, and
+issues `AddSender` before `AckActivation`. The ack must return inside one
+second, well under the five-second activation timeout, and the IS-05
+PATCH must succeed. `cancelled_add_sender_still_records_the_name` drops
+that `AddSender` while it is blocked and then checks that a repeat add of
+the same name is `already_exists`.
 
 Also run the full `nvnmosd` test suite under default parallelism and
 `--test-threads=1` (`http_port_release_repro`, `session_gc`, etc.).

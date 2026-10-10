@@ -28,6 +28,7 @@ mod malloc_trim;
 mod session_gc;
 mod state;
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::mpsc as std_mpsc;
@@ -36,7 +37,7 @@ use std::task::{Context as TaskContext, Poll};
 
 use anyhow::Context;
 use clap::Parser;
-use nvnmos::{Activation, ChannelMappingActivation, Transport};
+use nvnmos::{Activation, ChannelMappingActivation};
 use nvnmos_rpc::v1::nvnmos_daemon_server::{NvnmosDaemon, NvnmosDaemonServer};
 use nvnmos_rpc::v1::{
     AckActivationRequest, AckChannelMappingActivationRequest, ActivationEvent,
@@ -74,6 +75,7 @@ struct Args {
     uds: PathBuf,
 }
 
+#[derive(Clone)]
 struct Daemon {
     state: Arc<Mutex<State>>,
     session_gc: SessionGc,
@@ -106,14 +108,11 @@ impl Daemon {
         self.state.lock().expect("daemon state mutex poisoned")
     }
 
-    /// Second phase of node-creating RPCs (no `state` lock held): wire daemon
-    /// activation callbacks into [`CreateNodePrep::run_ffi`]. On failure,
-    /// abort the pending node ([`State::abort_pending_node`], a brief
-    /// lock). The caller commits via [`State::commit_open_session`] or
-    /// [`State::commit_add_node`].
+    /// Wire activation callbacks into [`CreateNodePrep::run_ffi`] with no
+    /// `state` lock held. The caller aborts the pending node on failure and
+    /// commits via [`State::commit_open_session`] or [`State::commit_add_node`].
     fn run_ffi(&self, prep: state::CreateNodePrep) -> Result<state::CreateNodeReady, Status> {
         let seed = prep.seed.clone();
-        let http_port = prep.http_port;
         prep.run_ffi(
             {
                 let state = self.state.clone();
@@ -122,131 +121,45 @@ impl Daemon {
             },
             {
                 let state = self.state.clone();
-                let seed = seed.clone();
                 move |act| route_channelmapping_activation(&state, &seed, act)
             },
             self.annotations.clone(),
         )
-        .inspect_err(|_| {
-            self.lock_state().abort_pending_node(&seed, http_port);
-        })
     }
+}
 
-    /// `AddNode` orchestration (persistent-Node analogue of
-    /// [`Daemon::add_resource`]): validate daemon bookkeeping under the
-    /// lock, build the [`nvnmos::NodeServer`] with no lock held, then
-    /// commit under the lock.
-    fn add_node(&self, config: nvnmos::NodeConfig) -> Result<state::AddNodeOutcome, Status> {
-        let prep = {
-            let mut state = self.lock_state();
-            state.prepare_add_node(config, &self.http_port_range)?
-        };
-        let ready = self.run_ffi(prep)?;
-        let mut state = self.lock_state();
-        Ok(state.commit_add_node(ready))
+/// Run libnvnmos work off the async worker.
+///
+/// An in-band activation holds the Node model lock on a libnvnmos thread
+/// until `AckActivation`. That RPC only takes the daemon state mutex, so it
+/// needs a free async worker.
+async fn blocking_ffi<T, F>(f: F) -> Result<T, Status>
+where
+    F: FnOnce() -> Result<T, Status> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(result) => result,
+        Err(join) => Err(Status::internal(format!("libnvnmos call panicked: {join}"))),
     }
+}
 
-    /// `OpenSession` orchestration (session-refcounted analogue of
-    /// [`Daemon::add_node`]): validate daemon bookkeeping under the lock
-    /// and either attach to an existing Node (no FFI) or, for a new Node,
-    /// build the [`nvnmos::NodeServer`] with no lock held and commit under
-    /// the lock.
-    fn open_session(&self, config: nvnmos::NodeConfig) -> Result<state::OpenOutcome, Status> {
-        // Bookkeeping under the lock; the blocking libnvnmos create (mDNS
-        // / bind / worker spawn) runs afterwards with no lock held.
-        let plan = {
-            let mut state = self.lock_state();
-            state.prepare_open_session(config, &self.http_port_range)?
-        };
-        match plan {
-            state::OpenSessionPlan::Attached(outcome) => Ok(outcome),
-            state::OpenSessionPlan::Create(prep) => {
-                let ready = self.run_ffi(prep)?;
-                Ok(self.lock_state().commit_open_session(ready))
-            }
-        }
-    }
-
-    /// `AddSender` orchestration: validate daemon bookkeeping under the
-    /// lock, run the libnvnmos add + id lookups with no lock held, then
-    /// commit under the lock.
-    fn add_sender(
-        &self,
-        session_handle: &str,
-        transport: Transport,
-        transport_file: &str,
-        claimed_name: &str,
-    ) -> Result<state::AddSenderOutcome, Status> {
-        let prep = {
-            let mut state = self.lock_state();
-            state.prepare_add_resource(
-                Side::Sender,
-                session_handle,
-                transport,
-                transport_file,
-                claimed_name,
-            )?
-        };
-        match prep.run_ffi(self.annotations.as_deref())? {
-            state::AddResourceReady::Sender(ready) => {
-                let mut state = self.lock_state();
-                state.commit_add_sender(ready)
-            }
-            state::AddResourceReady::Receiver(_) => Err(Status::internal(
-                "AddSender prep produced a Receiver ready result",
-            )),
-        }
-    }
-
-    /// `AddReceiver` orchestration: validate daemon bookkeeping under the
-    /// lock, run the libnvnmos add + id lookup with no lock held, then
-    /// commit under the lock.
-    fn add_receiver(
-        &self,
-        session_handle: &str,
-        transport: Transport,
-        transport_file: &str,
-        claimed_name: &str,
-    ) -> Result<state::AddReceiverOutcome, Status> {
-        let prep = {
-            let mut state = self.lock_state();
-            state.prepare_add_resource(
-                Side::Receiver,
-                session_handle,
-                transport,
-                transport_file,
-                claimed_name,
-            )?
-        };
-        match prep.run_ffi(self.annotations.as_deref())? {
-            state::AddResourceReady::Receiver(ready) => {
-                let mut state = self.lock_state();
-                state.commit_add_receiver(ready)
-            }
-            state::AddResourceReady::Sender(_) => Err(Status::internal(
-                "AddReceiver prep produced a Sender ready result",
-            )),
-        }
-    }
-
-    /// `AddChannelMapping` orchestration (IS-08 analogue of
-    /// [`Daemon::add_sender`] / [`Daemon::add_receiver`]): validate daemon
-    /// bookkeeping under the lock, run the libnvnmos add with no lock held,
-    /// then commit under the lock.
-    fn add_channelmapping(
-        &self,
-        session_handle: &str,
-        name: &str,
-        inputs: &[nvnmos_rpc::v1::ChannelMappingInput],
-        outputs: &[nvnmos_rpc::v1::ChannelMappingOutput],
-    ) -> Result<state::AddChannelMappingOutcome, Status> {
-        let prep = {
-            let mut state = self.lock_state();
-            state.prepare_add_channelmapping(session_handle, name, inputs, outputs)?
-        };
-        let ready = prep.run_ffi()?;
-        let mut state = self.lock_state();
-        state.commit_add_channelmapping(ready)
+/// Finish `work` even when the RPC handler is dropped.
+///
+/// The handler awaits the task, so a client that stays connected receives
+/// the result. Dropping that await does not cancel the task. `work` awaits
+/// [`blocking_ffi`] and then commits or aborts while holding `state` on an
+/// async worker.
+async fn finish_ffi<T, Fut>(work: Fut) -> Result<T, Status>
+where
+    Fut: Future<Output = Result<T, Status>> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::spawn(work).await {
+        Ok(result) => result,
+        Err(join) => Err(Status::internal(format!(
+            "daemon follow-up to a libnvnmos call panicked: {join}"
+        ))),
     }
 }
 
@@ -259,7 +172,30 @@ impl NvnmosDaemon for Daemon {
         let req = request.into_inner();
         let config = state::translate_config(req.node_config.as_ref())?;
         let seed = config.seed.clone();
-        let outcome = self.add_node(config)?;
+        let prep = {
+            let mut state = self.lock_state();
+            state.prepare_add_node(config, &self.http_port_range)?
+        };
+        let node_seed = prep.seed.clone();
+        let http_port = prep.http_port;
+        let daemon = self.clone();
+        // Build the NodeServer outside the lock. Commit or abort still runs
+        // if the client drops this RPC during the build.
+        let outcome = finish_ffi(async move {
+            let built = blocking_ffi({
+                let daemon = daemon.clone();
+                move || daemon.run_ffi(prep)
+            })
+            .await;
+            if built.is_err() {
+                daemon
+                    .lock_state()
+                    .abort_pending_node(&node_seed, http_port);
+            }
+            let ready = built?;
+            Ok(daemon.lock_state().commit_add_node(ready))
+        })
+        .await?;
         tracing::info!(
             node_seed = %seed,
             node_id = %outcome.node_id,
@@ -284,7 +220,11 @@ impl NvnmosDaemon for Daemon {
             state.remove_node(&req.node_seed)?
         };
         // Drop the NodeServer (destroy + thread-join) outside the lock.
-        ffi.run();
+        blocking_ffi(move || {
+            ffi.run();
+            Ok(())
+        })
+        .await?;
         {
             let state = self.lock_state();
             malloc_trim::maybe_after_remove_node(&state, &req.node_seed);
@@ -307,9 +247,45 @@ impl NvnmosDaemon for Daemon {
         // (bad port), and there's no reason to hold the lock for it.
         let config = state::translate_config(req.node_config.as_ref())?;
         let seed = config.seed.clone();
-        let outcome = self.open_session(config)?;
-        self.session_gc
-            .start_subscribe_timeout(&outcome.session_handle);
+        // Bookkeeping under the lock. Attaching to an existing Node does no
+        // libnvnmos work. Creating one builds the NodeServer outside the lock.
+        let plan = {
+            let mut state = self.lock_state();
+            state.prepare_open_session(config, &self.http_port_range)?
+        };
+        let outcome = match plan {
+            state::OpenSessionPlan::Attached(outcome) => {
+                self.session_gc
+                    .start_subscribe_timeout(&outcome.session_handle);
+                outcome
+            }
+            state::OpenSessionPlan::Create(prep) => {
+                let node_seed = prep.seed.clone();
+                let http_port = prep.http_port;
+                let daemon = self.clone();
+                let session_gc = self.session_gc.clone();
+                // Build the NodeServer outside the lock. Commit or abort,
+                // and the subscribe timeout, still run if the client drops
+                // this RPC during the build.
+                finish_ffi(async move {
+                    let built = blocking_ffi({
+                        let daemon = daemon.clone();
+                        move || daemon.run_ffi(prep)
+                    })
+                    .await;
+                    if built.is_err() {
+                        daemon
+                            .lock_state()
+                            .abort_pending_node(&node_seed, http_port);
+                    }
+                    let ready = built?;
+                    let outcome = daemon.lock_state().commit_open_session(ready);
+                    session_gc.start_subscribe_timeout(&outcome.session_handle);
+                    Ok(outcome)
+                })
+                .await?
+            }
+        };
 
         tracing::info!(
             node_seed = %seed,
@@ -342,7 +318,11 @@ impl NvnmosDaemon for Daemon {
         // last session) destroy the NodeServer outside the lock, so a
         // parked activation thread can take the lock and let the
         // thread-joins in destroy return.
-        ffi.run();
+        blocking_ffi(move || {
+            ffi.run();
+            Ok(())
+        })
+        .await?;
         {
             let state = self.lock_state();
             malloc_trim::maybe_after_close_session(&state, &outcome);
@@ -365,12 +345,32 @@ impl NvnmosDaemon for Daemon {
     ) -> Result<Response<AddSenderResponse>, Status> {
         let req = request.into_inner();
         let transport = state::translate_transport(decode_proto_transport(req.transport)?)?;
-        let outcome = self.add_sender(
-            &req.session_handle,
-            transport,
-            &req.transport_file,
-            &req.name,
-        )?;
+        let prep = {
+            let mut state = self.lock_state();
+            state.prepare_add_resource(
+                Side::Sender,
+                &req.session_handle,
+                transport,
+                &req.transport_file,
+                &req.name,
+            )?
+        };
+        // The libnvnmos add runs outside the lock. The commit still runs
+        // if the client drops this RPC during the add.
+        let annotations = self.annotations.clone();
+        let daemon = self.clone();
+        let outcome = finish_ffi(async move {
+            let ready = blocking_ffi(move || prep.run_ffi(annotations.as_deref())).await?;
+            match ready {
+                state::AddResourceReady::Sender(ready) => {
+                    daemon.lock_state().commit_add_sender(ready)
+                }
+                state::AddResourceReady::Receiver(_) => Err(Status::internal(
+                    "AddSender prep produced a Receiver ready result",
+                )),
+            }
+        })
+        .await?;
         tracing::info!(
             session_handle = %req.session_handle,
             node_seed = %outcome.node_seed,
@@ -395,12 +395,32 @@ impl NvnmosDaemon for Daemon {
     ) -> Result<Response<AddReceiverResponse>, Status> {
         let req = request.into_inner();
         let transport = state::translate_transport(decode_proto_transport(req.transport)?)?;
-        let outcome = self.add_receiver(
-            &req.session_handle,
-            transport,
-            &req.transport_file,
-            &req.name,
-        )?;
+        let prep = {
+            let mut state = self.lock_state();
+            state.prepare_add_resource(
+                Side::Receiver,
+                &req.session_handle,
+                transport,
+                &req.transport_file,
+                &req.name,
+            )?
+        };
+        // The libnvnmos add runs outside the lock. The commit still runs
+        // if the client drops this RPC during the add.
+        let annotations = self.annotations.clone();
+        let daemon = self.clone();
+        let outcome = finish_ffi(async move {
+            let ready = blocking_ffi(move || prep.run_ffi(annotations.as_deref())).await?;
+            match ready {
+                state::AddResourceReady::Receiver(ready) => {
+                    daemon.lock_state().commit_add_receiver(ready)
+                }
+                state::AddResourceReady::Sender(_) => Err(Status::internal(
+                    "AddReceiver prep produced a Sender ready result",
+                )),
+            }
+        })
+        .await?;
         tracing::info!(
             session_handle = %req.session_handle,
             node_seed = %outcome.node_seed,
@@ -425,7 +445,11 @@ impl NvnmosDaemon for Daemon {
             state.remove_resource(&req.session_handle, &req.resource_handle)?
         };
         // libnvnmos removal is best-effort and runs outside the lock.
-        ffi.run();
+        blocking_ffi(move || {
+            ffi.run();
+            Ok(())
+        })
+        .await?;
         {
             let state = self.lock_state();
             malloc_trim::maybe_after_remove_resource(&state, &outcome.node_seed);
@@ -507,7 +531,7 @@ impl NvnmosDaemon for Daemon {
         };
         // The libnvnmos activate/deactivate runs outside the lock; its
         // result is the RPC result.
-        ffi.run()?;
+        blocking_ffi(move || ffi.run()).await?;
         tracing::info!(
             session_handle = %req.session_handle,
             resource_handle = %req.resource_handle,
@@ -525,8 +549,23 @@ impl NvnmosDaemon for Daemon {
         request: Request<AddChannelMappingRequest>,
     ) -> Result<Response<AddChannelMappingResponse>, Status> {
         let req = request.into_inner();
-        let outcome =
-            self.add_channelmapping(&req.session_handle, &req.name, &req.inputs, &req.outputs)?;
+        let prep = {
+            let mut state = self.lock_state();
+            state.prepare_add_channelmapping(
+                &req.session_handle,
+                &req.name,
+                &req.inputs,
+                &req.outputs,
+            )?
+        };
+        // The libnvnmos add runs outside the lock. The commit still runs
+        // if the client drops this RPC during the add.
+        let daemon = self.clone();
+        let outcome = finish_ffi(async move {
+            let ready = blocking_ffi(move || prep.run_ffi()).await?;
+            daemon.lock_state().commit_add_channelmapping(ready)
+        })
+        .await?;
         tracing::info!(
             session_handle = %req.session_handle,
             name = %req.name,
@@ -551,7 +590,11 @@ impl NvnmosDaemon for Daemon {
             state.remove_channelmapping(&req.session_handle, &req.channelmapping_handle)?
         };
         // libnvnmos removal is best-effort and runs outside the lock.
-        ffi.run();
+        blocking_ffi(move || {
+            ffi.run();
+            Ok(())
+        })
+        .await?;
         tracing::info!(
             session_handle = %req.session_handle,
             channelmapping_handle = %req.channelmapping_handle,
@@ -577,7 +620,7 @@ impl NvnmosDaemon for Daemon {
             )?
         };
         // The libnvnmos IS-08 activate runs outside the lock.
-        ffi.run()?;
+        blocking_ffi(move || ffi.run()).await?;
         tracing::info!(
             session_handle = %req.session_handle,
             channelmapping_handle = %req.channelmapping_handle,

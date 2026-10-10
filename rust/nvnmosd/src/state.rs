@@ -194,7 +194,7 @@ impl Side {
     /// Dispatch the wrapper's `{sender,receiver}_id` lookup. Returns
     /// `Ok(None)` when libnvnmos does not have a resource of this side
     /// with the given `name`. Used as the post-add validation
-    /// primitive by [`State::add_resource`].
+    /// primitive by [`AddResourcePrep::run_ffi`].
     fn lookup_id(self, server: &NodeServer, name: &str) -> nvnmos::Result<Option<String>> {
         match self {
             Self::Sender => server.sender_id(name),
