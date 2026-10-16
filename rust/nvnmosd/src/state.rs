@@ -1420,7 +1420,7 @@ impl State {
     /// stray (no compensating remove; torn down when the Node is destroyed)
     /// and this returns `NOT_FOUND`.
     pub fn commit_add_sender(&mut self, ready: AddSenderReady) -> Result<AddSenderOutcome, Status> {
-        let resource_handle = self.commit_added_resource(
+        let resource_handle = self.commit_add_resource(
             Side::Sender,
             &ready.name,
             &ready.node_seed,
@@ -1446,7 +1446,7 @@ impl State {
         &mut self,
         ready: AddReceiverReady,
     ) -> Result<AddReceiverOutcome, Status> {
-        let resource_handle = self.commit_added_resource(
+        let resource_handle = self.commit_add_resource(
             Side::Receiver,
             &ready.name,
             &ready.node_seed,
@@ -1459,7 +1459,7 @@ impl State {
         })
     }
 
-    fn commit_added_resource(
+    fn commit_add_resource(
         &mut self,
         side: Side,
         name: &str,
