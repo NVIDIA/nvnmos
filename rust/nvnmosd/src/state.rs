@@ -194,7 +194,7 @@ impl Side {
     /// Dispatch the wrapper's `{sender,receiver}_id` lookup. Returns
     /// `Ok(None)` when libnvnmos does not have a resource of this side
     /// with the given `name`. Used as the post-add validation
-    /// primitive by [`State::add_resource`].
+    /// primitive by [`AddResourcePrep::run_ffi`].
     fn lookup_id(self, server: &NodeServer, name: &str) -> nvnmos::Result<Option<String>> {
         match self {
             Self::Sender => server.sender_id(name),
@@ -1420,7 +1420,7 @@ impl State {
     /// stray (no compensating remove; torn down when the Node is destroyed)
     /// and this returns `NOT_FOUND`.
     pub fn commit_add_sender(&mut self, ready: AddSenderReady) -> Result<AddSenderOutcome, Status> {
-        let resource_handle = self.commit_added_resource(
+        let resource_handle = self.commit_add_resource(
             Side::Sender,
             &ready.name,
             &ready.node_seed,
@@ -1446,7 +1446,7 @@ impl State {
         &mut self,
         ready: AddReceiverReady,
     ) -> Result<AddReceiverOutcome, Status> {
-        let resource_handle = self.commit_added_resource(
+        let resource_handle = self.commit_add_resource(
             Side::Receiver,
             &ready.name,
             &ready.node_seed,
@@ -1459,7 +1459,7 @@ impl State {
         })
     }
 
-    fn commit_added_resource(
+    fn commit_add_resource(
         &mut self,
         side: Side,
         name: &str,

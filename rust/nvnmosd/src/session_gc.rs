@@ -121,8 +121,14 @@ impl SessionGc {
             };
             // Run the libnvnmos removals / NodeServer destroy outside the
             // lock so a parked activation thread can take `state` and let
-            // the destroy thread-joins return.
-            ffi.run();
+            // the destroy thread-joins return. Off the async worker, so a
+            // parked activation's ack can still be served.
+            crate::blocking_ffi(move || {
+                ffi.run();
+                Ok(())
+            })
+            .await
+            .expect("session GC libnvnmos call panicked");
             {
                 let guard = state.lock().expect("daemon state mutex poisoned");
                 malloc_trim::maybe_after_close_session(&guard, &outcome);
