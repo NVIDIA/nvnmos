@@ -1415,11 +1415,16 @@ impl State {
     /// Third phase of `AddSender`: record the Sender in daemon state after
     /// the libnvnmos add + id lookups succeeded.
     ///
-    /// The session must still exist; if it was closed while the FFI ran
-    /// (a concurrent `CloseSession`), the libnvnmos resource is left as a
-    /// stray (no compensating remove; torn down when the Node is destroyed)
-    /// and this returns `NOT_FOUND`.
-    pub fn commit_add_sender(&mut self, ready: AddSenderReady) -> Result<AddSenderOutcome, Status> {
+    /// The session must still exist. If it was closed while the FFI ran,
+    /// this returns `NOT_FOUND` and a [`RemoveResourceFfi`] for the object
+    /// libnvnmos already added. The caller runs that remove outside the
+    /// state lock. A Node that this close destroyed has already dropped
+    /// out of the map, so the remove is a no-op and the object goes with
+    /// the Node.
+    pub fn commit_add_sender(
+        &mut self,
+        ready: AddSenderReady,
+    ) -> Result<AddSenderOutcome, (Status, RemoveResourceFfi)> {
         let resource_handle = self.commit_add_resource(
             Side::Sender,
             &ready.name,
@@ -1438,14 +1443,13 @@ impl State {
     /// Third phase of `AddReceiver`: record the Receiver in daemon state
     /// after the libnvnmos add + id lookup succeeded.
     ///
-    /// The session must still exist; if it was closed while the FFI ran
-    /// (a concurrent `CloseSession`), the libnvnmos resource is left as a
-    /// stray (no compensating remove; torn down when the Node is destroyed)
-    /// and this returns `NOT_FOUND`.
+    /// The session must still exist. If it was closed while the FFI ran,
+    /// this returns `NOT_FOUND` and a [`RemoveResourceFfi`] for the object
+    /// libnvnmos already added. See [`State::commit_add_sender`].
     pub fn commit_add_receiver(
         &mut self,
         ready: AddReceiverReady,
-    ) -> Result<AddReceiverOutcome, Status> {
+    ) -> Result<AddReceiverOutcome, (Status, RemoveResourceFfi)> {
         let resource_handle = self.commit_add_resource(
             Side::Receiver,
             &ready.name,
@@ -1465,7 +1469,7 @@ impl State {
         name: &str,
         node_seed: &str,
         session_handle: &str,
-    ) -> Result<String, Status> {
+    ) -> Result<String, (Status, RemoveResourceFfi)> {
         if !self.sessions.contains_key(session_handle) {
             tracing::warn!(
                 session_handle,
@@ -1473,11 +1477,19 @@ impl State {
                 name = %name,
                 %node_seed,
                 "AddSender/AddReceiver: session closed while libnvnmos add was \
-                 in flight; libnvnmos resource left as stray"
+                 in flight; removing the libnvnmos resource"
             );
-            return Err(Status::not_found(format!(
-                "session {session_handle:?} closed before the add completed"
-            )));
+            let server = self.nodes.get(node_seed).map(|node| node.server.clone());
+            return Err((
+                Status::not_found(format!(
+                    "session {session_handle:?} closed before the add completed"
+                )),
+                RemoveResourceFfi {
+                    server,
+                    side,
+                    name: name.to_string(),
+                },
+            ));
         }
 
         let resource_handle = self.allocate_resource_handle();
@@ -1986,8 +1998,8 @@ impl State {
     ///    ([`AddChannelMappingPrep::run_ffi`], no lock held); then record
     ///    it in daemon state ([`State::commit_add_channelmapping`]). If
     ///    the session closed during FFI, commit returns `NOT_FOUND` and
-    ///    the libnvnmos mapping is left as a stray (no compensating
-    ///    remove; torn down when the Node is destroyed).
+    ///    a [`RemoveChannelMappingFfi`] for the mapping libnvnmos already
+    ///    added.
     pub fn prepare_add_channelmapping(
         &mut self,
         session_handle: &str,
@@ -2059,14 +2071,13 @@ impl State {
     /// Third phase of `AddChannelMapping`: record the channel mapping in
     /// daemon state after the libnvnmos add succeeded.
     ///
-    /// The session must still exist; if it was closed while the FFI ran
-    /// (a concurrent `CloseSession`), the libnvnmos mapping is left as a
-    /// stray (no compensating remove; torn down when the Node is destroyed)
-    /// and this returns `NOT_FOUND`.
+    /// The session must still exist. If it was closed while the FFI ran,
+    /// this returns `NOT_FOUND` and a [`RemoveChannelMappingFfi`] for the
+    /// mapping libnvnmos already added. See [`State::commit_add_sender`].
     pub fn commit_add_channelmapping(
         &mut self,
         ready: AddChannelMappingReady,
-    ) -> Result<AddChannelMappingOutcome, Status> {
+    ) -> Result<AddChannelMappingOutcome, (Status, RemoveChannelMappingFfi)> {
         let AddChannelMappingReady {
             name,
             node_seed,
@@ -2081,11 +2092,18 @@ impl State {
                 name = %name,
                 %node_seed,
                 "AddChannelMapping: session closed while libnvnmos add was in \
-                 flight; libnvnmos channel mapping left as stray"
+                 flight; removing the libnvnmos channel mapping"
             );
-            return Err(Status::not_found(format!(
-                "session {session_handle:?} closed before the add completed"
-            )));
+            let server = self.nodes.get(&node_seed).map(|node| node.server.clone());
+            return Err((
+                Status::not_found(format!(
+                    "session {session_handle:?} closed before the add completed"
+                )),
+                RemoveChannelMappingFfi {
+                    server,
+                    name: name.clone(),
+                },
+            ));
         }
 
         let channelmapping_handle = self.allocate_channelmapping_handle();
@@ -2632,5 +2650,139 @@ mod http_port_allocation_tests {
             .resolve_http_port_for_test(18_010, &range)
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::AlreadyExists);
+    }
+}
+
+#[cfg(test)]
+mod commit_after_close_tests {
+    use super::{OpenSessionPlan, Side, State, Transport};
+
+    fn iface_ip() -> String {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").expect("udp");
+        sock.connect("8.8.8.8:80").expect("route");
+        sock.local_addr().expect("local addr").ip().to_string()
+    }
+
+    fn ports() -> super::PortRange {
+        super::PortRange::new(18_320, 18_329).expect("range")
+    }
+
+    fn minimal_sender_sdp(name: &str, iface_ip: &str) -> String {
+        format!(
+            "v=0\r\n\
+             o=- 0 0 IN IP4 {iface_ip}\r\n\
+             s=commit-after-close\r\n\
+             t=0 0\r\n\
+             a=x-nvnmos-name:{name}\r\n\
+             m=video 5020 RTP/AVP 96\r\n\
+             c=IN IP4 233.252.0.0/64\r\n\
+             a=source-filter: incl IN IP4 233.252.0.0 {iface_ip}\r\n\
+             a=x-nvnmos-iface-ip:{iface_ip}\r\n\
+             a=rtpmap:96 raw/90000\r\n\
+             a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080; \
+             exactframerate=50; depth=10; TCS=SDR; colorimetry=BT709; \
+             PM=2110GPM; SSN=ST2110-20:2017; TP=2110TPN;\r\n\
+             a=mediaclk:direct=0\r\n\
+             a=x-nvnmos-src-port:5004\r\n\
+             a=ts-refclk:localmac=CA-FE-01-CA-FE-02\r\n"
+        )
+    }
+
+    #[test]
+    fn commit_after_close_removes_the_libnvnmos_sender() {
+        let mut state = State::new();
+        let seed = "commit-after-close";
+        let config = nvnmos::NodeConfig {
+            seed: seed.to_string(),
+            http_port: 0,
+            ..nvnmos::NodeConfig::default()
+        };
+        let ports = ports();
+        let prep = state
+            .prepare_add_node(config, &ports)
+            .expect("prepare node");
+        let ready = prep
+            .run_ffi(|_| Ok(()), |_| Ok(()), None)
+            .expect("build node");
+        state.commit_add_node(ready);
+
+        let OpenSessionPlan::Attached(open) = state
+            .prepare_open_session(
+                nvnmos::NodeConfig {
+                    seed: seed.to_string(),
+                    ..nvnmos::NodeConfig::default()
+                },
+                &ports,
+            )
+            .expect("attach")
+        else {
+            panic!("persistent node should attach");
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        state
+            .subscribe_activations(&open.session_handle, tx)
+            .expect("subscribe");
+
+        let name = "sender-closed";
+        let prep = state
+            .prepare_add_resource(
+                Side::Sender,
+                &open.session_handle,
+                Transport::Rtp,
+                &minimal_sender_sdp(name, &iface_ip()),
+                name,
+            )
+            .expect("prepare add");
+        let ready = prep.run_ffi(None).expect("libnvnmos add");
+        let super::AddResourceReady::Sender(ready) = ready else {
+            panic!("sender add");
+        };
+
+        let (_outcome, close_ffi) = state.close_session(&open.session_handle).expect("close");
+        close_ffi.run();
+
+        let (status, remove) = state.commit_add_sender(ready).expect_err("session is gone");
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        remove.run();
+
+        let OpenSessionPlan::Attached(open) = state
+            .prepare_open_session(
+                nvnmos::NodeConfig {
+                    seed: seed.to_string(),
+                    ..nvnmos::NodeConfig::default()
+                },
+                &ports,
+            )
+            .expect("attach again")
+        else {
+            panic!("persistent node should attach");
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        state
+            .subscribe_activations(&open.session_handle, tx)
+            .expect("subscribe again");
+        let prep = state
+            .prepare_add_resource(
+                Side::Sender,
+                &open.session_handle,
+                Transport::Rtp,
+                &minimal_sender_sdp(name, &iface_ip()),
+                name,
+            )
+            .expect("prepare second add");
+        let ready = prep
+            .run_ffi(None)
+            .expect("second add must not see a leftover sender");
+        let super::AddResourceReady::Sender(ready) = ready else {
+            panic!("sender add");
+        };
+        if let Err((status, _)) = state.commit_add_sender(ready) {
+            panic!("commit second add: {status}");
+        }
+
+        let (_outcome, close_ffi) = state.close_session(&open.session_handle).expect("close");
+        close_ffi.run();
+        let (_outcome, remove_node) = state.remove_node(seed).expect("remove node");
+        remove_node.run();
     }
 }
