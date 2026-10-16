@@ -903,9 +903,13 @@ impl NmosSrc {
             {
                 Ok(fake) => {
                     if let Err(e) = self.swap_inner(bin_ref, &fake, reroute_opts) {
-                        return ActivationOutcome::Failed {
-                            reason: format!("nmossrc: intermediate fake-chain swap failed: {e:#}"),
-                        };
+                        // No fallback on this hop. The pipeline stays up,
+                        // `active` is unchanged, and the `AckActivation`
+                        // reason is discarded.
+                        let reason = format!("nmossrc: intermediate fake-chain swap failed: {e:#}");
+                        gst::warning!(CAT, "{reason}");
+                        gst::element_imp_warning!(self, gst::CoreError::StateChange, ("{reason}"));
+                        return ActivationOutcome::Failed { reason };
                     }
                 }
                 Err(e) => {
@@ -1020,13 +1024,12 @@ impl NmosSrc {
             }
         };
         if let Err(e) = self.swap_inner(bin_ref, &new_inner, reroute_opts) {
-            // Loud-log the swap failure so the cause shows up in
-            // the consumer log, not just stuffed into the daemon's
-            // (currently-discarded) `AckActivation` reason.
-            gst::warning!(
-                CAT,
-                "nmossrc activation swap failed; restoring fake chain: {e:#}",
-            );
+            // The pipeline stays up on the fake chain, and the
+            // `AckActivation` reason is discarded. The bus warning is
+            // what an application can respond to.
+            let reason = format!("nmossrc: swapping inner element: {e:#}");
+            gst::warning!(CAT, "{reason}");
+            gst::element_imp_warning!(self, gst::CoreError::StateChange, ("{reason}"));
             // Best-effort: try to restore a caps-aware fake chain
             // so the bin doesn't end up with a bare appsrc that
             // can't negotiate. If caps resolution fails here we
@@ -1037,9 +1040,7 @@ impl NmosSrc {
                     gst::warning!(CAT, "nmossrc fake-chain restore also failed: {e2:#}",);
                 }
             }
-            return ActivationOutcome::Failed {
-                reason: format!("nmossrc: swapping inner element: {e:#}"),
-            };
+            return ActivationOutcome::Failed { reason };
         }
         match &plan.ack {
             ActivationAck::Success => {
