@@ -156,7 +156,7 @@ the AB-BA deadlock with `model`. Bookkeeping mutations remain serialized by
 | Concern | Mechanism |
 |---------|-----------|
 | Double node create for same `node_seed` | `pending_nodes` + `http_ports` reserved in `prepare_*`; concurrent `OpenSession` / `AddNode` gets `UNAVAILABLE` / `ALREADY_EXISTS` |
-| Add resource while session dies | `commit_add_sender` / `commit_add_receiver` re-checks session exists; returns `NOT_FOUND` if `CloseSession` won the race |
+| Add resource while session dies | `commit_add_sender` / `commit_add_receiver` / `commit_add_channelmapping` re-check that the session exists. If `CloseSession` won, commit returns `NOT_FOUND` and a deferred remove of the object libnvnmos already added |
 | `NodeServer` destroyed while FFI uses it | `Arc<NodeServer>` in `*Prep` / `*Ffi` keeps the C++ object alive until `run_ffi` / `run()` completes |
 | Conflicting FFI on one Node | libnvnmos `model` lock serialises internally |
 
@@ -169,7 +169,7 @@ reintroduces the deadlock).
 
 | Scenario | Outcome |
 |----------|---------|
-| `CloseSession` during `AddSender` / `AddReceiver` / `AddChannelMapping` FFI | libnvnmos accepted the add, but the session is gone before commit. Commit returns `NOT_FOUND`; the daemon does **not** attempt a compensating libnvnmos remove. The object is a **stray** in libnvnmos until the Node is destroyed. The client sees a failed add, not a hung daemon. |
+| `CloseSession` during `AddSender` / `AddReceiver` / `AddChannelMapping` FFI | libnvnmos accepted the add, but the session is gone before commit. Commit returns `NOT_FOUND` and removes that object outside the state lock. The client sees a failed add, not a hung daemon. A later add of the same name succeeds once the remove has finished. |
 | Activation for a stray (or between add FFI and commit) | `dispatch_activation` / `dispatch_channelmapping_activation` find no daemon entry → NACK (`NoResource` / `NoChannelMapping`). The daemon does not remove the libnvnmos object on this path. |
 | Node create: server up, not yet committed | No session or resources in daemon maps yet; activations cannot route. A second create for the same seed is blocked by `pending_nodes`. |
 

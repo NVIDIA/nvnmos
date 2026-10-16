@@ -375,12 +375,25 @@ impl NvnmosDaemon for Daemon {
             let ready = blocking_ffi(move || prep.run_ffi(annotations.as_deref())).await?;
             match ready {
                 state::AddResourceReady::Sender(ready) => {
-                    let mut state = daemon.lock_state();
-                    let outcome = state.commit_add_sender(ready)?;
-                    if let Some(store) = store.as_ref() {
-                        state.emit_added_resource(&outcome.resource_handle, store);
+                    let committed = {
+                        let mut state = daemon.lock_state();
+                        let committed = state.commit_add_sender(ready);
+                        if let (Ok(outcome), Some(store)) = (&committed, store.as_ref()) {
+                            state.emit_added_resource(&outcome.resource_handle, store);
+                        }
+                        committed
+                    };
+                    match committed {
+                        Ok(outcome) => Ok(outcome),
+                        Err((status, ffi)) => {
+                            blocking_ffi(move || {
+                                ffi.run();
+                                Ok(())
+                            })
+                            .await?;
+                            Err(status)
+                        }
                     }
-                    Ok(outcome)
                 }
                 state::AddResourceReady::Receiver(_) => Err(Status::internal(
                     "AddSender prep produced a Receiver ready result",
@@ -431,12 +444,25 @@ impl NvnmosDaemon for Daemon {
             let ready = blocking_ffi(move || prep.run_ffi(annotations.as_deref())).await?;
             match ready {
                 state::AddResourceReady::Receiver(ready) => {
-                    let mut state = daemon.lock_state();
-                    let outcome = state.commit_add_receiver(ready)?;
-                    if let Some(store) = store.as_ref() {
-                        state.emit_added_resource(&outcome.resource_handle, store);
+                    let committed = {
+                        let mut state = daemon.lock_state();
+                        let committed = state.commit_add_receiver(ready);
+                        if let (Ok(outcome), Some(store)) = (&committed, store.as_ref()) {
+                            state.emit_added_resource(&outcome.resource_handle, store);
+                        }
+                        committed
+                    };
+                    match committed {
+                        Ok(outcome) => Ok(outcome),
+                        Err((status, ffi)) => {
+                            blocking_ffi(move || {
+                                ffi.run();
+                                Ok(())
+                            })
+                            .await?;
+                            Err(status)
+                        }
                     }
-                    Ok(outcome)
                 }
                 state::AddResourceReady::Sender(_) => Err(Status::internal(
                     "AddReceiver prep produced a Sender ready result",
@@ -586,7 +612,18 @@ impl NvnmosDaemon for Daemon {
         let daemon = self.clone();
         let outcome = finish_ffi(async move {
             let ready = blocking_ffi(move || prep.run_ffi()).await?;
-            daemon.lock_state().commit_add_channelmapping(ready)
+            let committed = daemon.lock_state().commit_add_channelmapping(ready);
+            match committed {
+                Ok(outcome) => Ok(outcome),
+                Err((status, ffi)) => {
+                    blocking_ffi(move || {
+                        ffi.run();
+                        Ok(())
+                    })
+                    .await?;
+                    Err(status)
+                }
+            }
         })
         .await?;
         tracing::info!(
