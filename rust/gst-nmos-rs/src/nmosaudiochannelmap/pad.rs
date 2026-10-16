@@ -173,6 +173,11 @@ mod imp {
             self.frozen
                 .store(true, std::sync::atomic::Ordering::Release);
         }
+
+        pub(crate) fn thaw(&self) {
+            self.frozen
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
     }
 
     #[glib::object_subclass]
@@ -291,6 +296,11 @@ mod imp {
         pub(crate) fn freeze(&self) {
             self.frozen
                 .store(true, std::sync::atomic::Ordering::Release);
+        }
+
+        pub(crate) fn thaw(&self) {
+            self.frozen
+                .store(false, std::sync::atomic::Ordering::Release);
         }
     }
 }

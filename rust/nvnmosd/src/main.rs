@@ -363,7 +363,18 @@ impl NvnmosDaemon for Daemon {
             let ready = blocking_ffi(move || prep.run_ffi(annotations.as_deref())).await?;
             match ready {
                 state::AddResourceReady::Sender(ready) => {
-                    daemon.lock_state().commit_add_sender(ready)
+                    let committed = daemon.lock_state().commit_add_sender(ready);
+                    match committed {
+                        Ok(outcome) => Ok(outcome),
+                        Err((status, ffi)) => {
+                            blocking_ffi(move || {
+                                ffi.run();
+                                Ok(())
+                            })
+                            .await?;
+                            Err(status)
+                        }
+                    }
                 }
                 state::AddResourceReady::Receiver(_) => Err(Status::internal(
                     "AddSender prep produced a Receiver ready result",
@@ -413,7 +424,18 @@ impl NvnmosDaemon for Daemon {
             let ready = blocking_ffi(move || prep.run_ffi(annotations.as_deref())).await?;
             match ready {
                 state::AddResourceReady::Receiver(ready) => {
-                    daemon.lock_state().commit_add_receiver(ready)
+                    let committed = daemon.lock_state().commit_add_receiver(ready);
+                    match committed {
+                        Ok(outcome) => Ok(outcome),
+                        Err((status, ffi)) => {
+                            blocking_ffi(move || {
+                                ffi.run();
+                                Ok(())
+                            })
+                            .await?;
+                            Err(status)
+                        }
+                    }
                 }
                 state::AddResourceReady::Sender(_) => Err(Status::internal(
                     "AddReceiver prep produced a Sender ready result",
@@ -563,7 +585,18 @@ impl NvnmosDaemon for Daemon {
         let daemon = self.clone();
         let outcome = finish_ffi(async move {
             let ready = blocking_ffi(move || prep.run_ffi()).await?;
-            daemon.lock_state().commit_add_channelmapping(ready)
+            let committed = daemon.lock_state().commit_add_channelmapping(ready);
+            match committed {
+                Ok(outcome) => Ok(outcome),
+                Err((status, ffi)) => {
+                    blocking_ffi(move || {
+                        ffi.run();
+                        Ok(())
+                    })
+                    .await?;
+                    Err(status)
+                }
+            }
         })
         .await?;
         tracing::info!(

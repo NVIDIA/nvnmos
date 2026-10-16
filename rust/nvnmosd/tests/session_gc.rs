@@ -240,6 +240,78 @@ async fn resubscribe_timeout_closes_session() {
         .await;
 }
 
+/// A zero resubscribe timeout closes the session once the activation stream ends.
+#[tokio::test]
+async fn zero_resubscribe_timeout_closes_session() {
+    let mut harness = DaemonHarness::spawn(
+        18_310..=18_319,
+        &[
+            ("NVNMOSD_SESSION_GC", "1"),
+            ("NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC", "5"),
+            ("NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC", "0"),
+        ],
+    );
+    harness.ready().await;
+    let mut client = connect(&harness.uds).await;
+    let seed = "session-gc-zero";
+    let iface = autodetect_iface_ip();
+    let session = open_session(&mut client, seed).await;
+
+    let sub = client
+        .subscribe_activations(SubscribeActivationsRequest {
+            session_handle: session.clone(),
+        })
+        .await
+        .expect("subscribe")
+        .into_inner();
+
+    client
+        .add_sender(AddSenderRequest {
+            session_handle: session.clone(),
+            name: "sender-zero".to_string(),
+            transport: ProtoTransport::Rtp as i32,
+            transport_file: minimal_sender_sdp("sender-zero", &iface),
+        })
+        .await
+        .expect("AddSender");
+
+    drop(sub);
+    // The stream's drop starts the close asynchronously. One second is the
+    // same slack case C allows beyond its configured timeout.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let err = client
+        .close_session(CloseSessionRequest {
+            session_handle: session.clone(),
+        })
+        .await
+        .expect_err("old session should be gone");
+    expect_code(err, Code::NotFound);
+
+    let session2 = open_session(&mut client, seed).await;
+    let _sub2 = client
+        .subscribe_activations(SubscribeActivationsRequest {
+            session_handle: session2.clone(),
+        })
+        .await
+        .expect("subscribe on new session")
+        .into_inner();
+    client
+        .add_sender(AddSenderRequest {
+            session_handle: session2.clone(),
+            name: "sender-zero".to_string(),
+            transport: ProtoTransport::Rtp as i32,
+            transport_file: minimal_sender_sdp("sender-zero", &iface),
+        })
+        .await
+        .expect("reuse name after immediate close");
+    let _ = client
+        .close_session(CloseSessionRequest {
+            session_handle: session2,
+        })
+        .await;
+}
+
 /// Case D — subscribe timeout after OpenSession.
 #[tokio::test]
 async fn subscribe_timeout_closes_session() {
