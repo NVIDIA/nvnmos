@@ -959,9 +959,14 @@ impl NmosSink {
             {
                 Ok(p) => {
                     if let Err(e) = self.swap_inner(bin_ref, &p, None) {
-                        return ActivationOutcome::Failed {
-                            reason: format!("nmossink: intermediate fake-chain swap failed: {e:#}"),
-                        };
+                        // No fallback on this hop. The pipeline stays up,
+                        // `active` is unchanged, and the `AckActivation`
+                        // reason is discarded.
+                        let reason =
+                            format!("nmossink: intermediate fake-chain swap failed: {e:#}");
+                        gst::warning!(CAT, "{reason}");
+                        gst::element_imp_warning!(self, gst::CoreError::StateChange, ("{reason}"));
+                        return ActivationOutcome::Failed { reason };
                     }
                 }
                 Err(e) => {
@@ -1010,14 +1015,14 @@ impl NmosSink {
         };
         let mut build_fallback = || inner::build_fake_sink(fallback_caps.as_ref());
         if let Err(e) = self.swap_inner(bin_ref, &new_inner, Some(&mut build_fallback)) {
-            // Loud-log the swap failure so the cause shows up in
-            // the producer log, not just stuffed into the daemon's
-            // (currently-discarded) `AckActivation` reason. The fallback
-            // sink, when it could be built, is already linked.
-            gst::warning!(CAT, "nmossink activation swap failed: {e:#}");
-            return ActivationOutcome::Failed {
-                reason: format!("nmossink: swapping inner element: {e:#}"),
-            };
+            // The pipeline stays up on the fallback sink, and the
+            // `AckActivation` reason is discarded. The bus warning is
+            // what an application can respond to. The fallback sink, when it
+            // could be built, is already linked.
+            let reason = format!("nmossink: swapping inner element: {e:#}");
+            gst::warning!(CAT, "{reason}");
+            gst::element_imp_warning!(self, gst::CoreError::StateChange, ("{reason}"));
+            return ActivationOutcome::Failed { reason };
         }
         match &plan.ack {
             ActivationAck::Success => {
