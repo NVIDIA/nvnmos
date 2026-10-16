@@ -610,7 +610,7 @@ impl BinImpl for NmosSink {
             {
                 let settings = imp.settings.lock().unwrap().clone();
                 match build_fake_sink_for_settings(&settings)
-                    .and_then(|fake| imp.swap_inner(sink.upcast_ref(), &fake))
+                    .and_then(|fake| imp.swap_inner(sink.upcast_ref(), &fake, None))
                 {
                     Ok(()) => gst::warning!(
                         CAT,
@@ -676,7 +676,7 @@ impl NmosSink {
                     let settings = self.settings.lock().unwrap();
                     build_real_sink(transport, &settings)?
                 };
-                self.swap_inner(bin, &new_inner)?;
+                self.swap_inner(bin, &new_inner, None)?;
                 // Reaching the `Real` branch at NULL→READY / READY→PAUSED
                 // implies `auto-activate=true` (the `validate_and_open` and
                 // `add_deferred_sender` gates downgrade to a fake chain
@@ -714,7 +714,7 @@ impl NmosSink {
         let snapshot = self.settings.lock().unwrap().clone();
         match build_fake_sink_for_settings(&snapshot) {
             Ok(fake) => {
-                if let Err(e) = self.swap_inner(bin_ref, &fake) {
+                if let Err(e) = self.swap_inner(bin_ref, &fake, None) {
                     gst::warning!(CAT, "restoring nmossink fake chain: {e:#}");
                 }
             }
@@ -730,7 +730,7 @@ impl NmosSink {
         if let Some(caps) = caps {
             gst::info!(CAT, "nmossink pinning fake chain to `{caps}`");
             let fake = inner::build_fake_sink(Some(&caps))?;
-            self.swap_inner(bin, &fake)?;
+            self.swap_inner(bin, &fake, None)?;
         } else {
             gst::debug!(
                 CAT,
@@ -779,16 +779,29 @@ impl NmosSink {
         let fixated = crate::session::prepare_deferred_peer_caps("nmossink", peer_caps)?;
         gst::info!(CAT, "nmossink pinning deferred fake chain to `{fixated}`");
         let fake = inner::build_fake_sink(Some(&fixated))?;
-        self.swap_inner(bin, &fake)?;
+        self.swap_inner(bin, &fake, None)?;
         Ok(())
     }
 
-    fn swap_inner(&self, bin: &gst::Bin, new_inner: &gst::Element) -> Result<(), anyhow::Error> {
+    fn swap_inner(
+        &self,
+        bin: &gst::Bin,
+        new_inner: &gst::Element,
+        fallback: Option<&mut dyn FnMut() -> Result<gst::Element, anyhow::Error>>,
+    ) -> Result<(), anyhow::Error> {
         let ghost_guard = self.ghost.lock().unwrap();
         let ghost = ghost_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("nmossink ghost pad missing"))?;
-        inner::rebuild_chain(&CAT, bin, ghost, new_inner, "sink")
+        inner::rebuild_chain_with_opts(
+            &CAT,
+            bin,
+            ghost,
+            new_inner,
+            "sink",
+            inner::RebuildChainOpts::default(),
+            fallback,
+        )
     }
 
     /// True iff the bin's current inner chain is a real transport
@@ -945,7 +958,7 @@ impl NmosSink {
                 .and_then(|caps| inner::build_fake_sink(caps.as_ref()))
             {
                 Ok(p) => {
-                    if let Err(e) = self.swap_inner(bin_ref, &p) {
+                    if let Err(e) = self.swap_inner(bin_ref, &p, None) {
                         return ActivationOutcome::Failed {
                             reason: format!("nmossink: intermediate fake-chain swap failed: {e:#}"),
                         };
@@ -985,21 +998,23 @@ impl NmosSink {
                 }
             }
         };
-        if let Err(e) = self.swap_inner(bin_ref, &new_inner) {
+        // Resolve caps before the swap removes the current chain. The sink
+        // itself is built only if that swap fails, while the anchor is blocked.
+        let fallback_caps = match fake_caps_from_settings(&settings) {
+            Ok(caps) => caps,
+            Err(e) => {
+                return ActivationOutcome::Failed {
+                    reason: format!("nmossink: preparing fake-chain restore: {e:#}"),
+                };
+            }
+        };
+        let mut build_fallback = || inner::build_fake_sink(fallback_caps.as_ref());
+        if let Err(e) = self.swap_inner(bin_ref, &new_inner, Some(&mut build_fallback)) {
             // Loud-log the swap failure so the cause shows up in
             // the producer log, not just stuffed into the daemon's
-            // (currently-discarded) `AckActivation` reason.
-            gst::warning!(
-                CAT,
-                "nmossink activation swap failed; restoring fake chain: {e:#}",
-            );
-            // Try one more time with a fresh fake chain so the bin
-            // is left in a known state even on the failure path.
-            if let Ok(p) = build_fake_sink_for_settings(&settings) {
-                if let Err(e2) = self.swap_inner(bin_ref, &p) {
-                    gst::warning!(CAT, "nmossink fake-chain restore also failed: {e2:#}",);
-                }
-            }
+            // (currently-discarded) `AckActivation` reason. The fallback
+            // sink, when it could be built, is already linked.
+            gst::warning!(CAT, "nmossink activation swap failed: {e:#}");
             return ActivationOutcome::Failed {
                 reason: format!("nmossink: swapping inner element: {e:#}"),
             };
@@ -1391,7 +1406,7 @@ mod tests {
             .build()
             .expect("real sink");
         sink.imp()
-            .swap_inner(sink.upcast_ref(), &real)
+            .swap_inner(sink.upcast_ref(), &real, None)
             .expect("install real sink");
         assert!(sink.imp().current_chain_is_real());
 

@@ -838,8 +838,11 @@ pub(crate) fn parse_sdp(text: &str) -> Result<UdpMedia, SdpError> {
 }
 
 /// Build a single-`m=` SDP from a dual-leg activation file when exactly one leg
-/// is active. Used for `nvdsudpsink` `sdp-file` — not for configuring SDP sent
-/// to `nvnmosd`.
+/// is active. The active `m=` section is kept as written rather than being rebuilt
+/// from the parsed SDP message. The inactive section, session-level `a=group:`
+/// lines, and `a=mid:` on the kept section are dropped.
+///
+/// Used for `nvdsudpsink` `sdp-file` — not for configuring SDP sent to `nvnmosd`.
 pub(crate) fn normalise_to_single_active_leg(text: &str) -> Result<String, SdpError> {
     let count = sdp_media_block_count(text)?;
     if count == 1 {
@@ -851,32 +854,51 @@ pub(crate) fn normalise_to_single_active_leg(text: &str) -> Result<String, SdpEr
     if count_active_sdp_legs(text)? != 1 {
         return Err(SdpError::NotExactlyOneActiveLeg);
     }
-    let media = parse_sdp(text)?;
     let msg =
         SDPMessage::parse_buffer(text.as_bytes()).map_err(|e| SdpError::Parse(e.to_string()))?;
-    let origin = msg.origin();
-    let origin_address = origin
-        .and_then(|o| o.addr())
-        .unwrap_or(defaults::UNSPECIFIED_ADDRESS);
-    let origin_session_id = origin.and_then(|o| o.sess_id()).unwrap_or("0");
-    let session_name = msg.session_name().unwrap_or("nvnmos session");
-    let active_idx = (0..2).find(|&idx| msg.media(idx).is_some_and(|m| !is_media_inactive(m)));
-    let emit_ptp_ts_refclk = active_idx
-        .and_then(|idx| msg.media(idx))
-        .and_then(|m| m.attribute_val("ts-refclk"))
-        .is_some();
-    let session = SdpSession {
-        origin_address,
-        origin_session_id,
-        session_name,
-        description: msg.information(),
-        name: msg.attribute_val("x-nvnmos-name"),
-        group_hint: msg.attribute_val("x-nvnmos-group-hint"),
-        advertise_caps: false,
-        emit_ptp_ts_refclk,
-        bit_rates: BitRates::UNSET,
+    let active_idx = (0..msg.medias_len())
+        .find(|&idx| msg.media(idx).is_some_and(|m| !is_media_inactive(m)))
+        .ok_or(SdpError::NotExactlyOneActiveLeg)?;
+    splice_active_media_section(text, active_idx as usize)
+}
+
+/// Keep the session preamble and one `m=` section from `text`.
+fn splice_active_media_section(text: &str, active_idx: usize) -> Result<String, SdpError> {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut lines: Vec<&str> = text
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r'))
+        .collect();
+    if lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+
+    let mut session = Vec::new();
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    for line in lines {
+        if line.starts_with("m=") {
+            blocks.push(vec![line]);
+        } else if let Some(block) = blocks.last_mut() {
+            block.push(line);
+        } else if !line.trim_start().starts_with("a=group:") {
+            session.push(line);
+        }
+    }
+    let Some(media) = blocks.get(active_idx) else {
+        return Err(SdpError::NotExactlyOneActiveLeg);
     };
-    build_sdp(&media, session)
+
+    let kept: Vec<String> = media
+        .iter()
+        .copied()
+        .filter(|line| !line.trim_start().starts_with("a=mid:"))
+        .map(str::to_owned)
+        .collect();
+
+    let mut out: Vec<String> = session.into_iter().map(str::to_owned).collect();
+    out.extend(kept);
+    out.push(String::new());
+    Ok(out.join(newline))
 }
 
 /// Session-level `a=x-nvnmos-name` from configuring SDP text.
@@ -3315,6 +3337,91 @@ mod tests {
         assert_eq!(media.primary.destination_ip, "239.1.1.2");
         assert_eq!(media.primary.destination_port, 5006);
         assert!(media.secondary.is_none());
+    }
+
+    /// Dual-leg activation file whose active section carries the lines
+    /// `nvdsudpsink` reads from `sdp-file` (`b=AS`, grandmaster
+    /// `ts-refclk`, `source-filter`, fmtp).
+    fn dual_leg_activation_sdp(inactive_leg: &str) -> String {
+        let mut sdp = String::from(concat!(
+            "v=0\r\n",
+            "o=- 1234567890 0 IN IP4 192.0.2.10\r\n",
+            "s=Example\r\n",
+            "t=0 0\r\n",
+            "a=group:DUP primary secondary\r\n",
+            "m=video 5004 RTP/AVP 96\r\n",
+            "c=IN IP4 239.1.1.1/64\r\n",
+            "b=AS:116000\r\n",
+            "a=mid:primary\r\n",
+            "a=source-filter: incl IN IP4 239.1.1.1 192.0.2.20\r\n",
+            "a=rtpmap:96 raw/90000\r\n",
+            "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=50; depth=10; TP=2110TPN\r\n",
+            "a=ts-refclk:ptp=IEEE1588-2008:39-a7-1e-ff-fe-00-00-01\r\n",
+            "a=x-nvnmos-iface-ip:192.0.2.11\r\n",
+            "m=video 5006 RTP/AVP 96\r\n",
+            "c=IN IP4 239.1.1.2/64\r\n",
+            "b=AS:116000\r\n",
+            "a=mid:secondary\r\n",
+            "a=source-filter: incl IN IP4 239.1.1.2 192.0.2.21\r\n",
+            "a=rtpmap:96 raw/90000\r\n",
+            "a=fmtp:96 sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate=50; depth=10; TP=2110TPN\r\n",
+            "a=ts-refclk:ptp=IEEE1588-2008:39-a7-1e-ff-fe-00-00-02\r\n",
+            "a=x-nvnmos-iface-ip:192.0.2.12\r\n",
+        ));
+        let inactive_at = sdp
+            .find(&format!("m=video {inactive_leg} RTP/AVP 96\r\n"))
+            .expect("inactive leg");
+        let insert_at = inactive_at + format!("m=video {inactive_leg} RTP/AVP 96\r\n").len();
+        sdp.insert_str(insert_at, "a=inactive\r\n");
+        sdp
+    }
+
+    fn assert_kept_leg(out: &str, kept_clock: &str, dropped_clock: &str, kept_filter: &str) {
+        assert_eq!(sdp_media_block_count(out).expect("count"), 1, "{out}");
+        assert!(
+            out.contains("o=- 1234567890 0 IN IP4 192.0.2.10"),
+            "origin must be kept:\n{out}",
+        );
+        assert!(out.contains("b=AS:116000"), "bandwidth:\n{out}");
+        assert!(out.contains(kept_clock), "ts-refclk:\n{out}");
+        assert!(!out.contains(dropped_clock), "other leg:\n{out}");
+        assert!(out.contains(kept_filter), "source-filter:\n{out}");
+        assert!(out.contains("TP=2110TPN"), "fmtp:\n{out}");
+        assert!(!out.contains("a=group:"), "session group:\n{out}");
+        assert!(!out.contains("DUP"), "DUP:\n{out}");
+        assert!(!out.contains("a=mid:"), "mid:\n{out}");
+        assert!(!out.contains("a=inactive"), "inactive:\n{out}");
+    }
+
+    #[test]
+    fn normalise_to_single_active_leg_keeps_primary_section() {
+        init_gst();
+        let out =
+            normalise_to_single_active_leg(&dual_leg_activation_sdp("5006")).expect("normalise");
+        assert_kept_leg(
+            &out,
+            "a=ts-refclk:ptp=IEEE1588-2008:39-a7-1e-ff-fe-00-00-01",
+            "39-a7-1e-ff-fe-00-00-02",
+            "a=source-filter: incl IN IP4 239.1.1.1 192.0.2.20",
+        );
+        assert!(out.contains("m=video 5004 RTP/AVP 96"), "{out}");
+        assert!(!out.contains("5006"), "{out}");
+        assert_eq!(out.matches("a=source-filter:").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn normalise_to_single_active_leg_keeps_secondary_section() {
+        init_gst();
+        let out =
+            normalise_to_single_active_leg(&dual_leg_activation_sdp("5004")).expect("normalise");
+        assert_kept_leg(
+            &out,
+            "a=ts-refclk:ptp=IEEE1588-2008:39-a7-1e-ff-fe-00-00-02",
+            "39-a7-1e-ff-fe-00-00-01",
+            "a=source-filter: incl IN IP4 239.1.1.2 192.0.2.21",
+        );
+        assert!(out.contains("m=video 5006 RTP/AVP 96"), "{out}");
+        assert!(!out.contains("5004"), "{out}");
     }
 
     #[test]
