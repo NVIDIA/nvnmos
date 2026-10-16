@@ -100,8 +100,8 @@ activation subscription is missing or interrupted.
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `NVNMOSD_SESSION_GC` | on | Disable with `0`, `false`, `off`, or `no`. |
-| `NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC` | 60 | Subscribe within this many seconds of `OpenSession`. |
-| `NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC` | 5 | Resubscribe within this many seconds after the activation stream ends. |
+| `NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC` | 60 | Subscribe within this many seconds of `OpenSession`. Must be at least `1`; `0` closes the session before a subscription can be established. |
+| `NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC` | 5 | Resubscribe within this many seconds after the activation stream ends. Must be at least `1` to allow resubscription; `0` closes the session when the stream ends. |
 
 ### Node HTTP Port Allocation
 

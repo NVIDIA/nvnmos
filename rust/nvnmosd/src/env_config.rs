@@ -41,8 +41,9 @@ pub(crate) fn parse_env_bool(value: Option<&str>, default: EnvDefault) -> bool {
     }
 }
 
-/// Read a positive timeout in **seconds** from `name`, falling back to `default_secs`
+/// Read a timeout in **seconds** from `name`, falling back to `default_secs`
 /// when unset or invalid (logs a warning for invalid non-empty values).
+/// Zero means the deadline is immediate.
 pub(crate) fn read_timeout_secs(name: &str, default_secs: u64) -> Duration {
     match std::env::var(name) {
         Err(_) => Duration::from_secs(default_secs),
@@ -61,13 +62,10 @@ pub(crate) fn read_timeout_secs(name: &str, default_secs: u64) -> Duration {
     }
 }
 
-/// Parse a timeout in **seconds**. Returns `None` for zero and non-numeric values.
+/// Parse a timeout in **seconds**. Zero means immediate. Returns `None` for
+/// non-numeric values, including fractions of a second.
 pub(crate) fn parse_timeout_secs(value: &str) -> Option<Duration> {
-    match value.parse::<u64>() {
-        Ok(0) => None,
-        Ok(secs) => Some(Duration::from_secs(secs)),
-        Err(_) => None,
-    }
+    value.parse::<u64>().ok().map(Duration::from_secs)
 }
 
 /// Parse a TCP port number (`1..=65535`). Returns `None` for zero, out of
@@ -160,8 +158,13 @@ mod tests {
     }
 
     #[test]
-    fn timeout_rejects_zero_and_garbage() {
-        assert_eq!(parse_timeout_secs("0"), None);
+    fn timeout_accepts_zero_as_immediate() {
+        assert_eq!(parse_timeout_secs("0"), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn timeout_rejects_fractions_and_garbage() {
+        assert_eq!(parse_timeout_secs("0.001"), None);
         assert_eq!(parse_timeout_secs("nope"), None);
     }
 
