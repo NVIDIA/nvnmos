@@ -162,7 +162,7 @@ gst-launch-1.0 \
 | `node-seed` | NvNmos Node seed; sessions sharing this seed share a Node |
 | `http-port`, `host-name`, `domain`, `registration-url`, `system-url` | Forwarded in `OpenSession.node_config` when this session **creates** the Node; ignored when attaching to an existing Node |
 | `channelmapping-name` | Caller-chosen channel mapping name; **not** an IS-08 REST resource id |
-| `restrict-routable-inputs` | bool, default **`false`**. When **`true`**, set each Output's proto **`routable_inputs`** to the effective Input ids in this request (pad **`input-id`**, or §6.10 slug defaulting applied locally when empty). When **`false`**, leave **`routable_inputs`** empty → IS-08 **`null`** (unrestricted). Prefer **`false`** when this element is the only channel-mapping contributor on the Node; use **`true`** on multi-channel-mapping Nodes (§6.10). **Not implemented in gst-nmos-rs yet.** |
+| `restrict-routable-inputs` | bool, default **`false`**. When **`true`**, set each Output's proto **`routable_inputs`** to the effective Input ids in this request (pad **`input-id`**, or the §6.10 `inputN` default applied locally when empty) plus **`""`**, which IS-08 publishes as **`null`** so unrouted channels remain permitted. When **`false`**, leave **`routable_inputs`** empty → IS-08 **`null`** (unrestricted). Prefer **`false`** when this element is the only channel-mapping contributor on the Node; use **`true`** on multi-channel-mapping Nodes (§6.10). |
 
 No `transport` / `transport-file` on this element.
 
@@ -591,7 +591,7 @@ nvnmosd **forwards names unchanged**; libnvnmos derives IS-04 UUIDs from the Nod
 
 Registration lookup is **not** required — ids are deterministic. Controllers may see `/parent` or `/sourceid` before the endpoint appears in IS-04.
 
-**`routable_inputs` (proto / libnvnmos / IS-08):** mirrors nmos-cpp. Empty or omitted on **`ChannelMappingOutput`** → nvnmosd passes **`None`** to libnvnmos → caps publish **`"routable_inputs": null`** (unrestricted). Non-empty list → restricted array; **`""`** entry → **`null`** in the array (unrouted outputs permitted). Same as C **`routable_inputs` NULL / zero length**. gst-nmos-rs **`restrict-routable-inputs`** (§3.5) is the optional same-request restriction — **not** nvnmosd defaulting.
+**`routable_inputs` (proto / libnvnmos / IS-08):** mirrors nmos-cpp. Empty or omitted on **`ChannelMappingOutput`** → nvnmosd passes **`None`** to libnvnmos → caps publish **`"routable_inputs": null`** (unrestricted). Non-empty list → restricted array; **`""`** entry → **`null`** in the array (unrouted outputs permitted). Same as C **`routable_inputs` NULL / zero length**. gst-nmos-rs **`restrict-routable-inputs`** (§3.5) is the optional same-request restriction, always including **`""`** — **not** nvnmosd defaulting.
 
 **`NvNmosChannelMappingConfig`:** the `{inputs[], outputs[]}` bundle passed to `add_nmos_channelmapping_to_node_server` — channel mapping I/O geometry, not a single IS-08 REST resource.
 
@@ -730,7 +730,7 @@ node-seed=studio
 |------|--------|
 | **Slug namespace** | IS-08 input **slugs** unique among inputs and output **slugs** unique among outputs per Node (enforced by nvnmos). The same string may name both an input and an output (IS-08 / nmos-cpp). Default `input0`, `output0`, … for every channel mapping (§3.4); explicit pad **`input-id`** / proto **`id`** overrides. An effective slug another channel mapping on the Node already uses fails **`AddChannelMapping`** with **`ALREADY_EXISTS`**, naming the slug. |
 | **Ownership** | `(node_seed, name)` → channel mapping; `(node_seed, output_id)` → **session** for activation dispatch. |
-| **`routable_inputs`** | **Default:** empty proto → IS-08 **`null`** (unrestricted). **`restrict-routable-inputs=true`** on the element (§3.5) sets each Output's list to **Input ids from the same add**. Cross-channel-mapping routes require an explicit proto list on each Output (advanced). |
+| **`routable_inputs`** | **Default:** empty proto → IS-08 **`null`** (unrestricted). **`restrict-routable-inputs=true`** on the element (§3.5) sets each Output's list to **Input ids from the same add** plus **`""`** (unrouted). Cross-channel-mapping routes require an explicit proto list on each Output (advanced). |
 | **Unknown input on activation** | nmos-cpp may accept if `routable_inputs` allows; element **NACKs** if the Input id is not on its sink pads. |
 | **Names before registration** | libnvnmos derives IS-04 ids from `parent_name` / `sender_name` + Node seed without `AddReceiver` / `AddSender` (§6.2). |
 
@@ -882,7 +882,7 @@ Do not publish zero-channel Inputs/Outputs.
 
 When building **`AddChannelMappingRequest`**, leave each Output's **`routable_inputs`** empty unless:
 
-- **`restrict-routable-inputs`** is **`true`** — set every Output's list to the **effective Input ids in this request** (pad **`input-id`** when set, else the same slug defaulting rules as §6.10 applied locally before the RPC), or
+- **`restrict-routable-inputs`** is **`true`** — set every Output's list to the **effective Input ids in this request** (pad **`input-id`** when set, else the §6.10 `inputN` default applied locally before the RPC) plus **`""`** so unrouted channels remain permitted, or
 - a pad / element policy requires an explicit cross-mapping or partial list (advanced).
 
 Per-output proto lists may include **`""`** for an IS-08 array **`null`** entry (unrouted permitted within a restricted list).

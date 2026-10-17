@@ -38,9 +38,9 @@ on all (or all but one) of them. A clash fails when the element reaches PAUSED.
 
 By default an Output may advertise unrestricted routable Inputs. Set
 `restrict-routable-inputs=true` to limit each Output to the Inputs owned by
-that element. The element starts with an identity map where its channel
-geometry permits, then applies routing changes requested by an IS-08
-Controller.
+that element. Unrouted channels remain permitted. The element starts with an
+identity map where its channel geometry permits, then applies routing changes
+requested by an IS-08 Controller.
 
 See the
 [`nmosaudiochannelmap` reference](https://nvidia.github.io/nvnmos/gstreamer/nmos/nmosaudiochannelmap.html)

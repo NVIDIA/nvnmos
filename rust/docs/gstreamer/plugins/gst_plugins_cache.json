@@ -340,7 +340,7 @@
                         "writable": true
                     },
                     "restrict-routable-inputs": {
-                        "blurb": "Limit each Output's IS-08 `/caps/routable_inputs` to this element's Inputs. When false, routable Inputs are unrestricted. Default: false.",
+                        "blurb": "Limit each Output's IS-08 `/caps/routable_inputs` to this element's Inputs and unrouted. When false, routable Inputs are unrestricted. Default: false.",
                         "conditionally-available": false,
                         "construct": false,
                         "construct-only": false,
