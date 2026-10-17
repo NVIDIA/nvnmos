@@ -99,7 +99,11 @@
  * when the element first reaches READY, so request every pad you need before
  * starting the pipeline. `channelmapping-name` names the Input/Output bundle on
  * the Node, and `restrict-routable-inputs` limits each Output to this element's
- * own Inputs.
+ * own Inputs and unrouted.
+ *
+ * An empty pad `input-id` or `output-id` defaults to `inputN` or `outputN`
+ * from the pad's position. IDs must be unique within the Node, so set them
+ * explicitly when the Node has more than one channel mapping.
  *
  * ## Activation
  *

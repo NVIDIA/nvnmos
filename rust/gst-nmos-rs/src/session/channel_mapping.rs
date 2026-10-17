@@ -22,8 +22,8 @@ pub(crate) const CHANNELMAPPING_NAME_BLURB: &str = "\
     Node. It is not an IS-08 Input or Output ID.";
 
 pub(crate) const RESTRICT_ROUTABLE_INPUTS_BLURB: &str = "\
-    Limit each Output's IS-08 `/caps/routable_inputs` to this element's Inputs. \
-    When false, routable Inputs are unrestricted. Default: false.";
+    Limit each Output's IS-08 `/caps/routable_inputs` to this element's Inputs \
+    and unrouted. When false, routable Inputs are unrestricted. Default: false.";
 
 /// Settings snapshot for `nmosaudiochannelmap` NULL→READY.
 #[derive(Debug, Clone)]
