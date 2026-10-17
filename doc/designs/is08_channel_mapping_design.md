@@ -27,7 +27,7 @@ Control-plane limitations must not leak downward. NvNmos and nvnmosd support arb
 | Layer | IS-04 parent / source linkage | `name` |
 |-------|------------------------------|-----------------|
 | **libnvnmos (C)** | Caller-chosen **`parent_name`** / **`sender_name`** → IS-04 UUIDs from Node **seed** (deterministic identity; same scheme as senders/receivers). Requires explicit non-empty IS-08 input/output **slugs** and channel-mapping **`name`**. | `name` (settings key; not an IS-08 REST resource id) |
-| **nvnmosd (gRPC)** | Forwards names unchanged. Assigns default IS-08 **slugs** when proto **`id`** is empty (`input0`, `{name}_input0`, …); forwards **`routable_inputs`** like libnvnmos (empty → IS-08 `null`); returns effective ids in the add response. | `name` in request |
+| **nvnmosd (gRPC)** | Forwards names unchanged. Assigns default IS-08 **slugs** when proto **`id`** is empty (`input0`, `output0`, …; §6.10); forwards **`routable_inputs`** like libnvnmos (empty → IS-08 `null`); returns effective ids in the add response. | `name` in request |
 | **gst-nmos-rs** | Pad props `receiver-name`, `sender-name` → forwarded as proto names. Optional **`restrict-routable-inputs`** populates output `routable_inputs` from this add's input ids (§3.5). | `channelmapping-name` |
 
 **Why UUID derivation is libnvnmos but slug defaulting is nvnmosd:** `parent_name` / `sender_name` → IS-04 UUID is **deterministic identity** from `(Node seed, name)` — the same class of computation libnvnmos already performs for senders/receivers, and direct C callers need it without a daemon. Empty IS-08 **slug** defaulting is different: a **gRPC convenience** for GStreamer (omit pad `input-id`, get `input0` back in the response). Direct C callers supply explicit slugs, analogous to embedding a name in a transport file rather than expecting libnvnmos to invent one.
@@ -132,7 +132,7 @@ See Appendix B for Plan B detail and T10 results.
 ### 3.4 IS-08 advertisement
 
 - One Input per sink pad; one Output per src pad.
-- **I/O id defaulting** (when pad **`input-id`** / **`output-id`** or proto **`id`** is empty): **nvnmosd** assigns before calling libnvnmos (§6.10). Direct C callers must supply explicit slugs. **First** channel mapping on the Node → `input0`, …; **later** → `{name}_input0`, … Return effective slugs in the add response (§6.2).
+- **I/O id defaulting** (when pad **`input-id`** / **`output-id`** or proto **`id`** is empty): **nvnmosd** assigns before calling libnvnmos (§6.10). Direct C callers must supply explicit slugs. Every channel mapping defaults to `input0`, …, `output0`, …; a Node with more than one channel mapping sets explicit slugs on all (or all but one) of them. Return effective slugs in the add response (§6.2).
 - **Parent association:** pad **`receiver-name`** / **`sender-name`** are forwarded through nvnmosd/proto/C as **`parent_name`** / **`sender_name`**; libnvnmos derives IS-04 UUIDs from the Node seed at add time (§2, §6.2).
 - **`AddChannelMapping`** creates real Input/Output resources (`make_channelmapping_*` + `insert_resource`). Default output overload = **entirely unrouted** `/map/active` (nmos-cpp default).
 - After internal matrices are programmed, **`SyncChannelMappingState`** publishes the initial identity or `active-map` values (§3.5.2, §7.4). Controller **activations** do **not** call sync — they update matrices in **PLAYING** (§7.1).
@@ -728,7 +728,7 @@ node-seed=studio
 
 | Rule | Detail |
 |------|--------|
-| **Slug namespace** | IS-08 input **slugs** unique among inputs and output **slugs** unique among outputs per Node (enforced by nvnmos). The same string may name both an input and an output (IS-08 / nmos-cpp). **First** channel mapping on the Node: default `input0`, `output0`, …; **later** channel mappings: `{name}_input0`, … (§3.4). Explicit pad **`input-id`** / proto **`id`** overrides. |
+| **Slug namespace** | IS-08 input **slugs** unique among inputs and output **slugs** unique among outputs per Node (enforced by nvnmos). The same string may name both an input and an output (IS-08 / nmos-cpp). Default `input0`, `output0`, … for every channel mapping (§3.4); explicit pad **`input-id`** / proto **`id`** overrides. An effective slug another channel mapping on the Node already uses fails **`AddChannelMapping`** with **`ALREADY_EXISTS`**, naming the slug. |
 | **Ownership** | `(node_seed, name)` → channel mapping; `(node_seed, output_id)` → **session** for activation dispatch. |
 | **`routable_inputs`** | **Default:** empty proto → IS-08 **`null`** (unrestricted). **`restrict-routable-inputs=true`** on the element (§3.5) sets each Output's list to **Input ids from the same add**. Cross-channel-mapping routes require an explicit proto list on each Output (advanced). |
 | **Unknown input on activation** | nmos-cpp may accept if `routable_inputs` allows; element **NACKs** if the Input id is not on its sink pads. |
@@ -739,15 +739,11 @@ Fine-grained per-Input/Output add/remove is **deferred** — whole channel mappi
 **Empty I/O slug defaulting (nvnmosd):** when `ChannelMappingInput.id` / `ChannelMappingOutput.id` (or C `id` NULL/empty) is omitted, assign before libnvnmos:
 
 ```text
-if Node has no channelmapping Input/Output resources yet:
-  input[i]  → "input{i}"    # i = 0, 1, … in request order
-  output[j] → "output{j}"
-else:
-  input[i]  → "{name}_input{i}"
-  output[j] → "{name}_output{j}"
+input[i]  → "input{i}"    # i = 0, 1, … in request order
+output[j] → "output{j}"
 ```
 
-`{name}` = `AddChannelMappingRequest.name`. Return effective slugs in **`AddChannelMappingResponse.input_ids` / `output_ids`**. Element uses those for matrix programming and `active-map` when pad **`input-id`** / **`output-id`** were left empty. Empty pad **`name`** / **`description`** → omit or pass through as empty IS-08 `/properties` (optional in IS-08).
+The default does not depend on other channel mappings on the Node: sessions on a Node have no defined start order, and slugs appear in the IS-08 API paths and in `active-map`, so they must not change between runs. Deriving defaults from the channel mapping `name` (`{name}_input0`, …) would avoid collisions, but `input0`, … keeps the common single-mapping case simple. For now we accept the limitation: a Node with more than one channel mapping sets explicit slugs on all (or all but one) of them. Return effective slugs in **`AddChannelMappingResponse.input_ids` / `output_ids`**. Element uses those for matrix programming and `active-map` when pad **`input-id`** / **`output-id`** were left empty. Empty pad **`name`** / **`description`** → omit or pass through as empty IS-08 `/properties` (optional in IS-08).
 
 ## 7. gst-nmos-rs element behaviour
 

@@ -101,6 +101,10 @@
  * the Node, and `restrict-routable-inputs` limits each Output to this element's
  * own Inputs.
  *
+ * An empty pad `input-id` or `output-id` defaults to `inputN` or `outputN`
+ * from the pad's position. IDs must be unique within the Node, so set them
+ * explicitly when the Node has more than one channel mapping.
+ *
  * ## Activation
  *
  * The element starts with an identity map wherever the channel geometry allows

@@ -30,6 +30,12 @@ shared IS-08 Channel Mapping API. This includes multiple
 it does not create a separate IS-08 API. The name must therefore be unique
 within the Node.
 
+An empty `input-id` or `output-id` defaults to `inputN` or `outputN`, where N
+is the pad's position among the element's sink or source pads. These IDs
+appear in the IS-08 API paths and in `active-map`. IDs must be unique within
+the Node, so when a Node has more than one channel mapping, set explicit IDs
+on all (or all but one) of them. A clash fails when the element reaches PAUSED.
+
 By default an Output may advertise unrestricted routable Inputs. Set
 `restrict-routable-inputs=true` to limit each Output to the Inputs owned by
 that element. The element starts with an identity map where its channel

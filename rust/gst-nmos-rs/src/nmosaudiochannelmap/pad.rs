@@ -90,7 +90,11 @@ mod imp {
                         .build(),
                     glib::ParamSpecString::builder("input-id")
                         .nick("Input ID")
-                        .blurb("IS-08 Input ID. Empty assigns a default.")
+                        .blurb(
+                            "IS-08 Input ID. Empty assigns `inputN` from this pad's \
+                             position. Set it when the Node has more than one channel \
+                             mapping.",
+                        )
                         .build(),
                     glib::ParamSpecString::builder("label")
                         .nick("IS-08 Name")
@@ -197,7 +201,11 @@ mod imp {
                         .build(),
                     glib::ParamSpecString::builder("output-id")
                         .nick("Output ID")
-                        .blurb("IS-08 Output ID. Empty assigns a default.")
+                        .blurb(
+                            "IS-08 Output ID. Empty assigns `outputN` from this pad's \
+                             position. Set it when the Node has more than one channel \
+                             mapping.",
+                        )
                         .build(),
                     glib::ParamSpecString::builder("label")
                         .nick("IS-08 Name")

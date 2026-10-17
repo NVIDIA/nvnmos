@@ -435,7 +435,8 @@ enum ChannelMappingParentType {
 
 // IS-08 Input geometry.
 message ChannelMappingInput {
-  // IS-08 input ID. Empty requests an assigned default.
+  // IS-08 input ID. Empty assigns `inputN`, where N is the index in
+  // `inputs`. An ID already used on the Node fails with `ALREADY_EXISTS`.
   string id = 1;
   // IS-08 `/properties` name, independent of the channel-mapping name.
   string name = 2;
@@ -457,7 +458,8 @@ message ChannelMappingInput {
 
 // IS-08 Output geometry.
 message ChannelMappingOutput {
-  // IS-08 output ID. Empty requests an assigned default.
+  // IS-08 output ID. Empty assigns `outputN`, where N is the index in
+  // `outputs`. An ID already used on the Node fails with `ALREADY_EXISTS`.
   string id = 1;
   // IS-08 `/properties` name, independent of the channel-mapping name.
   string name = 2;
