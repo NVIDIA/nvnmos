@@ -728,7 +728,7 @@ node-seed=studio
 
 | Rule | Detail |
 |------|--------|
-| **Slug namespace** | IS-08 input **slugs** unique among inputs and output **slugs** unique among outputs per Node (enforced by nvnmos). The same string may name both an input and an output (IS-08 / nmos-cpp). Default `input0`, `output0`, … for every channel mapping (§3.4); explicit pad **`input-id`** / proto **`id`** overrides. An effective slug another channel mapping on the Node already uses fails **`AddChannelMapping`** with **`ALREADY_EXISTS`**, naming the slug. |
+| **Slug namespace** | IS-08 input **slugs** unique among inputs and output **slugs** unique among outputs per Node (enforced by nvnmos). Each slug matches the IS-08 schema pattern `^[a-zA-Z0-9\-_]+$`. The same string may name both an input and an output (IS-08 / nmos-cpp). Default `input0`, `output0`, … for every channel mapping (§3.4); explicit pad **`input-id`** / proto **`id`** overrides. **`AddChannelMapping`** fails with **`ALREADY_EXISTS`** for an effective slug another channel mapping on the Node already uses, and with **`INVALID_ARGUMENT`** for a slug or **`routable_inputs`** entry outside the pattern. Both errors name the slug. |
 | **Ownership** | `(node_seed, name)` → channel mapping; `(node_seed, output_id)` → **session** for activation dispatch. |
 | **`routable_inputs`** | **Default:** empty proto → IS-08 **`null`** (unrestricted). **`restrict-routable-inputs=true`** on the element (§3.5) sets each Output's list to **Input ids from the same add** plus **`""`** (unrouted). Cross-channel-mapping routes require an explicit proto list on each Output (advanced). |
 | **Unknown input on activation** | nmos-cpp may accept if `routable_inputs` allows; element **NACKs** if the Input id is not on its sink pads. |

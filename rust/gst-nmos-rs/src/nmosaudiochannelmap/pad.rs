@@ -91,9 +91,9 @@ mod imp {
                     glib::ParamSpecString::builder("input-id")
                         .nick("Input ID")
                         .blurb(
-                            "IS-08 Input ID. Empty assigns `inputN` from this pad's \
-                             position. Set it when the Node has more than one channel \
-                             mapping.",
+                            "IS-08 Input ID: ASCII letters, digits, `-` and `_`. Empty \
+                             assigns `inputN` from this pad's position. Set it when the \
+                             Node has more than one channel mapping.",
                         )
                         .build(),
                     glib::ParamSpecString::builder("label")
@@ -202,9 +202,9 @@ mod imp {
                     glib::ParamSpecString::builder("output-id")
                         .nick("Output ID")
                         .blurb(
-                            "IS-08 Output ID. Empty assigns `outputN` from this pad's \
-                             position. Set it when the Node has more than one channel \
-                             mapping.",
+                            "IS-08 Output ID: ASCII letters, digits, `-` and `_`. Empty \
+                             assigns `outputN` from this pad's position. Set it when the \
+                             Node has more than one channel mapping.",
                         )
                         .build(),
                     glib::ParamSpecString::builder("label")

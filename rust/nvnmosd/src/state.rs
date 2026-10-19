@@ -1980,10 +1980,11 @@ impl State {
     /// 1. Pre-check in daemon state — refuses a duplicate channel mapping
     ///    `name` on the same Node before any FFI happens (here).
     /// 2. Assign default IS-08 ids `inputN` / `outputN` when proto `id` is
-    ///    empty (nvnmosd policy), then refuse an id another channel mapping
-    ///    on the Node already uses, since libnvnmos reports that collision
-    ///    without saying which id; `routable_inputs` is forwarded like
-    ///    libnvnmos C (empty → unrestricted caps) (here).
+    ///    empty (nvnmosd policy), refuse ids and `routable_inputs` entries
+    ///    outside the IS-08 id pattern, then refuse an id another channel
+    ///    mapping on the Node already uses, since libnvnmos reports that
+    ///    collision without saying which id; `routable_inputs` is forwarded
+    ///    like libnvnmos C (empty → unrestricted caps) (here).
     /// 3. `add_channelmapping` into libnvnmos, which validates geometry,
     ///    duplicate ids, labels, and parent/sender linkage
     ///    ([`AddChannelMappingPrep::run_ffi`], no lock held); then record
@@ -2027,6 +2028,36 @@ impl State {
 
         let effective_input_ids = effective_channelmapping_input_ids(inputs);
         let effective_output_ids = effective_channelmapping_output_ids(outputs);
+        if let Some(id) = effective_input_ids
+            .iter()
+            .find(|id| !is_channelmapping_id(id))
+        {
+            return Err(Status::invalid_argument(format!(
+                "channel mapping input id {id:?} must contain only ASCII letters, digits, \
+                 '-' and '_'"
+            )));
+        }
+        if let Some(id) = effective_output_ids
+            .iter()
+            .find(|id| !is_channelmapping_id(id))
+        {
+            return Err(Status::invalid_argument(format!(
+                "channel mapping output id {id:?} must contain only ASCII letters, digits, \
+                 '-' and '_'"
+            )));
+        }
+        for (output, output_id) in outputs.iter().zip(&effective_output_ids) {
+            if let Some(id) = output
+                .routable_inputs
+                .iter()
+                .find(|id| !id.is_empty() && !is_channelmapping_id(id))
+            {
+                return Err(Status::invalid_argument(format!(
+                    "channel mapping output {output_id:?} routable input {id:?} must be \
+                     empty or contain only ASCII letters, digits, '-' and '_'"
+                )));
+            }
+        }
         for entry in self
             .channelmappings
             .values()
@@ -2368,6 +2399,14 @@ fn require_non_empty_seed(seed: &str) -> Result<(), Status> {
     } else {
         Ok(())
     }
+}
+
+// IS-08 schemas constrain Input and Output IDs to `^[a-zA-Z0-9\-_]+$`.
+fn is_channelmapping_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn effective_channelmapping_input_ids(inputs: &[ProtoChannelMappingInput]) -> Vec<String> {
