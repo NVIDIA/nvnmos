@@ -33,6 +33,7 @@ pub(crate) mod types;
 
 pub(crate) use node::NodeSettings;
 
+use self::error::WithCode;
 use self::types::Side;
 
 /// Translate the GObject `Transport` enum to the protobuf enum.
@@ -461,11 +462,13 @@ pub(crate) fn fake_caps_from_settings(
         return caps_from_transport_file(element, transport, transport_file);
     }
     if !transport_file_path.is_empty() {
-        let text = std::fs::read_to_string(transport_file_path).map_err(|e| {
-            anyhow::anyhow!(
-                "{element}: re-reading `transport-file-path` = `{transport_file_path}` for fake-chain caps: {e}"
-            )
-        })?;
+        let text = std::fs::read_to_string(transport_file_path)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "{element}: re-reading `transport-file-path` = `{transport_file_path}` for fake-chain caps: {e}"
+                )
+            })
+            .with_code(gst::ResourceError::OpenRead)?;
         return caps_from_transport_file(element, transport, &text);
     }
     Ok(None)
@@ -480,7 +483,8 @@ pub(crate) fn caps_from_flow_def(
         return Ok(None);
     };
     let parsed_caps = crate::flow_def::caps_from(text)
-        .map_err(|e| anyhow::anyhow!("caps from flow-def transport file: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("caps from flow-def transport file: {e}"))
+        .with_code(gst::ResourceError::Settings)?;
     let caps = crate::essence_caps::caps_from(&parsed_caps, None);
     gst::info!(
         gst::CAT_DEFAULT,
@@ -501,7 +505,8 @@ fn caps_from_transport_file(
         Transport::Mxl => caps_from_flow_def(element, Some(transport_file)),
         Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => {
             let media = crate::sdp::parse_sdp(transport_file)
-                .map_err(|e| anyhow::anyhow!("caps from SDP transport file: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("caps from SDP transport file: {e}"))
+                .with_code(gst::ResourceError::Settings)?;
             let caps = crate::essence_caps::caps_from(&media.caps, Some(&media.rtp_caps));
             gst::info!(
                 gst::CAT_DEFAULT,
@@ -523,24 +528,28 @@ fn resolve_transport_file(
     let inline = !settings.transport_file.is_empty();
     let path = !settings.transport_file_path.is_empty();
     if inline && path {
-        bail!(
+        return Err(anyhow::anyhow!(
             "{element}: `transport-file` and `transport-file-path` are mutually exclusive; set at most one"
-        );
+        ))
+        .with_code(gst::ResourceError::Settings);
     }
     if inline {
         Ok(Some(settings.transport_file.clone()))
     } else if path {
-        let text = std::fs::read_to_string(&settings.transport_file_path).with_context(|| {
-            format!(
-                "{element}: reading `transport-file-path` = `{}`",
-                settings.transport_file_path
-            )
-        })?;
+        let text = std::fs::read_to_string(&settings.transport_file_path)
+            .with_context(|| {
+                format!(
+                    "{element}: reading `transport-file-path` = `{}`",
+                    settings.transport_file_path
+                )
+            })
+            .with_code(gst::ResourceError::OpenRead)?;
         if text.is_empty() {
-            bail!(
+            return Err(anyhow::anyhow!(
                 "{element}: `transport-file-path` = `{}` is empty",
                 settings.transport_file_path
-            );
+            ))
+            .with_code(gst::ResourceError::Settings);
         }
         Ok(Some(text))
     } else {
@@ -742,25 +751,27 @@ pub(crate) fn resolve_resource_name(
     }
     let prop = settings.side.name_property();
     let Some(text) = transport_file.filter(|t| !t.is_empty()) else {
-        bail!(
+        return Err(anyhow::anyhow!(
             "{element}: `{prop}` is required (set the property or carry the name \
              in `transport-file` as `a=x-nvnmos-name` or `urn:x-nvnmos:tag:name`)"
-        );
+        ))
+        .with_code(gst::ResourceError::Settings);
     };
     let from_file = match settings.transport {
         Transport::Mxl => {
-            mxl::resource_name_from_transport_file(text).map_err(anyhow::Error::from)?
+            mxl::resource_name_from_transport_file(text).with_code(gst::ResourceError::Settings)?
         }
         Transport::Udp | Transport::Udp2 | Transport::NvDsUdp => {
-            udp::resource_name_from_transport_file(text).map_err(anyhow::Error::from)?
+            udp::resource_name_from_transport_file(text).with_code(gst::ResourceError::Settings)?
         }
     };
     match from_file {
         Some(name) => Ok(name),
-        None => bail!(
+        None => Err(anyhow::anyhow!(
             "{element}: `{prop}` is unset and `transport-file` does not carry a name \
              (`a=x-nvnmos-name` for SDP, `urn:x-nvnmos:tag:name` for flow_def)"
-        ),
+        ))
+        .with_code(gst::ResourceError::Settings),
     }
 }
 
@@ -777,7 +788,8 @@ pub(crate) fn validate_and_open(
     activation_handler: ActivationHandler,
 ) -> Result<InnerConfig, anyhow::Error> {
     if settings.node.node_seed.is_empty() {
-        bail!("{element}: `node-seed` is required");
+        return Err(anyhow::anyhow!("{element}: `node-seed` is required"))
+            .with_code(gst::ResourceError::Settings);
     }
 
     let resolved_transport_file = resolve_transport_file(element, settings)?;
@@ -998,20 +1010,22 @@ pub(crate) fn prepare_deferred_peer_caps(
     peer_caps: gst::Caps,
 ) -> Result<gst::Caps, anyhow::Error> {
     if peer_caps.is_empty() {
-        bail!(
+        return Err(anyhow::anyhow!(
             "{element}: deferred AddSender: upstream peer offered no caps. \
              Declare `caps=\"…\"` on the element or insert a `capsfilter` \
              upstream so the element knows what transport file to add."
-        );
+        ))
+        .with_code(gst::CoreError::Negotiation);
     }
     if peer_caps.is_any() {
-        bail!(
+        return Err(anyhow::anyhow!(
             "{element}: deferred AddSender: upstream peer offered ANY caps \
              (likely no negotiated caps yet — e.g. `fakesrc` with no upstream \
              capsfilter). Declare `caps=\"…\"` on the element or insert a \
              `capsfilter` upstream so the element knows what transport file to \
              add."
-        );
+        ))
+        .with_code(gst::CoreError::Negotiation);
     }
     let mut fixated = peer_caps;
     fixated.fixate();
@@ -1035,7 +1049,7 @@ pub(crate) fn add_deferred_sender(
     peer_caps: gst::Caps,
 ) -> Result<InnerConfig, anyhow::Error> {
     if settings.side != Side::Sender {
-        bail!("{element}: deferred AddSender is sender-only");
+        bail!("{element}: internal: deferred AddSender is sender-only");
     }
 
     let fixated = prepare_deferred_peer_caps(element, peer_caps)?;
@@ -1075,7 +1089,7 @@ fn finish_deferred_add_sender(
     // has a session to close whether AddSender succeeded or failed.
     let mut taken = session.lock().unwrap().take().ok_or_else(|| {
         anyhow::anyhow!(
-            "{element}: deferred AddSender but no open session — was NULL→READY skipped?"
+            "{element}: internal: deferred AddSender but no open session — was NULL→READY skipped?"
         )
     })?;
     let rpc_result = SHARED_RUNTIME.block_on(async {

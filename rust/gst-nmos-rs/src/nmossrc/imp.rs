@@ -535,7 +535,6 @@ impl ElementImpl for NmosSrc {
                     post_state_change_error!(
                         self.obj(),
                         &e,
-                        gst::ResourceError::OpenRead,
                         "nmossrc NULL\u{2192}READY failed: {e:#}"
                     );
                     return Err(gst::StateChangeError);

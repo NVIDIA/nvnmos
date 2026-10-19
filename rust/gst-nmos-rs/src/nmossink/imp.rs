@@ -34,7 +34,7 @@ use anyhow::{Context, anyhow};
 
 use crate::daemon::{ActivationHandler, ActivationOutcome, ActivationRequest, Session};
 use crate::inner;
-use crate::session::error::post_state_change_error;
+use crate::session::error::{WithCode, post_state_change_error};
 use crate::session::{
     ActivationAck, ActivationPlan, CommonSettings, InnerConfig, NodeSettings, TransportConfig,
 };
@@ -536,7 +536,6 @@ impl ElementImpl for NmosSink {
                     post_state_change_error!(
                         self.obj(),
                         &e,
-                        gst::ResourceError::OpenWrite,
                         "nmossink NULL\u{2192}READY failed: {e:#}"
                     );
                     return Err(gst::StateChangeError);
@@ -556,7 +555,6 @@ impl ElementImpl for NmosSink {
                     post_state_change_error!(
                         self.obj(),
                         &e,
-                        gst::ResourceError::OpenWrite,
                         "nmossink READY\u{2192}PAUSED deferred fake-chain pin failed: {e:#}"
                     );
                     return Err(gst::StateChangeError);
@@ -566,7 +564,6 @@ impl ElementImpl for NmosSink {
                     post_state_change_error!(
                         self.obj(),
                         &e,
-                        gst::ResourceError::OpenWrite,
                         "nmossink READY\u{2192}PAUSED deferred AddSender failed: {e:#}"
                     );
                     return Err(gst::StateChangeError);
@@ -1060,7 +1057,8 @@ fn build_real_sink(
                 anyhow!("building real MXL sink without a configuring transport file")
             })?;
             let metadata = crate::flow_def::metadata_from_transport(transport_file)
-                .context("reading MXL flow metadata from transport file")?;
+                .context("reading MXL flow metadata from transport file")
+                .with_code(gst::ResourceError::Settings)?;
             let caps = crate::session::caps_from_flow_def("nmossink", Some(transport_file))?
                 .ok_or_else(|| {
                     anyhow!("building real MXL sink without essence caps from the transport file")
