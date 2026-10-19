@@ -27,6 +27,7 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) mod channel_mapping;
 pub(crate) mod connection_active;
+pub(crate) mod error;
 pub(crate) mod node;
 pub(crate) mod types;
 
@@ -1173,7 +1174,11 @@ pub(crate) fn close(cat: &gst::DebugCategory, element: &str, session: &Mutex<Opt
         let result = SHARED_RUNTIME.block_on(s.close());
         match result {
             Ok(()) => gst::info!(cat, "session closed: handle={handle}"),
-            Err(e) => gst::warning!(cat, "{element}: CloseSession (handle={handle}): {e}"),
+            Err(e) => gst::warning!(
+                cat,
+                "{element}: CloseSession (handle={handle}): {:#}",
+                anyhow::Error::new(e)
+            ),
         }
     }
 }

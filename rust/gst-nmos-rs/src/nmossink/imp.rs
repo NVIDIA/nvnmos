@@ -34,6 +34,7 @@ use anyhow::{Context, anyhow};
 
 use crate::daemon::{ActivationHandler, ActivationOutcome, ActivationRequest, Session};
 use crate::inner;
+use crate::session::error::post_state_change_error;
 use crate::session::{
     ActivationAck, ActivationPlan, CommonSettings, InnerConfig, NodeSettings, TransportConfig,
 };
@@ -532,10 +533,11 @@ impl ElementImpl for NmosSink {
         match transition {
             gst::StateChange::NullToReady => {
                 if let Err(e) = self.open_session() {
-                    gst::element_imp_error!(
-                        self,
+                    post_state_change_error!(
+                        self.obj(),
+                        &e,
                         gst::ResourceError::OpenWrite,
-                        ["nmossink NULL\u{2192}READY failed: {e:#}"]
+                        "nmossink NULL\u{2192}READY failed: {e:#}"
                     );
                     return Err(gst::StateChangeError);
                 }
@@ -551,19 +553,21 @@ impl ElementImpl for NmosSink {
                 let bin = self.obj();
                 let bin_ref: &gst::Bin = bin.upcast_ref();
                 if let Err(e) = self.prepare_deferred_fake_chain(bin_ref) {
-                    gst::element_imp_error!(
-                        self,
+                    post_state_change_error!(
+                        self.obj(),
+                        &e,
                         gst::ResourceError::OpenWrite,
-                        ["nmossink READY\u{2192}PAUSED deferred fake-chain pin failed: {e:#}"]
+                        "nmossink READY\u{2192}PAUSED deferred fake-chain pin failed: {e:#}"
                     );
                     return Err(gst::StateChangeError);
                 }
                 let res = self.parent_change_state(transition)?;
                 if let Err(e) = self.maybe_add_deferred_sender() {
-                    gst::element_imp_error!(
-                        self,
+                    post_state_change_error!(
+                        self.obj(),
+                        &e,
                         gst::ResourceError::OpenWrite,
-                        ["nmossink READY\u{2192}PAUSED deferred AddSender failed: {e:#}"]
+                        "nmossink READY\u{2192}PAUSED deferred AddSender failed: {e:#}"
                     );
                     return Err(gst::StateChangeError);
                 }

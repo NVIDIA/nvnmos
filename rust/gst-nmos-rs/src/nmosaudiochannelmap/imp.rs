@@ -21,6 +21,7 @@ use crate::session::channel_mapping::{
     CHANNELMAPPING_NAME_BLURB, ChannelMappingSettings, RESTRICT_ROUTABLE_INPUTS_BLURB,
     close as close_session, validate_and_open,
 };
+use crate::session::error::post_state_change_error;
 use crate::types::DEFAULT_DAEMON_URI;
 use anyhow::{Context, bail};
 use gstreamer as gst;
@@ -331,10 +332,12 @@ impl ElementImpl for NmosAudioChannelMap {
                     &self.session,
                     handler,
                 ) {
-                    element.post_error_message(gst::error_msg!(
+                    post_state_change_error!(
+                        element,
+                        &e,
                         gst::ResourceError::OpenRead,
-                        ["failed to open channel mapping session: {e:#}"]
-                    ));
+                        "failed to open channel mapping session: {e:#}"
+                    );
                     return Err(gst::StateChangeError);
                 }
             }
@@ -352,10 +355,12 @@ impl ElementImpl for NmosAudioChannelMap {
         if transition == gst::StateChange::ReadyToPaused {
             if !*self.fixated.lock().unwrap() {
                 if let Err(e) = self.fixate_and_build() {
-                    element.post_error_message(gst::error_msg!(
+                    post_state_change_error!(
+                        element,
+                        &e,
                         gst::StreamError::Failed,
-                        ["channel mapping fixation failed: {e:#}"]
-                    ));
+                        "channel mapping fixation failed: {e:#}"
+                    );
                     return Err(gst::StateChangeError);
                 }
             }

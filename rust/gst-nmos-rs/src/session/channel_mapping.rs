@@ -101,7 +101,11 @@ pub(crate) fn close(
         let result = SHARED_RUNTIME.block_on(s.close());
         match result {
             Ok(()) => gst::info!(cat, "channel mapping session closed: handle={handle}"),
-            Err(e) => gst::warning!(cat, "{element}: CloseSession (handle={handle}): {e}"),
+            Err(e) => gst::warning!(
+                cat,
+                "{element}: CloseSession (handle={handle}): {:#}",
+                anyhow::Error::new(e)
+            ),
         }
     }
 }
