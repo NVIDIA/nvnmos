@@ -25,11 +25,31 @@ package nvnmos.daemon.v1;
 // A Sender or Receiver `transport_file` is SDP for `TRANSPORT_RTP` or MXL
 // `flow_def` JSON for `TRANSPORT_MXL`. It must contain the resource `name` as
 // `a=x-nvnmos-name` or `urn:x-nvnmos:tag:name`, respectively.
+//
+// Status codes follow the definitions in `google/rpc/code.proto`
+// (https://github.com/googleapis/googleapis/blob/master/google/rpc/code.proto).
+// For this service:
+//
+// * `INVALID_ARGUMENT`: a request field is invalid whatever the daemon's
+//   state.
+// * `NOT_FOUND`: a seed, session, or handle does not exist, or the session
+//   does not own it.
+// * `ALREADY_EXISTS`: the Node, resource, channel mapping, HTTP port, or
+//   activation stream already exists or is already assigned.
+// * `FAILED_PRECONDITION`: the daemon or host is not in the state the call
+//   requires. Retrying the same call fails until that state changes.
+// * `UNAVAILABLE`: retrying the same call later may succeed.
+// * `RESOURCE_EXHAUSTED`: no HTTP port is free in the daemon's range.
+// * `UNKNOWN`: libnvnmos reported that the operation failed without saying
+//   why. The nvnmosd log has its messages.
+// * `INTERNAL`: a daemon invariant is broken.
 service NvnmosDaemon {
   // Creates a persistent Node that remains until `RemoveNode`. Returns
   // `ALREADY_EXISTS` if the seed or requested HTTP port is already in use,
   // `INVALID_ARGUMENT` for invalid configuration, or `FAILED_PRECONDITION`
-  // when the requested HTTP port cannot be bound.
+  // when the requested HTTP port cannot be bound. Returns
+  // `RESOURCE_EXHAUSTED` when no HTTP port is free, or `UNKNOWN` when
+  // libnvnmos cannot create the Node.
   rpc AddNode(AddNodeRequest) returns (AddNodeResponse);
 
   // Removes a persistent Node. Returns `NOT_FOUND` for an unknown seed or
@@ -43,7 +63,8 @@ service NvnmosDaemon {
   // HTTP port belongs to another Node, or `FAILED_PRECONDITION` when that port
   // cannot be bound. Returns `UNAVAILABLE` while another `OpenSession` is
   // creating the Node for the same seed; retrying the call attaches to that
-  // Node once it exists.
+  // Node once it exists. Returns `RESOURCE_EXHAUSTED` when no HTTP port is
+  // free, or `UNKNOWN` when libnvnmos cannot create the Node.
   rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
 
   // Closes a session and removes its resources. The backing Node is also
@@ -52,15 +73,19 @@ service NvnmosDaemon {
   rpc CloseSession(CloseSessionRequest) returns (Empty);
 
   // Adds a Sender owned by the session. Requires an active activation
-  // subscription. Returns `FAILED_PRECONDITION` without one and
-  // `INVALID_ARGUMENT` for invalid or inconsistent resource configuration.
+  // subscription. Returns `FAILED_PRECONDITION` without one.
+  // Returns `INVALID_ARGUMENT` for an empty name, an unspecified transport,
+  // or a transport file that names a different resource, and `UNKNOWN` when
+  // libnvnmos rejects the transport file.
   // Returns `NOT_FOUND` for an unknown session and `ALREADY_EXISTS` for a
   // duplicate Sender name on the Node.
   rpc AddSender(AddSenderRequest) returns (AddSenderResponse);
 
   // Adds a Receiver owned by the session. Requires an active activation
-  // subscription. Returns `FAILED_PRECONDITION` without one and
-  // `INVALID_ARGUMENT` for invalid or inconsistent resource configuration.
+  // subscription. Returns `FAILED_PRECONDITION` without one.
+  // Returns `INVALID_ARGUMENT` for an empty name, an unspecified transport,
+  // or a transport file that names a different resource, and `UNKNOWN` when
+  // libnvnmos rejects the transport file.
   // Returns `NOT_FOUND` for an unknown session and `ALREADY_EXISTS` for a
   // duplicate Receiver name on the Node.
   rpc AddReceiver(AddReceiverRequest) returns (AddReceiverResponse);
@@ -86,14 +111,16 @@ service NvnmosDaemon {
 
   // Updates NMOS state after a client-originated data-plane change. A present
   // `transport_file` activates the resource; absence deactivates it. Returns
-  // `NOT_FOUND` if the session does not own the resource or `INVALID_ARGUMENT`
-  // if the state change is invalid.
+  // `NOT_FOUND` if the session does not own the resource or `UNKNOWN` if
+  // libnvnmos rejects the state change.
   rpc SyncResourceState(SyncResourceStateRequest) returns (Empty);
 
   // Adds an audio channel mapping owned by the session. Requires an active
   // channel-mapping activation subscription; otherwise `FAILED_PRECONDITION`.
-  // Returns `NOT_FOUND` for an unknown session, `ALREADY_EXISTS` for a
-  // duplicate name, or `INVALID_ARGUMENT` for invalid geometry.
+  // Returns `NOT_FOUND` for an unknown session and `ALREADY_EXISTS` for a
+  // duplicate name. Returns `INVALID_ARGUMENT` for an empty name or an ID
+  // outside the IS-08 pattern, and `UNKNOWN` when libnvnmos rejects the
+  // mapping.
   rpc AddChannelMapping(AddChannelMappingRequest) returns (AddChannelMappingResponse);
 
   // Removes an audio channel mapping owned by the session. Returns `NOT_FOUND`
@@ -102,7 +129,7 @@ service NvnmosDaemon {
 
   // Updates one output after a client-originated channel-mapping change.
   // Returns `NOT_FOUND` if the session does not own the channel mapping or
-  // `INVALID_ARGUMENT` if the active map is invalid.
+  // `UNKNOWN` if libnvnmos rejects the active map.
   rpc SyncChannelMappingState(SyncChannelMappingStateRequest) returns (Empty);
 
   // Streams pending IS-08 activations for channel mappings owned by the

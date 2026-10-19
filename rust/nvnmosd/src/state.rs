@@ -586,12 +586,7 @@ impl SyncResourceFfi {
                 } else {
                     "deactivate"
                 };
-                Status::invalid_argument(format!(
-                    "libnvnmos {verb} for {} {:?} failed (transport_file \
-                     parse error or libnvnmos state mismatch): {e}",
-                    self.side.label(),
-                    self.name,
-                ))
+                libnvnmos_status(format!("{verb} {} {:?}", self.side.label(), self.name), e)
             })
     }
 }
@@ -654,11 +649,7 @@ impl AddResourcePrep {
                 &self.name,
             )
             .map_err(|e| {
-                Status::invalid_argument(format!(
-                    "libnvnmos add_{} failed (transport_file parse error or \
-                     duplicate): {e}",
-                    self.side.label(),
-                ))
+                libnvnmos_status(format!("add {} {:?}", self.side.label(), self.name), e)
             })?;
 
         let resource_id = match self.side.lookup_id(&self.server, &self.name) {
@@ -768,9 +759,13 @@ impl SyncChannelMappingFfi {
         self.server
             .activate_channelmapping(&self.name, &self.output_id, &self.active_map)
             .map_err(|e| {
-                Status::invalid_argument(format!(
-                    "libnvnmos nmos_channelmapping_activate failed: {e}"
-                ))
+                libnvnmos_status(
+                    format!(
+                        "activate channel mapping {:?} output {:?}",
+                        self.name, self.output_id
+                    ),
+                    e,
+                )
             })
     }
 }
@@ -801,11 +796,7 @@ impl AddChannelMappingPrep {
     pub fn run_ffi(self) -> Result<AddChannelMappingReady, Status> {
         self.server
             .add_channelmapping(&self.name, &self.mapping)
-            .map_err(|e| {
-                Status::invalid_argument(format!(
-                    "libnvnmos add_channelmapping failed (duplicate or invalid geometry): {e}"
-                ))
-            })?;
+            .map_err(|e| libnvnmos_status(format!("add channel mapping {:?}", self.name), e))?;
         Ok(AddChannelMappingReady {
             name: self.name,
             node_seed: self.node_seed,
@@ -873,7 +864,7 @@ impl CreateNodePrep {
         }
         let server = builder
             .build()
-            .map_err(|e| Status::internal(format!("create_nmos_node_server failed: {e}")))?;
+            .map_err(|e| libnvnmos_status(format!("create Node for seed {:?}", self.seed), e))?;
 
         let node_id = server.node_id().map_err(|e| {
             Status::internal(format!(
@@ -2391,6 +2382,19 @@ impl State {
     pub fn cleanup_pending_channelmapping_activation(&mut self, activation_handle: &str) {
         self.pending_channelmapping_activations
             .remove(activation_handle);
+    }
+}
+
+/// Status for a failed libnvnmos call. A libnvnmos function reports only
+/// that it failed, not why, so that failure is `UNKNOWN`; its log messages
+/// carry the reason.
+fn libnvnmos_status(action: String, e: nvnmos::Error) -> Status {
+    match e {
+        nvnmos::Error::Failed(_) => Status::unknown(format!("{action}: {e}")),
+        nvnmos::Error::InteriorNul(_) | nvnmos::Error::InvalidConfig(_) => {
+            Status::invalid_argument(format!("{action}: {e}"))
+        }
+        nvnmos::Error::InvalidUtf8(_) => Status::internal(format!("{action}: {e}")),
     }
 }
 
