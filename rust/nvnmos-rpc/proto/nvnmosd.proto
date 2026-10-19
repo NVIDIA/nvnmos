@@ -435,7 +435,9 @@ enum ChannelMappingParentType {
 
 // IS-08 Input geometry.
 message ChannelMappingInput {
-  // IS-08 input ID. Empty requests an assigned default.
+  // IS-08 input ID: ASCII letters, digits, `-` and `_`, otherwise
+  // `INVALID_ARGUMENT`. Empty assigns `inputN`, where N is the index in
+  // `inputs`. An ID already used on the Node fails with `ALREADY_EXISTS`.
   string id = 1;
   // IS-08 `/properties` name, independent of the channel-mapping name.
   string name = 2;
@@ -457,7 +459,9 @@ message ChannelMappingInput {
 
 // IS-08 Output geometry.
 message ChannelMappingOutput {
-  // IS-08 output ID. Empty requests an assigned default.
+  // IS-08 output ID: ASCII letters, digits, `-` and `_`, otherwise
+  // `INVALID_ARGUMENT`. Empty assigns `outputN`, where N is the index in
+  // `outputs`. An ID already used on the Node fails with `ALREADY_EXISTS`.
   string id = 1;
   // IS-08 `/properties` name, independent of the channel-mapping name.
   string name = 2;
@@ -468,8 +472,9 @@ message ChannelMappingOutput {
   // Caller-chosen Sender name used for IS-04 linkage. Empty produces a null
   // `/sourceid`.
   string sender_name = 5;
-  // IS-08 output `/caps/routable_inputs`. Empty is unrestricted; an empty
-  // string entry permits an unrouted channel.
+  // IS-08 output `/caps/routable_inputs`. Empty leaves routable inputs
+  // unrestricted. Otherwise each entry is an input ID, or an empty string
+  // that permits unrouted channels.
   repeated string routable_inputs = 6;
 }
 

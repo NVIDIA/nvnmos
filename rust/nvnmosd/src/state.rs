@@ -398,6 +398,7 @@ struct ChannelMappingEntry {
     name: String,
     node_seed: String,
     session_handle: String,
+    input_ids: HashSet<String>,
     output_ids: HashSet<String>,
 }
 
@@ -1978,9 +1979,12 @@ impl State {
     ///
     /// 1. Pre-check in daemon state — refuses a duplicate channel mapping
     ///    `name` on the same Node before any FFI happens (here).
-    /// 2. Assign default IS-08 ids when proto `id` is empty (nvnmosd
-    ///    policy); `routable_inputs` is forwarded like libnvnmos C
-    ///    (empty → unrestricted caps) (here).
+    /// 2. Assign default IS-08 ids `inputN` / `outputN` when proto `id` is
+    ///    empty (nvnmosd policy), refuse ids and `routable_inputs` entries
+    ///    outside the IS-08 id pattern, then refuse an id another channel
+    ///    mapping on the Node already uses, since libnvnmos reports that
+    ///    collision without saying which id; `routable_inputs` is forwarded
+    ///    like libnvnmos C (empty → unrestricted caps) (here).
     /// 3. `add_channelmapping` into libnvnmos, which validates geometry,
     ///    duplicate ids, labels, and parent/sender linkage
     ///    ([`AddChannelMappingPrep::run_ffi`], no lock held); then record
@@ -2022,14 +2026,64 @@ impl State {
             )));
         }
 
-        let first_on_node = !self
+        let effective_input_ids = effective_channelmapping_input_ids(inputs);
+        let effective_output_ids = effective_channelmapping_output_ids(outputs);
+        if let Some(id) = effective_input_ids
+            .iter()
+            .find(|id| !is_channelmapping_id(id))
+        {
+            return Err(Status::invalid_argument(format!(
+                "channel mapping input id {id:?} must contain only ASCII letters, digits, \
+                 '-' and '_'"
+            )));
+        }
+        if let Some(id) = effective_output_ids
+            .iter()
+            .find(|id| !is_channelmapping_id(id))
+        {
+            return Err(Status::invalid_argument(format!(
+                "channel mapping output id {id:?} must contain only ASCII letters, digits, \
+                 '-' and '_'"
+            )));
+        }
+        for (output, output_id) in outputs.iter().zip(&effective_output_ids) {
+            if let Some(id) = output
+                .routable_inputs
+                .iter()
+                .find(|id| !id.is_empty() && !is_channelmapping_id(id))
+            {
+                return Err(Status::invalid_argument(format!(
+                    "channel mapping output {output_id:?} routable input {id:?} must be \
+                     empty or contain only ASCII letters, digits, '-' and '_'"
+                )));
+            }
+        }
+        for entry in self
             .channelmappings
             .values()
-            .any(|entry| entry.node_seed == node_seed);
-
-        let effective_input_ids = effective_channelmapping_input_ids(name, inputs, first_on_node);
-        let effective_output_ids =
-            effective_channelmapping_output_ids(name, outputs, first_on_node);
+            .filter(|entry| entry.node_seed == node_seed)
+        {
+            if let Some(id) = effective_input_ids
+                .iter()
+                .find(|id| entry.input_ids.contains(*id))
+            {
+                return Err(Status::already_exists(format!(
+                    "channel mapping input id {id:?} already exists on node_seed \
+                     {node_seed:?}; set explicit input ids when a Node has more than \
+                     one channel mapping"
+                )));
+            }
+            if let Some(id) = effective_output_ids
+                .iter()
+                .find(|id| entry.output_ids.contains(*id))
+            {
+                return Err(Status::already_exists(format!(
+                    "channel mapping output id {id:?} already exists on node_seed \
+                     {node_seed:?}; set explicit output ids when a Node has more than \
+                     one channel mapping"
+                )));
+            }
+        }
         let mapping =
             build_channelmapping(inputs, outputs, &effective_input_ids, &effective_output_ids);
 
@@ -2089,6 +2143,7 @@ impl State {
         }
 
         let channelmapping_handle = self.allocate_channelmapping_handle();
+        let input_id_set: HashSet<String> = effective_input_ids.iter().cloned().collect();
         let output_id_set: HashSet<String> = effective_output_ids.iter().cloned().collect();
         for id in &effective_output_ids {
             self.outputs_by_id.insert(
@@ -2103,6 +2158,7 @@ impl State {
                 name: name.clone(),
                 node_seed: node_seed.clone(),
                 session_handle: session_handle.clone(),
+                input_ids: input_id_set,
                 output_ids: output_id_set,
             },
         );
@@ -2345,33 +2401,21 @@ fn require_non_empty_seed(seed: &str) -> Result<(), Status> {
     }
 }
 
-fn default_channelmapping_input_id(name: &str, index: usize, first_on_node: bool) -> String {
-    if first_on_node {
-        format!("input{index}")
-    } else {
-        format!("{name}_input{index}")
-    }
+// IS-08 schemas constrain Input and Output IDs to `^[a-zA-Z0-9\-_]+$`.
+fn is_channelmapping_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-fn default_channelmapping_output_id(name: &str, index: usize, first_on_node: bool) -> String {
-    if first_on_node {
-        format!("output{index}")
-    } else {
-        format!("{name}_output{index}")
-    }
-}
-
-fn effective_channelmapping_input_ids(
-    name: &str,
-    inputs: &[ProtoChannelMappingInput],
-    first_on_node: bool,
-) -> Vec<String> {
+fn effective_channelmapping_input_ids(inputs: &[ProtoChannelMappingInput]) -> Vec<String> {
     inputs
         .iter()
         .enumerate()
         .map(|(index, input)| {
             if input.id.is_empty() {
-                default_channelmapping_input_id(name, index, first_on_node)
+                format!("input{index}")
             } else {
                 input.id.clone()
             }
@@ -2379,17 +2423,13 @@ fn effective_channelmapping_input_ids(
         .collect()
 }
 
-fn effective_channelmapping_output_ids(
-    name: &str,
-    outputs: &[ProtoChannelMappingOutput],
-    first_on_node: bool,
-) -> Vec<String> {
+fn effective_channelmapping_output_ids(outputs: &[ProtoChannelMappingOutput]) -> Vec<String> {
     outputs
         .iter()
         .enumerate()
         .map(|(index, output)| {
             if output.id.is_empty() {
-                default_channelmapping_output_id(name, index, first_on_node)
+                format!("output{index}")
             } else {
                 output.id.clone()
             }

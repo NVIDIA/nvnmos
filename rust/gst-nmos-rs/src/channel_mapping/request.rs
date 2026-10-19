@@ -24,12 +24,31 @@ pub(crate) fn build_add_channel_mapping_request(
     srcs: &[SrcPadSnapshot],
     restrict_routable_inputs: bool,
 ) -> AddChannelMappingRequest {
-    let input_ids_for_routable: Vec<String> = sinks.iter().map(|s| s.input_id.clone()).collect();
+    // An empty pad id gets the same `inputN` / `outputN` default nvnmosd
+    // assigns, resolved here so the restricted routable inputs can name it.
+    let input_ids: Vec<String> = sinks
+        .iter()
+        .enumerate()
+        .map(|(index, s)| {
+            if s.input_id.is_empty() {
+                format!("input{index}")
+            } else {
+                s.input_id.clone()
+            }
+        })
+        .collect();
+    // The empty entry publishes null, so a controller may unroute a channel.
+    let input_ids_for_routable: Vec<String> = input_ids
+        .iter()
+        .cloned()
+        .chain(std::iter::once(String::new()))
+        .collect();
 
     let inputs = sinks
         .iter()
-        .map(|s| ChannelMappingInput {
-            id: s.input_id.clone(),
+        .zip(&input_ids)
+        .map(|(s, id)| ChannelMappingInput {
+            id: id.clone(),
             name: s.label.clone(),
             description: s.description.clone(),
             channel_labels: default_channel_labels(s.negotiated_channels),
@@ -42,14 +61,19 @@ pub(crate) fn build_add_channel_mapping_request(
 
     let outputs = srcs
         .iter()
-        .map(|s| {
+        .enumerate()
+        .map(|(index, s)| {
             let routable_inputs = if restrict_routable_inputs {
                 input_ids_for_routable.clone()
             } else {
                 Vec::new()
             };
             ChannelMappingOutput {
-                id: s.output_id.clone(),
+                id: if s.output_id.is_empty() {
+                    format!("output{index}")
+                } else {
+                    s.output_id.clone()
+                },
                 name: s.label.clone(),
                 description: s.description.clone(),
                 channel_labels: default_channel_labels(s.negotiated_channels),
@@ -93,7 +117,35 @@ mod tests {
         assert_eq!(req.inputs.len(), 1);
         assert_eq!(req.inputs[0].parent_name, "rx1");
         assert_eq!(req.inputs[0].channel_labels, vec!["0", "1"]);
-        assert_eq!(req.outputs[0].routable_inputs, vec!["input0"]);
+        assert_eq!(req.outputs[0].routable_inputs, vec!["input0", ""]);
+    }
+
+    #[test]
+    fn restrict_routable_inputs_lists_default_input_ids() {
+        let sink = |input_id: &str| SinkPadSnapshot {
+            receiver_name: String::new(),
+            input_id: input_id.into(),
+            label: String::new(),
+            description: String::new(),
+            negotiated_channels: 2,
+        };
+        let sinks = vec![sink(""), sink("explicit"), sink("")];
+        let srcs = vec![SrcPadSnapshot {
+            sender_name: String::new(),
+            output_id: String::new(),
+            label: String::new(),
+            description: String::new(),
+            negotiated_channels: 2,
+            active_map: None,
+        }];
+        let req = build_add_channel_mapping_request("sess", "studio", &sinks, &srcs, true);
+        let input_ids: Vec<&str> = req.inputs.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(input_ids, vec!["input0", "explicit", "input2"]);
+        assert_eq!(req.outputs[0].id, "output0");
+        assert_eq!(
+            req.outputs[0].routable_inputs,
+            vec!["input0", "explicit", "input2", ""]
+        );
     }
 
     #[test]
