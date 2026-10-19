@@ -990,7 +990,8 @@ impl State {
     /// * `INVALID_ARGUMENT` if `seed` is empty (the empty seed would
     ///   collapse every "default" session onto the same Node and lose
     ///   determinism of the NMOS UUIDs).
-    /// * `ABORTED` if a create for the same seed is already pending.
+    /// * `UNAVAILABLE` if a create for the same seed is already pending.
+    ///   Retrying the same call attaches once the create completes.
     /// * Whatever [`State::resolve_http_port`] returns.
     pub fn prepare_open_session(
         &mut self,
@@ -1024,7 +1025,7 @@ impl State {
         }
 
         if self.pending_nodes.contains(&seed) {
-            return Err(Status::aborted(format!(
+            return Err(Status::unavailable(format!(
                 "a Node for seed {seed:?} is already being created; retry"
             )));
         }
@@ -2672,5 +2673,32 @@ mod http_port_allocation_tests {
             .resolve_http_port_for_test(18_010, &range)
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::AlreadyExists);
+    }
+}
+
+#[cfg(test)]
+mod open_session_tests {
+    use super::{ProtoNodeConfig, State, translate_config};
+    use crate::http_port::PortRange;
+
+    #[test]
+    fn open_session_during_node_create_is_unavailable() {
+        let mut state = State::new();
+        let range = PortRange::new(18_370, 18_379).expect("range");
+        let config = || {
+            translate_config(Some(&ProtoNodeConfig {
+                seed: "pending-seed".into(),
+                ..Default::default()
+            }))
+            .expect("config")
+        };
+        state
+            .prepare_open_session(config(), &range)
+            .expect("first OpenSession prepares the Node create");
+        let err = state
+            .prepare_open_session(config(), &range)
+            .err()
+            .expect("second OpenSession while the create is pending");
+        assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
     }
 }

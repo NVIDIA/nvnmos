@@ -155,7 +155,7 @@ the AB-BA deadlock with `model`. Bookkeeping mutations remain serialized by
 
 | Concern | Mechanism |
 |---------|-----------|
-| Double node create for same `node_seed` | `pending_nodes` + `http_ports` reserved in `prepare_*`; concurrent `OpenSession` / `AddNode` gets `ABORTED` / `ALREADY_EXISTS` |
+| Double node create for same `node_seed` | `pending_nodes` + `http_ports` reserved in `prepare_*`; concurrent `OpenSession` / `AddNode` gets `UNAVAILABLE` / `ALREADY_EXISTS` |
 | Add resource while session dies | `commit_add_sender` / `commit_add_receiver` re-checks session exists; returns `NOT_FOUND` if `CloseSession` won the race |
 | `NodeServer` destroyed while FFI uses it | `Arc<NodeServer>` in `*Prep` / `*Ffi` keeps the C++ object alive until `run_ffi` / `run()` completes |
 | Conflicting FFI on one Node | libnvnmos `model` lock serialises internally |

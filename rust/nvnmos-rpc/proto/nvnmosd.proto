@@ -41,7 +41,9 @@ service NvnmosDaemon {
   // session-refcounted Node when the seed is new. Returns `INVALID_ARGUMENT`
   // for invalid creation configuration, `ALREADY_EXISTS` when a requested
   // HTTP port belongs to another Node, or `FAILED_PRECONDITION` when that port
-  // cannot be bound.
+  // cannot be bound. Returns `UNAVAILABLE` while another `OpenSession` is
+  // creating the Node for the same seed; retrying the call attaches to that
+  // Node once it exists.
   rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
 
   // Closes a session and removes its resources. The backing Node is also
