@@ -117,11 +117,17 @@ struct AddedResource {
 pub(crate) enum DaemonError {
     #[error("unsupported daemon-uri scheme: {0}; only `unix:` URIs are supported")]
     UnsupportedScheme(String),
-    #[error("transport error connecting to nvnmosd: {0}")]
-    Transport(#[from] Box<tonic::transport::Error>),
-    #[error("RPC error: {0}")]
-    Rpc(#[from] Box<tonic::Status>),
-    #[error("invalid node-properties: {0}")]
+    // tonic's transport errors repeat their causes in their own text, so
+    // the error is not a source and only its innermost cause is shown.
+    #[error("could not connect to nvnmosd: {}", root_cause(.0.as_ref()))]
+    Transport(Box<tonic::transport::Error>),
+    // The status code and the server's message are the useful parts of a
+    // `Status`, and its own text is verbose, so the status is not a source
+    // and only those two fields are shown.
+    #[error("{:?}: {}", .0.code(), .0.message())]
+    Rpc(Box<tonic::Status>),
+    // The reason is the source, so it is not repeated in this text.
+    #[error("invalid node-properties")]
     NodeProperties(#[from] crate::session::node::NodePropertiesError),
     #[error("session already has a resource added; deferred AddSender is a one-shot operation")]
     AlreadyAdded,
@@ -129,6 +135,15 @@ pub(crate) enum DaemonError {
         "session has no resource added yet; auto-activate sync cannot run before AddSender / AddReceiver"
     )]
     NoResource,
+}
+
+fn root_cause<'a>(
+    mut e: &'a (dyn std::error::Error + 'static),
+) -> &'a (dyn std::error::Error + 'static) {
+    while let Some(source) = e.source() {
+        e = source;
+    }
+    e
 }
 
 impl From<tonic::transport::Error> for DaemonError {

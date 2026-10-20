@@ -6,7 +6,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow};
 use gstreamer as gst;
 
 use crate::channel_mapping_session::{ChannelMappingActivationHandler, ChannelMappingSession};
@@ -14,6 +14,7 @@ use crate::runtime::SHARED_RUNTIME;
 use crate::types::DEFAULT_DAEMON_URI;
 
 use super::NodeSettings;
+use super::error::WithCode;
 
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -51,10 +52,12 @@ pub(crate) fn validate_and_open(
     activation_handler: ChannelMappingActivationHandler,
 ) -> Result<(), anyhow::Error> {
     if settings.node.node_seed.is_empty() {
-        bail!("{element}: `node-seed` is required");
+        return Err(anyhow!("{element}: `node-seed` is required"))
+            .with_code(gst::ResourceError::Settings);
     }
     if settings.channelmapping_name.is_empty() {
-        bail!("{element}: `channelmapping-name` is required");
+        return Err(anyhow!("{element}: `channelmapping-name` is required"))
+            .with_code(gst::ResourceError::Settings);
     }
 
     let settings = settings.clone();
@@ -101,7 +104,11 @@ pub(crate) fn close(
         let result = SHARED_RUNTIME.block_on(s.close());
         match result {
             Ok(()) => gst::info!(cat, "channel mapping session closed: handle={handle}"),
-            Err(e) => gst::warning!(cat, "{element}: CloseSession (handle={handle}): {e}"),
+            Err(e) => gst::warning!(
+                cat,
+                "{element}: CloseSession (handle={handle}): {:#}",
+                anyhow::Error::new(e)
+            ),
         }
     }
 }

@@ -70,6 +70,7 @@ use crate::nvdsudp::packetization::{
     self, ANC_HEADER_SIZE, AUDIO_HEADER_SIZE, Packetization, VIDEO_HEADER_SIZE,
 };
 use crate::nvdsudp::sdp_file::SdpFileGuard;
+use crate::session::error::WithCode;
 use crate::session::udp::UdpVariant;
 use crate::session::udp::types::{UdpLeg, UdpMedia};
 use crate::types::FlowFormat;
@@ -501,7 +502,8 @@ fn advance_chain_to_parent_target(
 ) -> Result<(), anyhow::Error> {
     new_chain
         .sync_state_with_parent()
-        .with_context(|| format!("syncing state of `{}` with parent", new_chain.name()))?;
+        .with_context(|| format!("syncing state of `{}` with parent", new_chain.name()))
+        .with_code(gst::CoreError::StateChange)?;
 
     wait_for_chain_state(cat, bin, new_chain)
 }
@@ -868,13 +870,15 @@ pub(crate) fn build_fake_sink(caps: Option<&gst::Caps>) -> Result<gst::Element, 
         .name("nmossink-fake-valve")
         .property("drop", false)
         .build()
-        .map_err(|e| anyhow!("creating valve for nmossink fake chain: {e}"))?;
+        .map_err(|e| anyhow!("creating valve for nmossink fake chain: {e}"))
+        .with_code(gst::CoreError::MissingPlugin)?;
     let fakesink = gst::ElementFactory::make("fakesink")
         .name("nmossink-fake-sink")
         .property("sync", true)
         .property("async", false)
         .build()
-        .map_err(|e| anyhow!("creating fakesink for nmossink fake chain: {e}"))?;
+        .map_err(|e| anyhow!("creating fakesink for nmossink fake chain: {e}"))
+        .with_code(gst::CoreError::MissingPlugin)?;
     let bin = gst::Bin::with_name("nmossink-fake");
     bin.add_many([&valve, &fakesink])
         .map_err(|e| anyhow!("adding fake-chain valve + fakesink: {e}"))?;
@@ -888,7 +892,8 @@ pub(crate) fn build_fake_sink(caps: Option<&gst::Caps>) -> Result<gst::Element, 
                 .name("nmossink-fake-caps")
                 .property("caps", caps)
                 .build()
-                .context("creating capsfilter for nmossink fake chain")?;
+                .context("creating capsfilter for nmossink fake chain")
+                .with_code(gst::CoreError::MissingPlugin)?;
             bin.add(&capsfilter)
                 .map_err(|e| anyhow!("adding fake-chain capsfilter: {e}"))?;
             capsfilter
@@ -938,7 +943,8 @@ pub(crate) fn build_fake_src(caps: Option<&gst::Caps>) -> Result<gst::Element, a
         .property("is-live", true)
         .property("format", gst::Format::Time)
         .build()
-        .map_err(|e| anyhow!("creating appsrc for nmossrc fake chain: {e}"))?;
+        .map_err(|e| anyhow!("creating appsrc for nmossrc fake chain: {e}"))
+        .with_code(gst::CoreError::MissingPlugin)?;
     if let Some(caps) = caps {
         elem.set_property("caps", caps);
     }
@@ -1011,7 +1017,8 @@ fn prepend_sink_capsfilter(
         .name("nmossink-caps")
         .property("caps", caps)
         .build()
-        .context("creating capsfilter to pin advertised sink essence")?;
+        .context("creating capsfilter to pin advertised sink essence")
+        .with_code(gst::CoreError::MissingPlugin)?;
     bin.add(&capsfilter)
         .map_err(|e| anyhow!("adding essence capsfilter: {e}"))?;
     capsfilter
@@ -1054,7 +1061,8 @@ pub(crate) fn build_mxlsink(
         .build()
         .with_context(|| {
             format!("instantiating `mxlsink` with domain={domain_path:?}, flow-id={flow_id}")
-        })?;
+        })
+        .with_code(gst::CoreError::MissingPlugin)?;
     let bin = gst::Bin::with_name("nmossink-mxl");
     bin.add(&mxlsink)
         .map_err(|e| anyhow!("adding mxlsink to inner bin: {e}"))?;
@@ -1092,7 +1100,7 @@ pub(crate) fn build_mxlsrc(
         FlowFormat::Data => "data-flow-id",
         FlowFormat::Unspecified => {
             return Err(anyhow!(
-                "build_mxlsrc called with FlowFormat::Unspecified; caller should have built a fake chain",
+                "internal: build_mxlsrc called with FlowFormat::Unspecified; caller should have built a fake chain",
             ));
         }
     };
@@ -1103,7 +1111,8 @@ pub(crate) fn build_mxlsrc(
         .build()
         .with_context(|| {
             format!("instantiating `mxlsrc` with domain={domain_path:?}, {prop}={flow_id}")
-        })?;
+        })
+        .with_code(gst::CoreError::MissingPlugin)?;
 
     let Some(caps) = advertise_caps else {
         return Ok(MxlSrcChain {
@@ -1116,7 +1125,8 @@ pub(crate) fn build_mxlsrc(
         .name("nmossrc-caps")
         .property("caps", caps)
         .build()
-        .map_err(|e| anyhow!("instantiating `capssetter` for nmossrc caps advertisement: {e}"))?;
+        .map_err(|e| anyhow!("instantiating `capssetter` for nmossrc caps advertisement: {e}"))
+        .with_code(gst::CoreError::MissingPlugin)?;
     let bin = gst::Bin::with_name("nmossrc-inner");
     bin.add_many([&mxlsrc, &capssetter])
         .map_err(|e| anyhow!("adding mxlsrc + capssetter to inner bin: {e}"))?;
@@ -1227,18 +1237,21 @@ pub(crate) fn build_udpsink(
     let rtp_s = media
         .rtp_caps
         .structure(0)
-        .ok_or_else(|| anyhow!("UdpMedia.rtp_caps is empty (no structure(0))"))?;
+        .ok_or_else(|| anyhow!("internal: UdpMedia.rtp_caps is empty (no structure(0))"))?;
     let encoding_name = rtp_s
         .get::<&str>("encoding-name")
-        .map_err(|e| anyhow!("UdpMedia.rtp_caps missing `encoding-name`: {e}"))?;
+        .map_err(|e| anyhow!("internal: UdpMedia.rtp_caps missing `encoding-name`: {e}"))?;
     let pt = rtp_s
         .get::<i32>("payload")
-        .map_err(|e| anyhow!("UdpMedia.rtp_caps missing `payload` field: {e}"))?;
+        .map_err(|e| anyhow!("internal: UdpMedia.rtp_caps missing `payload` field: {e}"))?;
     if !(0..=127).contains(&pt) {
-        bail!("UdpMedia.rtp_caps `payload`={pt} out of valid RTP payload-type range 0..=127");
+        return Err(anyhow!(
+            "UdpMedia.rtp_caps `payload`={pt} out of valid RTP payload-type range 0..=127"
+        ))
+        .with_code(gst::ResourceError::Settings);
     }
     let ptime_ns = if matches!(media.format, FlowFormat::Audio) {
-        ptime_ns_from_rtp_caps(rtp_s)?
+        ptime_ns_from_rtp_caps(rtp_s).with_code(gst::ResourceError::Settings)?
     } else {
         None
     };
@@ -1248,7 +1261,8 @@ pub(crate) fn build_udpsink(
         .name("nmossink-payloader")
         .property("pt", pt as u32)
         .build()
-        .with_context(|| format!("instantiating payloader `{payloader_factory}` (pt={pt})"))?;
+        .with_context(|| format!("instantiating payloader `{payloader_factory}` (pt={pt})"))
+        .with_code(gst::CoreError::MissingPlugin)?;
     if let Some(ns) = ptime_ns {
         payloader.set_property("min-ptime", ns);
         payloader.set_property("max-ptime", ns);
@@ -1279,7 +1293,8 @@ pub(crate) fn build_udpsink(
                 "instantiating `udpsink` (host={}, port={})",
                 media.primary.destination_ip, media.primary.destination_port,
             )
-        })?;
+        })
+        .with_code(gst::CoreError::MissingPlugin)?;
     if let Some(port) = media.primary.source_port {
         udpsink.set_property("bind-port", i32::from(port));
     }
@@ -1349,21 +1364,25 @@ fn select_rtp_factory(
         (FlowFormat::Audio, "L24") => "rtpL24",
         (FlowFormat::Audio, "L16") => "rtpL16",
         (FlowFormat::Data, "SMPTE291") => "rtpsmpte291",
-        _ => bail!(
-            "unsupported essence for RTP/UDP `{suffix}`: format={format:?}, \
-             encoding-name=`{encoding_name}` (today RFC 4175 `RAW` video, \
-             RFC 9134 / ST 2110-22 `JXSV` JPEG XS video, ST 2110-30 `L24` / \
-             `L16` audio, and RFC 8331 / ST 2110-40 `SMPTE291` ANC are \
-             supported)"
-        ),
+        _ => {
+            return Err(anyhow!(
+                "unsupported essence for RTP/UDP `{suffix}`: format={format:?}, \
+                 encoding-name=`{encoding_name}` (today RFC 4175 `RAW` video, \
+                 RFC 9134 / ST 2110-22 `JXSV` JPEG XS video, ST 2110-30 `L24` / \
+                 `L16` audio, and RFC 8331 / ST 2110-40 `SMPTE291` ANC are \
+                 supported)"
+            ))
+            .with_code(gst::ResourceError::Settings);
+        }
     };
     let v1 = format!("{stem}{suffix}");
     if gst::ElementFactory::find(&v1).is_none() {
-        bail!(
+        return Err(anyhow!(
             "GStreamer factory `{v1}` not found; install `{package}` and \
              ensure it's on `GST_PLUGIN_PATH`",
             package = package_hint_for_stem(stem),
-        );
+        ))
+        .with_code(gst::CoreError::MissingPlugin);
     }
     match variant {
         UdpVariant::V1 => Ok(v1),
@@ -1567,10 +1586,10 @@ pub(crate) fn build_udpsrc(
     let rtp_s = media
         .rtp_caps
         .structure(0)
-        .ok_or_else(|| anyhow!("UdpMedia.rtp_caps is empty (no structure(0))"))?;
+        .ok_or_else(|| anyhow!("internal: UdpMedia.rtp_caps is empty (no structure(0))"))?;
     let encoding_name = rtp_s
         .get::<&str>("encoding-name")
-        .map_err(|e| anyhow!("UdpMedia.rtp_caps missing `encoding-name`: {e}"))?;
+        .map_err(|e| anyhow!("internal: UdpMedia.rtp_caps missing `encoding-name`: {e}"))?;
 
     let depayloader_factory = select_rtp_factory("depay", media.format, encoding_name, variant)?;
     let capssetter_caps =
@@ -1578,7 +1597,8 @@ pub(crate) fn build_udpsrc(
     let depayloader = gst::ElementFactory::make(&depayloader_factory)
         .name("nmossrc-depayloader")
         .build()
-        .with_context(|| format!("instantiating depayloader `{depayloader_factory}`"))?;
+        .with_context(|| format!("instantiating depayloader `{depayloader_factory}`"))
+        .with_code(gst::CoreError::MissingPlugin)?;
 
     let udpsrc_factory = select_udpsrc_factory(variant);
     let udpsrc = gst::ElementFactory::make(udpsrc_factory)
@@ -1591,7 +1611,8 @@ pub(crate) fn build_udpsrc(
                 "instantiating `{udpsrc_factory}` (address={}, port={})",
                 media.primary.destination_ip, media.primary.destination_port,
             )
-        })?;
+        })
+        .with_code(gst::CoreError::MissingPlugin)?;
     // `udpsrc.port` is `gint` (gst-plugins-good's pspec) while
     // `udpsrc2.port` is `guint` (gst-plugins-rs' pspec) — same
     // numeric value, different glib type tag, so the property setter
@@ -1653,7 +1674,8 @@ pub(crate) fn build_udpsrc(
                 .build()
                 .map_err(|e| {
                     anyhow!("instantiating `{tail_factory}` for nmossrc caps advertisement: {e}")
-                })?;
+                })
+                .with_code(gst::CoreError::MissingPlugin)?;
             bin.add(&tail)
                 .map_err(|e| anyhow!("adding tail {tail_factory} to inner bin: {e}"))?;
             depayloader
@@ -1703,7 +1725,8 @@ fn require_nvdsudp_factory(name: &'static str) -> Result<(), anyhow::Error> {
              plugins (e.g. `libnvdsgst_udp.so`) are on `GST_PLUGIN_PATH`, and \
              ensure the host binary has `CAP_NET_RAW` (e.g. \
              `sudo setcap CAP_NET_RAW=ep $(which gst-launch-1.0)`)"
-        ));
+        ))
+        .with_code(gst::CoreError::MissingPlugin);
     }
     Ok(())
 }
@@ -1771,19 +1794,22 @@ pub(crate) fn build_nvdsudpsink(
     sdp_text: &str,
 ) -> Result<NvDsUdpSinkChain, anyhow::Error> {
     require_nvdsudp_factory("nvdsudpsink")?;
-    let pkt = packetization::from_media(media.format, &media.caps, &media.rtp_caps)?;
+    let pkt = packetization::from_media(media.format, &media.caps, &media.rtp_caps)
+        .with_code(gst::ResourceError::Settings)?;
 
     let sdp_for_sink = if media.secondary.is_none()
         && crate::sdp::sdp_media_block_count(sdp_text).is_ok_and(|n| n > 1)
     {
         crate::sdp::normalise_to_single_active_leg(sdp_text).with_context(
             || "nvdsudpsink: normalising dual-leg SDP with only one leg active to single-leg SDP",
-        )?
+        )
+        .with_code(gst::ResourceError::Settings)?
     } else {
         sdp_text.to_owned()
     };
 
-    let sdp_file = SdpFileGuard::write("nvnmos-nvdsudpsink", &sdp_for_sink)?;
+    let sdp_file = SdpFileGuard::write("nvnmos-nvdsudpsink", &sdp_for_sink)
+        .with_code(gst::ResourceError::OpenWrite)?;
     gst::debug!(
         nvdsudp_log_cat(),
         "build_nvdsudpsink: sdp-file={} (host={}, port={})",
@@ -1803,7 +1829,8 @@ pub(crate) fn build_nvdsudpsink(
                 "instantiating `nvdsudpsink` (host={}, port={})",
                 media.primary.destination_ip, media.primary.destination_port,
             )
-        })?;
+        })
+        .with_code(gst::CoreError::MissingPlugin)?;
 
     let iface_ips = match &media.secondary {
         Some(secondary) => comma_separated_sender_interface_ips(&[&media.primary, secondary]),
@@ -1896,14 +1923,16 @@ pub(crate) fn build_nvdsudpsrc(
     // `st2038combiner` sees it — the src-side counterpart of the same
     // default `build_nvdsudpsink` applies before the shared sink capsfilter.
     let caps = packetization::with_st2038_frame_alignment(&media.caps);
-    let pkt = packetization::from_media(media.format, &caps, &media.rtp_caps)?;
+    let pkt = packetization::from_media(media.format, &caps, &media.rtp_caps)
+        .with_code(gst::ResourceError::Settings)?;
 
     let src = if let Some(secondary) = &media.secondary {
         let streams = format!("{},{}", host_port(&media.primary), host_port(secondary));
         nvdsudpsrc_builder(&caps)
             .property("st2022-7-streams", &streams)
             .build()
-            .with_context(|| format!("instantiating `nvdsudpsrc` (st2022-7-streams={streams})"))?
+            .with_context(|| format!("instantiating `nvdsudpsrc` (st2022-7-streams={streams})"))
+            .with_code(gst::CoreError::MissingPlugin)?
     } else {
         nvdsudpsrc_builder(&caps)
             .property("address", &media.primary.destination_ip)
@@ -1914,7 +1943,8 @@ pub(crate) fn build_nvdsudpsrc(
                     "instantiating `nvdsudpsrc` (address={}, port={})",
                     media.primary.destination_ip, media.primary.destination_port,
                 )
-            })?
+            })
+            .with_code(gst::CoreError::MissingPlugin)?
     };
 
     let iface_ips = match &media.secondary {
@@ -1972,7 +2002,8 @@ fn require_mxl_factory(name: &'static str) -> Result<(), anyhow::Error> {
             "GStreamer factory `{name}` not found; \
              load the `gst-mxl-rs` plugin (set GST_PLUGIN_PATH to the directory containing `libgstmxl.so` \
              and LD_LIBRARY_PATH so the MXL runtime libraries are visible)",
-        ));
+        ))
+        .with_code(gst::CoreError::MissingPlugin);
     }
     Ok(())
 }

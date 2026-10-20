@@ -15,6 +15,7 @@ use crate::channel_mapping::matrix::{
     matrix_to_audiomixmatrix_gvalue,
 };
 use crate::channel_mapping::types::FrozenTopology;
+use crate::session::error::WithCode;
 
 // Extra wait the live audiomixer allows for jittery inputs before emitting.
 // Covers software-receive scheduling jitter at small RTP packet times.
@@ -56,7 +57,8 @@ impl InternalGraph {
         let mixer = gst::ElementFactory::make("audiomixer")
             .name("mixer")
             .build()
-            .context("creating audiomixer")?;
+            .context("creating audiomixer")
+            .with_code(gst::CoreError::MissingPlugin)?;
         if mixer.has_property("ignore-inactive-pads") {
             mixer.set_property("ignore-inactive-pads", true);
         }
@@ -73,7 +75,8 @@ impl InternalGraph {
         let tee = gst::ElementFactory::make("tee")
             .name("mixer-tee")
             .build()
-            .context("creating tee")?;
+            .context("creating tee")
+            .with_code(gst::CoreError::MissingPlugin)?;
 
         // Pin the mixer output bus to its channel count so the downstream
         // per-output audiomixmatrix in-channels dimension matches. The
@@ -84,7 +87,8 @@ impl InternalGraph {
             .name("mixer-capsfilter")
             .property("caps", caps_with_channel_mask(topology.input_bus_channels))
             .build()
-            .context("creating mixer capsfilter")?;
+            .context("creating mixer capsfilter")
+            .with_code(gst::CoreError::MissingPlugin)?;
 
         bin.add_many([&mixer, &mixer_capsfilter, &tee])?;
 
@@ -116,7 +120,8 @@ impl InternalGraph {
                 .name(format!("sink-capsfilter-{idx}"))
                 .property("caps", caps_with_channel_count(input_ch))
                 .build()
-                .context("creating sink capsfilter")?;
+                .context("creating sink capsfilter")
+                .with_code(gst::CoreError::MissingPlugin)?;
             // A per-leg queue decouples each input from the live mixer's
             // aggregation thread so RTP jitter at small packet times does not
             // starve it (see QUEUE_MAX_SIZE_TIME_NS).
@@ -126,7 +131,8 @@ impl InternalGraph {
                 .property("max-size-buffers", 0u32)
                 .property("max-size-bytes", 0u32)
                 .build()
-                .context("creating sink queue")?;
+                .context("creating sink queue")
+                .with_code(gst::CoreError::MissingPlugin)?;
             bin.add_many([&sink_capsfilter, &sink_queue])?;
             sink_capsfilter
                 .link(&sink_queue)
@@ -138,7 +144,10 @@ impl InternalGraph {
                 .context("linking sink queue to audiomixer")?;
 
             let ghost: NmosAudioChannelMapSinkPad = sink_pad.clone().downcast().map_err(|_| {
-                anyhow::anyhow!("pad `{}` is not a sink ghost pad", sink_pad.name())
+                anyhow::anyhow!(
+                    "internal: pad `{}` is not a sink ghost pad",
+                    sink_pad.name()
+                )
             })?;
             ghost.set_target(sink_capsfilter.static_pad("sink").as_ref())?;
             ghost.set_active(true)?;
@@ -154,7 +163,8 @@ impl InternalGraph {
                 .property("max-size-time", QUEUE_MAX_SIZE_TIME_NS)
                 .property("max-size-buffers", 0u32)
                 .property("max-size-bytes", 0u32)
-                .build()?;
+                .build()
+                .with_code(gst::CoreError::MissingPlugin)?;
             let output_ch = topology.output_channels[src_idx];
             let mixmatrix = gst::ElementFactory::make("audiomixmatrix")
                 .name(format!("mixmatrix-{src_idx}"))
@@ -162,7 +172,8 @@ impl InternalGraph {
                 .property("in-channels", topology.input_bus_channels)
                 .property("out-channels", output_ch)
                 .build()
-                .context("creating audiomixmatrix")?;
+                .context("creating audiomixmatrix")
+                .with_code(gst::CoreError::MissingPlugin)?;
             // Give >2-channel outputs a sequential channel-mask so the matrix src
             // caps carry defined positions (keeps "invalid channel positions"
             // warnings out of the log). Mono/stereo are left at the property
@@ -187,10 +198,9 @@ impl InternalGraph {
             let matrix_src = mixmatrix
                 .static_pad("src")
                 .ok_or_else(|| anyhow::anyhow!("audiomixmatrix has no src pad"))?;
-            let ghost: NmosAudioChannelMapSrcPad = src_pad
-                .clone()
-                .downcast()
-                .map_err(|_| anyhow::anyhow!("pad `{}` is not a src ghost pad", src_pad.name()))?;
+            let ghost: NmosAudioChannelMapSrcPad = src_pad.clone().downcast().map_err(|_| {
+                anyhow::anyhow!("internal: pad `{}` is not a src ghost pad", src_pad.name())
+            })?;
             ghost.set_target(Some(&matrix_src))?;
             ghost.set_active(true)?;
 

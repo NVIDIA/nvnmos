@@ -586,12 +586,7 @@ impl SyncResourceFfi {
                 } else {
                     "deactivate"
                 };
-                Status::invalid_argument(format!(
-                    "libnvnmos {verb} for {} {:?} failed (transport_file \
-                     parse error or libnvnmos state mismatch): {e}",
-                    self.side.label(),
-                    self.name,
-                ))
+                libnvnmos_status(format!("{verb} {} {:?}", self.side.label(), self.name), e)
             })
     }
 }
@@ -654,11 +649,7 @@ impl AddResourcePrep {
                 &self.name,
             )
             .map_err(|e| {
-                Status::invalid_argument(format!(
-                    "libnvnmos add_{} failed (transport_file parse error or \
-                     duplicate): {e}",
-                    self.side.label(),
-                ))
+                libnvnmos_status(format!("add {} {:?}", self.side.label(), self.name), e)
             })?;
 
         let resource_id = match self.side.lookup_id(&self.server, &self.name) {
@@ -768,9 +759,13 @@ impl SyncChannelMappingFfi {
         self.server
             .activate_channelmapping(&self.name, &self.output_id, &self.active_map)
             .map_err(|e| {
-                Status::invalid_argument(format!(
-                    "libnvnmos nmos_channelmapping_activate failed: {e}"
-                ))
+                libnvnmos_status(
+                    format!(
+                        "activate channel mapping {:?} output {:?}",
+                        self.name, self.output_id
+                    ),
+                    e,
+                )
             })
     }
 }
@@ -801,11 +796,7 @@ impl AddChannelMappingPrep {
     pub fn run_ffi(self) -> Result<AddChannelMappingReady, Status> {
         self.server
             .add_channelmapping(&self.name, &self.mapping)
-            .map_err(|e| {
-                Status::invalid_argument(format!(
-                    "libnvnmos add_channelmapping failed (duplicate or invalid geometry): {e}"
-                ))
-            })?;
+            .map_err(|e| libnvnmos_status(format!("add channel mapping {:?}", self.name), e))?;
         Ok(AddChannelMappingReady {
             name: self.name,
             node_seed: self.node_seed,
@@ -873,7 +864,7 @@ impl CreateNodePrep {
         }
         let server = builder
             .build()
-            .map_err(|e| Status::internal(format!("create_nmos_node_server failed: {e}")))?;
+            .map_err(|e| libnvnmos_status(format!("create Node for seed {:?}", self.seed), e))?;
 
         let node_id = server.node_id().map_err(|e| {
             Status::internal(format!(
@@ -990,7 +981,8 @@ impl State {
     /// * `INVALID_ARGUMENT` if `seed` is empty (the empty seed would
     ///   collapse every "default" session onto the same Node and lose
     ///   determinism of the NMOS UUIDs).
-    /// * `ABORTED` if a create for the same seed is already pending.
+    /// * `UNAVAILABLE` if a create for the same seed is already pending.
+    ///   Retrying the same call attaches once the create completes.
     /// * Whatever [`State::resolve_http_port`] returns.
     pub fn prepare_open_session(
         &mut self,
@@ -1024,7 +1016,7 @@ impl State {
         }
 
         if self.pending_nodes.contains(&seed) {
-            return Err(Status::aborted(format!(
+            return Err(Status::unavailable(format!(
                 "a Node for seed {seed:?} is already being created; retry"
             )));
         }
@@ -2393,6 +2385,19 @@ impl State {
     }
 }
 
+/// Status for a failed libnvnmos call. A libnvnmos function reports only
+/// that it failed, not why, so that failure is `UNKNOWN`; its log messages
+/// carry the reason.
+fn libnvnmos_status(action: String, e: nvnmos::Error) -> Status {
+    match e {
+        nvnmos::Error::Failed(_) => Status::unknown(format!("{action}: {e}")),
+        nvnmos::Error::InteriorNul(_) | nvnmos::Error::InvalidConfig(_) => {
+            Status::invalid_argument(format!("{action}: {e}"))
+        }
+        nvnmos::Error::InvalidUtf8(_) => Status::internal(format!("{action}: {e}")),
+    }
+}
+
 fn require_non_empty_seed(seed: &str) -> Result<(), Status> {
     if seed.is_empty() {
         Err(Status::invalid_argument("node_seed must be non-empty"))
@@ -2672,5 +2677,32 @@ mod http_port_allocation_tests {
             .resolve_http_port_for_test(18_010, &range)
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::AlreadyExists);
+    }
+}
+
+#[cfg(test)]
+mod open_session_tests {
+    use super::{ProtoNodeConfig, State, translate_config};
+    use crate::http_port::PortRange;
+
+    #[test]
+    fn open_session_during_node_create_is_unavailable() {
+        let mut state = State::new();
+        let range = PortRange::new(18_370, 18_379).expect("range");
+        let config = || {
+            translate_config(Some(&ProtoNodeConfig {
+                seed: "pending-seed".into(),
+                ..Default::default()
+            }))
+            .expect("config")
+        };
+        state
+            .prepare_open_session(config(), &range)
+            .expect("first OpenSession prepares the Node create");
+        let err = state
+            .prepare_open_session(config(), &range)
+            .err()
+            .expect("second OpenSession while the create is pending");
+        assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
     }
 }

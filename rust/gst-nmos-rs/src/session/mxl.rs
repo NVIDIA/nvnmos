@@ -7,6 +7,7 @@ use anyhow::Context;
 use gstreamer as gst;
 use uuid::Uuid;
 
+use super::error::WithCode;
 use super::types::Side;
 use super::{
     ActivationAck, ActivationPlan, CommonSettings, FakeKind, InnerConfig, TransportConfig,
@@ -52,7 +53,8 @@ pub(crate) fn synthesise_or_passthrough_mxl(
                 group_hint: &settings.group_hint,
                 caps,
             })
-            .with_context(|| format!("{element}: synthesising flow_def from caps"))?;
+            .with_context(|| format!("{element}: synthesising flow_def from caps"))
+            .with_code(gst::ResourceError::Settings)?;
             if settings.mxl_flow_id.is_empty() {
                 gst::debug!(
                     cat,
@@ -96,14 +98,16 @@ pub(super) fn synthesise_deferred_sender_mxl(
         group_hint: &settings.group_hint,
         caps: fixated,
     })
-    .with_context(|| format!("{element}: synthesising flow_def from peer caps"))?;
+    .with_context(|| format!("{element}: synthesising flow_def from peer caps"))
+    .with_code(gst::CoreError::Negotiation)?;
 
     let flow = flow_def::resolve_mxl_flow_meta(
         &settings.mxl_flow_id,
         FlowFormat::from_caps(fixated),
         Some(&json),
     )
-    .with_context(|| format!("{element}: resolving MXL flow id / format for deferred AddSender"))?;
+    .with_context(|| format!("{element}: resolving MXL flow id / format for deferred AddSender"))
+    .with_code(gst::ResourceError::Settings)?;
     let inner = decide_inner_config_mxl(settings, &flow, Some(&json));
     let blocked = mxl_eager_blocked(&flow, &inner);
     let inner = super::apply_auto_activate_policy(&crate::CAT, element, settings, inner, blocked);
@@ -248,7 +252,8 @@ pub(super) fn resolve_inner_config_mxl(
             flow_def::splice_overrides(&text, &property_overrides_mxl(settings, &domain_id))
                 .with_context(|| {
                     format!("{element}: splicing property overrides into transport file")
-                })?,
+                })
+                .with_code(gst::ResourceError::Settings)?,
         ),
         None => None,
     };
@@ -276,7 +281,8 @@ pub(super) fn resolve_inner_config_mxl(
         caps_format,
         transport_file.as_deref(),
     )
-    .with_context(|| format!("{element}: resolving MXL flow id / format"))?;
+    .with_context(|| format!("{element}: resolving MXL flow id / format"))
+    .with_code(gst::ResourceError::Settings)?;
     log_flow_origin(cat, "mxl-flow-id", flow.id_origin);
     log_flow_origin(cat, "caps format", flow.format_origin);
     let inner = decide_inner_config_mxl(settings, &flow, transport_file.as_deref());

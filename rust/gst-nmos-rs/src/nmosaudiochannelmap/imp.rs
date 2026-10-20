@@ -21,8 +21,9 @@ use crate::session::channel_mapping::{
     CHANNELMAPPING_NAME_BLURB, ChannelMappingSettings, RESTRICT_ROUTABLE_INPUTS_BLURB,
     close as close_session, validate_and_open,
 };
+use crate::session::error::{WithCode, post_state_change_error};
 use crate::types::DEFAULT_DAEMON_URI;
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow};
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
@@ -331,10 +332,11 @@ impl ElementImpl for NmosAudioChannelMap {
                     &self.session,
                     handler,
                 ) {
-                    element.post_error_message(gst::error_msg!(
-                        gst::ResourceError::OpenRead,
-                        ["failed to open channel mapping session: {e:#}"]
-                    ));
+                    post_state_change_error!(
+                        element,
+                        &e,
+                        "failed to open channel mapping session: {e:#}"
+                    );
                     return Err(gst::StateChangeError);
                 }
             }
@@ -352,10 +354,7 @@ impl ElementImpl for NmosAudioChannelMap {
         if transition == gst::StateChange::ReadyToPaused {
             if !*self.fixated.lock().unwrap() {
                 if let Err(e) = self.fixate_and_build() {
-                    element.post_error_message(gst::error_msg!(
-                        gst::StreamError::Failed,
-                        ["channel mapping fixation failed: {e:#}"]
-                    ));
+                    post_state_change_error!(element, &e, "channel mapping fixation failed: {e:#}");
                     return Err(gst::StateChangeError);
                 }
             }
@@ -460,13 +459,17 @@ impl NmosAudioChannelMap {
 
         let (sink_pads, src_pads) = collect_request_pads(bin)?;
         if sink_pads.is_empty() || src_pads.is_empty() {
-            bail!("need at least one sink_%u and one src_%u pad");
+            return Err(anyhow!("need at least one sink_%u and one src_%u pad"))
+                .with_code(gst::CoreError::StateChange);
         }
 
         let mut sink_snapshots = Vec::new();
         for (idx, pad) in sink_pads.iter().enumerate() {
             let typed: NmosAudioChannelMapSinkPad = pad.clone().downcast().map_err(|_| {
-                anyhow::anyhow!("pad `{}` is not a channel map sink pad", pad.name())
+                anyhow::anyhow!(
+                    "internal: pad `{}` is not a channel map sink pad",
+                    pad.name()
+                )
             })?;
             let state = typed.imp().snapshot();
             let negotiated = resolve_pad_channels(pad, state.channels)?;
@@ -478,7 +481,8 @@ impl NmosAudioChannelMap {
                 negotiated_channels: negotiated,
             });
             if negotiated == 0 {
-                bail!("sink pad `{}` has zero channels", pad.name());
+                return Err(anyhow!("sink pad `{}` has zero channels", pad.name()))
+                    .with_code(gst::CoreError::Negotiation);
             }
             let _ = idx;
         }
@@ -486,7 +490,10 @@ impl NmosAudioChannelMap {
         let mut src_snapshots = Vec::new();
         for pad in &src_pads {
             let typed: NmosAudioChannelMapSrcPad = pad.clone().downcast().map_err(|_| {
-                anyhow::anyhow!("pad `{}` is not a channel map src pad", pad.name())
+                anyhow::anyhow!(
+                    "internal: pad `{}` is not a channel map src pad",
+                    pad.name()
+                )
             })?;
             let state = typed.imp().snapshot();
             let negotiated = resolve_pad_channels(pad, state.channels)?;
@@ -499,7 +506,8 @@ impl NmosAudioChannelMap {
                 active_map: state.active_map,
             });
             if negotiated == 0 {
-                bail!("src pad `{}` has zero channels", pad.name());
+                return Err(anyhow!("src pad `{}` has zero channels", pad.name()))
+                    .with_code(gst::CoreError::Negotiation);
             }
         }
 
@@ -507,7 +515,7 @@ impl NmosAudioChannelMap {
         let mut session_guard = self.session.lock().unwrap();
         let session = session_guard
             .as_mut()
-            .context("no open channel mapping session")?;
+            .context("internal: no open channel mapping session")?;
 
         if session.channelmapping_handle().is_none() {
             let req = build_add_channel_mapping_request(
@@ -562,9 +570,10 @@ impl NmosAudioChannelMap {
         let mut sync_entries = Vec::new();
         for (src_idx, src) in src_snapshots.iter().enumerate() {
             let entries =
-                active_map_entries_for_src(&topology, src, src_idx, &sink_snapshots, src_count)?;
+                active_map_entries_for_src(&topology, src, src_idx, &sink_snapshots, src_count)
+                    .with_code(gst::ResourceError::Settings)?;
             let routes = if let Some(structure) = src.active_map.as_ref() {
-                parse_active_map_structure(structure)?
+                parse_active_map_structure(structure).with_code(gst::ResourceError::Settings)?
             } else {
                 default_identity_routes(
                     &topology,
@@ -677,10 +686,11 @@ fn resolve_pad_channels(pad: &gst::Pad, declared: u32) -> Result<u32, anyhow::Er
 
     if let Some(negotiated) = negotiated {
         if declared > 0 && declared != negotiated {
-            bail!(
+            return Err(anyhow!(
                 "pad `{}`: declared channels={declared} but negotiated caps have {negotiated}",
                 pad.name()
-            );
+            ))
+            .with_code(gst::CoreError::Negotiation);
         }
         return Ok(if declared > 0 { declared } else { negotiated });
     }
@@ -694,11 +704,12 @@ fn resolve_pad_channels(pad: &gst::Pad, declared: u32) -> Result<u32, anyhow::Er
         .or_else(|| pad.allowed_caps())
         .and_then(|c| c.structure(0).map(|s| s.to_string()))
         .unwrap_or_else(|| "none".into());
-    bail!(
+    Err(anyhow!(
         "pad `{}`: link peers with fixed channel count in audio/x-raw caps, or set `channels` \
          before READY→PAUSED (caps={caps_hint})",
         pad.name()
-    );
+    ))
+    .with_code(gst::CoreError::Negotiation)
 }
 
 fn block_on_async<T, E>(future: impl std::future::Future<Output = Result<T, E>>) -> Result<T, E> {

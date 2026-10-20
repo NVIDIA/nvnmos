@@ -5,9 +5,10 @@
 
 pub(crate) mod types;
 
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow, bail};
 use gstreamer as gst;
 
+use super::error::WithCode;
 use super::types::Side;
 use super::{CommonSettings, FakeKind, InnerConfig, TransportConfig};
 use crate::sdp::{self, DualLegPassthroughPolicy, SdpOverrides};
@@ -70,14 +71,14 @@ pub(super) fn validate_rtp_configuring_minimum(
     settings: &CommonSettings,
 ) -> Result<(), anyhow::Error> {
     match settings.side {
-        Side::Sender if settings.source_ip.is_empty() => {
-            bail!("{element}: `source-ip` is required to synthesise configuring SDP for AddSender");
-        }
-        Side::Receiver if settings.interface_ip.is_empty() => {
-            bail!(
-                "{element}: `interface-ip` is required to synthesise configuring SDP for AddReceiver"
-            );
-        }
+        Side::Sender if settings.source_ip.is_empty() => Err(anyhow!(
+            "{element}: `source-ip` is required to synthesise configuring SDP for AddSender"
+        ))
+        .with_code(gst::ResourceError::Settings),
+        Side::Receiver if settings.interface_ip.is_empty() => Err(anyhow!(
+            "{element}: `interface-ip` is required to synthesise configuring SDP for AddReceiver"
+        ))
+        .with_code(gst::ResourceError::Settings),
         _ => Ok(()),
     }
 }
@@ -189,7 +190,8 @@ pub(super) fn synthesise_or_passthrough_udp(
         (None, Some(caps)) => {
             validate_rtp_configuring_minimum(element, settings)?;
             let text = sdp::from_caps(&sdp_build_input(settings, caps))
-                .with_context(|| format!("{element}: synthesising SDP from caps"))?;
+                .with_context(|| format!("{element}: synthesising SDP from caps"))
+                .with_code(gst::ResourceError::Settings)?;
             gst::info!(
                 cat,
                 "{element}: synthesised SDP from `caps` (side={:?})",
@@ -233,9 +235,12 @@ pub(super) fn synthesise_deferred_sender_udp(
     caps: &gst::Caps,
 ) -> Result<(String, InnerConfig), anyhow::Error> {
     validate_rtp_configuring_minimum(element, settings)?;
+    // Most failures here mean the peer caps don't fit, but a few, such as
+    // `SdpError::InvalidPayloadType` from `transport-caps`, are really settings.
     let text = sdp::from_caps(&sdp_build_input(settings, caps))
         .map_err(anyhow::Error::from)
-        .with_context(|| format!("{element}: synthesising SDP from peer caps"))?;
+        .with_context(|| format!("{element}: synthesising SDP from peer caps"))
+        .with_code(gst::CoreError::Negotiation)?;
     let inner = match settings.transport {
         Transport::Udp => decide_inner_config_udp(
             element,
@@ -334,12 +339,16 @@ fn finish_udp_inner_config(
     cross_check_mode: sdp::EssenceCrossCheckMode,
     build_real: impl FnOnce(types::UdpMedia) -> InnerConfig,
 ) -> Result<InnerConfig, anyhow::Error> {
-    if transport != Transport::NvDsUdp && sdp::sdp_media_block_count(text)? > 1 {
-        return Err(anyhow::Error::new(sdp::SdpError::DualLegNotSupported));
+    if transport != Transport::NvDsUdp
+        && sdp::sdp_media_block_count(text).with_code(gst::ResourceError::Settings)? > 1
+    {
+        return Err(sdp::SdpError::DualLegNotSupported).with_code(gst::ResourceError::Settings);
     }
-    let mut media = sdp::parse_sdp(text).with_context(|| {
-        format!("{element}: parsing SDP transport file for transport={transport:?}")
-    })?;
+    let mut media = sdp::parse_sdp(text)
+        .with_context(|| {
+            format!("{element}: parsing SDP transport file for transport={transport:?}")
+        })
+        .with_code(gst::ResourceError::Settings)?;
     sdp::cross_check_essence(
         &media,
         settings.caps.as_ref(),
@@ -351,8 +360,9 @@ fn finish_udp_inner_config(
             "{element}: cross-checking SDP against `caps` / `transport-caps` \
              for transport={transport:?}"
         )
-    })?;
-    if sdp::count_active_sdp_legs(text)? == 0 {
+    })
+    .with_code(gst::ResourceError::Settings)?;
+    if sdp::count_active_sdp_legs(text).with_code(gst::ResourceError::Settings)? == 0 {
         return Ok(InnerConfig::Fake {
             kind: FakeKind::NotActive,
             detail: "all legs inactive (rtp_enabled: false)".into(),
@@ -428,11 +438,13 @@ fn passthrough_user_transport_file(
     policy: DualLegPassthroughPolicy,
 ) -> Result<String, anyhow::Error> {
     let file = sdp::bit_rates_from_sdp_text(text)
-        .with_context(|| format!("{element}: parsing bit rates from transport-file SDP"))?;
+        .with_context(|| format!("{element}: parsing bit rates from transport-file SDP"))
+        .with_code(gst::ResourceError::Settings)?;
     let property =
         sdp::bit_rates_from_properties(settings.format_bit_rate, settings.transport_bit_rate);
     sdp::cross_check_bit_rates(property, file)
-        .with_context(|| format!("{element}: cross-checking bit rates against transport-file"))?;
+        .with_context(|| format!("{element}: cross-checking bit rates against transport-file"))
+        .with_code(gst::ResourceError::Settings)?;
 
     let mut overrides = property_overrides_udp(settings);
     if property != sdp::BitRates::UNSET && file == sdp::BitRates::UNSET {
@@ -441,6 +453,7 @@ fn passthrough_user_transport_file(
 
     sdp::passthrough_with_overrides(text, &overrides, policy)
         .with_context(|| format!("{element}: applying property overrides to transport-file SDP"))
+        .with_code(gst::ResourceError::Settings)
 }
 
 pub(super) fn resolve_inner_config_nvdsudp(
