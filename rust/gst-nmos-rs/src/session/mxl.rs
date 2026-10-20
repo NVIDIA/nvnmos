@@ -829,7 +829,7 @@ mod tests {
         use super::*;
         use std::str::FromStr;
 
-        fn no_session() -> Mutex<Option<Session>> {
+        fn no_session() -> Mutex<Option<crate::daemon::SessionPhase<Session>>> {
             Mutex::new(None)
         }
 

@@ -21,7 +21,10 @@ use tonic::transport::Channel;
 
 use gstreamer as gst;
 
-use crate::daemon::{DaemonError, connect_uds, parse_unix_uri};
+use crate::CAT;
+use crate::daemon::{
+    DaemonError, RPC_TIMEOUT, connect_uds, drive_call, parse_unix_uri, settle_task,
+};
 use crate::runtime::SHARED_RUNTIME;
 use crate::session::channel_mapping::ChannelMappingSettings;
 
@@ -54,8 +57,10 @@ pub(crate) struct ChannelMappingSession {
     pub(crate) created_node: bool,
     pub(crate) http_port: u16,
     channelmapping: Option<AddedChannelMapping>,
-    client: NvnmosDaemonClient<Channel>,
-    activation_task: JoinHandle<()>,
+    client: Option<NvnmosDaemonClient<Channel>>,
+    activation_task: Option<JoinHandle<()>>,
+    inflight_add: Option<JoinHandle<Result<AddChannelMappingResponse, DaemonError>>>,
+    inflight_sync: Option<JoinHandle<Result<(), DaemonError>>>,
 }
 
 struct AddedChannelMapping {
@@ -118,8 +123,10 @@ impl ChannelMappingSession {
             created_node,
             http_port,
             channelmapping: None,
-            client,
-            activation_task,
+            client: Some(client),
+            activation_task: Some(activation_task),
+            inflight_add: None,
+            inflight_sync: None,
         })
     }
 
@@ -134,7 +141,21 @@ impl ChannelMappingSession {
         if self.channelmapping.is_some() {
             return Err(DaemonError::AlreadyAdded);
         }
-        let resp = self.client.add_channel_mapping(request).await?.into_inner();
+        let mut client = self
+            .client
+            .as_ref()
+            .expect("session client missing")
+            .clone();
+        let resp = drive_call(&mut self.inflight_add, || {
+            SHARED_RUNTIME.spawn(async move {
+                client
+                    .add_channel_mapping(request)
+                    .await
+                    .map(|response| response.into_inner())
+                    .map_err(DaemonError::from)
+            })
+        })
+        .await?;
         self.channelmapping = Some(AddedChannelMapping {
             handle: resp.channelmapping_handle.clone(),
         });
@@ -147,6 +168,8 @@ impl ChannelMappingSession {
             return Ok(());
         };
         self.client
+            .as_mut()
+            .expect("session client missing")
             .remove_channel_mapping(RemoveChannelMappingRequest {
                 session_handle: self.session_handle.clone(),
                 channelmapping_handle: cm.handle,
@@ -165,42 +188,102 @@ impl ChannelMappingSession {
             .as_ref()
             .map(|cm| cm.handle.clone())
             .ok_or(DaemonError::NoResource)?;
-        self.client
-            .sync_channel_mapping_state(SyncChannelMappingStateRequest {
-                session_handle: self.session_handle.clone(),
-                channelmapping_handle: handle,
-                output_id: output_id.to_owned(),
-                active_map,
+        let mut client = self
+            .client
+            .as_ref()
+            .expect("session client missing")
+            .clone();
+        let session_handle = self.session_handle.clone();
+        let output_id = output_id.to_owned();
+        drive_call(&mut self.inflight_sync, || {
+            SHARED_RUNTIME.spawn(async move {
+                client
+                    .sync_channel_mapping_state(SyncChannelMappingStateRequest {
+                        session_handle,
+                        channelmapping_handle: handle,
+                        output_id,
+                        active_map,
+                    })
+                    .await
+                    .map(|_| ())
+                    .map_err(DaemonError::from)
             })
-            .await?;
-        Ok(())
+        })
+        .await
     }
 
+    /// Cancel the activation task and close the session. `CloseSession`
+    /// removes the channel mapping, so no `RemoveChannelMapping` is sent.
     pub(crate) async fn close(mut self) -> Result<(), DaemonError> {
-        let ChannelMappingSession {
+        match self.detach() {
+            Some(detached) => detached.close().await,
+            None => Ok(()),
+        }
+    }
+
+    fn detach(&mut self) -> Option<DetachedChannelMappingSession> {
+        Some(DetachedChannelMappingSession {
+            session_handle: self.session_handle.clone(),
+            client: self.client.take()?,
+            activation_task: self.activation_task.take(),
+            inflight_add: self.inflight_add.take(),
+            inflight_sync: self.inflight_sync.take(),
+        })
+    }
+}
+
+impl Drop for ChannelMappingSession {
+    fn drop(&mut self) {
+        let Some(detached) = self.detach() else {
+            return;
+        };
+        let handle = detached.session_handle.clone();
+        SHARED_RUNTIME.spawn(async move {
+            match detached.close().await {
+                Ok(()) => gst::info!(CAT, "channel mapping session closed: handle={handle}"),
+                Err(e) => gst::warning!(CAT, "CloseSession (handle={handle}): {e}"),
+            }
+        });
+    }
+}
+
+struct DetachedChannelMappingSession {
+    session_handle: String,
+    client: NvnmosDaemonClient<Channel>,
+    activation_task: Option<JoinHandle<()>>,
+    inflight_add: Option<JoinHandle<Result<AddChannelMappingResponse, DaemonError>>>,
+    inflight_sync: Option<JoinHandle<Result<(), DaemonError>>>,
+}
+
+impl DetachedChannelMappingSession {
+    async fn close(self) -> Result<(), DaemonError> {
+        let Self {
             session_handle,
             mut client,
             activation_task,
-            ..
+            inflight_add,
+            inflight_sync,
         } = self;
-
-        activation_task.abort();
-        let _ = activation_task.await;
-
-        if let Some(cm) = self.channelmapping.take() {
-            let _ = client
-                .remove_channel_mapping(RemoveChannelMappingRequest {
-                    session_handle: session_handle.clone(),
-                    channelmapping_handle: cm.handle,
-                })
-                .await;
+        if let Some(task) = inflight_add {
+            settle_task(task).await;
         }
-
-        client
-            .close_session(CloseSessionRequest { session_handle })
-            .await?;
-
-        Ok(())
+        if let Some(task) = inflight_sync {
+            settle_task(task).await;
+        }
+        if let Some(task) = activation_task {
+            task.abort();
+            let _ = task.await;
+        }
+        match tokio::time::timeout(
+            RPC_TIMEOUT,
+            client.close_session(CloseSessionRequest { session_handle }),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(status)) => Err(status.into()),
+            Err(_elapsed) => Err(DaemonError::TimedOut),
+        }
     }
 }
 

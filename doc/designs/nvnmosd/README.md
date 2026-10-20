@@ -228,8 +228,8 @@ Implementation lives in
 | Variable | Default | Meaning |
 |---|---|---|
 | `NVNMOSD_SESSION_GC` | on (unset = enabled) | Set to `0`, `false`, `off`, or `no` to disable implicit `CloseSession`. |
-| `NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC` | 60 | After `OpenSession`, the client must call `SubscribeActivations` within this many **seconds** (before `AddSender` / `AddReceiver`). |
-| `NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC` | 5 | After the activation subscription stream ends, the client must call `SubscribeActivations` again within this many **seconds**. |
+| `NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC` | 60 | After `OpenSession`, the client must call `SubscribeActivations` within this many **seconds** (before `AddSender` / `AddReceiver`). Must be at least `1`; `0` closes the session before a subscription can be established. |
+| `NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC` | 5 | After the activation subscription stream ends, the client must call `SubscribeActivations` again within this many **seconds**. Must be at least `1` to allow resubscription; `0` closes the session when the stream ends. |
 
 When GC is enabled, `AddSender` and `AddReceiver` return `FAILED_PRECONDITION`
 if the session has no live `SubscribeActivations` stream. After an implicit
