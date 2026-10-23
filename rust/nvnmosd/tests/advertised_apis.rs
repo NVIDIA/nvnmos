@@ -7,15 +7,20 @@
 
 mod common;
 
-use nvnmos_rpc::v1::CloseSessionRequest;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
+use nvnmos_rpc::v1::{CloseSessionRequest, NodeConfig, OpenSessionRequest};
 use serde_json::Value;
 use tonic::transport::Channel;
 
-use common::{DaemonHarness, PortRange, connect, http_get_json, open_session_with_port};
+use common::{
+    DaemonHarness, PortRange, autodetect_iface_ip, connect, http_get_json, open_session_with_port,
+};
 
 // 18220..=18239 belong to the activation-ack lock-ordering tests.
 const ANNOTATION_API_UNMOUNTED_PORTS: PortRange = 18_240..=18_249;
+// 18370..=18379 belong to an open-session unit test in src/state.rs.
+const HOST_NAME_IS_ADDRESS_PORTS: PortRange = 18_380..=18_389;
+const HOST_NAME_IS_INTERFACE_ADDRESS_PORTS: PortRange = 18_390..=18_399;
 
 fn json_string_set(value: &Value) -> Vec<String> {
     value
@@ -173,4 +178,74 @@ async fn annotation_api_env_leaves_annotation_unmounted() {
         })
         .await;
     drop(harness);
+}
+
+fn assert_listed_once(what: &str, mut items: Vec<String>) {
+    assert!(!items.is_empty(), "expected {what}");
+    items.sort();
+    let mut unique = items.clone();
+    unique.dedup();
+    assert_eq!(items, unique, "{what} listed more than once");
+}
+
+async fn assert_hosts_listed_once(http_ports: PortRange, host_name: &str, host_addresses: &[&str]) {
+    let mut harness = DaemonHarness::spawn(http_ports, &[]);
+    harness.ready().await;
+    let mut client = connect(&harness.uds).await;
+    let resp = client
+        .open_session(OpenSessionRequest {
+            node_config: Some(NodeConfig {
+                seed: format!(
+                    "advertised-apis-{}-host-addresses-{}",
+                    std::process::id(),
+                    host_addresses.len()
+                ),
+                host_name: host_name.to_owned(),
+                host_addresses: host_addresses.iter().map(|&a| a.to_owned()).collect(),
+                ..Default::default()
+            }),
+        })
+        .await
+        .expect("OpenSession")
+        .into_inner();
+    let port = u16::try_from(resp.http_port).expect("allocated http_port");
+
+    let endpoints = http_get_json(port, "/x-nmos/node/v1.3/self").await["api"]["endpoints"]
+        .as_array()
+        .expect("endpoints array")
+        .iter()
+        .map(Value::to_string)
+        .collect();
+    assert_listed_once("Node API endpoints", endpoints);
+
+    let mut hrefs = Vec::new();
+    for device in http_get_json(port, "/x-nmos/node/v1.3/devices")
+        .await
+        .as_array()
+        .expect("devices array")
+    {
+        for control in device["controls"].as_array().expect("controls") {
+            hrefs.push(control["href"].as_str().expect("href").to_owned());
+        }
+    }
+    assert_listed_once("Device control hrefs", hrefs);
+
+    let _ = client
+        .close_session(CloseSessionRequest {
+            session_handle: resp.session_handle,
+        })
+        .await;
+    drop(harness);
+}
+
+#[tokio::test]
+async fn host_name_that_is_a_host_address_is_listed_once() {
+    assert_hosts_listed_once(HOST_NAME_IS_ADDRESS_PORTS, "127.0.0.1", &["127.0.0.1"]).await;
+}
+
+#[tokio::test]
+async fn host_name_that_is_an_interface_address_is_listed_once() {
+    // Empty host_addresses asks for every interface address, which excludes loopback.
+    let host_name = autodetect_iface_ip();
+    assert_hosts_listed_once(HOST_NAME_IS_INTERFACE_ADDRESS_PORTS, &host_name, &[]).await;
 }

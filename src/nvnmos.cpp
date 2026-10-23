@@ -641,8 +641,6 @@ namespace nvnmos
             web::json::insert(settings, std::make_pair(nmos::fields::host_addresses, value_from_elements(host_addresses)));
         }
 
-        web::json::insert(settings, std::make_pair(nmos::experimental::fields::href_mode, 3));
-
         if (0 != config.http_port)
         {
             web::json::insert(settings, std::make_pair(nmos::fields::http_port, config.http_port));
@@ -746,6 +744,12 @@ namespace nvnmos
         }
 
         nmos::insert_node_default_settings(settings);
+
+        // use the host name and the host addresses in hrefs, or only the addresses when the
+        // host name is one of them, e.g. an IP address, so that no href is listed twice
+        const auto host_name_is_address = settings.has_field(nmos::fields::host_addresses)
+            && nmos::fields::host_addresses(settings).end() != boost::range::find(nmos::fields::host_addresses(settings), web::json::value::string(host_name_domain.first));
+        web::json::insert(settings, std::make_pair(nmos::experimental::fields::href_mode, host_name_is_address ? 2 : 3));
 
         return settings;
     }
