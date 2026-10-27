@@ -92,6 +92,9 @@ Logging uses `tracing`; set `RUST_LOG` as usual (e.g. `RUST_LOG=info`).
 
 ## Environment Variables
 
+A numeric variable that is not an integer, or is below its minimum, logs a
+warning and uses the default.
+
 ### Session Liveness
 
 These settings control when the daemon implicitly closes a session whose
@@ -100,15 +103,15 @@ activation subscription is missing or interrupted.
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `NVNMOSD_SESSION_GC` | on | Disable with `0`, `false`, `off`, or `no`. |
-| `NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC` | 60 | Subscribe within this many seconds of `OpenSession`. |
-| `NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC` | 5 | Resubscribe within this many seconds after the activation stream ends. |
+| `NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC` | 60 | Subscribe within this many seconds of `OpenSession`. Minimum `1`. |
+| `NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC` | 5 | Resubscribe within this many seconds after the activation stream ends. `0` closes the session when the stream ends. |
 
 ### Node HTTP Port Allocation
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `NVNMOSD_HTTP_PORT_MIN` | `18080` | Inclusive lower bound when `NodeConfig.http_port` is `0`. |
-| `NVNMOSD_HTTP_PORT_MAX` | `18099` | Inclusive upper bound. |
+| `NVNMOSD_HTTP_PORT_MIN` | `18080` | Inclusive lower bound when `NodeConfig.http_port` is `0`. Minimum `1`. |
+| `NVNMOSD_HTTP_PORT_MAX` | `18099` | Inclusive upper bound. Minimum `1`. |
 
 When `NodeConfig.http_port` is **`0`**, the daemon picks the first port in `[MIN, MAX]` that is not already used by another Node and that the host can bind. When **`http_port` is non-zero**, the client chooses the port; the daemon rejects the create if that port is already taken by another Node or unavailable on the host.
 

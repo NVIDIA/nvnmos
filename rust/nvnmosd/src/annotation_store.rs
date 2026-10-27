@@ -29,6 +29,8 @@ use std::time::Duration;
 use nvnmos::{Annotation, AnnotationTag, AnnotationUpdate, ResourceType, Update};
 use serde::{Deserialize, Serialize};
 
+use crate::env_config;
+
 const CHECKPOINT_VERSION: u32 = 1;
 const DEFAULT_DEBOUNCE_MS: u64 = 1000;
 const DEFAULT_ENTRY_LIMIT: u64 = 10_000;
@@ -135,9 +137,17 @@ impl AnnotationStore {
     pub fn open(path: &Path) -> Result<Self, CheckpointError> {
         Self::with_file(
             path,
-            Duration::from_millis(read_u64_env(ENV_DEBOUNCE_MS, DEFAULT_DEBOUNCE_MS)),
-            usize::try_from(read_u64_env(ENV_ENTRY_LIMIT, DEFAULT_ENTRY_LIMIT))
-                .unwrap_or(usize::MAX),
+            Duration::from_millis(env_config::read_integer(
+                ENV_DEBOUNCE_MS,
+                DEFAULT_DEBOUNCE_MS,
+                0,
+            )),
+            usize::try_from(env_config::read_integer(
+                ENV_ENTRY_LIMIT,
+                DEFAULT_ENTRY_LIMIT,
+                0,
+            ))
+            .unwrap_or(usize::MAX),
         )
     }
 
@@ -342,24 +352,6 @@ pub(crate) fn read_only_tag(key: &str) -> bool {
     key.starts_with("urn:x-nmos:tag:asset:")
         || key.starts_with("urn:x-nmos:tag:grouphint/")
         || key.starts_with("urn:x-nvnmos:tag:")
-}
-
-fn read_u64_env(name: &str, default: u64) -> u64 {
-    match std::env::var(name) {
-        Err(_) => default,
-        Ok(value) => match value.trim().parse::<u64>() {
-            Ok(parsed) => parsed,
-            Err(_) => {
-                tracing::warn!(
-                    env = name,
-                    value = value.trim(),
-                    default,
-                    "invalid integer; using default"
-                );
-                default
-            }
-        },
-    }
 }
 
 fn writer_loop(rx: Receiver<Msg>, inner: Arc<Mutex<Inner>>, path: PathBuf, debounce: Duration) {
