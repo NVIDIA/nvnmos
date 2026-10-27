@@ -28,6 +28,7 @@ mod malloc_trim;
 mod session_gc;
 mod state;
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -37,16 +38,20 @@ use std::task::{Context as TaskContext, Poll};
 
 use anyhow::Context;
 use clap::Parser;
-use nvnmos::{Activation, ChannelMappingActivation};
+use nvnmos::{
+    Activation, Annotation, AnnotationTag, ChannelMappingActivation, ResourceType, Update,
+};
 use nvnmos_rpc::v1::nvnmos_daemon_server::{NvnmosDaemon, NvnmosDaemonServer};
 use nvnmos_rpc::v1::{
     AckActivationRequest, AckChannelMappingActivationRequest, ActivationEvent,
     AddChannelMappingRequest, AddChannelMappingResponse, AddNodeRequest, AddNodeResponse,
     AddReceiverRequest, AddReceiverResponse, AddSenderRequest, AddSenderResponse,
-    CloseSessionRequest, Empty, OpenSessionRequest, OpenSessionResponse,
-    RemoveChannelMappingRequest, RemoveNodeRequest, RemoveResourceRequest,
-    SubscribeActivationsRequest, SubscribeChannelMappingActivationsRequest,
-    SyncChannelMappingStateRequest, SyncResourceStateRequest, Transport as ProtoTransport,
+    Annotation as ProtoAnnotation, AnnotationEvent, CloseSessionRequest, Empty, OpenSessionRequest,
+    OpenSessionResponse, RemoveChannelMappingRequest, RemoveNodeRequest, RemoveResourceRequest,
+    ResourceType as ProtoResourceType, SubscribeActivationsRequest, SubscribeAnnotationsRequest,
+    SubscribeChannelMappingActivationsRequest, SyncChannelMappingStateRequest,
+    SyncResourceStateRequest, Transport as ProtoTransport, Update as ProtoUpdate,
+    UpdateAnnotationRequest,
 };
 use tokio::net::UnixListener;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -56,7 +61,10 @@ use tonic::{Request, Response, Status};
 
 use crate::http_port::read_http_port_range;
 use crate::session_gc::SessionGc;
-use crate::state::{AckOutcome, ActivationDispatch, ChannelMappingActivationDispatch, Side, State};
+use crate::state::{
+    AckOutcome, ActivationDispatch, ChannelMappingActivationDispatch, Side, State,
+    clear_annotation_refusal, take_annotation_refusal,
+};
 
 /// Bound on the per-session activations stream. Small because activations
 /// are rare (one per IS-05 PATCH) and the consumer is expected to ack
@@ -124,6 +132,7 @@ impl Daemon {
                 move |act| route_channelmapping_activation(&state, &seed, act)
             },
             self.annotations.clone(),
+            self.state.clone(),
         )
     }
 }
@@ -360,10 +369,16 @@ impl NvnmosDaemon for Daemon {
         let annotations = self.annotations.clone();
         let daemon = self.clone();
         let outcome = finish_ffi(async move {
+            let store = annotations.clone();
             let ready = blocking_ffi(move || prep.run_ffi(annotations.as_deref())).await?;
             match ready {
                 state::AddResourceReady::Sender(ready) => {
-                    daemon.lock_state().commit_add_sender(ready)
+                    let mut state = daemon.lock_state();
+                    let outcome = state.commit_add_sender(ready)?;
+                    if let Some(store) = store.as_ref() {
+                        state.emit_added_resource(&outcome.resource_handle, store);
+                    }
+                    Ok(outcome)
                 }
                 state::AddResourceReady::Receiver(_) => Err(Status::internal(
                     "AddSender prep produced a Receiver ready result",
@@ -410,10 +425,16 @@ impl NvnmosDaemon for Daemon {
         let annotations = self.annotations.clone();
         let daemon = self.clone();
         let outcome = finish_ffi(async move {
+            let store = annotations.clone();
             let ready = blocking_ffi(move || prep.run_ffi(annotations.as_deref())).await?;
             match ready {
                 state::AddResourceReady::Receiver(ready) => {
-                    daemon.lock_state().commit_add_receiver(ready)
+                    let mut state = daemon.lock_state();
+                    let outcome = state.commit_add_receiver(ready)?;
+                    if let Some(store) = store.as_ref() {
+                        state.emit_added_resource(&outcome.resource_handle, store);
+                    }
+                    Ok(outcome)
                 }
                 state::AddResourceReady::Sender(_) => Err(Status::internal(
                     "AddReceiver prep produced a Sender ready result",
@@ -680,6 +701,85 @@ impl NvnmosDaemon for Daemon {
         );
         Ok(Response::new(Empty {}))
     }
+
+    type SubscribeAnnotationsStream = AnnotationSubscriptionStream;
+
+    async fn subscribe_annotations(
+        &self,
+        request: Request<SubscribeAnnotationsRequest>,
+    ) -> Result<Response<Self::SubscribeAnnotationsStream>, Status> {
+        let Some(store) = self.annotations.clone() else {
+            return Err(Status::failed_precondition("Annotation API is off"));
+        };
+        let req = request.into_inner();
+        let (rx, session_handle) = {
+            let mut state = self.lock_state();
+            let capacity = state
+                .annotation_snapshot(&req.session_handle, &store)?
+                .len()
+                .max(SUBSCRIPTION_BUFFER);
+            let (tx, rx) = tokio_mpsc::channel(capacity);
+            state.subscribe_annotations(&req.session_handle, tx.clone())?;
+            let events = state.annotation_snapshot(&req.session_handle, &store)?;
+            for event in events {
+                if tx.try_send(Ok(event)).is_err() {
+                    state.drop_annotation_subscription(&req.session_handle);
+                    return Err(Status::internal(
+                        "annotation snapshot did not fit in the stream buffer",
+                    ));
+                }
+            }
+            (rx, req.session_handle)
+        };
+        tracing::info!(session_handle = %session_handle, "SubscribeAnnotations");
+        Ok(Response::new(AnnotationSubscriptionStream {
+            inner: ReceiverStream::new(rx),
+            session_handle,
+            state: self.state.clone(),
+        }))
+    }
+
+    async fn update_annotation(
+        &self,
+        request: Request<UpdateAnnotationRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        if self.annotations.is_none() {
+            return Err(Status::failed_precondition("Annotation API is off"));
+        }
+        let req = request.into_inner();
+        let resource_type = decode_resource_type(req.resource_type)?;
+        let annotation = decode_annotation_update(req.annotation.as_ref())?;
+        let prep = {
+            let state = self.lock_state();
+            state.prepare_annotation_update(
+                &req.session_handle,
+                resource_type,
+                &req.resource_handle,
+            )?
+        };
+        blocking_ffi(move || {
+            clear_annotation_refusal();
+            match prep.server.update_annotation(
+                prep.resource_type,
+                prep.name.as_deref(),
+                &annotation,
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) => Err(match take_annotation_refusal() {
+                    Some(reason) => Status::failed_precondition(reason),
+                    None => Status::unknown(format!("nmos_annotation_update: {error}")),
+                }),
+            }
+        })
+        .await?;
+        tracing::info!(
+            session_handle = %req.session_handle,
+            resource_handle = %req.resource_handle,
+            resource_type = resource_type_name(resource_type),
+            "UpdateAnnotation",
+        );
+        Ok(Response::new(Empty {}))
+    }
 }
 
 /// Server-streaming wrapper that arms the resubscribe watchdog when the
@@ -712,6 +812,33 @@ impl Drop for SubscriptionStream {
             if arm {
                 session_gc.start_resubscribe_timeout(&session_handle);
             }
+        });
+    }
+}
+
+/// Server-streaming wrapper for `SubscribeAnnotations`. Dropping it
+/// removes the session's annotation slot and does not arm session GC.
+struct AnnotationSubscriptionStream {
+    inner: ReceiverStream<Result<AnnotationEvent, Status>>,
+    session_handle: String,
+    state: Arc<Mutex<State>>,
+}
+
+impl Stream for AnnotationSubscriptionStream {
+    type Item = Result<AnnotationEvent, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl Drop for AnnotationSubscriptionStream {
+    fn drop(&mut self) {
+        let session_handle = self.session_handle.clone();
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            let mut guard = state.lock().expect("daemon state mutex poisoned");
+            guard.reap_annotation_subscription(&session_handle);
         });
     }
 }
@@ -755,6 +882,89 @@ impl Drop for ChannelMappingSubscriptionStream {
 fn decode_proto_transport(raw: i32) -> Result<ProtoTransport, Status> {
     ProtoTransport::try_from(raw).map_err(|_| {
         Status::invalid_argument(format!("unknown Transport value on the wire: {raw}"))
+    })
+}
+
+fn decode_resource_type(raw: i32) -> Result<ResourceType, Status> {
+    match ProtoResourceType::try_from(raw) {
+        Ok(ProtoResourceType::Node) => Ok(ResourceType::Node),
+        Ok(ProtoResourceType::Device) => Ok(ResourceType::Device),
+        Ok(ProtoResourceType::Source) => Ok(ResourceType::Source),
+        Ok(ProtoResourceType::Flow) => Ok(ResourceType::Flow),
+        Ok(ProtoResourceType::Sender) => Ok(ResourceType::Sender),
+        Ok(ProtoResourceType::Receiver) => Ok(ResourceType::Receiver),
+        Ok(ProtoResourceType::Unspecified) | Err(_) => {
+            Err(Status::invalid_argument("resource_type is unspecified"))
+        }
+    }
+}
+
+fn resource_type_name(resource_type: ResourceType) -> &'static str {
+    match resource_type {
+        ResourceType::Node => "node",
+        ResourceType::Device => "device",
+        ResourceType::Source => "source",
+        ResourceType::Flow => "flow",
+        ResourceType::Sender => "sender",
+        ResourceType::Receiver => "receiver",
+    }
+}
+
+fn decode_update(raw: i32, field: &str) -> Result<Update, Status> {
+    match ProtoUpdate::try_from(raw) {
+        Ok(ProtoUpdate::Unchanged) => Ok(Update::Unchanged),
+        Ok(ProtoUpdate::Set) => Ok(Update::Set),
+        Ok(ProtoUpdate::Reset) => Ok(Update::Reset),
+        Err(_) => Err(Status::invalid_argument(format!(
+            "unknown Update value for {field}: {raw}"
+        ))),
+    }
+}
+
+fn decode_annotation_update(annotation: Option<&ProtoAnnotation>) -> Result<Annotation, Status> {
+    let Some(annotation) = annotation else {
+        return Ok(Annotation::default());
+    };
+    let label_update = decode_update(annotation.label_update, "label_update")?;
+    let description_update = decode_update(annotation.description_update, "description_update")?;
+    let tags_update = decode_update(annotation.tags_update, "tags_update")?;
+    let mut seen = HashSet::new();
+    let mut tags = Vec::new();
+    if tags_update == Update::Set {
+        for tag in &annotation.tags {
+            let values_update = decode_update(tag.values_update, "values_update")?;
+            if values_update == Update::Unchanged {
+                continue;
+            }
+            if tag.key.is_empty() {
+                return Err(Status::invalid_argument("tag key is empty"));
+            }
+            if !seen.insert(tag.key.clone()) {
+                return Err(Status::invalid_argument(format!(
+                    "duplicate tag {}",
+                    tag.key
+                )));
+            }
+            if crate::annotation_store::read_only_tag(&tag.key) {
+                return Err(Status::invalid_argument(format!(
+                    "read-only tag {}",
+                    tag.key
+                )));
+            }
+            tags.push(AnnotationTag {
+                key: tag.key.clone(),
+                values_update,
+                values: tag.values.clone(),
+            });
+        }
+    }
+    Ok(Annotation {
+        label_update,
+        label: (label_update == Update::Set).then(|| annotation.label.clone()),
+        description_update,
+        description: (description_update == Update::Set).then(|| annotation.description.clone()),
+        tags_update,
+        tags,
     })
 }
 

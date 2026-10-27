@@ -153,7 +153,8 @@ typedef enum _NvNmosSide
 
 /**
  * Identifies an IS-04 resource type. Used by
- * @ref nmos_annotation_callback, @ref nmos_make_id and @ref nmos_get_id.
+ * @ref nmos_annotation_update_callback, @ref nmos_make_id and
+ * @ref nmos_get_id.
  * Node and Device have no caller-chosen name (one Device per Node).
  * Source, Flow and Sender share the sender name; Receiver uses the
  * receiver name.
@@ -262,6 +263,24 @@ typedef bool (* nmos_channelmapping_activation_callback)(
     size_t num_active_map);
 
 /**
+ * Whether an IS-13 annotation field is left alone, written, or cleared.
+ *
+ * #NVNMOS_UPDATE_SET with an empty string is an overlay. #NVNMOS_UPDATE_SET
+ * with an empty tag value array is an empty array. #NVNMOS_UPDATE_RESET
+ * is JSON null: it clears a label, a description, every writable tag,
+ * or one tag key.
+ */
+typedef enum _NvNmosUpdate
+{
+    /** Leave the field as it is. */
+    NVNMOS_UPDATE_UNCHANGED = 0,
+    /** Write the accompanying value. */
+    NVNMOS_UPDATE_SET = 1,
+    /** Clear the field. */
+    NVNMOS_UPDATE_RESET = 2
+} NvNmosUpdate;
+
+/**
  * One writable IS-04 tags entry. Read-only tags (including
  * 'urn:x-nvnmos:tag:name' and group hint) are not represented here.
  */
@@ -269,84 +288,107 @@ typedef struct _NvNmosTag
 {
     /** Holds the tag key. Must not be null or empty. */
     const char *key;
-    /** Holds the tag values. The array's size must be equal to
+    /** Whether #values is unchanged, written, or cleared. On a
+        callback, a key removed by the merge is absent. A key this
+        merge left in place is #NVNMOS_UPDATE_UNCHANGED. A key this
+        merge wrote is #NVNMOS_UPDATE_SET. */
+    NvNmosUpdate values_update;
+    /** Holds the tag values. On the callback, a key this merge wrote
+        or left in place carries them. At create and on
+        @ref nmos_annotation_update they are read when #values_update
+        is #NVNMOS_UPDATE_SET. The array's size must be equal to
         #num_values. May be null when #num_values is zero (empty
-        array). Must not be null when #num_values is non-zero.
-        Each entry must not be null; use "" for an empty string. */
+        array), or when #values_update is not #NVNMOS_UPDATE_SET.
+        Must not be null when #num_values is non-zero and
+        #values_update is #NVNMOS_UPDATE_SET. Each entry must not be
+        null; use "" for an empty string. */
     const char **values;
     /** Holds the number of #values. May be zero. */
     unsigned int num_values;
 } NvNmosTag;
 
 /**
- * IS-13 annotation applied at create, or carried on
- * @ref nmos_annotation_callback for properties that this merge
- * changed.
+ * IS-13 annotation applied at create, carried on
+ * @ref nmos_annotation_update_callback, or passed to
+ * @ref nmos_annotation_update.
  *
- * A null #label or #description omits that property at create.
- * On the callback, those members are meaningful only when the
- * matching changed flag is true; then null is a reset and a
- * non-null empty string is an annotated empty value, not a reset.
+ * At create, #NVNMOS_UPDATE_SET writes the property. #NVNMOS_UPDATE_UNCHANGED
+ * leaves the constructed value in place. #NVNMOS_UPDATE_RESET is invalid.
+ *
+ * On the callback, #label and #description are the effective strings after the
+ * merge. #NVNMOS_UPDATE_SET means that string was written as the overlay.
+ * #NVNMOS_UPDATE_RESET means the overlay was cleared and the string is the
+ * restored default. #NVNMOS_UPDATE_UNCHANGED means the overlay was left alone.
+ * #tags is the writable-tag overlay after the merge. A #tags_update of
+ * #NVNMOS_UPDATE_SET means the merge wrote the tags object. A key this merge
+ * wrote is #NVNMOS_UPDATE_SET. A key this merge left in place is
+ * #NVNMOS_UPDATE_UNCHANGED. A key this merge cleared is absent. A #tags_update
+ * of #NVNMOS_UPDATE_RESET means every writable tag was cleared and #tags is
+ * empty. A #tags_update of #NVNMOS_UPDATE_UNCHANGED means the merge left the
+ * tags object alone. #tags still lists the overlay, and each key is
+ * #NVNMOS_UPDATE_UNCHANGED.
+ *
+ * On @ref nmos_annotation_update, only an operation of #NVNMOS_UPDATE_SET or
+ * #NVNMOS_UPDATE_RESET is applied, and a value on an unchanged or reset field
+ * is ignored. #tags lists the keys to update. A tag whose operation is
+ * #NVNMOS_UPDATE_UNCHANGED is ignored.
  */
 typedef struct _NvNmosAnnotation
 {
-    /** Holds the label. May be null. */
+    /** Whether #label is unchanged, written, or cleared. */
+    NvNmosUpdate label_update;
+    /** Holds the label. On the callback this is the effective string. On
+        @ref nmos_annotation_update it is read when #label_update is
+        #NVNMOS_UPDATE_SET. An empty string is a valid overlay. May be
+        null unless #label_update is #NVNMOS_UPDATE_SET. */
     const char *label;
-    /** Holds the description. May be null. */
+    /** Whether #description is unchanged, written, or cleared. */
+    NvNmosUpdate description_update;
+    /** Holds the description. On the callback this is the effective
+        string. On @ref nmos_annotation_update it is read when
+        #description_update is #NVNMOS_UPDATE_SET. An empty string is a
+        valid overlay. May be null unless #description_update is
+        #NVNMOS_UPDATE_SET. */
     const char *description;
-    /** Holds writable tags. The array's size must be equal to
-        #num_tags. May be null when #num_tags is zero. Must not be
-        null when #num_tags is non-zero. */
+    /** Whether #tags is unchanged, written, or cleared. */
+    NvNmosUpdate tags_update;
+    /** Holds writable tags. On the callback this is the writable-tag
+        overlay after the merge. At create and on
+        @ref nmos_annotation_update it lists the keys to update and is
+        read when #tags_update is #NVNMOS_UPDATE_SET. A tag whose
+        operation is #NVNMOS_UPDATE_UNCHANGED is not read. The array's
+        size must be equal to #num_tags. May be null when #num_tags is
+        zero, or when #tags_update is not #NVNMOS_UPDATE_SET. Must not
+        be null when #num_tags is non-zero and #tags_update is
+        #NVNMOS_UPDATE_SET. */
     const NvNmosTag *tags;
     /** Holds the number of #tags. May be zero. */
     unsigned int num_tags;
 } NvNmosAnnotation;
 
 /**
- * Type for a callback from NvNmos when an IS-13 Annotation API request
- * patches an IS-04 resource. Called once the patch data has been
- * validated and merged with the resource's current values, before the
- * resource is updated.
+ * Type for a callback from NvNmos for an IS-13 annotation update.
+ * Called once the annotation has been validated and merged with the
+ * resource's current values, before the resource is updated. An HTTP
+ * Annotation API PATCH and @ref nmos_annotation_update both invoke it.
  *
- * JSON merge-patch; the three bools say which members of @p annotation
- * to apply.
- *
- * Pointers in @p annotation and its members are valid only for the
- * duration of the call. @p annotation is never null.
- *
- * @param[in] server               The server issuing the callback.
- * @param[in] type                 Which IS-04 resource was updated.
- * @param[in] name                 The caller-chosen sender or receiver
- *                                 name, unique for that side on the
- *                                 Node. Null when @p type is
- *                                 ::NVNMOS_RESOURCE_NODE or
- *                                 ::NVNMOS_RESOURCE_DEVICE.
- * @param[in] annotation           Values for properties this merge
- *                                 changed. Must not be null.
- * @param[in] label_changed        True if this merge included
- *                                 'label'. Then a null
- *                                 #NvNmosAnnotation::label is a
- *                                 reset; a string is the overlay.
- * @param[in] description_changed  True if this merge included
- *                                 'description'. Same null/string
- *                                 rule as #label_changed.
- * @param[in] tags_changed         True if this merge included
- *                                 'tags'. Then #NvNmosAnnotation::tags
- *                                 is the full writable-tag overlay
- *                                 after this merge (empty array is
- *                                 a whole-object reset).
- * @return Whether the application accepted the change. When false,
- *         the resource is left unchanged and the Annotation API
- *         request fails with 500 Internal Error.
+ * @param[in] server     The server issuing the callback.
+ * @param[in] type       Which IS-04 resource was updated.
+ * @param[in] name       The caller-chosen sender or receiver name,
+ *                       unique for that side on the Node. Null when
+ *                       @p type is ::NVNMOS_RESOURCE_NODE or
+ *                       ::NVNMOS_RESOURCE_DEVICE.
+ * @param[in] annotation The merged annotation. See #NvNmosAnnotation.
+ *                       Must not be null.
+ * @return Whether the application accepted the update. When false,
+ *         the resource is left unchanged. An Annotation API request
+ *         then fails with 500 Internal Error.
  */
-typedef bool (* nmos_annotation_callback)(
+typedef bool (* nmos_annotation_update_callback)(
     NvNmosNodeServer *server,
     NvNmosResourceType type,
     const char *name,
-    const NvNmosAnnotation *annotation,
-    bool label_changed,
-    bool description_changed,
-    bool tags_changed);
+    const NvNmosAnnotation *annotation);
 
 /**
  * Defines some common severity/logging levels for log messages from
@@ -451,10 +493,11 @@ typedef struct _NvNmosNodeConfig
     const NvNmosAnnotation *node_annotation;
     /** IS-13 annotation for the Device resource. May be null. */
     const NvNmosAnnotation *device_annotation;
-    /** Called for each IS-13 Annotation API patch, before the resource
-        is updated; may refuse the change. May be null, which leaves the
-        Annotation API unmounted. */
-    nmos_annotation_callback annotation_changed;
+
+    /** Holds the callback for handling an IS-13 annotation update,
+        before the resource is updated; may refuse the change. May be null,
+        which leaves the Annotation API unmounted. */
+    nmos_annotation_update_callback annotation_updated;
 
     /** Holds the callback for handling log messages. May be null. */
     nmos_logging_callback log_callback;
@@ -801,6 +844,39 @@ bool nmos_connection_activate(
     NvNmosSide side,
     const char *name,
     const char *transport_file);
+
+/**
+ * Update the IS-13 annotation of one IS-04 resource.
+ *
+ * @ref nmos_annotation_update_callback runs on this thread, inside the
+ * call, before the resource is updated. An HTTP Annotation API PATCH
+ * invokes that same callback.
+ *
+ * @param[in] server     The server to update.
+ * @param[in] type       Which IS-04 resource to update.
+ * @param[in] name       The caller-chosen sender or receiver name,
+ *                       unique for that side on the Node. Null when
+ *                       @p type is ::NVNMOS_RESOURCE_NODE or
+ *                       ::NVNMOS_RESOURCE_DEVICE.
+ * @param[in] annotation The fields to update. Must not be null.
+ *                       #NVNMOS_UPDATE_UNCHANGED leaves a property as
+ *                       it is. #NVNMOS_UPDATE_RESET clears it.
+ *                       #NVNMOS_UPDATE_SET writes the value. When
+ *                       #NvNmosAnnotation::tags_update is
+ *                       #NVNMOS_UPDATE_SET, #NvNmosAnnotation::tags
+ *                       lists the keys to update, not the whole
+ *                       overlay.
+ * @return Whether the resource was updated. False indicates the
+ *         annotation is invalid, no resource of @p type and @p name
+ *         exists, or the callback returned false. The library logs
+ *         the reason.
+ */
+NVNMOS_API
+bool nmos_annotation_update(
+    NvNmosNodeServer *server,
+    NvNmosResourceType type,
+    const char *name,
+    const NvNmosAnnotation *annotation);
 
 /**
  * Parent type for an IS-08 Input's /parent endpoint.

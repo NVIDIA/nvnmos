@@ -47,30 +47,33 @@
 //! prepare / deferred `*Ffi` or `*Prep::run_ffi` / commit phases; see
 //! `doc/designs/nvnmosd/lock-ordering.md`.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nvnmos::{
-    Activation, AssetConfig, ChannelMappingActivation, ChannelMappingActiveMapEntry,
-    ChannelMappingConfig, ChannelMappingInput, ChannelMappingOutput, ChannelMappingParentType,
-    NetworkServicesConfig, NodeConfig, NodeServer, ReceiverConfig, ResourceType, SenderConfig,
-    Side as WrapperSide, Transport,
+    Activation, Annotation, AnnotationUpdate, AssetConfig, ChannelMappingActivation,
+    ChannelMappingActiveMapEntry, ChannelMappingConfig, ChannelMappingInput, ChannelMappingOutput,
+    ChannelMappingParentType, NetworkServicesConfig, NodeConfig, NodeServer, ReceiverConfig,
+    ResourceType, SenderConfig, Side as WrapperSide, Transport, Update,
 };
 use nvnmos_rpc::v1::{
-    ActivationEvent, ActiveMapEntry as ProtoActiveMapEntry, AssetConfig as ProtoAssetConfig,
+    ActivationEvent, ActiveMapEntry as ProtoActiveMapEntry, Annotation as ProtoAnnotation,
+    AnnotationEvent, AnnotationTag as ProtoAnnotationTag, AssetConfig as ProtoAssetConfig,
     ChannelMappingActivationEvent, ChannelMappingInput as ProtoChannelMappingInput,
     ChannelMappingOutput as ProtoChannelMappingOutput,
     ChannelMappingParentType as ProtoChannelMappingParentType,
     NetworkServicesConfig as ProtoNetworkServicesConfig, NodeConfig as ProtoNodeConfig,
-    Side as ProtoSide, Transport as ProtoTransport,
+    ResourceType as ProtoResourceType, Side as ProtoSide, Transport as ProtoTransport,
+    Update as ProtoUpdate,
 };
 use tokio::sync::mpsc as tokio_mpsc;
 use tonic::Status;
 
-use crate::annotation_store::AnnotationStore;
+use crate::annotation_store::{AnnotationStore, annotation_at_create};
 use crate::http_port::{self, PortRange};
 use crate::log_bridge;
 
@@ -176,17 +179,25 @@ impl Side {
                 transport,
                 transport_file: transport_file.to_string(),
                 source_annotation: annotations
-                    .and_then(|store| store.get(node_seed, ResourceType::Source, name)),
+                    .and_then(|store| store.get(node_seed, ResourceType::Source, name))
+                    .as_ref()
+                    .map(annotation_at_create),
                 flow_annotation: annotations
-                    .and_then(|store| store.get(node_seed, ResourceType::Flow, name)),
+                    .and_then(|store| store.get(node_seed, ResourceType::Flow, name))
+                    .as_ref()
+                    .map(annotation_at_create),
                 sender_annotation: annotations
-                    .and_then(|store| store.get(node_seed, ResourceType::Sender, name)),
+                    .and_then(|store| store.get(node_seed, ResourceType::Sender, name))
+                    .as_ref()
+                    .map(annotation_at_create),
             }),
             Self::Receiver => server.add_receiver(&ReceiverConfig {
                 transport,
                 transport_file: transport_file.to_string(),
                 receiver_annotation: annotations
-                    .and_then(|store| store.get(node_seed, ResourceType::Receiver, name)),
+                    .and_then(|store| store.get(node_seed, ResourceType::Receiver, name))
+                    .as_ref()
+                    .map(annotation_at_create),
             }),
         }
     }
@@ -376,6 +387,115 @@ pub struct AckOutcome {
 /// blocking the libnvnmos worker thread.
 struct ActivationSubscriber {
     tx: tokio_mpsc::Sender<Result<ActivationEvent, Status>>,
+}
+
+/// One session's `SubscribeAnnotations` stream. `try_send` pushes the
+/// stored annotation without blocking the libnvnmos thread that applied it.
+struct AnnotationSubscriber {
+    tx: tokio_mpsc::Sender<Result<AnnotationEvent, Status>>,
+}
+
+/// Resource selected by [`State::prepare_annotation_update`].
+pub struct AnnotationUpdatePrep {
+    pub server: Arc<NodeServer>,
+    pub resource_type: ResourceType,
+    pub name: Option<String>,
+}
+
+thread_local! {
+    static ANNOTATION_REFUSAL: Cell<Option<String>> = const { Cell::new(None) };
+}
+
+/// Forget a refusal recorded by an earlier annotation callback on this thread.
+pub fn clear_annotation_refusal() {
+    ANNOTATION_REFUSAL.with(|slot| slot.set(None));
+}
+
+/// Take the refusal recorded by the annotation callback on this thread.
+pub fn take_annotation_refusal() -> Option<String> {
+    ANNOTATION_REFUSAL.with(|slot| slot.take())
+}
+
+fn note_annotation_refusal(reason: &str) {
+    ANNOTATION_REFUSAL.with(|slot| slot.set(Some(reason.to_string())));
+}
+
+fn side_order(side: Side) -> u8 {
+    match side {
+        Side::Sender => 0,
+        Side::Receiver => 1,
+    }
+}
+
+fn resource_types_for_side(side: Side) -> &'static [ResourceType] {
+    match side {
+        Side::Sender => &[
+            ResourceType::Source,
+            ResourceType::Flow,
+            ResourceType::Sender,
+        ],
+        Side::Receiver => &[ResourceType::Receiver],
+    }
+}
+
+fn proto_resource_type(resource_type: ResourceType) -> i32 {
+    match resource_type {
+        ResourceType::Node => ProtoResourceType::Node as i32,
+        ResourceType::Device => ProtoResourceType::Device as i32,
+        ResourceType::Source => ProtoResourceType::Source as i32,
+        ResourceType::Flow => ProtoResourceType::Flow as i32,
+        ResourceType::Sender => ProtoResourceType::Sender as i32,
+        ResourceType::Receiver => ProtoResourceType::Receiver as i32,
+    }
+}
+
+fn annotation_event(
+    resource_type: ResourceType,
+    resource_handle: &str,
+    stored: Option<&Annotation>,
+) -> AnnotationEvent {
+    AnnotationEvent {
+        resource_type: proto_resource_type(resource_type),
+        resource_handle: resource_handle.to_string(),
+        annotation: Some(proto_annotation(stored)),
+    }
+}
+
+fn proto_annotation(stored: Option<&Annotation>) -> ProtoAnnotation {
+    let Some(stored) = stored else {
+        return ProtoAnnotation {
+            label_update: ProtoUpdate::Reset as i32,
+            label: String::new(),
+            description_update: ProtoUpdate::Reset as i32,
+            description: String::new(),
+            tags_update: ProtoUpdate::Reset as i32,
+            tags: Vec::new(),
+        };
+    };
+    ProtoAnnotation {
+        label_update: proto_update(stored.label_update),
+        label: stored.label.clone().unwrap_or_default(),
+        description_update: proto_update(stored.description_update),
+        description: stored.description.clone().unwrap_or_default(),
+        tags_update: proto_update(stored.tags_update),
+        tags: stored
+            .tags
+            .iter()
+            .map(|tag| ProtoAnnotationTag {
+                key: tag.key.clone(),
+                values_update: proto_update(tag.values_update),
+                values: tag.values.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn proto_update(update: Update) -> i32 {
+    match update {
+        Update::Unchanged => ProtoUpdate::Unchanged as i32,
+        Update::Set => ProtoUpdate::Set as i32,
+        Update::Reset => ProtoUpdate::Reset as i32,
+    }
 }
 
 /// One in-flight activation waiting on an `AckActivation`. Inserted by
@@ -841,6 +961,7 @@ impl CreateNodePrep {
         on_activation: A,
         on_channelmapping_activation: C,
         annotations: Option<Arc<AnnotationStore>>,
+        state: Arc<Mutex<State>>,
     ) -> Result<CreateNodeReady, Status>
     where
         A: Fn(&Activation<'_>) -> std::result::Result<(), String> + Send + Sync + 'static,
@@ -850,8 +971,14 @@ impl CreateNodePrep {
             + 'static,
     {
         if let Some(annotations) = &annotations {
-            self.config.node_annotation = annotations.get(&self.seed, ResourceType::Node, "");
-            self.config.device_annotation = annotations.get(&self.seed, ResourceType::Device, "");
+            self.config.node_annotation = annotations
+                .get(&self.seed, ResourceType::Node, "")
+                .as_ref()
+                .map(annotation_at_create);
+            self.config.device_annotation = annotations
+                .get(&self.seed, ResourceType::Device, "")
+                .as_ref()
+                .map(annotation_at_create);
         }
         let seed = self.seed.clone();
         let mut builder = NodeServer::builder(self.config.as_ref())
@@ -859,8 +986,20 @@ impl CreateNodePrep {
             .on_activation(on_activation)
             .on_channelmapping_activation(on_channelmapping_activation);
         if let Some(annotation_store) = annotations {
-            builder =
-                builder.on_annotation_changed(move |change| annotation_store.apply(&seed, change));
+            let state = state.clone();
+            builder = builder.on_annotation_updated(move |update| {
+                // Subscribe copies the store while it holds this lock. The
+                // store write and the publish stay inside the same hold, so
+                // that copy cannot include an annotation that publish then
+                // sends again.
+                let mut guard = state.lock().expect("daemon state mutex poisoned");
+                if let Err(reason) = annotation_store.apply(&seed, update) {
+                    note_annotation_refusal(&reason);
+                    return Err(reason);
+                }
+                guard.publish_annotation(&seed, update, &annotation_store);
+                Ok(())
+            });
         }
         let server = builder
             .build()
@@ -920,6 +1059,8 @@ pub struct State {
     by_name: HashMap<(String, Side, String), String>,
     /// At most one `SubscribeActivations` subscriber per session.
     subscriptions: HashMap<String, ActivationSubscriber>,
+    /// At most one `SubscribeAnnotations` subscriber per session.
+    annotation_subscriptions: HashMap<String, AnnotationSubscriber>,
     /// Activations currently waiting on `AckActivation`, keyed by
     /// daemon-allocated `activation_handle`.
     pending_activations: HashMap<String, PendingActivation>,
@@ -948,6 +1089,7 @@ impl State {
             resources: HashMap::new(),
             by_name: HashMap::new(),
             subscriptions: HashMap::new(),
+            annotation_subscriptions: HashMap::new(),
             pending_activations: HashMap::new(),
             channelmappings: HashMap::new(),
             channelmappings_by_name: HashMap::new(),
@@ -1101,6 +1243,7 @@ impl State {
         // released here; the streaming RPC handler observes `rx` going
         // empty and closed and returns.
         self.subscriptions.remove(session_handle);
+        self.annotation_subscriptions.remove(session_handle);
 
         // Abort any in-flight activations belonging to this session.
         // Dropping the sync-channel sender wakes the libnvnmos worker
@@ -1644,6 +1787,295 @@ impl State {
         self.subscriptions
             .insert(session_handle.to_string(), ActivationSubscriber { tx });
         Ok(())
+    }
+
+    /// Register a `SubscribeAnnotations` stream. At most one per session.
+    /// A closed slot is replaced. Does not affect session lifetime.
+    pub fn subscribe_annotations(
+        &mut self,
+        session_handle: &str,
+        tx: tokio_mpsc::Sender<Result<AnnotationEvent, Status>>,
+    ) -> Result<(), Status> {
+        if !self.sessions.contains_key(session_handle) {
+            return Err(Status::not_found(format!(
+                "session_handle {session_handle:?} is not known to this daemon"
+            )));
+        }
+        if let Some(existing) = self.annotation_subscriptions.get(session_handle) {
+            if !existing.tx.is_closed() {
+                return Err(Status::already_exists(format!(
+                    "session {session_handle:?} already has an active \
+                     SubscribeAnnotations stream"
+                )));
+            }
+        }
+        self.annotation_subscriptions
+            .insert(session_handle.to_string(), AnnotationSubscriber { tx });
+        Ok(())
+    }
+
+    /// Drop a `SubscribeAnnotations` slot whose receiver is gone.
+    pub fn reap_annotation_subscription(&mut self, session_handle: &str) {
+        if self
+            .annotation_subscriptions
+            .get(session_handle)
+            .is_some_and(|subscriber| subscriber.tx.is_closed())
+        {
+            self.annotation_subscriptions.remove(session_handle);
+        }
+    }
+
+    /// Close a `SubscribeAnnotations` stream, queued events included.
+    pub fn drop_annotation_subscription(&mut self, session_handle: &str) {
+        self.annotation_subscriptions.remove(session_handle);
+    }
+
+    /// Resolve the resource an `UpdateAnnotation` call may update.
+    ///
+    /// The caller validates the annotation fields and makes the libnvnmos
+    /// call with no daemon lock held.
+    pub fn prepare_annotation_update(
+        &self,
+        session_handle: &str,
+        resource_type: ResourceType,
+        resource_handle: &str,
+    ) -> Result<AnnotationUpdatePrep, Status> {
+        let session = self.sessions.get(session_handle).ok_or_else(|| {
+            Status::not_found(format!(
+                "session_handle {session_handle:?} is not known to this daemon"
+            ))
+        })?;
+        let server = self
+            .nodes
+            .get(&session.node_seed)
+            .ok_or_else(|| {
+                Status::internal(format!(
+                    "session {session_handle:?} referenced seed {:?} but no Node entry exists",
+                    session.node_seed
+                ))
+            })?
+            .server
+            .clone();
+        let name = match resource_type {
+            ResourceType::Node | ResourceType::Device => {
+                if !resource_handle.is_empty() {
+                    return Err(Status::invalid_argument(
+                        "resource_handle must be empty for Node and Device",
+                    ));
+                }
+                None
+            }
+            ResourceType::Source | ResourceType::Flow | ResourceType::Sender => {
+                Some(self.owned_resource_name(session_handle, resource_handle, Side::Sender)?)
+            }
+            ResourceType::Receiver => {
+                Some(self.owned_resource_name(session_handle, resource_handle, Side::Receiver)?)
+            }
+        };
+        Ok(AnnotationUpdatePrep {
+            server,
+            resource_type,
+            name,
+        })
+    }
+
+    /// One event per resource this session can see, including an empty
+    /// annotation. Node and Device come first, then each owned sender
+    /// (Source, Flow, Sender) and each owned receiver.
+    pub fn annotation_snapshot(
+        &self,
+        session_handle: &str,
+        store: &AnnotationStore,
+    ) -> Result<Vec<AnnotationEvent>, Status> {
+        let session = self.sessions.get(session_handle).ok_or_else(|| {
+            Status::not_found(format!(
+                "session_handle {session_handle:?} is not known to this daemon"
+            ))
+        })?;
+        let node_seed = session.node_seed.clone();
+        let mut events = vec![
+            annotation_event(
+                ResourceType::Node,
+                "",
+                store.get(&node_seed, ResourceType::Node, "").as_ref(),
+            ),
+            annotation_event(
+                ResourceType::Device,
+                "",
+                store.get(&node_seed, ResourceType::Device, "").as_ref(),
+            ),
+        ];
+        let mut owned: Vec<(String, String, Side)> = session
+            .resources
+            .iter()
+            .filter_map(|handle| {
+                self.resources
+                    .get(handle)
+                    .map(|resource| (handle.clone(), resource.name.clone(), resource.side))
+            })
+            .collect();
+        owned.sort_by(|left, right| {
+            left.1
+                .cmp(&right.1)
+                .then_with(|| side_order(left.2).cmp(&side_order(right.2)))
+        });
+        for (handle, name, side) in owned {
+            for resource_type in resource_types_for_side(side) {
+                events.push(annotation_event(
+                    *resource_type,
+                    &handle,
+                    store.get(&node_seed, *resource_type, &name).as_ref(),
+                ));
+            }
+        }
+        Ok(events)
+    }
+
+    /// Send the annotation stored for this update to every session allowed
+    /// to see it. A full stream is closed. The update has already been
+    /// stored.
+    pub fn publish_annotation(
+        &mut self,
+        node_seed: &str,
+        update: &AnnotationUpdate,
+        store: &AnnotationStore,
+    ) {
+        let name = update.name.as_deref().unwrap_or("");
+        let stored = store.get(node_seed, update.resource_type, name);
+        for (session_handle, resource_handle) in
+            self.annotation_recipients(node_seed, update.resource_type, name)
+        {
+            self.send_annotation(
+                &session_handle,
+                annotation_event(update.resource_type, &resource_handle, stored.as_ref()),
+            );
+        }
+    }
+
+    /// After a sender or receiver is committed, send its current annotations
+    /// when that session has a stream. Creation applies a stored annotation
+    /// without the callback.
+    pub fn emit_added_resource(&mut self, resource_handle: &str, store: &AnnotationStore) {
+        let Some(resource) = self.resources.get(resource_handle) else {
+            return;
+        };
+        let session_handle = resource.session_handle.clone();
+        let name = resource.name.clone();
+        let node_seed = resource.node_seed.clone();
+        let side = resource.side;
+        let handle = resource_handle.to_string();
+        if self
+            .annotation_subscriptions
+            .get(&session_handle)
+            .is_none_or(|subscriber| subscriber.tx.is_closed())
+        {
+            return;
+        }
+        for resource_type in resource_types_for_side(side) {
+            let stored = store.get(&node_seed, *resource_type, &name);
+            self.send_annotation(
+                &session_handle,
+                annotation_event(*resource_type, &handle, stored.as_ref()),
+            );
+        }
+    }
+
+    fn owned_resource_name(
+        &self,
+        session_handle: &str,
+        resource_handle: &str,
+        side: Side,
+    ) -> Result<String, Status> {
+        let session = self.sessions.get(session_handle).ok_or_else(|| {
+            Status::not_found(format!(
+                "session_handle {session_handle:?} is not known to this daemon"
+            ))
+        })?;
+        if resource_handle.is_empty() || !session.resources.contains(resource_handle) {
+            return Err(Status::not_found(format!(
+                "session {session_handle:?} does not own resource_handle {resource_handle:?}"
+            )));
+        }
+        let resource = self.resources.get(resource_handle).ok_or_else(|| {
+            Status::internal(format!(
+                "session {session_handle:?} owns resource_handle {resource_handle:?} \
+                 but no resource entry exists"
+            ))
+        })?;
+        if resource.side != side {
+            return Err(Status::invalid_argument(
+                "resource_type does not belong to resource_handle",
+            ));
+        }
+        Ok(resource.name.clone())
+    }
+
+    fn annotation_recipients(
+        &self,
+        node_seed: &str,
+        resource_type: ResourceType,
+        name: &str,
+    ) -> Vec<(String, String)> {
+        match resource_type {
+            ResourceType::Node | ResourceType::Device => self
+                .sessions
+                .iter()
+                .filter(|(_, session)| session.node_seed == node_seed)
+                .filter(|(handle, _)| {
+                    self.annotation_subscriptions
+                        .get(*handle)
+                        .is_some_and(|subscriber| !subscriber.tx.is_closed())
+                })
+                .map(|(handle, _)| (handle.clone(), String::new()))
+                .collect(),
+            ResourceType::Source | ResourceType::Flow | ResourceType::Sender => {
+                self.resource_recipient(node_seed, Side::Sender, name)
+            }
+            ResourceType::Receiver => self.resource_recipient(node_seed, Side::Receiver, name),
+        }
+    }
+
+    fn resource_recipient(&self, node_seed: &str, side: Side, name: &str) -> Vec<(String, String)> {
+        let Some(handle) = self
+            .by_name
+            .get(&(node_seed.to_string(), side, name.to_string()))
+        else {
+            return Vec::new();
+        };
+        let Some(resource) = self.resources.get(handle) else {
+            return Vec::new();
+        };
+        let session_handle = resource.session_handle.clone();
+        if self
+            .annotation_subscriptions
+            .get(&session_handle)
+            .is_some_and(|subscriber| !subscriber.tx.is_closed())
+        {
+            vec![(session_handle, handle.clone())]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn send_annotation(&mut self, session_handle: &str, event: AnnotationEvent) {
+        let Some(subscriber) = self.annotation_subscriptions.get(session_handle) else {
+            return;
+        };
+        if subscriber.tx.is_closed() {
+            self.annotation_subscriptions.remove(session_handle);
+            return;
+        }
+        let tx = subscriber.tx.clone();
+        match tx.try_send(Ok(event)) {
+            Ok(()) => {}
+            Err(tokio_mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(session_handle, "annotation stream buffer full; closing it");
+                self.annotation_subscriptions.remove(session_handle);
+            }
+            Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
+                self.annotation_subscriptions.remove(session_handle);
+            }
+        }
     }
 
     /// True when `session_handle` has a live activation subscription
@@ -2688,7 +3120,7 @@ mod open_session_tests {
     #[test]
     fn open_session_during_node_create_is_unavailable() {
         let mut state = State::new();
-        let range = PortRange::new(18_370, 18_379).expect("range");
+        let range = PortRange::new(18_400, 18_409).expect("range");
         let config = || {
             translate_config(Some(&ProtoNodeConfig {
                 seed: "pending-seed".into(),
@@ -2704,5 +3136,51 @@ mod open_session_tests {
             .err()
             .expect("second OpenSession while the create is pending");
         assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+    }
+}
+
+#[cfg(test)]
+mod annotation_stream_tests {
+    use std::collections::HashSet;
+
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    use super::{ResourceType, SessionEntry, State, annotation_event};
+
+    #[test]
+    fn a_full_annotation_buffer_closes_the_stream_and_keeps_queued_events() {
+        let mut state = State::new();
+        state.sessions.insert(
+            "session".to_string(),
+            SessionEntry {
+                node_seed: "seed".to_string(),
+                resources: HashSet::new(),
+                channelmappings: HashSet::new(),
+            },
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        state
+            .subscribe_annotations("session", tx)
+            .expect("subscribe");
+
+        for _ in 0..16 {
+            state.send_annotation("session", annotation_event(ResourceType::Node, "", None));
+            assert!(state.annotation_subscriptions.contains_key("session"));
+        }
+        state.send_annotation("session", annotation_event(ResourceType::Node, "", None));
+        assert!(
+            !state.annotation_subscriptions.contains_key("session"),
+            "the event that did not fit should close the stream"
+        );
+
+        let mut queued = 0;
+        loop {
+            match rx.try_recv() {
+                Ok(_) => queued += 1,
+                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => panic!("the closed stream still has a sender"),
+            }
+        }
+        assert_eq!(queued, 16, "events already queued stay readable");
     }
 }

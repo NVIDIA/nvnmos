@@ -144,6 +144,35 @@ service NvnmosDaemon {
   // rolled back. Returns `NOT_FOUND` unless the activation is pending for
   // this session.
   rpc AckChannelMappingActivation(AckChannelMappingActivationRequest) returns (Empty);
+
+  // Updates the IS-13 annotation of one resource. Success returns `Empty`.
+  // The stored annotation is sent on `SubscribeAnnotations`, in the order
+  // the daemon commits it.
+  // Returns `FAILED_PRECONDITION` when the Annotation API is off, or when
+  // the annotation store is full and the resource has no stored annotation.
+  // Returns `INVALID_ARGUMENT` for `RESOURCE_TYPE_UNSPECIFIED`,
+  // a malformed tag list, a read-only tag, a `resource_type` that does not
+  // belong to `resource_handle`, or a non-empty `resource_handle` for Node
+  // or Device.
+  // Returns `NOT_FOUND` when the session is unknown or does not own
+  // `resource_handle`.
+  // Returns `UNKNOWN` when libnvnmos rejects the update for another reason.
+  rpc UpdateAnnotation(UpdateAnnotationRequest) returns (Empty);
+
+  // Streams the annotations visible to the session. The first events
+  // are the current annotation of every visible resource, including an
+  // empty `annotation` where the resource has no stored annotation.
+  // Later events are the complete annotation whenever it is updated. A
+  // cleared annotation is an empty `annotation`. There is no
+  // acknowledgement.
+  // Adding a sender emits three events (Source, Flow, Sender). Adding a
+  // receiver emits one. Each is empty when that resource has no stored
+  // annotation.
+  // Removing a resource emits nothing.
+  // Returns `NOT_FOUND` for an unknown session, `ALREADY_EXISTS` if a
+  // stream is already active, or `FAILED_PRECONDITION` when the
+  // Annotation API is off.
+  rpc SubscribeAnnotations(SubscribeAnnotationsRequest) returns (stream AnnotationEvent);
 }
 
 // Empty response for RPCs that return no data.
@@ -558,4 +587,90 @@ message AckChannelMappingActivationRequest {
   // Free-form failure reason, logged by the daemon. Set only when `success`
   // is false.
   string failure_reason = 4;
+}
+
+// Which IS-04 resource. `UNSPECIFIED` is the proto3 zero value and is
+// an error from a client. The daemon does not send it.
+enum ResourceType {
+  RESOURCE_TYPE_UNSPECIFIED = 0;
+  RESOURCE_TYPE_NODE = 1;
+  RESOURCE_TYPE_DEVICE = 2;
+  RESOURCE_TYPE_SOURCE = 3;
+  RESOURCE_TYPE_FLOW = 4;
+  RESOURCE_TYPE_SENDER = 5;
+  RESOURCE_TYPE_RECEIVER = 6;
+}
+
+// Leave a field alone, write the accompanying value, or clear it.
+// `UPDATE_SET` with "" or an empty value list is an overlay.
+// `UPDATE_RESET` is JSON null; the accompanying value is ignored.
+enum Update {
+  UPDATE_UNCHANGED = 0;
+  UPDATE_SET = 1;
+  UPDATE_RESET = 2;
+}
+
+// One writable tag. A read-only key is `INVALID_ARGUMENT`.
+message AnnotationTag {
+  // Tag key. Empty is `INVALID_ARGUMENT`.
+  string key = 1;
+  // On `UpdateAnnotation`, `UPDATE_SET` writes `values`, including an
+  // empty list, and `UPDATE_RESET` clears the key. `UPDATE_UNCHANGED`
+  // is ignored.
+  // On `AnnotationEvent` every tag is `UPDATE_UNCHANGED`. The list
+  // contains only stored keys, so a cleared key is omitted, it is not
+  // indicated by `UPDATE_RESET`.
+  Update values_update = 2;
+  // Stored values on an event. On `UpdateAnnotation`, applied when
+  // `values_update` is `UPDATE_SET`.
+  repeated string values = 3;
+}
+
+// One annotation. On `UpdateAnnotation` only `UPDATE_SET` and
+// `UPDATE_RESET` are applied, and `tags` lists the keys to update.
+// On `AnnotationEvent` this is the stored annotation, and `UPDATE_SET`
+// is never sent. A present label, description, or tags object is
+// `UPDATE_UNCHANGED` with the stored value, including "" and an empty
+// value list. A label, description, or whole tags object with no
+// overlay is `UPDATE_RESET`. Each tag is `UPDATE_UNCHANGED`, because
+// the list contains only stored keys. A cleared key is omitted, it is
+// not indicated by `UPDATE_RESET`.
+message Annotation {
+  Update label_update = 1;
+  string label = 2;
+  Update description_update = 3;
+  string description = 4;
+  Update tags_update = 5;
+  repeated AnnotationTag tags = 6;
+}
+
+// Updates the IS-13 annotation of one resource.
+message UpdateAnnotationRequest {
+  // Session that owns the resource, or that is attached to the Node
+  // when `resource_type` is Node or Device.
+  string session_handle = 1;
+  // Which IS-04 resource to update. Source, Flow, and Sender refer to
+  // the sender identified by `resource_handle`.
+  ResourceType resource_type = 2;
+  // Opaque handle from `AddSender` or `AddReceiver`. Empty for Node
+  // and Device.
+  string resource_handle = 3;
+  // Fields to update. See `Annotation`.
+  Annotation annotation = 4;
+}
+
+// Request to open the session's annotation stream.
+message SubscribeAnnotationsRequest {
+  // Session whose annotations to stream.
+  string session_handle = 1;
+}
+
+// One complete annotation for a resource the session can see.
+message AnnotationEvent {
+  // Which IS-04 resource this annotation belongs to.
+  ResourceType resource_type = 1;
+  // Opaque handle of the sender or receiver. Empty for Node and Device.
+  string resource_handle = 2;
+  // Stored annotation. The daemon always sets this field. See `Annotation`.
+  Annotation annotation = 3;
 }

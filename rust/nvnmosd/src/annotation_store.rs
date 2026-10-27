@@ -8,6 +8,11 @@
 //! or destroying a node does not drop entries. An entry is removed when
 //! an IS-13 reset leaves it with no label, description, or writable tags.
 //!
+//! The map holds an [`Annotation`] in subscription form. A present field is
+//! [`Update::Unchanged`] and an absent field is [`Update::Reset`].
+//! [`annotation_at_create`] rewrites that for resource creation. The
+//! checkpoint stores the values without an operation.
+//!
 //! The checkpoint write runs on a background thread. [`AnnotationStore::apply`]
 //! updates the map and returns; it does not serialize. [`AnnotationStore::flush`]
 //! writes the current map before the process exits.
@@ -21,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use nvnmos::{Annotation, AnnotationChange, ResourceType};
+use nvnmos::{Annotation, AnnotationTag, AnnotationUpdate, ResourceType, Update};
 use serde::{Deserialize, Serialize};
 
 const CHECKPOINT_VERSION: u32 = 1;
@@ -36,6 +41,59 @@ struct Key {
     seed: String,
     resource_type: ResourceType,
     name: String,
+}
+
+/// Subscription form with nothing stored.
+fn blank_annotation() -> Annotation {
+    Annotation {
+        label_update: Update::Reset,
+        label: None,
+        description_update: Update::Reset,
+        description: None,
+        tags_update: Update::Reset,
+        tags: Vec::new(),
+    }
+}
+
+/// Create form of a stored annotation. A present field is [`Update::Set`].
+/// An absent field is [`Update::Unchanged`], because [`Update::Reset`] is
+/// invalid at create.
+pub(crate) fn annotation_at_create(stored: &Annotation) -> Annotation {
+    let tags_update = create_operation(stored.tags_update);
+    Annotation {
+        label_update: create_operation(stored.label_update),
+        label: present_value(stored.label_update, &stored.label),
+        description_update: create_operation(stored.description_update),
+        description: present_value(stored.description_update, &stored.description),
+        tags_update,
+        tags: if tags_update == Update::Unchanged {
+            Vec::new()
+        } else {
+            stored
+                .tags
+                .iter()
+                .map(|tag| AnnotationTag {
+                    key: tag.key.clone(),
+                    values_update: Update::Set,
+                    values: tag.values.clone(),
+                })
+                .collect()
+        },
+    }
+}
+
+fn create_operation(update: Update) -> Update {
+    match update {
+        Update::Unchanged | Update::Set => Update::Set,
+        Update::Reset => Update::Unchanged,
+    }
+}
+
+fn present_value(update: Update, value: &Option<String>) -> Option<String> {
+    match update {
+        Update::Unchanged | Update::Set => value.clone(),
+        Update::Reset => None,
+    }
 }
 
 struct Inner {
@@ -140,33 +198,85 @@ impl AnnotationStore {
         self.lock().entries.get(&key).cloned()
     }
 
-    /// Apply one callback. A new key at the limit is logged and refused,
+    /// Apply one annotation update. A new key at the limit is logged and refused,
     /// so the caller can fail the Annotation API request.
     /// An entry with nothing left annotated is deleted.
-    pub fn apply(&self, seed: &str, change: &AnnotationChange<'_>) -> Result<(), String> {
-        let name = change.name.unwrap_or("");
+    pub fn apply(&self, seed: &str, update: &AnnotationUpdate) -> Result<(), String> {
+        let name = update.name.as_deref().unwrap_or("");
         let key = Key {
             seed: seed.to_string(),
-            resource_type: change.resource_type,
+            resource_type: update.resource_type,
             name: name.to_string(),
         };
+        let annotation = &update.annotation;
         let mut inner = self.lock();
-        let mut entry = inner.entries.get(&key).cloned().unwrap_or_default();
-        if change.label_changed {
-            entry.label.clone_from(&change.annotation.label);
+        let mut entry = inner
+            .entries
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(blank_annotation);
+        match annotation.label_update {
+            Update::Unchanged => {}
+            Update::Set => {
+                entry.label.clone_from(&annotation.label);
+                entry.label_update = if entry.label.is_some() {
+                    Update::Unchanged
+                } else {
+                    Update::Reset
+                };
+            }
+            Update::Reset => {
+                entry.label_update = Update::Reset;
+                entry.label = None;
+            }
         }
-        if change.description_changed {
-            entry.description.clone_from(&change.annotation.description);
+        match annotation.description_update {
+            Update::Unchanged => {}
+            Update::Set => {
+                entry.description.clone_from(&annotation.description);
+                entry.description_update = if entry.description.is_some() {
+                    Update::Unchanged
+                } else {
+                    Update::Reset
+                };
+            }
+            Update::Reset => {
+                entry.description_update = Update::Reset;
+                entry.description = None;
+            }
         }
-        if change.tags_changed {
-            entry.tags.clone_from(&change.annotation.tags);
+        match annotation.tags_update {
+            Update::Unchanged => {}
+            Update::Set => {
+                entry.tags = annotation
+                    .tags
+                    .iter()
+                    .map(|tag| AnnotationTag {
+                        key: tag.key.clone(),
+                        values_update: Update::Unchanged,
+                        values: tag.values.clone(),
+                    })
+                    .collect();
+                entry.tags_update = if !entry.tags.is_empty() {
+                    Update::Unchanged
+                } else {
+                    Update::Reset
+                };
+            }
+            Update::Reset => {
+                entry.tags_update = Update::Reset;
+                entry.tags.clear();
+            }
         }
-        if entry.label.is_none() && entry.description.is_none() && entry.tags.is_empty() {
+        if entry.label_update == Update::Reset
+            && entry.description_update == Update::Reset
+            && entry.tags_update == Update::Reset
+        {
             inner.entries.remove(&key);
         } else if !inner.entries.contains_key(&key) && inner.entries.len() >= inner.limit {
             tracing::error!(
                 seed,
-                resource_type = resource_type_name(change.resource_type),
+                resource_type = resource_type_name(update.resource_type),
                 name,
                 limit = inner.limit,
                 "annotation store is full; refusing a new annotation"
@@ -228,7 +338,7 @@ fn default_checkpoint_file(uds: &Path) -> PathBuf {
     uds.with_file_name(name)
 }
 
-fn read_only_tag(key: &str) -> bool {
+pub(crate) fn read_only_tag(key: &str) -> bool {
     key.starts_with("urn:x-nmos:tag:asset:")
         || key.starts_with("urn:x-nmos:tag:grouphint/")
         || key.starts_with("urn:x-nvnmos:tag:")
@@ -389,11 +499,7 @@ fn read_checkpoint(path: &Path) -> Result<HashMap<Key, Annotation>, CheckpointEr
                 path.display()
             )));
         }
-        let annotation = Annotation {
-            label: record.label,
-            description: record.description,
-            tags: record.tags,
-        };
+        let annotation = stored_annotation(record.label, record.description, record.tags);
         if entries.insert(key, annotation).is_some() {
             return Err(CheckpointError(format!(
                 "duplicate annotation in {}",
@@ -402,6 +508,41 @@ fn read_checkpoint(path: &Path) -> Result<HashMap<Key, Annotation>, CheckpointEr
         }
     }
     Ok(entries)
+}
+
+fn stored_annotation(
+    label: Option<String>,
+    description: Option<String>,
+    tags: BTreeMap<String, Vec<String>>,
+) -> Annotation {
+    let tags = tags
+        .into_iter()
+        .map(|(key, values)| AnnotationTag {
+            key,
+            values_update: Update::Unchanged,
+            values,
+        })
+        .collect::<Vec<_>>();
+    Annotation {
+        label_update: if label.is_some() {
+            Update::Unchanged
+        } else {
+            Update::Reset
+        },
+        label,
+        description_update: if description.is_some() {
+            Update::Unchanged
+        } else {
+            Update::Reset
+        },
+        description,
+        tags_update: if !tags.is_empty() {
+            Update::Unchanged
+        } else {
+            Update::Reset
+        },
+        tags,
+    }
 }
 
 fn write_checkpoint(
@@ -414,9 +555,17 @@ fn write_checkpoint(
             seed: key.seed.clone(),
             resource_type: resource_type_name(key.resource_type).to_string(),
             name: key.name.clone(),
-            label: annotation.label.clone(),
-            description: annotation.description.clone(),
-            tags: annotation.tags.clone(),
+            label: present_value(annotation.label_update, &annotation.label),
+            description: present_value(annotation.description_update, &annotation.description),
+            tags: if annotation.tags_update == Update::Reset {
+                BTreeMap::new()
+            } else {
+                annotation
+                    .tags
+                    .iter()
+                    .map(|tag| (tag.key.clone(), tag.values.clone()))
+                    .collect()
+            },
         })
         .collect();
     annotations.sort_by(|left, right| {
@@ -476,76 +625,67 @@ fn temp_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn change<'a>(
+    fn report(
         resource_type: ResourceType,
-        name: Option<&'a str>,
-        annotation: &'a Annotation,
-        label_changed: bool,
-        description_changed: bool,
-        tags_changed: bool,
-    ) -> AnnotationChange<'a> {
-        AnnotationChange {
+        name: Option<&str>,
+        annotation: Annotation,
+    ) -> AnnotationUpdate {
+        AnnotationUpdate {
             resource_type,
-            name,
+            name: name.map(str::to_owned),
             annotation,
-            label_changed,
-            description_changed,
-            tags_changed,
         }
     }
 
     #[test]
     fn apply_keeps_unflagged_members_and_deletes_an_empty_entry() {
         let store = AnnotationStore::memory(8);
-        let labeled = Annotation {
-            label: Some("overlay".into()),
-            ..Annotation::default()
-        };
         store
             .apply(
                 "seed",
-                &change(
+                &report(
                     ResourceType::Sender,
                     Some("video"),
-                    &labeled,
-                    true,
-                    false,
-                    false,
+                    Annotation {
+                        label_update: Update::Set,
+                        label: Some("overlay".into()),
+                        ..Annotation::default()
+                    },
                 ),
             )
             .unwrap();
-        let described = Annotation {
-            description: Some("info".into()),
-            ..Annotation::default()
-        };
         store
             .apply(
                 "seed",
-                &change(
+                &report(
                     ResourceType::Sender,
                     Some("video"),
-                    &described,
-                    false,
-                    true,
-                    false,
+                    Annotation {
+                        description_update: Update::Set,
+                        description: Some("info".into()),
+                        ..Annotation::default()
+                    },
                 ),
             )
             .unwrap();
         let stored = store.get("seed", ResourceType::Sender, "video").unwrap();
+        assert_eq!(stored.label_update, Update::Unchanged);
         assert_eq!(stored.label.as_deref(), Some("overlay"));
+        assert_eq!(stored.description_update, Update::Unchanged);
         assert_eq!(stored.description.as_deref(), Some("info"));
+        assert_eq!(stored.tags_update, Update::Reset);
 
-        let reset = Annotation::default();
         store
             .apply(
                 "seed",
-                &change(
+                &report(
                     ResourceType::Sender,
                     Some("video"),
-                    &reset,
-                    true,
-                    true,
-                    false,
+                    Annotation {
+                        label_update: Update::Reset,
+                        description_update: Update::Reset,
+                        ..Annotation::default()
+                    },
                 ),
             )
             .unwrap();
@@ -555,61 +695,67 @@ mod tests {
     #[test]
     fn limit_refuses_a_new_key_and_still_updates_an_existing_one() {
         let store = AnnotationStore::memory(1);
-        let first = Annotation {
-            label: Some("one".into()),
-            ..Annotation::default()
-        };
         store
             .apply(
                 "seed",
-                &change(ResourceType::Sender, Some("a"), &first, true, false, false),
+                &report(
+                    ResourceType::Sender,
+                    Some("a"),
+                    Annotation {
+                        label_update: Update::Set,
+                        label: Some("one".into()),
+                        ..Annotation::default()
+                    },
+                ),
             )
             .unwrap();
-        let second = Annotation {
-            label: Some("two".into()),
-            ..Annotation::default()
-        };
         assert!(
             store
                 .apply(
                     "seed",
-                    &change(ResourceType::Sender, Some("b"), &second, true, false, false),
+                    &report(
+                        ResourceType::Sender,
+                        Some("b"),
+                        Annotation {
+                            label_update: Update::Set,
+                            label: Some("two".into()),
+                            ..Annotation::default()
+                        },
+                    ),
                 )
                 .is_err()
         );
         assert!(store.get("seed", ResourceType::Sender, "b").is_none());
-        let reset = Annotation::default();
         store
             .apply(
                 "seed",
-                &change(ResourceType::Sender, Some("b"), &reset, true, false, false),
-            )
-            .unwrap();
-        let updated = Annotation {
-            label: Some("one-b".into()),
-            ..Annotation::default()
-        };
-        store
-            .apply(
-                "seed",
-                &change(
+                &report(
                     ResourceType::Sender,
-                    Some("a"),
-                    &updated,
-                    true,
-                    false,
-                    false,
+                    Some("b"),
+                    Annotation {
+                        label_update: Update::Reset,
+                        ..Annotation::default()
+                    },
                 ),
             )
             .unwrap();
-        assert_eq!(
-            store
-                .get("seed", ResourceType::Sender, "a")
-                .unwrap()
-                .label
-                .as_deref(),
-            Some("one-b")
-        );
+        store
+            .apply(
+                "seed",
+                &report(
+                    ResourceType::Sender,
+                    Some("a"),
+                    Annotation {
+                        label_update: Update::Set,
+                        label: Some("one-b".into()),
+                        ..Annotation::default()
+                    },
+                ),
+            )
+            .unwrap();
+        let stored = store.get("seed", ResourceType::Sender, "a").unwrap();
+        assert_eq!(stored.label_update, Update::Unchanged);
+        assert_eq!(stored.label.as_deref(), Some("one-b"));
     }
 
     #[test]
@@ -626,25 +772,40 @@ mod tests {
 
         {
             let store = AnnotationStore::with_file(&path, Duration::from_secs(60), 8).unwrap();
-            let labeled = Annotation {
-                label: Some("node-overlay".into()),
-                tags: BTreeMap::from([("foo".into(), vec!["a".into()])]),
-                ..Annotation::default()
-            };
             store
                 .apply(
                     "seed",
-                    &change(ResourceType::Node, None, &labeled, true, false, true),
+                    &report(
+                        ResourceType::Node,
+                        None,
+                        Annotation {
+                            label_update: Update::Set,
+                            label: Some("node-overlay".into()),
+                            tags_update: Update::Set,
+                            tags: vec![AnnotationTag {
+                                key: "foo".into(),
+                                values_update: Update::Set,
+                                values: vec!["a".into()],
+                            }],
+                            ..Annotation::default()
+                        },
+                    ),
                 )
                 .unwrap();
             store.flush();
         }
         let restored = AnnotationStore::with_file(&path, Duration::ZERO, 8).unwrap();
         let node = restored.get("seed", ResourceType::Node, "").unwrap();
+        assert_eq!(node.label_update, Update::Unchanged);
         assert_eq!(node.label.as_deref(), Some("node-overlay"));
+        assert_eq!(node.description_update, Update::Reset);
+        assert_eq!(node.tags_update, Update::Unchanged);
         assert_eq!(
-            node.tags.get("foo").map(Vec::as_slice),
-            Some(["a".to_string()].as_slice())
+            node.tags
+                .iter()
+                .find(|tag| tag.key == "foo")
+                .map(|tag| (tag.values_update, tag.values.as_slice())),
+            Some((Update::Unchanged, ["a".to_string()].as_slice()))
         );
 
         std::fs::write(&path, b"not-json").unwrap();

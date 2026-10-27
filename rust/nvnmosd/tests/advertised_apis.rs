@@ -14,7 +14,6 @@ use tonic::transport::Channel;
 
 use common::{DaemonHarness, PortRange, connect, http_get_json, open_session_with_port};
 
-// 18220..=18239 belong to the activation-ack lock-ordering tests.
 const ANNOTATION_API_UNMOUNTED_PORTS: PortRange = 18_240..=18_249;
 
 fn json_string_set(value: &Value) -> Vec<String> {
