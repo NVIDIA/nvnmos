@@ -4,7 +4,7 @@
 //! Session lifecycle for `nmosaudiochannelmap`.
 
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
 use gstreamer as gst;
@@ -64,7 +64,7 @@ pub(crate) fn validate_and_open(
 
     let slot = session.lock().unwrap().take();
     match slot {
-        Some(SessionPhase::Pending(handle)) => match finish_opening(handle) {
+        Some(SessionPhase::Pending(handle)) => match finish_opening(handle, OPEN_TIMEOUT) {
             OpenJoin::Running(handle) => {
                 *session.lock().unwrap() = Some(SessionPhase::Pending(handle));
                 bail!(
@@ -73,7 +73,7 @@ pub(crate) fn validate_and_open(
                 );
             }
             OpenJoin::Ready(opened) => {
-                let _ = SHARED_RUNTIME.block_on(opened.close());
+                let _ = SHARED_RUNTIME.block_on(opened.close(Instant::now() + RPC_TIMEOUT));
             }
             OpenJoin::Finished => {}
         },
@@ -126,12 +126,13 @@ pub(crate) fn close(
     element: &str,
     session: &Mutex<Option<SessionPhase<ChannelMappingSession>>>,
 ) {
-    let Some(s) = take_for_close(session) else {
+    let deadline = Instant::now() + RPC_TIMEOUT;
+    let Some(s) = take_for_close(session, deadline) else {
         return;
     };
     {
         let handle = s.session_handle.clone();
-        let result = SHARED_RUNTIME.block_on(s.close());
+        let result = SHARED_RUNTIME.block_on(s.close(deadline));
         match result {
             Ok(()) => gst::info!(cat, "channel mapping session closed: handle={handle}"),
             Err(e) => gst::warning!(

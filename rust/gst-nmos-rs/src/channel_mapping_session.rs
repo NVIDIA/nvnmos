@@ -7,6 +7,7 @@
 //! `SubscribeChannelMappingActivations` and the channel-mapping RPCs.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
@@ -23,7 +24,7 @@ use gstreamer as gst;
 
 use crate::CAT;
 use crate::daemon::{
-    DaemonError, RPC_TIMEOUT, connect_uds, drive_call, parse_unix_uri, settle_task,
+    DaemonError, RPC_TIMEOUT, close_session, connect_uds, drive_call, parse_unix_uri, settle_task,
 };
 use crate::runtime::SHARED_RUNTIME;
 use crate::session::channel_mapping::ChannelMappingSettings;
@@ -212,11 +213,12 @@ impl ChannelMappingSession {
         .await
     }
 
-    /// Cancel the activation task and close the session. `CloseSession`
-    /// removes the channel mapping, so no `RemoveChannelMapping` is sent.
-    pub(crate) async fn close(mut self) -> Result<(), DaemonError> {
+    /// Cancel the activation task and close the session by `deadline`.
+    /// `CloseSession` removes the channel mapping, so no
+    /// `RemoveChannelMapping` is sent.
+    pub(crate) async fn close(mut self, deadline: Instant) -> Result<(), DaemonError> {
         match self.detach() {
-            Some(detached) => detached.close().await,
+            Some(detached) => detached.close(deadline).await,
             None => Ok(()),
         }
     }
@@ -238,8 +240,9 @@ impl Drop for ChannelMappingSession {
             return;
         };
         let handle = detached.session_handle.clone();
+        let deadline = Instant::now() + RPC_TIMEOUT;
         SHARED_RUNTIME.spawn(async move {
-            match detached.close().await {
+            match detached.close(deadline).await {
                 Ok(()) => gst::info!(CAT, "channel mapping session closed: handle={handle}"),
                 Err(e) => gst::warning!(CAT, "CloseSession (handle={handle}): {e}"),
             }
@@ -256,34 +259,25 @@ struct DetachedChannelMappingSession {
 }
 
 impl DetachedChannelMappingSession {
-    async fn close(self) -> Result<(), DaemonError> {
+    async fn close(self, deadline: Instant) -> Result<(), DaemonError> {
         let Self {
             session_handle,
-            mut client,
+            client,
             activation_task,
             inflight_add,
             inflight_sync,
         } = self;
         if let Some(task) = inflight_add {
-            settle_task(task).await;
+            settle_task(task, deadline).await;
         }
         if let Some(task) = inflight_sync {
-            settle_task(task).await;
+            settle_task(task, deadline).await;
         }
         if let Some(task) = activation_task {
             task.abort();
             let _ = task.await;
         }
-        match tokio::time::timeout(
-            RPC_TIMEOUT,
-            client.close_session(CloseSessionRequest { session_handle }),
-        )
-        .await
-        {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(status)) => Err(status.into()),
-            Err(_elapsed) => Err(DaemonError::TimedOut),
-        }
+        close_session(client, session_handle, deadline).await
     }
 }
 
@@ -550,7 +544,10 @@ mod session_integration {
                 .remove_channel_mapping()
                 .await
                 .expect("RemoveChannelMapping");
-            session.close().await.expect("CloseSession");
+            session
+                .close(Instant::now() + RPC_TIMEOUT)
+                .await
+                .expect("CloseSession");
         });
     }
 }

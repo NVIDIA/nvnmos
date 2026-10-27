@@ -25,7 +25,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
@@ -55,8 +55,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The state change fails and the call keeps running. `NULL` joins it,
 /// then sends `CloseSession`. A retry of the upward transition does not
 /// send a second RPC and does not take the result of the first one.
-/// `CloseSession` uses the same ceiling and then gives up. If the daemon
-/// answers, these calls return sooner.
+/// `NULL` waits for the joins and `CloseSession` together for at most
+/// this long, then gives up. If the daemon answers, these calls return
+/// sooner.
 pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Per-event input to an [`ActivationHandler`]. Mirrors
@@ -99,7 +100,7 @@ pub(crate) type ActivationHandler =
 /// A live session against `nvnmosd`.
 ///
 /// Open with [`Session::open`]; tear down with [`Session::close`].
-/// `close` waits for `CloseSession` and gives up after [`RPC_TIMEOUT`]
+/// `close` waits for `CloseSession` and gives up at the caller's deadline
 /// if the daemon does not answer. Drop starts the same bounded close in
 /// the background; process exit can stop it, so the daemon's session GC
 /// cleans up abandoned sessions.
@@ -211,7 +212,7 @@ impl<T> SessionPhase<T> {
     }
 }
 
-/// Result of joining a pending open for up to [`RPC_TIMEOUT`].
+/// Result of joining a pending open for a limited time.
 pub(crate) enum OpenJoin<T> {
     /// The open finished and returned a session. The caller closes it.
     Ready(T),
@@ -221,18 +222,21 @@ pub(crate) enum OpenJoin<T> {
     Running(JoinHandle<Result<T, DaemonError>>),
 }
 
-/// Take the open session, or a pending open that has finished.
+/// Take the open session, or a pending open that finishes before `deadline`.
 ///
 /// A pending open that is still running is put back. `NULL` succeeds
 /// without aborting it, and the next upward transition joins the same task.
-pub(crate) fn take_for_close<T>(slot: &std::sync::Mutex<Option<SessionPhase<T>>>) -> Option<T>
+pub(crate) fn take_for_close<T>(
+    slot: &std::sync::Mutex<Option<SessionPhase<T>>>,
+    deadline: Instant,
+) -> Option<T>
 where
     T: Send + 'static,
 {
     let taken = slot.lock().unwrap().take();
     match taken {
         Some(SessionPhase::Open(value)) => Some(value),
-        Some(SessionPhase::Pending(handle)) => match finish_opening(handle) {
+        Some(SessionPhase::Pending(handle)) => match finish_opening(handle, remaining(deadline)) {
             OpenJoin::Ready(value) => Some(value),
             OpenJoin::Finished => None,
             OpenJoin::Running(handle) => {
@@ -244,26 +248,63 @@ where
     }
 }
 
-/// Join a pending open. Does not abort the task.
-pub(crate) fn finish_opening<T>(mut handle: JoinHandle<Result<T, DaemonError>>) -> OpenJoin<T>
+/// Join a pending open for up to `limit`. Does not abort the task.
+pub(crate) fn finish_opening<T>(
+    mut handle: JoinHandle<Result<T, DaemonError>>,
+    limit: Duration,
+) -> OpenJoin<T>
 where
     T: Send + 'static,
 {
-    match SHARED_RUNTIME.block_on(wait_for_task(&mut handle, RPC_TIMEOUT)) {
+    match SHARED_RUNTIME.block_on(wait_for_task(&mut handle, limit)) {
         Some(Ok(Ok(value))) => OpenJoin::Ready(value),
         Some(_) => OpenJoin::Finished,
         None => OpenJoin::Running(handle),
     }
 }
 
-/// Wait up to [`RPC_TIMEOUT`] for `task`. Abort it if it is still running.
+/// The time left before `deadline`, or zero once it has passed.
+pub(crate) fn remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+/// Wait for `task` until `deadline`. Abort it if it is still running.
 ///
 /// Dropping a [`JoinHandle`] detaches the task. A close that gives up
 /// has to abort so the call does not outlive the session.
-pub(crate) async fn settle_task<T>(mut task: JoinHandle<T>) {
-    if wait_for_task(&mut task, RPC_TIMEOUT).await.is_none() {
+pub(crate) async fn settle_task<T>(mut task: JoinHandle<T>, deadline: Instant) {
+    if wait_for_task(&mut task, remaining(deadline))
+        .await
+        .is_none()
+    {
         task.abort();
         let _ = task.await;
+    }
+}
+
+/// Send `CloseSession` and wait for it until `deadline`.
+///
+/// The call is sent even when `deadline` has already passed, and is
+/// bounded by its own [`RPC_TIMEOUT`]. If `deadline` passes first, the
+/// call carries on in the background and this returns
+/// [`DaemonError::TimedOut`].
+pub(crate) async fn close_session(
+    mut client: NvnmosDaemonClient<Channel>,
+    session_handle: String,
+    deadline: Instant,
+) -> Result<(), DaemonError> {
+    let mut call = SHARED_RUNTIME.spawn(async move {
+        tokio::time::timeout(
+            RPC_TIMEOUT,
+            client.close_session(CloseSessionRequest { session_handle }),
+        )
+        .await
+    });
+    match wait_for_task(&mut call, remaining(deadline)).await {
+        Some(Ok(Ok(Ok(_)))) => Ok(()),
+        Some(Ok(Ok(Err(status)))) => Err(status.into()),
+        Some(Ok(Err(_))) | None => Err(DaemonError::TimedOut),
+        Some(Err(join)) => Err(DaemonError::CallEnded(join.to_string())),
     }
 }
 
@@ -569,13 +610,14 @@ impl Session {
 
     /// Cancel the background activation task and tell the daemon to
     /// close this session. Waits until `CloseSession` returns or
-    /// [`RPC_TIMEOUT`] elapses. The daemon removes any resource the
-    /// session contributed, so no `RemoveResource` is sent here. Errors
-    /// are returned so callers can log them; the session is consumed
-    /// either way.
-    pub(crate) async fn close(mut self) -> Result<(), DaemonError> {
+    /// `deadline` passes; joining an outstanding add or sync uses the
+    /// same deadline. The daemon removes any resource the session
+    /// contributed, so no `RemoveResource` is sent here. Errors are
+    /// returned so callers can log them; the session is consumed either
+    /// way.
+    pub(crate) async fn close(mut self, deadline: Instant) -> Result<(), DaemonError> {
         match self.detach() {
-            Some(detached) => detached.close().await,
+            Some(detached) => detached.close(deadline).await,
             None => Ok(()),
         }
     }
@@ -597,8 +639,9 @@ impl Drop for Session {
             return;
         };
         let handle = detached.session_handle.clone();
+        let deadline = Instant::now() + RPC_TIMEOUT;
         SHARED_RUNTIME.spawn(async move {
-            match detached.close().await {
+            match detached.close(deadline).await {
                 Ok(()) => gst::info!(CAT, "session closed: handle={handle}"),
                 Err(e) => gst::warning!(CAT, "CloseSession (handle={handle}): {e}"),
             }
@@ -615,10 +658,10 @@ struct DetachedSession {
 }
 
 impl DetachedSession {
-    async fn close(self) -> Result<(), DaemonError> {
+    async fn close(self, deadline: Instant) -> Result<(), DaemonError> {
         let Self {
             session_handle,
-            mut client,
+            client,
             activation_task,
             inflight_add,
             inflight_sync,
@@ -626,25 +669,16 @@ impl DetachedSession {
         // Join add/sync before CloseSession so a commit that is about to
         // finish is not left behind on a closed session.
         if let Some(task) = inflight_add {
-            settle_task(task).await;
+            settle_task(task, deadline).await;
         }
         if let Some(task) = inflight_sync {
-            settle_task(task).await;
+            settle_task(task, deadline).await;
         }
         if let Some(task) = activation_task {
             task.abort();
             let _ = task.await;
         }
-        match tokio::time::timeout(
-            RPC_TIMEOUT,
-            client.close_session(CloseSessionRequest { session_handle }),
-        )
-        .await
-        {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(status)) => Err(status.into()),
-            Err(_elapsed) => Err(DaemonError::TimedOut),
-        }
+        close_session(client, session_handle, deadline).await
     }
 }
 

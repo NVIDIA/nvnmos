@@ -11,7 +11,7 @@
 //! the settings critical section short.
 
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use gstreamer as gst;
@@ -857,7 +857,7 @@ pub(crate) fn validate_and_open(
 
     let slot = session.lock().unwrap().take();
     match slot {
-        Some(SessionPhase::Pending(handle)) => match finish_opening(handle) {
+        Some(SessionPhase::Pending(handle)) => match finish_opening(handle, OPEN_TIMEOUT) {
             OpenJoin::Running(handle) => {
                 *session.lock().unwrap() = Some(SessionPhase::Pending(handle));
                 bail!(
@@ -866,7 +866,7 @@ pub(crate) fn validate_and_open(
                 );
             }
             OpenJoin::Ready(opened) => {
-                let _ = SHARED_RUNTIME.block_on(opened.close());
+                let _ = SHARED_RUNTIME.block_on(opened.close(Instant::now() + RPC_TIMEOUT));
             }
             OpenJoin::Finished => {}
         },
@@ -1240,19 +1240,22 @@ pub(crate) fn sync_active(
     }
 }
 
-/// Explicit close: wait for `CloseSession` and log the result. An
-/// error is logged only, so state-change cleanup always succeeds.
+/// Explicit close: wait for `CloseSession` and log the result. Joining a
+/// pending open, an outstanding call, and `CloseSession` share one
+/// [`RPC_TIMEOUT`]. An error is logged only, so state-change cleanup
+/// always succeeds.
 pub(crate) fn close(
     cat: &gst::DebugCategory,
     element: &str,
     session: &Mutex<Option<SessionPhase<Session>>>,
 ) {
-    let Some(s) = take_for_close(session) else {
+    let deadline = Instant::now() + RPC_TIMEOUT;
+    let Some(s) = take_for_close(session, deadline) else {
         return;
     };
     {
         let handle = s.session_handle.clone();
-        let result = SHARED_RUNTIME.block_on(s.close());
+        let result = SHARED_RUNTIME.block_on(s.close(deadline));
         match result {
             Ok(()) => gst::info!(cat, "session closed: handle={handle}"),
             Err(e) => gst::warning!(

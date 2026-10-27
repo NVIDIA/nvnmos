@@ -37,6 +37,8 @@ enum HeldCall {
     AddSender,
     AddChannelMapping,
     SyncChannelMappingState,
+    /// Every call above: a daemon that has stopped answering.
+    All,
 }
 
 enum Mode {
@@ -229,7 +231,7 @@ impl Stub {
         else {
             return;
         };
-        if *held != call {
+        if *held != HeldCall::All && *held != call {
             return;
         }
         calls.fetch_add(1, Ordering::SeqCst);
@@ -529,4 +531,56 @@ fn close_after_add_sender_timeout_joins_the_add() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(slot.lock().unwrap().is_none());
+}
+
+/// Wait up to [`OPEN_TIMEOUT`] for the stub to have received `count` held calls.
+fn wait_for_calls(calls: &AtomicUsize, count: usize) {
+    let until = Instant::now() + OPEN_TIMEOUT;
+    while calls.load(Ordering::SeqCst) < count && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), count);
+}
+
+/// `NULL` against a daemon that has stopped answering waits for one
+/// [`OPEN_TIMEOUT`] in total, not one per step, and still sends `CloseSession`.
+#[test]
+fn close_shares_one_deadline_when_the_daemon_stops_answering() {
+    let (daemon, calls) = hold(HeldCall::All, hold_for());
+    let mut session = open_session(&daemon.uri);
+    let first = add_sender(&mut session);
+    assert!(
+        matches!(first, Err(DaemonError::TimedOut)),
+        "AddSender returned {first:?}"
+    );
+    let slot = Mutex::new(Some(SessionPhase::Open(session)));
+    let started = Instant::now();
+    close(&cat(), "nmossink", &slot);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < OPEN_TIMEOUT + OPEN_TIMEOUT / 2,
+        "close waited for each step in turn ({elapsed:?})"
+    );
+    wait_for_calls(&calls, 2);
+}
+
+/// The channel-map `NULL` shares one deadline in the same way.
+#[test]
+fn channel_mapping_close_shares_one_deadline_when_the_daemon_stops_answering() {
+    let (daemon, calls) = hold(HeldCall::All, hold_for());
+    let mut session = open_channel_mapping(&daemon.uri);
+    let first = SHARED_RUNTIME.block_on(session.add_channel_mapping(add_request()));
+    assert!(
+        matches!(first, Err(DaemonError::TimedOut)),
+        "AddChannelMapping returned {first:?}"
+    );
+    let slot = Mutex::new(Some(SessionPhase::Open(session)));
+    let started = Instant::now();
+    channel_mapping::close(&cat(), "nmosaudiochannelmap", &slot);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < OPEN_TIMEOUT + OPEN_TIMEOUT / 2,
+        "close waited for each step in turn ({elapsed:?})"
+    );
+    wait_for_calls(&calls, 2);
 }
