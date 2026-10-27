@@ -4,8 +4,11 @@
 # Library package image: builds libnvnmos + Rust workspace, produces a tarball,
 # and smoke-tests nvnmos-example / nvnmosd / nvnmosd-example on start.
 #
-# Build from the repository root:
+# Build from the repository root. The image matches the builder architecture
+# (linux/amd64 or linux/arm64). The same Ubuntu 24.04 recipe is the arm64
+# library image for Jetson and for SBSA.
 #   docker build -f docker/nvnmos/Dockerfile -t nvnmos .
+#   docker build --platform linux/arm64 -f docker/nvnmos/Dockerfile -t nvnmos:arm64 .
 
 ARG BASE_IMAGE=ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
@@ -14,9 +17,13 @@ ARG PIP_BREAK_SYSTEM_PACKAGES=1
 ARG CONAN_LOCKFILE=src/conan.lock
 ARG RUST_TOOLCHAIN=1.92
 
-# use pattern replacement to clean up '/' and ':'
+# use pattern replacement to clean up '/' and ':'.
+# TARGETARCH is BuildKit's automatic platform arg (amd64, arm64, …). Leave it
+# undeclared: an explicit ARG TARGETARCH with no default clears that value.
+# The architecture is part of the default package name so the two tarballs
+# do not share a filename.
 ARG _BASE_IMAGE=${BASE_IMAGE//\//-}
-ARG PACKAGE_NAME=nvnmos${PACKAGE_SUFFIX:--${_BASE_IMAGE//:/-}}
+ARG PACKAGE_NAME=nvnmos${PACKAGE_SUFFIX:--${_BASE_IMAGE//:/-}-${TARGETARCH}}
 
 # -----------------------------------------------------------------------------
 # C++ library (libnvnmos) — same layout as README / CI (repo root, build/ sibling of src/).

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # gst-nmos-rs Container Image
 
-Operator runtime image for **linux/amd64** (default base `ubuntu:24.04`, non-root UID/GID **10001**):
+Operator runtime image for **linux/amd64** and **linux/arm64** (default base `ubuntu:24.04`, non-root UID/GID **10001**):
 
 - `nvnmosd`, `gst-nmos-rs` (`libgstnmos.so`)
 - MXL (`libmxl` + `libgstmxl.so`)
@@ -25,7 +25,10 @@ Build from the **repository root**:
 
 ```bash
 docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst .
+docker build --platform linux/arm64 -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst:arm64 .
 ```
+
+The Ubuntu 24.04 arm64 image is the operator runtime for Jetson and for SBSA. DeepStream plugins come from the platform base in [DeepStream Base Image](#deepstream-base-image).
 
 The nvnmos tree is taken from the build context (`COPY src/`, `COPY rust/` via the C++ stage). The mxl and gst-plugins-rs repos are cloned at build time. MXL is built in one stage: `vcpkg` bootstrap, then `cargo build -p gst-mxl-rs`. Runtime finds `libmxl.so` via `LD_LIBRARY_PATH`. First build is slow (vcpkg + Conan + gst-plugins-rs).
 
@@ -53,18 +56,29 @@ docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst \
 
 ## DeepStream Base Image
 
-The default `ubuntu:24.04` runtime has the plugins for MXL and OSS RTP/UDP transports only. To get DeepStream's GStreamer plugins in the same image as `nvnmosd` / `nmossrc` / `nmossink`, build with a DeepStream base via `BASE_IMAGE` (all stages use that base, so the final image has the full DeepStream stack and is correspondingly large):
+The default `ubuntu:24.04` runtime has the plugins for MXL and OSS RTP/UDP transports only. To get DeepStream's GStreamer plugins in the same image as `nvnmosd` / `nmossrc` / `nmossink`, build with a DeepStream base via `BASE_IMAGE` (all stages use that base, so the final image has the full DeepStream stack and is correspondingly large).
+
+DeepStream 9.1 publishes a distinct container for x86 dGPU, Jetson, and SBSA ([Docker Containers](https://docs.nvidia.com/metropolis/deepstream/9.1/text/DS_docker_containers.html)). x86 and Jetson share one multi-arch manifest; `--platform` selects the slice. The SBSA image (GH200, GB200, and DGX Spark) uses a separate tag.
 
 ```bash
-docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst:ds \
+# x86 dGPU
+docker build --platform linux/amd64 -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst:ds \
   --build-arg BASE_IMAGE=nvcr.io/nvidia/deepstream:9.1-triton-multiarch .
+
+# Jetson (L4T)
+docker build --platform linux/arm64 -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst:ds-jetson \
+  --build-arg BASE_IMAGE=nvcr.io/nvidia/deepstream:9.1-triton-multiarch .
+
+# SBSA (GH200, GB200, DGX Spark)
+docker build --platform linux/arm64 -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst:ds-sbsa \
+  --build-arg BASE_IMAGE=nvcr.io/nvidia/deepstream:9.1-triton-sbsa-dgx-spark .
 ```
 
-NGC pull may require `docker login nvcr.io`. Pin the DeepStream tag you need. This Dockerfile has been smoke-built against `9.1-triton-multiarch`.
+NGC pull may require `docker login nvcr.io`. Pin the DeepStream tag you need. This Dockerfile has been smoke-built against the amd64 `9.1-triton-multiarch` image. NVIDIA documents the Jetson image as a deployment image; this Dockerfile installs its compiler packages on top of that base.
 
 **Runtime (GPU):** use the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/index.html) (e.g. `docker run --gpus all …`). Many DeepStream plugins need `libcuda` from the GPU runtime and will not load in a plain CPU-only `docker run`.
 
-CI builds and smoke-tests only the default Ubuntu-based `docker/nvnmos` package image, not a DeepStream or Rivermax `gst-nmos-rs` variant.
+CI builds and smoke-tests only the default Ubuntu-based `docker/nvnmos` package image, on `ubuntu-24.04` and `ubuntu-24.04-arm`, not a DeepStream or Rivermax `gst-nmos-rs` variant.
 
 ### Optional GStreamer codecs on DeepStream
 

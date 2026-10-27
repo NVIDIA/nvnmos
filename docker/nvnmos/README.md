@@ -7,20 +7,21 @@ SPDX-License-Identifier: Apache-2.0
 
 Builds and packages the C++ library and Rust workspace from source; the entrypoint smoke-tests _nvnmos-example_, _nvnmosd_, and _nvnmosd-example_ on start. Used by CI.
 
-Build from the **repository root**:
+Build from the **repository root**. The image follows the builder architecture:
 
 ```bash
 docker build -f docker/nvnmos/Dockerfile -t nvnmos .
+docker build --platform linux/arm64 -f docker/nvnmos/Dockerfile -t nvnmos:arm64 .
 ```
 
-With default build arguments the image produces a tarball named `nvnmos-ubuntu-24.04.tar.gz` (from `BASE_IMAGE=ubuntu:24.04` and `CONAN_LOCKFILE=src/conan.lock`). See the [top-level README](../../README.md#container-images) for copying that package to the host.
+With default build arguments the image produces `nvnmos-ubuntu-24.04-amd64.tar.gz` or `nvnmos-ubuntu-24.04-arm64.tar.gz` (`BASE_IMAGE=ubuntu:24.04`, plus the Docker target architecture, and `CONAN_LOCKFILE=src/conan.lock`). CI runs this build on `ubuntu-24.04` and `ubuntu-24.04-arm`. The arm64 package is the one to run on Jetson and on SBSA.
 
 ## Build Arguments
 
 | Argument | Default | Explanation |
 |----------|---------|-------------|
 | `BASE_IMAGE` | `ubuntu:24.04` | Base image for all stages; controls the compatibility of the created package and tarball name. |
-| `PACKAGE_SUFFIX` | _(derived from `BASE_IMAGE`)_ | Package directory and tarball suffix. Default is `-ubuntu-24.04` for the default base image, yielding `nvnmos-ubuntu-24.04.tar.gz`. |
+| `PACKAGE_SUFFIX` | _(derived from `BASE_IMAGE` and the target architecture)_ | Package directory and tarball suffix. Default is `-ubuntu-24.04-amd64` or `-ubuntu-24.04-arm64`. |
 | `CONAN_LOCKFILE` | `src/conan.lock` | Input lockfile for `conan install`. Pass an empty value, e.g. `--build-arg CONAN_LOCKFILE=`, to resolve the latest compatible graph instead. |
 | `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for the workspace build. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); workspace MSRV is **1.87** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
 

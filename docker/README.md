@@ -9,7 +9,7 @@ Build context for every image in this directory is the **repository root** (`.`)
 
 | Directory | Image | Purpose |
 |-----------|-------|---------|
-| [`nvnmos/`](nvnmos/) | `nvnmos` | Build `libnvnmos` + Rust workspace, produce `nvnmos-<platform>.tar.gz`, smoke-test `nvnmos-example` / `nvnmosd` / `nvnmosd-example` on start. Used by CI. |
+| [`nvnmos/`](nvnmos/) | `nvnmos` | Build `libnvnmos` + Rust workspace, produce `nvnmos-<base>-<arch>.tar.gz`, smoke-test `nvnmos-example` / `nvnmosd` / `nvnmosd-example` on start. Used by CI. |
 | [`gst-nmos-rs/`](gst-nmos-rs/) | `nvnmos-gst` | Operator runtime: `nvnmosd` + `gst-nmos-rs` + plugins for `transport=mxl` and `transport=udp`/`udp2`. Optional DeepStream base via `BASE_IMAGE` (see [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md#deepstream-base-image)). |
 
 Shared [`nvnmos/entrypoint-setup.sh`](nvnmos/entrypoint-setup.sh) starts user-mode D-Bus and Avahi without systemd or `CAP_SYS_CHROOT`.
@@ -29,4 +29,6 @@ docker build -f docker/nvnmos/Dockerfile -t nvnmos .
 docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst .
 ```
 
-See [`nvnmos/README.md`](nvnmos/README.md) and [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md) for build arguments. The [top-level README](../README.md#container-images) documents extracting the default `nvnmos-ubuntu-24.04.tar.gz` package.
+See [`nvnmos/README.md`](nvnmos/README.md) and [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md) for build arguments.
+
+Both images build for the Docker target architecture (`linux/amd64` or `linux/arm64`). CI builds the library image on `ubuntu-24.04` and `ubuntu-24.04-arm`. The Ubuntu 24.04 arm64 build is the image for Jetson and for SBSA. On either host the container brings its own Ubuntu 24.04 userspace. A DeepStream base is a different NGC image for Jetson than for SBSA; see [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md#deepstream-base-image).

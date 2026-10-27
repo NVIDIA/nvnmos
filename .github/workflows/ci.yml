@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2025]
         config: [Release]
     runs-on: ${{ matrix.os }}
     steps:
@@ -68,25 +68,30 @@ jobs:
         run: |
           cmake --build build --config=${{ matrix.config }} --parallel 2
       # Upload the Linux shared library so the `rust` job can link against
-      # it without rebuilding the C side from scratch.
+      # it without rebuilding the C side from scratch. The artifact name
+      # includes the runner label so the amd64 and arm64 builds stay separate.
       - name: Upload libnvnmos.so (Linux)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v7
         with:
-          name: libnvnmos-linux
+          name: libnvnmos-${{ matrix.os }}
           path: build/libnvnmos.so
           if-no-files-found: error
           retention-days: 1
   rust:
     needs: build
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Download libnvnmos.so
         uses: actions/download-artifact@v7
         with:
-          name: libnvnmos-linux
+          name: libnvnmos-${{ matrix.os }}
           path: build
 
       # bindgen (nvnmos-sys) needs libclang; gst-nmos-rs links GStreamer 1.x.
@@ -187,7 +192,11 @@ jobs:
           fi
           exit "${status}"
   docker:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
 
