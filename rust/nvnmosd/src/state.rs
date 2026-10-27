@@ -784,8 +784,8 @@ impl AddResourcePrep {
                     claimed_name = %self.name,
                     node_seed = %self.node_seed,
                     "AddSender/AddReceiver: libnvnmos accepted the transport \
-                     file but its embedded name does not match the claimed \
-                     name; left as a stray until the Node is destroyed"
+                     file but read a different name from it than the daemon \
+                     did; left as a stray until the Node is destroyed"
                 );
                 return Err(Status::invalid_argument(format!(
                     "{}'s transport_file embeds a different name than {:?}",
@@ -1485,19 +1485,19 @@ impl State {
     ///
     /// The full validation flow (spanning the three phases):
     ///
-    /// 1. Pre-check in daemon state — refuses a duplicate `name` on the
-    ///    same Node before any FFI happens (here).
+    /// 1. Pre-check in daemon state, before any FFI happens (here): the
+    ///    name the transport file carries must equal `claimed_name`, and
+    ///    no resource of this side on the same Node may already use it.
     /// 2. `add_{sender,receiver}` into libnvnmos, then
     ///    `{sender,receiver}_id(claimed_name)` — libnvnmos is the oracle:
     ///    success proves the transport file's id equalled the claim
     ///    ([`AddResourcePrep::run_ffi`], no lock held).
     /// 3. On success, finalise the maps ([`State::commit_add_sender`] /
     ///    [`State::commit_add_receiver`]).
-    ///    On a name mismatch the libnvnmos resource is left as a stray
-    ///    (no compensating remove); activations NACK with
-    ///    [`ActivationDispatch::NoResource`]; the stray is torn down when
-    ///    the Node is destroyed. See the proto's "Resource lifecycle"
-    ///    section.
+    ///    If libnvnmos reads a different name than step 1 did, its
+    ///    resource is left as a stray (no compensating remove);
+    ///    activations NACK with [`ActivationDispatch::NoResource`]; the
+    ///    stray is torn down when the Node is destroyed.
     pub fn prepare_add_resource(
         &mut self,
         side: Side,
@@ -1508,6 +1508,22 @@ impl State {
     ) -> Result<AddResourcePrep, Status> {
         if claimed_name.is_empty() {
             return Err(Status::invalid_argument("name must be non-empty"));
+        }
+        match transport_file_name(transport, transport_file) {
+            Some(embedded) if embedded == claimed_name => {}
+            Some(embedded) => {
+                return Err(Status::invalid_argument(format!(
+                    "transport_file names the {} {embedded:?}, not {claimed_name:?}",
+                    side.label(),
+                )));
+            }
+            None => {
+                return Err(Status::invalid_argument(format!(
+                    "transport_file does not name the {} (`x-nvnmos-name` SDP \
+                     attribute or `urn:x-nvnmos:tag:name` flow_def tag)",
+                    side.label(),
+                )));
+            }
         }
 
         self.reap_closed_subscription(session_handle);
@@ -2976,6 +2992,30 @@ pub fn active_map_to_proto(entries: &[ChannelMappingActiveMapEntry]) -> Vec<Prot
         .collect()
 }
 
+/// The resource name libnvnmos reads from `transport_file`: the first
+/// session-level `x-nvnmos-name` attribute of an SDP file, or the first
+/// value of the `urn:x-nvnmos:tag:name` tag of an MXL flow definition.
+/// `None` when the name is absent or empty, the flow definition is not
+/// valid JSON, or the transport is neither of those.
+fn transport_file_name(transport: Transport, transport_file: &str) -> Option<String> {
+    let name = match transport {
+        Transport::Rtp => transport_file
+            .lines()
+            .take_while(|line| !line.starts_with("m="))
+            .find_map(|line| line.strip_prefix("a=x-nvnmos-name:"))?
+            .to_owned(),
+        Transport::Mxl => serde_json::from_str::<serde_json::Value>(transport_file)
+            .ok()?
+            .get("tags")?
+            .get("urn:x-nvnmos:tag:name")?
+            .get(0)?
+            .as_str()?
+            .to_owned(),
+        _ => return None,
+    };
+    (!name.is_empty()).then_some(name)
+}
+
 /// Translate a proto [`ProtoTransport`] into the wrapper's [`Transport`].
 /// `TRANSPORT_UNSPECIFIED` (proto3's zero value) is treated as a
 /// caller error.
@@ -3209,6 +3249,67 @@ mod annotation_stream_tests {
             }
         }
         assert_eq!(queued, 16, "events already queued stay readable");
+    }
+}
+
+#[cfg(test)]
+mod transport_file_name_tests {
+    use super::{Side, State, Transport, transport_file_name};
+
+    const SDP: &str = "v=0\r\n\
+                       o=- 0 0 IN IP4 192.0.2.1\r\n\
+                       s=name-check\r\n\
+                       t=0 0\r\n\
+                       a=x-nvnmos-name:sender-a\r\n\
+                       m=video 5020 RTP/AVP 96\r\n\
+                       a=x-nvnmos-name:media-level\r\n";
+
+    #[test]
+    fn sdp_name_is_the_session_level_attribute() {
+        assert_eq!(
+            transport_file_name(Transport::Rtp, SDP).as_deref(),
+            Some("sender-a")
+        );
+        let media_level_only = SDP.replace("a=x-nvnmos-name:sender-a\r\n", "");
+        assert_eq!(transport_file_name(Transport::Rtp, &media_level_only), None);
+        let empty = SDP.replace("sender-a", "");
+        assert_eq!(transport_file_name(Transport::Rtp, &empty), None);
+    }
+
+    #[test]
+    fn flow_def_name_is_the_first_name_tag_value() {
+        let flow_def = r#"{"tags": {"urn:x-nvnmos:tag:name": ["sender-a", "other"]}}"#;
+        assert_eq!(
+            transport_file_name(Transport::Mxl, flow_def).as_deref(),
+            Some("sender-a")
+        );
+        for flow_def in [
+            r#"{"tags": {"urn:x-nvnmos:tag:name": [""]}}"#,
+            r#"{"tags": {"urn:x-nvnmos:tag:name": []}}"#,
+            r#"{"tags": {}}"#,
+            r#"{}"#,
+            "not json",
+        ] {
+            assert_eq!(
+                transport_file_name(Transport::Mxl, flow_def),
+                None,
+                "{flow_def}"
+            );
+        }
+    }
+
+    /// The check runs before the session is looked up, so an unknown
+    /// session shows that no add was attempted.
+    #[test]
+    fn add_rejects_a_transport_file_that_names_another_resource() {
+        let mut state = State::new();
+        for (file, claimed) in [(SDP, "sender-b"), ("v=0\r\n", "sender-a")] {
+            let err = state
+                .prepare_add_resource(Side::Sender, "no-session", Transport::Rtp, file, claimed)
+                .err()
+                .expect("mismatched name");
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
+        }
     }
 }
 
