@@ -91,7 +91,8 @@ pub(crate) fn error_code(err: &anyhow::Error) -> ErrorCode {
                 | DaemonError::NoResource
                 | DaemonError::TimedOut
                 | DaemonError::Outstanding
-                | DaemonError::CallEnded(_) => gst::ResourceError::OpenReadWrite,
+                | DaemonError::CallEnded(_)
+                | DaemonError::Closed => gst::ResourceError::OpenReadWrite,
             });
         }
         if let Some(e) = cause.downcast_ref::<DomainError>() {
@@ -197,6 +198,7 @@ mod tests {
             DaemonError::TimedOut,
             DaemonError::Outstanding,
             DaemonError::CallEnded("panicked".into()),
+            DaemonError::Closed,
         ] {
             assert_eq!(
                 error_code(&anyhow::Error::new(e)),

@@ -117,12 +117,16 @@ pub(crate) struct Session {
     /// called with a non-empty `transport_file` and the daemon
     /// accepted the `AddSender` / `AddReceiver`. `None` otherwise.
     resource: Option<AddedResource>,
+    /// `None` once [`Self::detach`] has handed the client to the close.
     client: Option<NvnmosDaemonClient<Channel>>,
     activation_task: Option<JoinHandle<()>>,
     inflight_add: Option<JoinHandle<Result<AddedResource, DaemonError>>>,
     inflight_sync: Option<JoinHandle<Result<(), DaemonError>>>,
-    /// Set when a deferred auto-activate did not finish after AddSender.
-    /// Cleared only by dropping this session at NULL.
+    /// Set when a deferred AddSender succeeded but the auto-activate sync
+    /// after it did not finish. The Sender exists but may not be active,
+    /// and AddSender cannot run again on this session, so a retry of
+    /// `READY→PAUSED` fails rather than treat that Sender as ready. `NULL`
+    /// drops this session and the next `NULL→READY` opens a new one.
     activation_incomplete: bool,
 }
 
@@ -183,6 +187,8 @@ pub(crate) enum DaemonError {
     Outstanding,
     #[error("daemon call ended before it returned: {0}")]
     CallEnded(String),
+    #[error("session is closed")]
+    Closed,
 }
 
 /// An element's session open: still running, or ready to use.
@@ -462,8 +468,8 @@ impl Session {
         })
     }
 
-    /// Deferred auto-activate added the resource but did not finish sync.
-    /// The next `READY→PAUSED` must fail until `NULL` drops this session.
+    /// Deferred AddSender succeeded but its auto-activate sync did not
+    /// finish; `READY→PAUSED` fails until `NULL` drops this session.
     pub(crate) fn activation_incomplete(&self) -> bool {
         self.activation_incomplete
     }
@@ -531,11 +537,7 @@ impl Session {
         if self.resource.is_some() {
             return Err(DaemonError::AlreadyAdded);
         }
-        let mut client = self
-            .client
-            .as_ref()
-            .expect("session client missing")
-            .clone();
+        let mut client = self.client()?;
         let session_handle = self.session_handle.clone();
         let name = name.to_owned();
         let transport_file = transport_file.to_owned();
@@ -586,11 +588,7 @@ impl Session {
             .as_ref()
             .map(|r| r.handle.clone())
             .ok_or(DaemonError::NoResource)?;
-        let mut client = self
-            .client
-            .as_ref()
-            .expect("session client missing")
-            .clone();
+        let mut client = self.client()?;
         let session_handle = self.session_handle.clone();
         let transport_file = transport_file.map(str::to_owned);
         drive_call(&mut self.inflight_sync, || {
@@ -620,6 +618,10 @@ impl Session {
             Some(detached) => detached.close(deadline).await,
             None => Ok(()),
         }
+    }
+
+    fn client(&self) -> Result<NvnmosDaemonClient<Channel>, DaemonError> {
+        self.client.clone().ok_or(DaemonError::Closed)
     }
 
     fn detach(&mut self) -> Option<DetachedSession> {

@@ -58,6 +58,7 @@ pub(crate) struct ChannelMappingSession {
     pub(crate) created_node: bool,
     pub(crate) http_port: u16,
     channelmapping: Option<AddedChannelMapping>,
+    /// `None` once [`Self::detach`] has handed the client to the close.
     client: Option<NvnmosDaemonClient<Channel>>,
     activation_task: Option<JoinHandle<()>>,
     inflight_add: Option<JoinHandle<Result<AddChannelMappingResponse, DaemonError>>>,
@@ -142,11 +143,7 @@ impl ChannelMappingSession {
         if self.channelmapping.is_some() {
             return Err(DaemonError::AlreadyAdded);
         }
-        let mut client = self
-            .client
-            .as_ref()
-            .expect("session client missing")
-            .clone();
+        let mut client = self.client()?;
         let resp = drive_call(&mut self.inflight_add, || {
             SHARED_RUNTIME.spawn(async move {
                 client
@@ -168,9 +165,7 @@ impl ChannelMappingSession {
         let Some(cm) = self.channelmapping.take() else {
             return Ok(());
         };
-        self.client
-            .as_mut()
-            .expect("session client missing")
+        self.client()?
             .remove_channel_mapping(RemoveChannelMappingRequest {
                 session_handle: self.session_handle.clone(),
                 channelmapping_handle: cm.handle,
@@ -189,11 +184,7 @@ impl ChannelMappingSession {
             .as_ref()
             .map(|cm| cm.handle.clone())
             .ok_or(DaemonError::NoResource)?;
-        let mut client = self
-            .client
-            .as_ref()
-            .expect("session client missing")
-            .clone();
+        let mut client = self.client()?;
         let session_handle = self.session_handle.clone();
         let output_id = output_id.to_owned();
         drive_call(&mut self.inflight_sync, || {
@@ -221,6 +212,10 @@ impl ChannelMappingSession {
             Some(detached) => detached.close(deadline).await,
             None => Ok(()),
         }
+    }
+
+    fn client(&self) -> Result<NvnmosDaemonClient<Channel>, DaemonError> {
+        self.client.clone().ok_or(DaemonError::Closed)
     }
 
     fn detach(&mut self) -> Option<DetachedChannelMappingSession> {
