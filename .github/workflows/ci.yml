@@ -37,6 +37,27 @@ jobs:
             -replace '^compiler\.cppstd=.*$', 'compiler.cppstd=17' `
             -replace '^compiler\.version=.*$', 'compiler.version=194' |
             Set-Content $profile
+      - name: Conan cache key
+        id: conan-profile
+        run: |
+          profile=$(conan profile path default)
+          if command -v cygpath >/dev/null 2>&1; then
+            profile=$(cygpath -u "$profile")
+          fi
+          compiler=$(sed -n 's/^compiler\.version=//p' "$profile")
+          test -n "$compiler"
+          echo "compiler=$compiler" >> "$GITHUB_OUTPUT"
+      # Package binaries only. The profile stays outside this directory, so the
+      # Windows MSVC pin above is not replaced by a restored cache.
+      # Save the cleaned cache when this key is not already stored.
+      - name: Restore Conan cache
+        id: conan-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ runner.os }}-${{ runner.arch }}-${{ matrix.config }}-${{ steps.conan-profile.outputs.compiler }}-${{ hashFiles('src/conan.lock') }}
+          restore-keys: |
+            conan-${{ runner.os }}-${{ runner.arch }}-${{ matrix.config }}-${{ steps.conan-profile.outputs.compiler }}-
       - name: Install dependencies
         run: |
           conan install src \
@@ -44,6 +65,13 @@ jobs:
             --build=missing \
             --output-folder=src/conan \
             --lockfile=src/conan.lock
+          conan cache clean "*" --source --build --temp
+      - name: Save Conan cache
+        if: steps.conan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.conan2/p
+          key: ${{ steps.conan-cache.outputs.cache-primary-key }}
       - name: Generate nvnmos (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -200,8 +228,36 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Package binaries from the previous image build. The image copies
+      # docker/nvnmos/conan-cache into Conan's package storage. Export and
+      # save when this key is not already stored.
+      - name: Restore Conan cache
+        id: conan-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: docker/nvnmos/conan-cache
+          key: conan-docker-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/conan.lock', 'docker/nvnmos/Dockerfile') }}
+          restore-keys: |
+            conan-docker-${{ runner.os }}-${{ runner.arch }}-
+      - name: Build C++ stage
+        id: cpp
+        run: docker build -f docker/nvnmos/Dockerfile --target cpp-builder -t nvnmos-cpp:ci .
       - name: Build image
         run: docker build -f docker/nvnmos/Dockerfile -t nvnmos:ci .
+      - name: Export Conan cache
+        if: always() && steps.cpp.outcome == 'success' && steps.conan-cache.outputs.cache-hit != 'true'
+        run: |
+          cid=$(docker create nvnmos-cpp:ci)
+          rm -rf docker/nvnmos/conan-cache
+          docker cp "$cid:/root/.conan2/p" docker/nvnmos/conan-cache
+          docker rm "$cid"
+          sudo chown -R "$(id -u):$(id -g)" docker/nvnmos/conan-cache
+      - name: Save Conan cache
+        if: always() && steps.cpp.outcome == 'success' && steps.conan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: docker/nvnmos/conan-cache
+          key: ${{ steps.conan-cache.outputs.cache-primary-key }}
 
       - name: Run entrypoint smoke tests (non-root)
         run: docker run --rm --user 1000:1000 --cap-drop=ALL nvnmos:ci true

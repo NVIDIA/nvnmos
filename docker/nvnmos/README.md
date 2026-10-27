@@ -14,14 +14,14 @@ docker build -f docker/nvnmos/Dockerfile -t nvnmos .
 docker build --platform linux/arm64 -f docker/nvnmos/Dockerfile -t nvnmos:arm64 .
 ```
 
-With default build arguments the image produces `nvnmos-ubuntu-24.04-amd64.tar.gz` or `nvnmos-ubuntu-24.04-arm64.tar.gz` (`BASE_IMAGE=ubuntu:24.04`, plus the Docker target architecture, and `CONAN_LOCKFILE=src/conan.lock`). CI runs this build on `ubuntu-24.04` and `ubuntu-24.04-arm`. The arm64 package is the one to run on Jetson and on SBSA.
+With default build arguments the image produces `nvnmos-ubuntu-24.04.tar.gz` (`BASE_IMAGE=ubuntu:24.04`). BuildKit appends the target architecture, producing `nvnmos-ubuntu-24.04-amd64.tar.gz` or `nvnmos-ubuntu-24.04-arm64.tar.gz`. CI runs this build on `ubuntu-24.04` and `ubuntu-24.04-arm`. The arm64 package is the one to run on Jetson and on SBSA.
 
 ## Build Arguments
 
 | Argument | Default | Explanation |
 |----------|---------|-------------|
 | `BASE_IMAGE` | `ubuntu:24.04` | Base image for all stages; controls the compatibility of the created package and tarball name. |
-| `PACKAGE_SUFFIX` | _(derived from `BASE_IMAGE` and the target architecture)_ | Package directory and tarball suffix. Default is `-ubuntu-24.04-amd64` or `-ubuntu-24.04-arm64`. |
+| `PACKAGE_SUFFIX` | _(empty; derived from `BASE_IMAGE` and, on BuildKit, the target architecture)_ | Replaces the whole package directory and tarball suffix. For `ubuntu:24.04` the derived suffix is `-ubuntu-24.04`, or `-ubuntu-24.04-amd64` / `-ubuntu-24.04-arm64` when BuildKit set the architecture. |
 | `CONAN_LOCKFILE` | `src/conan.lock` | Input lockfile for `conan install`. Pass an empty value, e.g. `--build-arg CONAN_LOCKFILE=`, to resolve the latest compatible graph instead. |
 | `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for the workspace build. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); workspace MSRV is **1.87** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
 

@@ -14,6 +14,10 @@
 # CMake user presets (machine-specific paths, generators, etc.)
 CMakeUserPresets.json
 
+# The Docker build copies docker/nvnmos/conan-cache. .gitkeep keeps the
+# directory in Git. Exclude the file, not the directory.
+docker/nvnmos/conan-cache/.gitkeep
+
 # Local Conan + CMake output (README layout; root-level only).
 # Use explicit dirs plus hyphenated variants (not build*/ / conan*/) so
 # patterns do not also match files like src/conanfile.txt.

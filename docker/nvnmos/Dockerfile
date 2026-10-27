@@ -6,7 +6,7 @@
 #
 # Build from the repository root. The image matches the builder architecture
 # (linux/amd64 or linux/arm64). The same Ubuntu 24.04 recipe is the arm64
-# library image for Jetson and for SBSA.
+# library image for Jetson and for SBSA. --platform requires BuildKit.
 #   docker build -f docker/nvnmos/Dockerfile -t nvnmos .
 #   docker build --platform linux/arm64 -f docker/nvnmos/Dockerfile -t nvnmos:arm64 .
 
@@ -17,13 +17,14 @@ ARG PIP_BREAK_SYSTEM_PACKAGES=1
 ARG CONAN_LOCKFILE=src/conan.lock
 ARG RUST_TOOLCHAIN=1.92
 
-# use pattern replacement to clean up '/' and ':'.
-# TARGETARCH is BuildKit's automatic platform arg (amd64, arm64, …). Leave it
-# undeclared: an explicit ARG TARGETARCH with no default clears that value.
-# The architecture is part of the default package name so the two tarballs
-# do not share a filename.
+# The default suffix is based on the BASE_IMAGE, plus BuildKit's TARGETARCH
+# (amd64, arm64, …) when it is set. Pattern replacement cleans '/' and ':'
+# out of BASE_IMAGE. PACKAGE_SUFFIX replaces the default suffix.
+# TARGETARCH is intentionally undeclared: an explicit ARG TARGETARCH, even
+# with no default, replaces the BuildKit value. The legacy builder leaves
+# it empty, so the default suffix has no architecture.
 ARG _BASE_IMAGE=${BASE_IMAGE//\//-}
-ARG PACKAGE_NAME=nvnmos${PACKAGE_SUFFIX:--${_BASE_IMAGE//:/-}-${TARGETARCH}}
+ARG PACKAGE_NAME=nvnmos${PACKAGE_SUFFIX:--${_BASE_IMAGE//:/-}${TARGETARCH:+-${TARGETARCH}}}
 
 # -----------------------------------------------------------------------------
 # C++ library (libnvnmos) — same layout as README / CI (repo root, build/ sibling of src/).
@@ -47,6 +48,10 @@ RUN pip install conan~=2.2 && conan profile detect
 
 WORKDIR /nvnmos
 
+# Restored package binaries. The profile from detect is already in place.
+# .gitkeep keeps the directory in Git. .dockerignore excludes it.
+COPY docker/nvnmos/conan-cache/ /root/.conan2/p/
+
 COPY src/ src/
 
 RUN conan install src \
@@ -54,7 +59,8 @@ RUN conan install src \
     --build=missing \
     --output-folder=src/conan \
     --lockfile=${CONAN_LOCKFILE} \
-    --lockfile-out=src/conan.lock
+    --lockfile-out=src/conan.lock \
+    && conan cache clean "*" --source --build --temp
 
 RUN cmake -B build \
     -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
