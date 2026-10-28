@@ -291,6 +291,7 @@ impl NvnmosDaemon for Daemon {
             node_seed = %seed,
             session_handle = %outcome.session_handle,
             node_id = %outcome.node_id,
+            device_id = %outcome.device_id,
             http_port = outcome.http_port,
             lifetime = outcome.lifetime.label(),
             created_node = outcome.created_node,
@@ -301,6 +302,7 @@ impl NvnmosDaemon for Daemon {
             node_id: outcome.node_id,
             created_node: outcome.created_node,
             http_port: u32::from(outcome.http_port),
+            device_id: outcome.device_id,
         }))
     }
 

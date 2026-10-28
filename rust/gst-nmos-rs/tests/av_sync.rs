@@ -55,7 +55,7 @@ use std::path::PathBuf;
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use common::{DaemonGuard, init, mxl_runtime_skip_reason, nvnmosd_skip_reason};
+use common::{DaemonGuard, init, mxl_runtime_skip_reason, nic_ip, nvnmosd_skip_reason};
 use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_app as gst_app;
@@ -241,28 +241,6 @@ impl Drop for TestDomainGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
-}
-
-/// Local egress NIC IPv4 for the RTP transports (skips loopback). Mirrors the
-/// example scripts' `_default_nic_ip`.
-fn nic_ip() -> String {
-    if let Ok(ip) = std::env::var("NVNMOS_TEST_NIC_IP") {
-        return ip;
-    }
-    let out = std::process::Command::new("ip")
-        .args(["-4", "-o", "addr", "show"])
-        .output();
-    if let Ok(out) = out {
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let f: Vec<&str> = line.split_whitespace().collect();
-            if f.len() >= 4 && f[1] != "lo" {
-                if let Some(ip) = f[3].split('/').next() {
-                    return ip.to_owned();
-                }
-            }
-        }
-    }
-    "127.0.0.1".to_owned()
 }
 
 /// Essence caps for each flow (also drives the synthesised NMOS flow_def).

@@ -29,6 +29,7 @@ pub(crate) mod channel_mapping;
 pub(crate) mod connection_active;
 pub(crate) mod error;
 pub(crate) mod node;
+pub(crate) mod resource_ids;
 pub(crate) mod types;
 
 pub(crate) use node::NodeSettings;
@@ -205,6 +206,30 @@ pub(crate) const ACTIVE_BLURB: &str = "\
     Whether the data plane is currently active (real inner transport chain). \
     Orthogonal to GStreamer pipeline state: the pipeline may be PLAYING while \
     this property is false when waiting for activation.";
+
+pub(crate) const NODE_ID_BLURB: &str = "\
+    NMOS Node `id` assigned when the daemon session opens. Empty until then. \
+    The same value on every element of this Node.";
+
+pub(crate) const DEVICE_ID_BLURB: &str = "\
+    NMOS Device `id` assigned when the daemon session opens. Empty until then. \
+    The same value on every element of this Node.";
+
+pub(crate) const SENDER_ID_BLURB: &str = "\
+    NMOS Sender `id` assigned when the daemon adds this Sender. Empty until \
+    then, including while a deferred Sender waits for upstream caps.";
+
+pub(crate) const SOURCE_ID_BLURB: &str = "\
+    NMOS Source `id` paired with this Sender. Assigned when the daemon adds \
+    the Sender. Empty until then.";
+
+pub(crate) const FLOW_ID_BLURB: &str = "\
+    NMOS Flow `id` paired with this Sender. Assigned when the daemon adds \
+    the Sender. Empty until then.";
+
+pub(crate) const RECEIVER_ID_BLURB: &str = "\
+    NMOS Receiver `id` assigned when the daemon adds this Receiver. Empty \
+    until then.";
 
 /// Snapshot of the properties needed to open a session, taken under
 /// the per-element settings lock so the lock isn't held over the
@@ -884,10 +909,11 @@ pub(crate) fn validate_and_open(
     };
     gst::info!(
         cat,
-        "session opened: handle={} node_id={} created_node={} http_port={} \
+        "session opened: handle={} node_id={} device_id={} created_node={} http_port={} \
          (node_seed={}, side={:?}, name={}, transport={:?}); {}; {}",
         new_session.session_handle,
         new_session.node_id,
+        new_session.device_id,
         new_session.created_node,
         new_session.http_port,
         settings.node.node_seed,

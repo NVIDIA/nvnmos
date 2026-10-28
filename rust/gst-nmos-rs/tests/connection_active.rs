@@ -16,32 +16,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use common::{DaemonGuard, init, nvnmosd_skip_reason, require_factories};
+use common::{DaemonGuard, init, nic_ip, nvnmosd_skip_reason, require_factories};
 use gst::prelude::*;
 use gstreamer as gst;
 use test_skip::skip;
 
 const HANG_TIMEOUT: Duration = Duration::from_secs(20);
-
-fn nic_ip() -> String {
-    if let Ok(ip) = std::env::var("NVNMOS_TEST_NIC_IP") {
-        return ip;
-    }
-    let out = std::process::Command::new("ip")
-        .args(["-4", "-o", "addr", "show"])
-        .output();
-    if let Ok(out) = out {
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let f: Vec<&str> = line.split_whitespace().collect();
-            if f.len() >= 4 && f[1] != "lo" {
-                if let Some(ip) = f[3].split('/').next() {
-                    return ip.to_owned();
-                }
-            }
-        }
-    }
-    "127.0.0.1".to_owned()
-}
 
 #[test]
 fn auto_activate_null_to_ready_does_not_hang() {

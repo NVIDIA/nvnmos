@@ -91,6 +91,28 @@ pub fn require_factories(names: &[&str]) {
     );
 }
 
+/// Local egress NIC IPv4 for the RTP transports (skips loopback). Mirrors the
+/// example scripts' `_default_nic_ip`.
+pub fn nic_ip() -> String {
+    if let Ok(ip) = std::env::var("NVNMOS_TEST_NIC_IP") {
+        return ip;
+    }
+    let out = Command::new("ip")
+        .args(["-4", "-o", "addr", "show"])
+        .output();
+    if let Ok(out) = out {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() >= 4 && f[1] != "lo" {
+                if let Some(ip) = f[3].split('/').next() {
+                    return ip.to_owned();
+                }
+            }
+        }
+    }
+    "127.0.0.1".to_owned()
+}
+
 /// Locate the `nvnmosd` binary. Prefer `NVNMOSD_BIN`, else
 /// `${CARGO_TARGET_DIR:-<manifest>/../target}/{debug,release}/nvnmosd`.
 pub fn nvnmosd_bin() -> PathBuf {

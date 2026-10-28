@@ -33,7 +33,9 @@ use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
 use tokio::sync::oneshot;
 
-use crate::daemon::{ActivationHandler, ActivationOutcome, ActivationRequest, Session};
+use crate::daemon::{
+    ActivationHandler, ActivationOutcome, ActivationRequest, ResourceIds, Session,
+};
 use crate::inner;
 use crate::session::error::post_state_change_error;
 use crate::session::{
@@ -140,6 +142,9 @@ pub struct NmosSrc {
     settings: Mutex<Settings>,
     /// Whether the real inner transport chain is installed.
     active: Mutex<bool>,
+    /// NMOS ids assigned by the daemon. Empty until the session is open
+    /// and, for the Receiver id, until AddReceiver returns.
+    ids: Mutex<ResourceIds>,
     session: Mutex<Option<Session>>,
     /// Ghost pad that hides the current inner chain behind the bin.
     /// Created at `constructed`; the chain behind it swaps between
@@ -234,6 +239,24 @@ impl ObjectImpl for NmosSrc {
                     .nick("Receiver Active")
                     .blurb(crate::session::ACTIVE_BLURB)
                     .default_value(false)
+                    .read_only()
+                    .build(),
+                glib::ParamSpecString::builder("node-id")
+                    .nick("Node ID")
+                    .blurb(crate::session::NODE_ID_BLURB)
+                    .default_value(Some(""))
+                    .read_only()
+                    .build(),
+                glib::ParamSpecString::builder("device-id")
+                    .nick("Device ID")
+                    .blurb(crate::session::DEVICE_ID_BLURB)
+                    .default_value(Some(""))
+                    .read_only()
+                    .build(),
+                glib::ParamSpecString::builder("receiver-id")
+                    .nick("Receiver ID")
+                    .blurb(crate::session::RECEIVER_ID_BLURB)
+                    .default_value(Some(""))
                     .read_only()
                     .build(),
                 glib::ParamSpecString::builder("label")
@@ -460,6 +483,9 @@ impl ObjectImpl for NmosSrc {
             "mxl-flow-id" => settings.mxl_flow_id.to_value(),
             "auto-activate" => settings.auto_activate.to_value(),
             "active" => self.active.lock().unwrap().to_value(),
+            "node-id" | "device-id" | "receiver-id" => {
+                crate::session::resource_ids::get(&self.ids, pspec.name())
+            }
             "label" => settings.label.to_value(),
             "description" => settings.description.to_value(),
             "group-hint" => settings.group_hint.to_value(),
@@ -640,7 +666,19 @@ impl NmosSrc {
             self.close_session();
             return Err(e);
         }
+        self.publish_resource_ids();
         Ok(())
+    }
+
+    fn publish_resource_ids(&self) {
+        let next = self
+            .session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(Session::resource_ids)
+            .unwrap_or_default();
+        crate::session::resource_ids::publish(self.obj().upcast_ref(), &self.ids, &next);
     }
 
     fn activate_inner(&self, bin: &gst::Bin, outcome: &InnerConfig) -> Result<(), anyhow::Error> {
@@ -738,6 +776,7 @@ impl NmosSrc {
 
     fn close_session(&self) {
         crate::session::close(&CAT, "nmossrc", &self.session);
+        self.publish_resource_ids();
         self.set_connection_active(false, "deactivate");
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
@@ -1256,6 +1295,25 @@ mod tests {
         assert!(pspec.flags().contains(glib::ParamFlags::READABLE));
         assert!(!pspec.flags().contains(glib::ParamFlags::WRITABLE));
         assert_eq!(pspec.nick(), "Receiver Active");
+    }
+
+    #[test]
+    fn resource_id_properties_are_read_only_and_start_empty() {
+        init_gst();
+        let element = glib::Object::builder::<crate::nmossrc::NmosSrc>().build();
+        for name in ["node-id", "device-id", "receiver-id"] {
+            assert_eq!(element.property::<String>(name), "", "{name}");
+            let pspec = element
+                .find_property(name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert!(pspec.flags().contains(glib::ParamFlags::READABLE), "{name}");
+            assert!(
+                !pspec.flags().contains(glib::ParamFlags::WRITABLE),
+                "{name}"
+            );
+        }
+        assert!(element.find_property("sender-id").is_none());
+        assert!(element.find_property("flow-id").is_none());
     }
 
     /// Pins the IS-05 Receiver `transport_params` →

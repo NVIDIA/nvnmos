@@ -153,7 +153,7 @@ Important: **the daemon never calls `nmos_connection_activate` in this path.** T
 
 ### Multi-Node support
 
-The daemon hosts zero or more NvNmos node-server instances, each with its own HTTP port. The `node_seed` is the daemon's lookup key — the underlying NMOS `/self` `node_id` (UUID) is generated deterministically by libnvnmos from the seed, so the same seed always yields the same `node_id`. The common deployment has a single Node; multi-Node is supported but rarely needed in practice.
+The daemon hosts zero or more NvNmos node-server instances, each with its own HTTP port. The `node_seed` is the daemon's lookup key. The `id` of the Node `/self` resource is generated deterministically by libnvnmos from that seed. A deployment has a single Node when every client uses the same `node_seed`; multiple Nodes are created when clients use different seeds. Each of the sub-resources created when a sender or receiver is added gets an `id` which is also based on the seed, so sender/receiver names only need to be unique within a Node.
 
 Node lifetime comes in two flavours:
 
@@ -174,7 +174,7 @@ The daemon's runtime state lives entirely in a single `State` struct in [`rust/n
 
 | Collection | Keyed by | Holds | Used for |
 |---|---|---|---|
-| `nodes` | `node_seed` | `NodeServer` handle, cached `node_id`, `Lifetime`, attached-session refcount | At most one libnvnmos node-server per seed; many sessions can attach to the same Node. |
+| `nodes` | `node_seed` | `NodeServer` handle, cached `node_id` and `device_id`, `Lifetime`, attached-session refcount | At most one libnvnmos node-server per seed; many sessions can attach to the same Node. |
 | `sessions` | `session_handle` (`sess-N`) | the `node_seed` the session is attached to, the set of `resource_handle`s the session owns | Per-client logical attachment to a Node. |
 | `resources` | `resource_handle` (`res-N`) | `name`, owning `session_handle`, owning `node_seed`, `Side` (Sender or Receiver) | Live senders or receivers contributed by sessions. |
 | `by_name` | `(node_seed, Side, name)` | `resource_handle` | Reverse index for (a) the per-side duplicate-name check in `AddSender` or `AddReceiver`, and (b) the activation router's lookup from libnvnmos's IS-05 callback (which delivers `(side, name)`) back to the owning session. Keying on `Side` lets a Sender and a Receiver share the same `name` on the same Node — the daemon distinguishes them by side. |
