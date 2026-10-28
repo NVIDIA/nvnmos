@@ -58,23 +58,23 @@ docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst \
 
 The default `ubuntu:24.04` runtime has the plugins for MXL and OSS RTP/UDP transports only. To get DeepStream's GStreamer plugins in the same image as `nvnmosd` / `nmossrc` / `nmossink`, build with a DeepStream base via `BASE_IMAGE` (all stages use that base, so the final image has the full DeepStream stack and is correspondingly large).
 
-DeepStream 9.1 publishes a distinct container for x86 dGPU, Jetson, and SBSA ([Docker Containers](https://docs.nvidia.com/metropolis/deepstream/9.1/text/DS_docker_containers.html)). x86 and Jetson share one multi-arch manifest; `--platform` selects the slice. The SBSA image (GH200, GB200, and DGX Spark) uses a separate tag.
+DeepStream 9.2 publishes a distinct container for x86 dGPU, Jetson, and SBSA ([Docker Containers](https://docs.nvidia.com/deepstream/9.2/text/DS_docker_containers.html)). The images are on `ghcr.io/nvidia/deepstream`. x86 and Jetson share one multi-arch manifest, and `--platform` chooses `linux/amd64` or `linux/arm64`. SBSA (GH200, GB200, and DGX Spark) uses a separate tag.
 
 ```bash
 # x86 dGPU
 docker build --platform linux/amd64 -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst:ds \
-  --build-arg BASE_IMAGE=nvcr.io/nvidia/deepstream:9.1-triton-multiarch .
+  --build-arg BASE_IMAGE=ghcr.io/nvidia/deepstream:9.2-triton-multiarch .
 
 # Jetson (L4T)
 docker build --platform linux/arm64 -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst:ds-jetson \
-  --build-arg BASE_IMAGE=nvcr.io/nvidia/deepstream:9.1-triton-multiarch .
+  --build-arg BASE_IMAGE=ghcr.io/nvidia/deepstream:9.2-triton-multiarch .
 
 # SBSA (GH200, GB200, DGX Spark)
 docker build --platform linux/arm64 -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst:ds-sbsa \
-  --build-arg BASE_IMAGE=nvcr.io/nvidia/deepstream:9.1-triton-sbsa-dgx-spark .
+  --build-arg BASE_IMAGE=ghcr.io/nvidia/deepstream:9.2-triton-sbsa-dgx-spark .
 ```
 
-NGC pull may require `docker login nvcr.io`. Pin the DeepStream tag you need. This Dockerfile has been smoke-built against the amd64 `9.1-triton-multiarch` image. NVIDIA documents the Jetson image as a deployment image; this Dockerfile installs its compiler packages on top of that base.
+Pin the DeepStream tag you need. This Dockerfile has been smoke-built against the amd64 `9.2-triton-multiarch` image. NVIDIA documents the Jetson containers as deployment images; this Dockerfile installs its compiler packages on top of that base.
 
 **Runtime (GPU):** use the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/index.html) (e.g. `docker run --gpus all …`). Many DeepStream plugins need `libcuda` from the GPU runtime and will not load in a plain CPU-only `docker run`.
 
@@ -82,7 +82,7 @@ CI builds and smoke-tests only the default Ubuntu-based `docker/nvnmos` package 
 
 ### Optional GStreamer codecs on DeepStream
 
-On the default Ubuntu base, `--build-arg EXTRA_APT_PACKAGES="gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly"` is enough to make elements such as `srtsink` and `x264enc` available. On DeepStream 9.1 those packages are already installed, but `x264enc` still does not load until you run DeepStream's restore script (it reinstalls the plugins and missing codec libraries such as `libx264`).
+On the default Ubuntu base, `--build-arg EXTRA_APT_PACKAGES="gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly"` is enough to make elements such as `srtsink` and `x264enc` available. DeepStream 9.2 omits the libraries for CPU decode and encode. Run DeepStream's install script in a derived image to add them.
 
 In a **derived** image:
 
@@ -103,13 +103,13 @@ This repository does not ship Rivermax or install it in `docker/gst-nmos-rs/Dock
 
 **License (host):** request a developer license from [Rivermax Getting Started](https://developer.nvidia.com/networking/rivermax-getting-started) and store it on the host (conventionally, `/opt/mellanox/rivermax/rivermax.lic`).
 
-**Install into a derived image** (after `nvnmos-gst:ds` exists). Obtain `rivermax_ubuntu2404_<ver>.tar.gz` from the Rivermax SDK download. Pin **1.70.32** for DeepStream 9.1: newer packages (e.g. 1.90.18) need `ibverbs-providers (>= 60)`, while the NGC DeepStream 9.1 base ships `ibverbs-providers` 59.1 unless you install matching MOFED/`ibverbs` first.
+**Install into a derived image** (after `nvnmos-gst:ds` exists). Obtain `rivermax_ubuntu2404_<ver>.tar.gz` from the Rivermax SDK download. Pin **1.80.24** for DeepStream 9.2: newer packages (e.g. 1.90.18) need `ibverbs-providers (>= 60)`, while the DeepStream 9.2 images ship `ibverbs-providers` 59.1.
 
 ```dockerfile
 # Example only — not part of this repository's Dockerfiles.
 FROM nvnmos-gst:ds
 USER root
-ARG RMAX_VER=1.70.32
+ARG RMAX_VER=1.80.24
 COPY rivermax_ubuntu2404_${RMAX_VER}.tar.gz /tmp/
 RUN tar -xzf /tmp/rivermax_ubuntu2404_${RMAX_VER}.tar.gz -C /tmp \
  && dpkg -i /tmp/${RMAX_VER}/Ubuntu.24.04/deb-dist/x86_64/*.deb \

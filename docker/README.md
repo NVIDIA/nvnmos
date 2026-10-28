@@ -31,4 +31,4 @@ docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst .
 
 See [`nvnmos/README.md`](nvnmos/README.md) and [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md) for build arguments.
 
-Both images build for the Docker target architecture (`linux/amd64` or `linux/arm64`). CI builds the library image on `ubuntu-24.04` and `ubuntu-24.04-arm`. The Ubuntu 24.04 arm64 build is the image for Jetson and for SBSA. On either host the container brings its own Ubuntu 24.04 userspace. A DeepStream base is a different NGC image for Jetson than for SBSA; see [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md#deepstream-base-image).
+Both images build for the Docker target architecture (`linux/amd64` or `linux/arm64`). CI builds the library image on `ubuntu-24.04` and `ubuntu-24.04-arm`. The Ubuntu 24.04 arm64 build is the image for Jetson and for SBSA. On either host the container brings its own Ubuntu 24.04 userspace. A DeepStream base uses one multi-arch image for x86 and Jetson, and a separate image for SBSA; see [`gst-nmos-rs/README.md`](gst-nmos-rs/README.md#deepstream-base-image).

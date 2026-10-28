@@ -15,12 +15,13 @@
 #   docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst \
 #     --build-arg EXTRA_APT_PACKAGES="gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly" .
 #
-# Optional DeepStream base (large). DeepStream 9.1 publishes distinct images;
-# pass --platform linux/amd64 or linux/arm64 to match the machine that runs it.
+# Optional DeepStream base (large). DeepStream 9.2 publishes distinct images
+# on ghcr.io/nvidia/deepstream. Pass --platform linux/amd64 or linux/arm64
+# to match the machine that runs it.
 #   x86 dGPU and Jetson (one multi-arch manifest):
-#     --build-arg BASE_IMAGE=nvcr.io/nvidia/deepstream:9.1-triton-multiarch
+#     --build-arg BASE_IMAGE=ghcr.io/nvidia/deepstream:9.2-triton-multiarch
 #   SBSA (GH200, GB200, DGX Spark):
-#     --build-arg BASE_IMAGE=nvcr.io/nvidia/deepstream:9.1-triton-sbsa-dgx-spark
+#     --build-arg BASE_IMAGE=ghcr.io/nvidia/deepstream:9.2-triton-sbsa-dgx-spark
 #
 # Run:
 #
