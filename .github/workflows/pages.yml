@@ -24,7 +24,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
     - name: Checkout repository
@@ -79,6 +79,8 @@ jobs:
     - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
       with:
         rust-src-dir: rust
+        # rust-cache's own key does not include the Ubuntu version.
+        cache-key: ubuntu-24.04
         rustflags: ""
 
     - name: Build GStreamer plugin documentation
@@ -125,7 +127,7 @@ jobs:
   deploy:
     if: github.event_name == 'push'
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     permissions:
       pages: write
