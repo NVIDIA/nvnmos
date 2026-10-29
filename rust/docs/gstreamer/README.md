@@ -55,8 +55,11 @@ pip install --no-build-isolation "hotdoc~=0.18.0"
 
 Meson then runs `scripts/patch_hotdoc_gtk_doc_hrefs.py` against the installed
 Hotdoc to rewrite leftover `web.mit.edu/barnowl` gtk-doc fallbacks (for example
-`gchararray`) to `docs.gtk.org`. The patch is idempotent and re-applied on every
-configure.
+`gchararray`) to `docs.gtk.org`. It also runs
+`scripts/patch_hotdoc_gst_enum_names.py`, which makes Hotdoc title enum sections
+with the GType name (`GstNmosCapsMode`) instead of a hyphenated form
+(`Nmos-caps-mode`), matching gstreamer.freedesktop.org. Both patches are
+idempotent and re-applied on every configure.
 
 Rust toolchain plus workspace dependencies (same as `rust/` CI).
 

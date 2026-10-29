@@ -116,6 +116,15 @@ if patch_hotdoc_result.returncode() != 0
 endif
 message(patch_hotdoc_result.stdout().strip())
 
+# Hotdoc 0.18 titles enum sections with a hyphenated form of the GType name.
+# Use the GType name itself before generate_doc runs (idempotent).
+patch_hotdoc_enum_names = find_program(cdir / 'scripts' / 'patch_hotdoc_gst_enum_names.py')
+patch_hotdoc_enum_result = run_command(patch_hotdoc_enum_names, check: false)
+if patch_hotdoc_enum_result.returncode() != 0
+  error('Failed to patch Hotdoc gst_extension.py enum titles:\n@0@'.format(patch_hotdoc_enum_result.stderr()))
+endif
+message(patch_hotdoc_enum_result.stdout().strip())
+
 hotdoc = import('hotdoc')
 required_hotdoc_extensions = ['gst-extension']
 foreach extension: required_hotdoc_extensions
