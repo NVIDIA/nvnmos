@@ -108,6 +108,10 @@ jobs:
           retention-days: 1
   rust:
     needs: build
+    env:
+      GST_PLUGINS_RS_REF: 8fe3cc1195d7d54990a84d85ca189624db29b096
+      GST_PLUGINS_RS_TOOLCHAIN: "1.92"
+      GST_PLUGINS_RS_PACKAGES: gst-plugin-closedcaption gst-plugin-rtp gst-plugin-udp
     strategy:
       fail-fast: false
       matrix:
@@ -171,30 +175,51 @@ jobs:
       # so the udp av_sync case (and udp2 / jxsv tests) run here instead of
       # self-skipping. The mxl and nvdsudp cases still self-skip (no libmxl /
       # DeepStream on the runner).
+      - name: gst-plugins-rs cache key
+        id: gst-plugins-rs-key
+        run: echo "gstreamer=$(pkg-config --modversion gstreamer-1.0)" >> "$GITHUB_OUTPUT"
+      # The plugins link against the runner's GStreamer, so its version is in the
+      # key with the runner image, toolchain, commit and packages.
+      # Build and save when this key is not already stored.
+      - name: Restore gst-plugins-rs plugins
+        id: gst-plugins-rs-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/gst-plugins-rs-cache
+          key: gst-plugins-rs-${{ matrix.os }}-${{ env.GST_PLUGINS_RS_TOOLCHAIN }}-${{ env.GST_PLUGINS_RS_REF }}-${{ env.GST_PLUGINS_RS_PACKAGES }}-${{ steps.gst-plugins-rs-key.outputs.gstreamer }}
       - name: Build gst-plugins-rs plugins (pinned)
+        if: steps.gst-plugins-rs-cache.outputs.cache-hit != 'true'
         env:
-          GST_PLUGINS_RS_REF: 8fe3cc1195d7d54990a84d85ca189624db29b096
-          RUSTUP_TOOLCHAIN: "1.92"
+          RUSTUP_TOOLCHAIN: ${{ env.GST_PLUGINS_RS_TOOLCHAIN }}
         run: |
           git init "${RUNNER_TEMP}/gst-plugins-rs"
           cd "${RUNNER_TEMP}/gst-plugins-rs"
           git remote add origin https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git
           git fetch --depth 1 origin "${GST_PLUGINS_RS_REF}"
           git checkout FETCH_HEAD
-          cargo build --release \
-            -p gst-plugin-closedcaption \
-            -p gst-plugin-rtp \
-            -p gst-plugin-udp
+          packages=()
+          for package in ${GST_PLUGINS_RS_PACKAGES}; do
+            packages+=(-p "${package}")
+          done
+          cargo build --release --locked "${packages[@]}"
+          mkdir -p "${RUNNER_TEMP}/gst-plugins-rs-cache"
+          cp target/release/libgstrs*.so "${RUNNER_TEMP}/gst-plugins-rs-cache/"
+      - name: Save gst-plugins-rs plugins
+        if: steps.gst-plugins-rs-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/gst-plugins-rs-cache
+          key: ${{ steps.gst-plugins-rs-cache.outputs.cache-primary-key }}
 
       # The daemon-backed integration tests self-gate: they run here because
       # nvnmosd + libnvnmos.so are present. GST_PLUGIN_PATH adds the pinned
-      # gst-plugins-rs plugins built above.
+      # gst-plugins-rs plugins built or restored above.
       - name: Cargo test (workspace)
         working-directory: rust
         env:
           NVNMOS_LIB_DIR: ${{ github.workspace }}/build
           LD_LIBRARY_PATH: ${{ github.workspace }}/build
-          GST_PLUGIN_PATH: ${{ runner.temp }}/gst-plugins-rs/target/release
+          GST_PLUGIN_PATH: ${{ runner.temp }}/gst-plugins-rs-cache
         shell: bash
         # --show-output surfaces the `test <name> ... skipped, <reason>` lines
         # that test-skip's `skip!` prints (libtest captures them otherwise and

@@ -221,7 +221,7 @@ WORKDIR /gst-plugins-rs
 # cargo-c writes plugins to target/<host-triple>/release (x86_64-unknown-linux-gnu
 # or aarch64-unknown-linux-gnu). Copy them to a fixed path so later stages
 # can take the same files on amd64 and arm64.
-RUN cargo cbuild -p gst-plugin-udp -p gst-plugin-rtp -p gst-plugin-closedcaption --release \
+RUN cargo cbuild -p gst-plugin-udp -p gst-plugin-rtp -p gst-plugin-closedcaption --release --locked \
     && host_triple="$(rustc -vV | sed -n 's/^host: //p')" \
     && mkdir -p /opt/gst-plugins-rs \
     && cp \
