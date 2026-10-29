@@ -40,7 +40,7 @@ ARG RUST_TOOLCHAIN=1.92
 
 # External sources
 ARG MXL_REPO=https://github.com/dmf-mxl/mxl.git
-ARG MXL_REF=5201833c68293525a87507bb734e9b80148bb71d
+ARG MXL_REF=8f3f1096e804bfb822eb959cdf2fc23199a7d15d
 ARG GST_PLUGINS_RS_REPO=https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git
 ARG GST_PLUGINS_RS_REF=8fe3cc1195d7d54990a84d85ca189624db29b096
 
