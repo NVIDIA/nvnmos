@@ -84,16 +84,17 @@ CI builds and smoke-tests only the default Ubuntu-based `docker/nvnmos` package 
 
 On the default Ubuntu base, `--build-arg EXTRA_APT_PACKAGES="gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly"` is enough to make elements such as `srtsink` and `x264enc` available. DeepStream 9.2 omits the libraries for CPU decode and encode. Run DeepStream's install script in a derived image to add them.
 
-In a **derived** image:
-
 ```dockerfile
 # Example only — not part of this repository's Dockerfiles.
-FROM nvnmos-gst:ds
+ARG BASE_IMAGE=nvnmos-gst:ds
+FROM ${BASE_IMAGE}
 USER root
 RUN /opt/nvidia/deepstream/deepstream/user_additional_install.sh \
  && rm -rf /var/lib/apt/lists/*
 USER nvnmos
 ```
+
+`BASE_IMAGE` defaults to the x86 image; you would pass `--build-arg BASE_IMAGE=nvnmos-gst:ds-jetson` or `nvnmos-gst:ds-sbsa` to build on the Jetson or SBSA image.
 
 ### Rivermax for `transport=nvdsudp`
 
@@ -103,16 +104,17 @@ This repository does not ship Rivermax or install it in `docker/gst-nmos-rs/Dock
 
 **License (host):** request a developer license from [Rivermax Getting Started](https://developer.nvidia.com/networking/rivermax-getting-started) and store it on the host (conventionally, `/opt/mellanox/rivermax/rivermax.lic`).
 
-**Install into a derived image** (after `nvnmos-gst:ds` exists). Obtain `rivermax_ubuntu2404_<ver>.tar.gz` from the Rivermax SDK download. Pin **1.80.24** for DeepStream 9.2: newer packages (e.g. 1.90.18) need `ibverbs-providers (>= 60)`, while the DeepStream 9.2 images ship `ibverbs-providers` 59.1.
+**Install into a derived image** (after a DeepStream image from [DeepStream Base Image](#deepstream-base-image) exists). Obtain `rivermax_ubuntu2404_<ver>.tar.gz` from the Rivermax SDK download. Pin **1.80.24** for DeepStream 9.2: newer packages (e.g. 1.90.18) need `ibverbs-providers (>= 60)`, while the DeepStream 9.2 images ship `ibverbs-providers` 59.1.
 
 ```dockerfile
 # Example only — not part of this repository's Dockerfiles.
-FROM nvnmos-gst:ds
+ARG BASE_IMAGE=nvnmos-gst:ds
+FROM ${BASE_IMAGE}
 USER root
 ARG RMAX_VER=1.80.24
 COPY rivermax_ubuntu2404_${RMAX_VER}.tar.gz /tmp/
 RUN tar -xzf /tmp/rivermax_ubuntu2404_${RMAX_VER}.tar.gz -C /tmp \
- && dpkg -i /tmp/${RMAX_VER}/Ubuntu.24.04/deb-dist/x86_64/*.deb \
+ && dpkg -i /tmp/${RMAX_VER}/Ubuntu.24.04/deb-dist/$(uname -m)/*.deb \
  && rm -rf /tmp/${RMAX_VER} /tmp/rivermax_ubuntu2404_${RMAX_VER}.tar.gz \
  && printf '%s\n' \
       /opt/nvnmos/lib/mxl \
@@ -124,13 +126,15 @@ USER nvnmos
 
 `setcap` on `gst-launch-1.0` makes the dynamic linker ignore `LD_LIBRARY_PATH`, so register `/opt/nvnmos/lib/mxl` via `ldconfig` before applying capabilities. MXL v1.1 embeds former `internal/` objects in `libmxl.so`, so that path alone is enough.
 
-For `aarch64`, install from `deb-dist/aarch64/` instead of `x86_64/`.
-
 ```bash
+# x86 dGPU
 docker build -t nvnmos-gst:ds-rivermax -f Dockerfile.rivermax .
+
+# Jetson (L4T)
+docker build --build-arg BASE_IMAGE=nvnmos-gst:ds-jetson -t nvnmos-gst:ds-jetson-rivermax -f Dockerfile.rivermax .
 ```
 
-**Run** with the license mounted at the path Rivermax expects, GPU and host network access, and the required capabilities:
+**Run** with the license mounted at the path Rivermax expects, GPU and host network access, and the required capabilities. On Jetson, run `nvnmos-gst:ds-jetson-rivermax`:
 
 ```bash
 docker run --rm --gpus all --net=host \
