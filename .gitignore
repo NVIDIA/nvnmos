@@ -25,6 +25,10 @@ CMakeUserPresets.json
 docker/nvnmos/conan-cache/*
 !docker/nvnmos/conan-cache/.gitkeep
 
+# The same applies to docker/nvnmos/cargo-cache.
+docker/nvnmos/cargo-cache/*
+!docker/nvnmos/cargo-cache/.gitkeep
+
 # Local Conan + CMake output (README layout).
 # Use explicit dirs plus hyphenated variants (not build*/ / conan*/) so
 # .dockerignore does not also match files like src/conanfile.txt.

@@ -219,6 +219,11 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
           exit "${status}"
+
+      # protobuf-src builds protoc with CMake. Only its install tree is used
+      # after the build, so the CMake build trees do not need to be saved.
+      - name: Remove CMake build trees from the Rust cache
+        run: rm -rf rust/target/*/build/*/out/build
   docker:
     strategy:
       fail-fast: false
@@ -239,9 +244,23 @@ jobs:
           key: conan-docker-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/conan.lock', 'docker/nvnmos/Dockerfile') }}
           restore-keys: |
             conan-docker-${{ runner.os }}-${{ runner.arch }}-
+      # Release builds of the Rust dependencies from the previous image build.
+      # The image copies docker/nvnmos/cargo-cache into the Cargo target
+      # directory. Export and save when this key is not already stored.
+      - name: Restore Cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: docker/nvnmos/cargo-cache
+          key: cargo-docker-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/Cargo.lock', 'docker/nvnmos/Dockerfile') }}
+          restore-keys: |
+            cargo-docker-${{ runner.os }}-${{ runner.arch }}-
       - name: Build C++ stage
         id: cpp
         run: docker build -f docker/nvnmos/Dockerfile --target cpp-builder -t nvnmos-cpp:ci .
+      - name: Build Rust stage
+        id: rust
+        run: docker build -f docker/nvnmos/Dockerfile --target rust-builder -t nvnmos-rust:ci .
       - name: Build image
         run: docker build -f docker/nvnmos/Dockerfile -t nvnmos:ci .
       - name: Export Conan cache
@@ -258,6 +277,23 @@ jobs:
         with:
           path: docker/nvnmos/conan-cache
           key: ${{ steps.conan-cache.outputs.cache-primary-key }}
+      # protobuf-src builds protoc with CMake. Only its install tree is used
+      # after the build, so the CMake build trees do not need to be saved.
+      - name: Export Cargo cache
+        if: always() && steps.rust.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true'
+        run: |
+          cid=$(docker create nvnmos-rust:ci)
+          rm -rf docker/nvnmos/cargo-cache
+          docker cp "$cid:/nvnmos/rust/target" docker/nvnmos/cargo-cache
+          docker rm "$cid"
+          sudo chown -R "$(id -u):$(id -g)" docker/nvnmos/cargo-cache
+          rm -rf docker/nvnmos/cargo-cache/release/build/*/out/build
+      - name: Save Cargo cache
+        if: always() && steps.rust.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: docker/nvnmos/cargo-cache
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
       - name: Run entrypoint smoke tests (non-root)
         run: docker run --rm --user 1000:1000 --cap-drop=ALL nvnmos:ci true

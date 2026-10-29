@@ -100,6 +100,11 @@ WORKDIR /nvnmos
 
 COPY --from=cpp-builder /nvnmos/build /nvnmos/build
 COPY --from=cpp-builder /nvnmos/src /nvnmos/src
+
+# Restored release builds of the dependencies.
+# .gitkeep keeps the directory in Git. .dockerignore excludes it.
+COPY docker/nvnmos/cargo-cache/ /nvnmos/rust/target/
+
 COPY rust/ rust/
 
 RUN NVNMOS_LIB_DIR=/nvnmos/build cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
