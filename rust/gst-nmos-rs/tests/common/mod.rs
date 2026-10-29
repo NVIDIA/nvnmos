@@ -15,6 +15,12 @@ use std::time::{Duration, Instant};
 
 use gstreamer as gst;
 
+const LIBRARY_PATH_ENV: &str = if cfg!(target_os = "macos") {
+    "DYLD_LIBRARY_PATH"
+} else {
+    "LD_LIBRARY_PATH"
+};
+
 static REGISTER: Once = Once::new();
 
 pub fn init() {
@@ -47,10 +53,15 @@ fn ensure_gst_plugin_path() {
             .to_string_lossy()
             .into_owned()
     });
+    let plugin_name = format!(
+        "{}gstnmos{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
     for profile in ["debug", "release"] {
         let profile_dir = PathBuf::from(&target_dir).join(profile);
-        let deps_so = profile_dir.join("deps").join("libgstnmos.so");
-        let profile_so = profile_dir.join("libgstnmos.so");
+        let deps_so = profile_dir.join("deps").join(&plugin_name);
+        let profile_so = profile_dir.join(&plugin_name);
         let mut plugin_dirs = Vec::new();
         if deps_so.exists() {
             plugin_dirs.push(profile_dir.join("deps"));
@@ -87,7 +98,7 @@ pub fn require_factories(names: &[&str]) {
     assert!(
         missing.is_empty(),
         "missing element factories: {missing:?}; set `GST_PLUGIN_PATH` to include \
-         `libgstnmos.so` (built in this workspace's `target/debug` or `target/release`)",
+         the native `nmos` plugin (built in this workspace's `target/debug` or `target/release`)",
     );
 }
 
@@ -114,11 +125,11 @@ pub fn nvnmosd_bin() -> PathBuf {
     PathBuf::from(target_dir).join("release").join("nvnmosd")
 }
 
-/// Directory holding `libnvnmos.so`, searched on `LD_LIBRARY_PATH` then
+/// Directory holding native libnvnmos, searched on the platform loader path then
 /// `NVNMOS_LIB_DIR`. `None` when the C library has not been built/placed.
 pub fn libnvnmos_dir() -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Ok(paths) = std::env::var("LD_LIBRARY_PATH") {
+    if let Ok(paths) = std::env::var(LIBRARY_PATH_ENV) {
         dirs.extend(
             paths
                 .split(':')
@@ -129,7 +140,12 @@ pub fn libnvnmos_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("NVNMOS_LIB_DIR") {
         dirs.push(PathBuf::from(dir));
     }
-    dirs.into_iter().find(|d| d.join("libnvnmos.so").exists())
+    let name = format!(
+        "{}nvnmos{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    dirs.into_iter().find(|d| d.join(&name).exists())
 }
 
 const SHM_MXL_HINT: &str = "MXL uses mkdtemp(3) under /dev/shm; run integration tests \
@@ -238,7 +254,7 @@ pub fn mxl_runtime_skip_reason() -> Option<String> {
 
 /// Reason the `nvnmosd`-backed integration tests cannot run, or `None` when the
 /// prerequisites are present. `nvnmosd` itself is built by `cargo test`, but it
-/// links `libnvnmos.so` from the C build, which CI exposes on `LD_LIBRARY_PATH`.
+/// links native libnvnmos from the C build, exposed on the platform loader path.
 /// On a Rust-only checkout the caller skips rather than fails.
 pub fn nvnmosd_skip_reason() -> Option<String> {
     let bin = nvnmosd_bin();
@@ -246,7 +262,7 @@ pub fn nvnmosd_skip_reason() -> Option<String> {
         return Some(format!("nvnmosd not built at `{}`", bin.display()));
     }
     if libnvnmos_dir().is_none() {
-        return Some("libnvnmos.so not found via LD_LIBRARY_PATH or NVNMOS_LIB_DIR".into());
+        return Some("libnvnmos not found via the native loader path or NVNMOS_LIB_DIR".into());
     }
     None
 }
@@ -278,16 +294,16 @@ impl DaemonGuard {
             )
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
-        // nvnmosd links libnvnmos.so; surface NVNMOS_LIB_DIR to the loader even
-        // when the caller set only it (not LD_LIBRARY_PATH).
+        // nvnmosd links native libnvnmos; surface NVNMOS_LIB_DIR to the loader even
+        // when the caller set only it (not the platform loader path).
         if let Ok(lib_dir) = std::env::var("NVNMOS_LIB_DIR") {
-            let existing = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+            let existing = std::env::var(LIBRARY_PATH_ENV).unwrap_or_default();
             let value = if existing.is_empty() {
                 lib_dir
             } else {
                 format!("{lib_dir}:{existing}")
             };
-            command.env("LD_LIBRARY_PATH", value);
+            command.env(LIBRARY_PATH_ENV, value);
         }
         let mut child = command
             .spawn()
@@ -303,7 +319,7 @@ impl DaemonGuard {
         let _ = child.kill();
         let _ = child.wait();
         panic!(
-            "nvnmosd UDS `{}` did not appear within 5s; check LD_LIBRARY_PATH includes libnvnmos",
+            "nvnmosd UDS `{}` did not appear within 5s; check the native loader path includes libnvnmos",
             socket.display(),
         );
     }

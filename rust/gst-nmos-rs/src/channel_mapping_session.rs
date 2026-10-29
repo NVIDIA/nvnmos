@@ -283,6 +283,12 @@ mod session_integration {
     use std::time::{Duration, Instant};
     use test_skip::skip;
 
+    const LIBRARY_PATH_ENV: &str = if cfg!(target_os = "macos") {
+        "DYLD_LIBRARY_PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    };
+
     fn nvnmosd_bin() -> PathBuf {
         if let Ok(p) = std::env::var("NVNMOSD_BIN") {
             return PathBuf::from(p);
@@ -306,7 +312,7 @@ mod session_integration {
 
     fn libnvnmos_dir() -> Option<PathBuf> {
         let mut dirs: Vec<PathBuf> = Vec::new();
-        if let Ok(paths) = std::env::var("LD_LIBRARY_PATH") {
+        if let Ok(paths) = std::env::var(LIBRARY_PATH_ENV) {
             dirs.extend(
                 paths
                     .split(':')
@@ -317,20 +323,25 @@ mod session_integration {
         if let Ok(dir) = std::env::var("NVNMOS_LIB_DIR") {
             dirs.push(PathBuf::from(dir));
         }
-        dirs.into_iter().find(|d| d.join("libnvnmos.so").exists())
+        let name = format!(
+            "{}nvnmos{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        );
+        dirs.into_iter().find(|d| d.join(&name).exists())
     }
 
     /// Mirror of `tests/common::nvnmosd_skip_reason` for this in-crate integration
     /// test, which needs `pub(crate)` access and so cannot live under `tests/`.
-    /// `nvnmosd` is built by `cargo test`, but it links `libnvnmos.so` from the C
-    /// build, which CI exposes on `LD_LIBRARY_PATH`; a Rust-only checkout skips.
+    /// `nvnmosd` is built by `cargo test`, but links native libnvnmos from the C
+    /// build via the platform loader path; a Rust-only checkout skips.
     fn skip_reason() -> Option<String> {
         let bin = nvnmosd_bin();
         if !bin.exists() {
             return Some(format!("nvnmosd not built at `{}`", bin.display()));
         }
         if libnvnmos_dir().is_none() {
-            return Some("libnvnmos.so not found via LD_LIBRARY_PATH or NVNMOS_LIB_DIR".into());
+            return Some("libnvnmos not found via the native loader path or NVNMOS_LIB_DIR".into());
         }
         None
     }
@@ -360,16 +371,16 @@ mod session_integration {
                 )
                 .stdout(Stdio::null())
                 .stderr(Stdio::inherit());
-            // nvnmosd links libnvnmos.so; surface NVNMOS_LIB_DIR to the loader even
-            // when the caller set only it (not LD_LIBRARY_PATH).
+            // nvnmosd links native libnvnmos; surface NVNMOS_LIB_DIR to the loader even
+            // when the caller set only it (not the platform loader path).
             if let Ok(lib_dir) = std::env::var("NVNMOS_LIB_DIR") {
-                let existing = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+                let existing = std::env::var(LIBRARY_PATH_ENV).unwrap_or_default();
                 let value = if existing.is_empty() {
                     lib_dir
                 } else {
                     format!("{lib_dir}:{existing}")
                 };
-                command.env("LD_LIBRARY_PATH", value);
+                command.env(LIBRARY_PATH_ENV, value);
             }
             let mut child = command
                 .spawn()
@@ -384,7 +395,7 @@ mod session_integration {
             let _ = child.kill();
             let _ = child.wait();
             panic!(
-                "nvnmosd UDS `{}` did not appear within 5s; check LD_LIBRARY_PATH includes libnvnmos",
+                "nvnmosd UDS `{}` did not appear within 5s; check the native loader path includes libnvnmos",
                 socket.display(),
             );
         }

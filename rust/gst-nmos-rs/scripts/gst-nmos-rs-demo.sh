@@ -81,6 +81,12 @@
 # parented to the stopped script (the kernel can't reparent to
 # init until the parent actually exits).
 
+# Associative arrays and namerefs below require Bash 4.3 or newer.
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
+    echo "[error] Bash 4.3 or newer is required (macOS: brew install bash, then run with Homebrew bash)" >&2
+    exit 1
+fi
+
 set -u
 
 # ---- Knobs ---------------------------------------------------------
@@ -109,11 +115,22 @@ DEMO_MXL_DOMAIN_PATH=${DEMO_MXL_DOMAIN_PATH:-/dev/shm/gst-nmos-rs-demo}
 source "$_SCRIPT_DIR/env.sh"
 require_demo_tools
 
-# `libnvnmos.so` (consumed by nvnmosd) and the gst-mxl-rs plugin +
+# `libnvnmos` (consumed by nvnmosd) and the gst-mxl-rs plugin +
 # libmxl.so runtime (required for the MXL inner transport chain).
 LIB=${NVNMOS_LIB_DIR:-$REPO/build}
 MXL_PLUGIN_DIR=${MXL_PLUGIN_DIR:-$MXL_REPO/rust/target/debug}
-MXL_RT_LIB_DIR=${MXL_RT_LIB_DIR:-$MXL_REPO/build/Linux-Clang-Debug/lib}
+MXL_RT_LIB_DIR=${MXL_RT_LIB_DIR:-$MXL_REPO/build/$(uname -s)-Clang-Debug/lib}
+
+case "$(uname -s)" in
+    Darwin)
+        PLUGIN_LIBRARY=libgstnmos.dylib
+        export DYLD_LIBRARY_PATH="$LIB:$MXL_RT_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+        ;;
+    *)
+        PLUGIN_LIBRARY=libgstnmos.so
+        export LD_LIBRARY_PATH="$LIB:$MXL_RT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        ;;
+esac
 
 SOCK=/tmp/gst-nmos-rs-demo.sock
 LOG_DIR=$(mktemp -d -t gst-nmos-rs-demo-XXXXXX)
@@ -133,7 +150,8 @@ DAEMON_LOG="$LOG_DIR/daemon.log"
 # (a non-exec function wrapper leaves gst-launch as an orphan when cleanup
 # kills only the subshell pid).
 _demo_line_buffered() {
-    if command -v stdbuf >/dev/null 2>&1; then
+    # macOS system tools strip DYLD_LIBRARY_PATH before launching children.
+    if [[ "$(uname -s)" != Darwin ]] && command -v stdbuf >/dev/null 2>&1; then
         exec stdbuf -oL -eL "$@"
     else
         exec "$@"
@@ -145,17 +163,16 @@ _demo_gst_launch() {
     _demo_line_buffered gst-launch-1.0 -e -m "$@"
 }
 
-# Return 0 when ss reports a LISTEN socket on path (another nvnmosd up).
-# No listener / missing path in ss → return 1.
+# Return 0 when a daemon is listening on this Unix socket path.
 _uds_socket_listening() {
     local path=$1
-    ss -xlpn 2>/dev/null | grep -F "LISTEN" | grep -qF "$path"
+    demo_uds_socket_listening "$path"
 }
 
-# Return 0 when ss reports pid is listening on the socket path.
+# Return 0 when pid owns the listening Unix socket.
 _uds_listener_owned_by_pid() {
     local pid=$1 path=$2
-    ss -xlpn 2>/dev/null | grep -F "$path" | grep -qE "pid=$pid[,)]"
+    demo_uds_listener_owned_by_pid "$pid" "$path"
 }
 
 # Fail if more than one nvnmosd was started with this --uds path.
@@ -164,13 +181,13 @@ _assert_single_nvnmosd_on_sock() {
     mapfile -t pids < <(pgrep -f "nvnmosd --uds $SOCK" 2>/dev/null || true)
     if (( ${#pids[@]} != 1 )); then
         echo "[error] expected exactly one nvnmosd on $SOCK, found ${#pids[@]}:"
-        pgrep -af "nvnmosd --uds $SOCK" 2>/dev/null || true
+        pgrep -fl "nvnmosd --uds $SOCK" 2>/dev/null || true
         echo "        stop extras: pkill -9 -f 'nvnmosd --uds $SOCK'"
         exit 1
     fi
     if (( pids[0] != DAEMON_PID )); then
         echo "[error] nvnmosd on $SOCK is pid ${pids[0]}, not demo daemon pid $DAEMON_PID"
-        pgrep -af "nvnmosd --uds $SOCK" 2>/dev/null || true
+        pgrep -fl "nvnmosd --uds $SOCK" 2>/dev/null || true
         exit 1
     fi
 }
@@ -416,7 +433,7 @@ TARGET_DIR=${CARGO_TARGET_DIR:-$REPO/rust/target}
 DAEMON_BIN="$TARGET_DIR/debug/nvnmosd"
 PLUGIN_DIR="$TARGET_DIR/debug"
 [[ -x "$DAEMON_BIN" ]]               || { echo "missing $DAEMON_BIN"; exit 1; }
-[[ -f "$PLUGIN_DIR/libgstnmos.so" ]] || { echo "missing $PLUGIN_DIR/libgstnmos.so"; exit 1; }
+[[ -f "$PLUGIN_DIR/$PLUGIN_LIBRARY" ]] || { echo "missing $PLUGIN_DIR/$PLUGIN_LIBRARY"; exit 1; }
 
 # ---- Daemon --------------------------------------------------------
 
@@ -426,13 +443,12 @@ PLUGIN_DIR="$TARGET_DIR/debug"
 if _uds_socket_listening "$SOCK"; then
     echo "[error] UDS socket $SOCK is already in use (another nvnmosd listening?)."
     echo "        Stop it, e.g.: pkill -9 -f 'nvnmosd --uds $SOCK'"
-    pgrep -af "nvnmosd --uds $SOCK" 2>/dev/null || true
+    pgrep -fl "nvnmosd --uds $SOCK" 2>/dev/null || true
     exit 1
 fi
 
 echo "[daemon] starting nvnmosd on $SOCK"
 RUST_LOG=${RUST_LOG:-info} \
-LD_LIBRARY_PATH="$LIB:${LD_LIBRARY_PATH:-}" \
     _demo_line_buffered "$DAEMON_BIN" --uds "$SOCK" > "$DAEMON_LOG" 2>&1 &
 declare -i DAEMON_PID=$!
 
@@ -505,8 +521,12 @@ if ! _uds_socket_listening "$SOCK"; then
 fi
 if ! _uds_listener_owned_by_pid "$DAEMON_PID" "$SOCK"; then
     echo "[daemon] $SOCK is not owned by nvnmosd pid $DAEMON_PID"
-    ss -xlpn 2>/dev/null | grep -F 'gst-nmos-rs-demo.sock' || true
-    pgrep -af "nvnmosd --uds $SOCK" 2>/dev/null || true
+    if [[ "$(uname -s)" == Darwin ]]; then
+        netstat -anv -f unix 2>/dev/null | grep -F "$SOCK" || true
+    else
+        ss -xlpn 2>/dev/null | grep -F 'gst-nmos-rs-demo.sock' || true
+    fi
+    pgrep -fl "nvnmosd --uds $SOCK" 2>/dev/null || true
     cat "$DAEMON_LOG"
     exit 1
 fi
@@ -516,7 +536,6 @@ echo "[daemon] ready (pid $DAEMON_PID, listening on $SOCK)"
 # ---- Common gst env for nmossrc / nmossink + inner mxl* ----------
 
 export GST_PLUGIN_PATH="$PLUGIN_DIR:$MXL_PLUGIN_DIR${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
-export LD_LIBRARY_PATH="$LIB:$MXL_RT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 if ! command -v gst-inspect-1.0 >/dev/null 2>&1 \
     || ! gst-inspect-1.0 nmosaudiochannelmap >/dev/null 2>&1; then

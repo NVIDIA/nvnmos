@@ -71,6 +71,10 @@ The following operating systems and compilers have been tested.
 
 * Ubuntu 24.04 with GCC 13
 * Windows 10 with Visual Studio 2022
+* macOS 26.7.1 (Apple Silicon) with Apple Clang 21
+
+See [Building and installation](doc/user/building.md) for the C library and
+the [Rust workspace guide](rust/README.md) for the daemon and GStreamer plugins.
 
 ## Contributing
 
