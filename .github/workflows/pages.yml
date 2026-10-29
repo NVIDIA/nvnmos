@@ -92,6 +92,11 @@ jobs:
         mkdir -p "$GITHUB_WORKSPACE/public/gstreamer"
         cp -a build/NvNmos-GStreamer-doc/html/* "$GITHUB_WORKSPACE/public/gstreamer/"
 
+    # protobuf-src builds protoc with CMake. Only its install tree is used
+    # after the build, so the CMake build trees do not need to be saved.
+    - name: Remove CMake build trees from the Rust cache
+      run: rm -rf rust/target/*/build/*/out/build
+
     - name: Upload Pages artifact
       if: github.event_name == 'push'
       uses: actions/upload-pages-artifact@v5
