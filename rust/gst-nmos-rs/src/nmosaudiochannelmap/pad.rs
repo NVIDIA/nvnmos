@@ -11,6 +11,8 @@ use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
 
 pub(crate) fn register_types() -> Result<(), glib::BoolError> {
+    NmosAudioChannelMapSinkPad::static_type().mark_as_plugin_api(gst::PluginAPIFlags::empty());
+    NmosAudioChannelMapSrcPad::static_type().mark_as_plugin_api(gst::PluginAPIFlags::empty());
     Ok(())
 }
 
