@@ -107,8 +107,9 @@ if not hotdoc_version.version_compare(hotdoc_req_min) or not hotdoc_version.vers
   error('Hotdoc @0@, <0.19.0 required, found @1@'.format(hotdoc_req_min, hotdoc_version))
 endif
 
-# Hotdoc 0.18 still hardcodes a few gtk-doc fallbacks to web.mit.edu/barnowl.
-# Rewrite those to docs.gtk.org before generate_doc runs (idempotent).
+# Hotdoc 0.18 still hardcodes a few gtk-doc fallbacks to web.mit.edu/barnowl
+# and has none for GObject and GInitiallyUnowned. Point those at docs.gtk.org
+# before generate_doc runs (idempotent).
 patch_hotdoc_hrefs = find_program(cdir / 'scripts' / 'patch_hotdoc_gtk_doc_hrefs.py')
 patch_hotdoc_result = run_command(patch_hotdoc_hrefs, check: false)
 if patch_hotdoc_result.returncode() != 0
@@ -124,6 +125,22 @@ if patch_hotdoc_enum_result.returncode() != 0
   error('Failed to patch Hotdoc gst_extension.py enum titles:\n@0@'.format(patch_hotdoc_enum_result.stderr()))
 endif
 message(patch_hotdoc_enum_result.stdout().strip())
+
+# Hotdoc links GStreamer core types to gstreamer.freedesktop.org through the
+# devhelp index of the matching gstreamer-docs release. Hotdoc reads
+# XDG_DATA_DIRS from its environment, so build with
+# `meson devenv -C build ninja gstreamer-doc` to pick the index up.
+gst_docs_data_dir = meson.current_build_dir() / 'gstreamer-docs-@0@'.format(gst_dep.version())
+fetch_gst_docs_index = find_program(cdir / 'scripts' / 'fetch_gst_docs_index.py')
+fetch_gst_docs_index_result = run_command(fetch_gst_docs_index, gst_dep.version(), gst_docs_data_dir, check: false)
+if fetch_gst_docs_index_result.returncode() == 0
+  message(fetch_gst_docs_index_result.stdout().strip())
+  gst_docs_devenv = environment()
+  gst_docs_devenv.prepend('XDG_DATA_DIRS', gst_docs_data_dir)
+  meson.add_devenv(gst_docs_devenv)
+else
+  warning('GStreamer docs index unavailable, GStreamer types will not be linked:\n@0@'.format(fetch_gst_docs_index_result.stderr().strip()))
+endif
 
 hotdoc = import('hotdoc')
 required_hotdoc_extensions = ['gst-extension']
