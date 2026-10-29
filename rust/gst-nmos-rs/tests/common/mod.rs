@@ -145,9 +145,9 @@ pub fn dev_shm_mkdtemp_skip_reason() -> Option<String> {
         let mut path = b"/dev/shm/nvnmos_mxl_shm_probeXXXXXX\0".to_vec();
         let created = unsafe {
             unsafe extern "C" {
-                fn mkdtemp(template: *mut i8) -> *mut i8;
+                fn mkdtemp(template: *mut std::ffi::c_char) -> *mut std::ffi::c_char;
             }
-            mkdtemp(path.as_mut_ptr() as *mut i8)
+            mkdtemp(path.as_mut_ptr() as *mut std::ffi::c_char)
         };
         if created.is_null() {
             let err = std::io::Error::last_os_error();
@@ -212,7 +212,7 @@ pub fn libmxl_skip_reason() -> Option<String> {
     };
     unsafe {
         unsafe extern "C" {
-            fn dlopen(filename: *const i8, flag: i32) -> *mut std::ffi::c_void;
+            fn dlopen(filename: *const std::ffi::c_char, flag: i32) -> *mut std::ffi::c_void;
             fn dlclose(handle: *mut std::ffi::c_void) -> i32;
         }
         const RTLD_LAZY: i32 = 1;

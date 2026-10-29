@@ -24,7 +24,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
     - name: Checkout repository
@@ -79,6 +79,8 @@ jobs:
     - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
       with:
         rust-src-dir: rust
+        # rust-cache's own key does not include the Ubuntu version.
+        cache-key: ubuntu-24.04
         rustflags: ""
 
     - name: Build GStreamer plugin documentation
@@ -91,6 +93,11 @@ jobs:
         ninja -C build gstreamer-doc
         mkdir -p "$GITHUB_WORKSPACE/public/gstreamer"
         cp -a build/NvNmos-GStreamer-doc/html/* "$GITHUB_WORKSPACE/public/gstreamer/"
+
+    # protobuf-src builds protoc with CMake. Only its install tree is used
+    # after the build, so the CMake build trees do not need to be saved.
+    - name: Remove CMake build trees from the Rust cache
+      run: rm -rf rust/target/*/build/*/out/build
 
     - name: Upload Pages artifact
       if: github.event_name == 'push'
@@ -120,7 +127,7 @@ jobs:
   deploy:
     if: github.event_name == 'push'
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     permissions:
       pages: write

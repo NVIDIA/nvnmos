@@ -15,9 +15,13 @@
 #   docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst \
 #     --build-arg EXTRA_APT_PACKAGES="gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly" .
 #
-# Optional DeepStream base (to get DeepStream plugins in the final image; large):
-#   docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst:ds \
-#     --build-arg BASE_IMAGE=nvcr.io/nvidia/deepstream:9.1-triton-multiarch .
+# Optional DeepStream base (large). DeepStream 9.2 publishes distinct images
+# on ghcr.io/nvidia/deepstream. Pass --platform linux/amd64 or linux/arm64
+# to match the machine that runs it.
+#   x86 dGPU and Jetson (one multi-arch manifest):
+#     --build-arg BASE_IMAGE=ghcr.io/nvidia/deepstream:9.2-triton-multiarch
+#   SBSA (GH200, GB200, DGX Spark):
+#     --build-arg BASE_IMAGE=ghcr.io/nvidia/deepstream:9.2-triton-sbsa-dgx-spark
 #
 # Run:
 #
@@ -214,7 +218,17 @@ RUN git init /gst-plugins-rs && cd /gst-plugins-rs \
     && git checkout FETCH_HEAD
 
 WORKDIR /gst-plugins-rs
-RUN cargo cbuild -p gst-plugin-udp -p gst-plugin-rtp -p gst-plugin-closedcaption --release
+# cargo-c writes plugins to target/<host-triple>/release (x86_64-unknown-linux-gnu
+# or aarch64-unknown-linux-gnu). Copy them to a fixed path so later stages
+# can take the same files on amd64 and arm64.
+RUN cargo cbuild -p gst-plugin-udp -p gst-plugin-rtp -p gst-plugin-closedcaption --release --locked \
+    && host_triple="$(rustc -vV | sed -n 's/^host: //p')" \
+    && mkdir -p /opt/gst-plugins-rs \
+    && cp \
+        "target/${host_triple}/release/libgstrsudp.so" \
+        "target/${host_triple}/release/libgstrsrtp.so" \
+        "target/${host_triple}/release/libgstrsclosedcaption.so" \
+        /opt/gst-plugins-rs/
 
 # -----------------------------------------------------------------------------
 # Stage runtime libraries and binaries into a fixed layout under /opt/nvnmos.
@@ -228,12 +242,7 @@ COPY --from=nvnmos-rust-builder /nvnmos/rust/target/release/nvnmosd /bin/nvnmosd
 COPY --from=nvnmos-rust-builder /nvnmos/rust/target/release/libgstnmos.so /plugins/
 COPY --from=nvnmos-rust-builder /nvnmos/rust/target/release/libgstavsynctest.so /plugins/
 COPY --from=mxl-builder /mxl/rust/target/release/libgstmxl.so /plugins/
-COPY --from=gst-plugins-rs-builder \
-    /gst-plugins-rs/target/x86_64-unknown-linux-gnu/release/libgstrsudp.so /plugins/
-COPY --from=gst-plugins-rs-builder \
-    /gst-plugins-rs/target/x86_64-unknown-linux-gnu/release/libgstrsrtp.so /plugins/
-COPY --from=gst-plugins-rs-builder \
-    /gst-plugins-rs/target/x86_64-unknown-linux-gnu/release/libgstrsclosedcaption.so /plugins/
+COPY --from=gst-plugins-rs-builder /opt/gst-plugins-rs/ /plugins/
 
 RUN mkdir -p /opt/nvnmos/bin /opt/nvnmos/lib /opt/nvnmos/lib/mxl/internal \
         /opt/nvnmos/plugins \

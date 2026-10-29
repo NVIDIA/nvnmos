@@ -4,8 +4,11 @@
 # Library package image: builds libnvnmos + Rust workspace, produces a tarball,
 # and smoke-tests nvnmos-example / nvnmosd / nvnmosd-example on start.
 #
-# Build from the repository root:
+# Build from the repository root. The image matches the builder architecture
+# (linux/amd64 or linux/arm64). The same Ubuntu 24.04 recipe is the arm64
+# library image for Jetson and for SBSA. --platform requires BuildKit.
 #   docker build -f docker/nvnmos/Dockerfile -t nvnmos .
+#   docker build --platform linux/arm64 -f docker/nvnmos/Dockerfile -t nvnmos:arm64 .
 
 ARG BASE_IMAGE=ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
@@ -14,9 +17,14 @@ ARG PIP_BREAK_SYSTEM_PACKAGES=1
 ARG CONAN_LOCKFILE=src/conan.lock
 ARG RUST_TOOLCHAIN=1.92
 
-# use pattern replacement to clean up '/' and ':'
+# The default suffix is based on the BASE_IMAGE, plus BuildKit's TARGETARCH
+# (amd64, arm64, …) when it is set. Pattern replacement cleans '/' and ':'
+# out of BASE_IMAGE. PACKAGE_SUFFIX replaces the default suffix.
+# TARGETARCH is intentionally undeclared: an explicit ARG TARGETARCH, even
+# with no default, replaces the BuildKit value. The legacy builder leaves
+# it empty, so the default suffix has no architecture.
 ARG _BASE_IMAGE=${BASE_IMAGE//\//-}
-ARG PACKAGE_NAME=nvnmos${PACKAGE_SUFFIX:--${_BASE_IMAGE//:/-}}
+ARG PACKAGE_NAME=nvnmos${PACKAGE_SUFFIX:--${_BASE_IMAGE//:/-}${TARGETARCH:+-${TARGETARCH}}}
 
 # -----------------------------------------------------------------------------
 # C++ library (libnvnmos) — same layout as README / CI (repo root, build/ sibling of src/).
@@ -40,6 +48,10 @@ RUN pip install conan~=2.2 && conan profile detect
 
 WORKDIR /nvnmos
 
+# Restored package binaries. The profile from detect is already in place.
+# .gitkeep keeps the directory in Git. .dockerignore excludes it.
+COPY docker/nvnmos/conan-cache/ /root/.conan2/p/
+
 COPY src/ src/
 
 RUN conan install src \
@@ -47,7 +59,8 @@ RUN conan install src \
     --build=missing \
     --output-folder=src/conan \
     --lockfile=${CONAN_LOCKFILE} \
-    --lockfile-out=src/conan.lock
+    --lockfile-out=src/conan.lock \
+    && conan cache clean "*" --source --build --temp
 
 RUN cmake -B build \
     -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
@@ -87,6 +100,11 @@ WORKDIR /nvnmos
 
 COPY --from=cpp-builder /nvnmos/build /nvnmos/build
 COPY --from=cpp-builder /nvnmos/src /nvnmos/src
+
+# Restored release builds of the dependencies.
+# .gitkeep keeps the directory in Git. .dockerignore excludes it.
+COPY docker/nvnmos/cargo-cache/ /nvnmos/rust/target/
+
 COPY rust/ rust/
 
 RUN NVNMOS_LIB_DIR=/nvnmos/build cargo build --manifest-path rust/Cargo.toml --workspace --release --locked

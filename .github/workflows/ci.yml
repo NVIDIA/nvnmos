@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2025]
         config: [Release]
     runs-on: ${{ matrix.os }}
     steps:
@@ -37,6 +37,27 @@ jobs:
             -replace '^compiler\.cppstd=.*$', 'compiler.cppstd=17' `
             -replace '^compiler\.version=.*$', 'compiler.version=194' |
             Set-Content $profile
+      - name: Conan cache key
+        id: conan-profile
+        run: |
+          profile=$(conan profile path default)
+          if command -v cygpath >/dev/null 2>&1; then
+            profile=$(cygpath -u "$profile")
+          fi
+          compiler=$(sed -n 's/^compiler\.version=//p' "$profile")
+          test -n "$compiler"
+          echo "compiler=$compiler" >> "$GITHUB_OUTPUT"
+      # Package binaries only. The profile stays outside this directory, so the
+      # Windows MSVC pin above is not replaced by a restored cache.
+      # Save the cleaned cache when this key is not already stored.
+      - name: Restore Conan cache
+        id: conan-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ runner.os }}-${{ runner.arch }}-${{ matrix.config }}-${{ steps.conan-profile.outputs.compiler }}-${{ hashFiles('src/conan.lock') }}
+          restore-keys: |
+            conan-${{ runner.os }}-${{ runner.arch }}-${{ matrix.config }}-${{ steps.conan-profile.outputs.compiler }}-
       - name: Install dependencies
         run: |
           conan install src \
@@ -44,6 +65,13 @@ jobs:
             --build=missing \
             --output-folder=src/conan \
             --lockfile=src/conan.lock
+          conan cache clean "*" --source --build --temp
+      - name: Save Conan cache
+        if: steps.conan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.conan2/p
+          key: ${{ steps.conan-cache.outputs.cache-primary-key }}
       - name: Generate nvnmos (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -68,25 +96,34 @@ jobs:
         run: |
           cmake --build build --config=${{ matrix.config }} --parallel 2
       # Upload the Linux shared library so the `rust` job can link against
-      # it without rebuilding the C side from scratch.
+      # it without rebuilding the C side from scratch. The artifact name
+      # includes the runner label so the amd64 and arm64 builds stay separate.
       - name: Upload libnvnmos.so (Linux)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v7
         with:
-          name: libnvnmos-linux
+          name: libnvnmos-${{ matrix.os }}
           path: build/libnvnmos.so
           if-no-files-found: error
           retention-days: 1
   rust:
     needs: build
-    runs-on: ubuntu-24.04
+    env:
+      GST_PLUGINS_RS_REF: 8fe3cc1195d7d54990a84d85ca189624db29b096
+      GST_PLUGINS_RS_TOOLCHAIN: "1.92"
+      GST_PLUGINS_RS_PACKAGES: gst-plugin-closedcaption gst-plugin-rtp gst-plugin-udp
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Download libnvnmos.so
         uses: actions/download-artifact@v7
         with:
-          name: libnvnmos-linux
+          name: libnvnmos-${{ matrix.os }}
           path: build
 
       # bindgen (nvnmos-sys) needs libclang; gst-nmos-rs links GStreamer 1.x.
@@ -111,6 +148,8 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
           rust-src-dir: rust
+          # rust-cache's own key does not include the Ubuntu version.
+          cache-key: ${{ matrix.os }}
           components: clippy, rustfmt
           rustflags: ""
 
@@ -138,30 +177,51 @@ jobs:
       # so the udp av_sync case (and udp2 / jxsv tests) run here instead of
       # self-skipping. The mxl and nvdsudp cases still self-skip (no libmxl /
       # DeepStream on the runner).
+      - name: gst-plugins-rs cache key
+        id: gst-plugins-rs-key
+        run: echo "gstreamer=$(pkg-config --modversion gstreamer-1.0)" >> "$GITHUB_OUTPUT"
+      # The plugins link against the runner's GStreamer, so its version is in the
+      # key with the runner image, toolchain, commit and packages.
+      # Build and save when this key is not already stored.
+      - name: Restore gst-plugins-rs plugins
+        id: gst-plugins-rs-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/gst-plugins-rs-cache
+          key: gst-plugins-rs-${{ matrix.os }}-${{ env.GST_PLUGINS_RS_TOOLCHAIN }}-${{ env.GST_PLUGINS_RS_REF }}-${{ env.GST_PLUGINS_RS_PACKAGES }}-${{ steps.gst-plugins-rs-key.outputs.gstreamer }}
       - name: Build gst-plugins-rs plugins (pinned)
+        if: steps.gst-plugins-rs-cache.outputs.cache-hit != 'true'
         env:
-          GST_PLUGINS_RS_REF: 8fe3cc1195d7d54990a84d85ca189624db29b096
-          RUSTUP_TOOLCHAIN: "1.92"
+          RUSTUP_TOOLCHAIN: ${{ env.GST_PLUGINS_RS_TOOLCHAIN }}
         run: |
           git init "${RUNNER_TEMP}/gst-plugins-rs"
           cd "${RUNNER_TEMP}/gst-plugins-rs"
           git remote add origin https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git
           git fetch --depth 1 origin "${GST_PLUGINS_RS_REF}"
           git checkout FETCH_HEAD
-          cargo build --release \
-            -p gst-plugin-closedcaption \
-            -p gst-plugin-rtp \
-            -p gst-plugin-udp
+          packages=()
+          for package in ${GST_PLUGINS_RS_PACKAGES}; do
+            packages+=(-p "${package}")
+          done
+          cargo build --release --locked "${packages[@]}"
+          mkdir -p "${RUNNER_TEMP}/gst-plugins-rs-cache"
+          cp target/release/libgstrs*.so "${RUNNER_TEMP}/gst-plugins-rs-cache/"
+      - name: Save gst-plugins-rs plugins
+        if: steps.gst-plugins-rs-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/gst-plugins-rs-cache
+          key: ${{ steps.gst-plugins-rs-cache.outputs.cache-primary-key }}
 
       # The daemon-backed integration tests self-gate: they run here because
       # nvnmosd + libnvnmos.so are present. GST_PLUGIN_PATH adds the pinned
-      # gst-plugins-rs plugins built above.
+      # gst-plugins-rs plugins built or restored above.
       - name: Cargo test (workspace)
         working-directory: rust
         env:
           NVNMOS_LIB_DIR: ${{ github.workspace }}/build
           LD_LIBRARY_PATH: ${{ github.workspace }}/build
-          GST_PLUGIN_PATH: ${{ runner.temp }}/gst-plugins-rs/target/release
+          GST_PLUGIN_PATH: ${{ runner.temp }}/gst-plugins-rs-cache
         shell: bash
         # --show-output surfaces the `test <name> ... skipped, <reason>` lines
         # that test-skip's `skip!` prints (libtest captures them otherwise and
@@ -186,13 +246,81 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
           exit "${status}"
+
+      # protobuf-src builds protoc with CMake. Only its install tree is used
+      # after the build, so the CMake build trees do not need to be saved.
+      - name: Remove CMake build trees from the Rust cache
+        run: rm -rf rust/target/*/build/*/out/build
   docker:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
 
+      # Package binaries from the previous image build. The image copies
+      # docker/nvnmos/conan-cache into Conan's package storage. Export and
+      # save when this key is not already stored.
+      - name: Restore Conan cache
+        id: conan-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: docker/nvnmos/conan-cache
+          key: conan-docker-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/conan.lock', 'docker/nvnmos/Dockerfile') }}
+          restore-keys: |
+            conan-docker-${{ runner.os }}-${{ runner.arch }}-
+      # Release builds of the Rust dependencies from the previous image build.
+      # The image copies docker/nvnmos/cargo-cache into the Cargo target
+      # directory. Export and save when this key is not already stored.
+      - name: Restore Cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: docker/nvnmos/cargo-cache
+          key: cargo-docker-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/Cargo.lock', 'docker/nvnmos/Dockerfile') }}
+          restore-keys: |
+            cargo-docker-${{ runner.os }}-${{ runner.arch }}-
+      - name: Build C++ stage
+        id: cpp
+        run: docker build -f docker/nvnmos/Dockerfile --target cpp-builder -t nvnmos-cpp:ci .
+      - name: Build Rust stage
+        id: rust
+        run: docker build -f docker/nvnmos/Dockerfile --target rust-builder -t nvnmos-rust:ci .
       - name: Build image
         run: docker build -f docker/nvnmos/Dockerfile -t nvnmos:ci .
+      - name: Export Conan cache
+        if: always() && steps.cpp.outcome == 'success' && steps.conan-cache.outputs.cache-hit != 'true'
+        run: |
+          cid=$(docker create nvnmos-cpp:ci)
+          rm -rf docker/nvnmos/conan-cache
+          docker cp "$cid:/root/.conan2/p" docker/nvnmos/conan-cache
+          docker rm "$cid"
+          sudo chown -R "$(id -u):$(id -g)" docker/nvnmos/conan-cache
+      - name: Save Conan cache
+        if: always() && steps.cpp.outcome == 'success' && steps.conan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: docker/nvnmos/conan-cache
+          key: ${{ steps.conan-cache.outputs.cache-primary-key }}
+      # protobuf-src builds protoc with CMake. Only its install tree is used
+      # after the build, so the CMake build trees do not need to be saved.
+      - name: Export Cargo cache
+        if: always() && steps.rust.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true'
+        run: |
+          cid=$(docker create nvnmos-rust:ci)
+          rm -rf docker/nvnmos/cargo-cache
+          docker cp "$cid:/nvnmos/rust/target" docker/nvnmos/cargo-cache
+          docker rm "$cid"
+          sudo chown -R "$(id -u):$(id -g)" docker/nvnmos/cargo-cache
+          rm -rf docker/nvnmos/cargo-cache/release/build/*/out/build
+      - name: Save Cargo cache
+        if: always() && steps.rust.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: docker/nvnmos/cargo-cache
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
       - name: Run entrypoint smoke tests (non-root)
         run: docker run --rm --user 1000:1000 --cap-drop=ALL nvnmos:ci true
