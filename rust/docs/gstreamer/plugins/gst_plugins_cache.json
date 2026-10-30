@@ -1161,7 +1161,216 @@
         },
         "filename": "gstnmos",
         "license": "Apache-2.0",
-        "other-types": {},
+        "other-types": {
+            "GstNmosAudioChannelMapSinkPad": {
+                "hierarchy": [
+                    "GstNmosAudioChannelMapSinkPad",
+                    "GstGhostPad",
+                    "GstProxyPad",
+                    "GstPad",
+                    "GstObject",
+                    "GInitiallyUnowned",
+                    "GObject"
+                ],
+                "kind": "object",
+                "properties": {
+                    "channels": {
+                        "blurb": "Number of Input channels. 0 derives it from negotiated audio caps.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "-1",
+                        "min": "0",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    },
+                    "description": {
+                        "blurb": "Description for this Input shown to controllers as IS-08 `/properties/description`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "input-id": {
+                        "blurb": "IS-08 Input ID: ASCII letters, digits, `-` and `_`. Empty assigns `inputN` from this pad's position. Set it when the Node has more than one channel mapping.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "label": {
+                        "blurb": "Label for this Input shown to controllers as IS-08 `/properties/name`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "receiver-name": {
+                        "blurb": "Caller-chosen name of the NMOS Receiver associated with this Input. Its derived NMOS ID is published as IS-08 `/parent`. Empty publishes null.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    }
+                }
+            },
+            "GstNmosAudioChannelMapSrcPad": {
+                "hierarchy": [
+                    "GstNmosAudioChannelMapSrcPad",
+                    "GstGhostPad",
+                    "GstProxyPad",
+                    "GstPad",
+                    "GstObject",
+                    "GInitiallyUnowned",
+                    "GObject"
+                ],
+                "kind": "object",
+                "properties": {
+                    "active-map": {
+                        "blurb": "Initial channel routing for this Output, for example `map,0=input0:0,1=input0:1`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "GstStructure",
+                        "writable": true
+                    },
+                    "channels": {
+                        "blurb": "Number of Output channels. 0 derives it from negotiated audio caps.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "-1",
+                        "min": "0",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    },
+                    "description": {
+                        "blurb": "Description for this Output shown to controllers as IS-08 `/properties/description`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "label": {
+                        "blurb": "Label for this Output shown to controllers as IS-08 `/properties/name`.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "output-id": {
+                        "blurb": "IS-08 Output ID: ASCII letters, digits, `-` and `_`. Empty assigns `outputN` from this pad's position. Set it when the Node has more than one channel mapping.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "sender-name": {
+                        "blurb": "Caller-chosen name of the NMOS Sender associated with this Output. The derived NMOS ID of its Source is published as IS-08 `/sourceid`. Empty publishes null.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    }
+                }
+            },
+            "GstNmosCapsMode": {
+                "kind": "enum",
+                "values": [
+                    {
+                        "desc": "Leave the transport file's caps marker untouched",
+                        "name": "auto",
+                        "value": "0"
+                    },
+                    {
+                        "desc": "Constrained Receiver Caps",
+                        "name": "constrained",
+                        "value": "1"
+                    },
+                    {
+                        "desc": "Unconstrained Receiver Caps",
+                        "name": "unconstrained",
+                        "value": "2"
+                    }
+                ]
+            },
+            "GstNmosTransport": {
+                "kind": "enum",
+                "values": [
+                    {
+                        "desc": "MXL shared-memory transport",
+                        "name": "mxl",
+                        "value": "0"
+                    },
+                    {
+                        "desc": "RTP/UDP via gst-plugins-good",
+                        "name": "udp",
+                        "value": "1"
+                    },
+                    {
+                        "desc": "RTP/UDP via gst-plugins-rs",
+                        "name": "udp2",
+                        "value": "2"
+                    },
+                    {
+                        "desc": "NvDsUdp / Rivermax (DeepStream nvdsudp*)",
+                        "name": "nvdsudp",
+                        "value": "3"
+                    }
+                ]
+            }
+        },
         "package": "gst-nmos-rs",
         "source": "gst-nmos-rs",
         "tracers": {},

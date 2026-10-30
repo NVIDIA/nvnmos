@@ -55,8 +55,11 @@ pip install --no-build-isolation "hotdoc~=0.18.0"
 
 Meson then runs `scripts/patch_hotdoc_gtk_doc_hrefs.py` against the installed
 Hotdoc to rewrite leftover `web.mit.edu/barnowl` gtk-doc fallbacks (for example
-`gchararray`) to `docs.gtk.org`. The patch is idempotent and re-applied on every
-configure.
+`gchararray`) to `docs.gtk.org`. It also runs
+`scripts/patch_hotdoc_gst_enum_names.py`, which makes Hotdoc title enum sections
+with the GType name (`GstNmosCapsMode`) instead of a hyphenated form
+(`Nmos-caps-mode`), matching gstreamer.freedesktop.org. Both patches are
+idempotent and re-applied on every configure.
 
 Rust toolchain plus workspace dependencies (same as `rust/` CI).
 
@@ -66,10 +69,17 @@ Rust toolchain plus workspace dependencies (same as `rust/` CI).
 export CARGO_TARGET_DIR=/path/to/nvnmos/rust/target
 cd rust/docs/gstreamer
 meson setup build -Ddoc=enabled
-ninja -C build gstreamer-doc
+meson devenv -C build ninja gstreamer-doc
 ```
 
 HTML output: `build/NvNmos-GStreamer-doc/html/`
+
+`meson setup` downloads the gstreamer-docs release tarball that matches the
+installed GStreamer version and keeps its devhelp index in the build directory.
+`meson devenv` adds that directory to `XDG_DATA_DIRS`, which Hotdoc uses to link
+GStreamer types such as `GstElement` to gstreamer.freedesktop.org. If the
+tarball cannot be fetched, for example offline or for a GStreamer version with
+no docs release, `meson setup` warns and those types are left unlinked.
 
 ## Refresh committed plugin cache
 
@@ -95,7 +105,7 @@ so it follows navbar link colour in both light and dark mode.
 
 After bumping Hotdoc or `html_theme` in `meson.build`:
 
-1. Rebuild: `ninja -C build gstreamer-doc` and open `index.html` locally.
+1. Rebuild: `meson devenv -C build ninja gstreamer-doc` and open `index.html` locally.
 2. Check the navbar: home icon, search, theme toggle, and **View on GitHub**
    (right-aligned, octocat + label).
 3. Toggle dark/light mode; confirm the octocat remains visible and the sidebar
@@ -110,4 +120,4 @@ After bumping the vendored GStreamer scanner (`tools/`):
 
 1. Rebuild the scanner: `ninja -C build`.
 2. Regenerate the cache: `./scripts/refresh-plugins-cache.sh`.
-3. Re-run `ninja -C build gstreamer-doc` and diff element property tables.
+3. Re-run `meson devenv -C build ninja gstreamer-doc` and diff element property tables.

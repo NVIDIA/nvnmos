@@ -88,9 +88,12 @@ jobs:
         export CARGO_TARGET_DIR="$PWD/rust/target"
         cd rust/docs/gstreamer
         meson setup build -Ddoc=enabled
+        if ! compgen -G 'build/gstreamer-docs-*/devhelp/books/GStreamer/GStreamer.devhelp2' > /dev/null; then
+          echo "::warning title=GStreamer docs index unavailable::GStreamer types in the plugin docs are not linked to gstreamer.freedesktop.org. See the meson setup output for the reason."
+        fi
         ninja -C build gst-hotdoc-plugins-scanner
         ./scripts/refresh-plugins-cache.sh --check
-        ninja -C build gstreamer-doc
+        meson devenv -C build ninja gstreamer-doc
         mkdir -p "$GITHUB_WORKSPACE/public/gstreamer"
         cp -a build/NvNmos-GStreamer-doc/html/* "$GITHUB_WORKSPACE/public/gstreamer/"
 

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Rewrite leftover MIT gtk-doc fallback URLs in Hotdoc's gtk_doc.py.
+"""Fix the hardcoded GLib/GObject fallback URLs in Hotdoc's gtk_doc.py.
 
 Hotdoc 0.18.x already points many GLib/GObject symbols at docs.gtk.org, but a
-handful of hardcoded fallbacks still use web.mit.edu/barnowl mirrors. There is
-no config hook for those URLs, so this script patches the installed module
-before documentation generation.
+handful of hardcoded fallbacks still use web.mit.edu/barnowl mirrors, and
+there are no entries for the `GObject` and `GInitiallyUnowned` classes. There
+is no config hook for those URLs, so this script patches the installed module
+before documentation generation to use docs.gtk.org.
 
 Idempotent: safe to run repeatedly against an already-patched install.
 """
@@ -60,6 +61,20 @@ REPLACEMENTS = (
         "glib-Standard-Macros.html#{define}:CAPS",
         "https://docs.gtk.org/glib/macros.html",
     ),
+    (
+        # The GStreamer devhelp index does not cover the GObject base classes
+        # in every element's hierarchy, so add them next to Hotdoc's own
+        # docs.gtk.org entries.
+        "    GTKDOC_HREFS['GAsyncReadyCallback'] = "
+        "'https://docs.gtk.org/gio/callback.AsyncReadyCallback.html'\n"
+        "    GTKDOC_HREFS['g_auto'] = ",
+        "    GTKDOC_HREFS['GAsyncReadyCallback'] = "
+        "'https://docs.gtk.org/gio/callback.AsyncReadyCallback.html'\n"
+        "    GTKDOC_HREFS['GObject'] = 'https://docs.gtk.org/gobject/class.Object.html'\n"
+        "    GTKDOC_HREFS['GInitiallyUnowned'] = "
+        "'https://docs.gtk.org/gobject/class.InitiallyUnowned.html'\n"
+        "    GTKDOC_HREFS['g_auto'] = ",
+    ),
 )
 
 
@@ -81,6 +96,13 @@ def patch_file(path: Path, *, dry_run: bool = False) -> int:
         if leftover:
             print(
                 f"{path}: still contains {leftover} barnowl URL(s); "
+                "Hotdoc may have changed — update this script",
+                file=sys.stderr,
+            )
+            return 1
+        if "GTKDOC_HREFS['GObject']" not in original:
+            print(
+                f"{path}: GObject entries not added; "
                 "Hotdoc may have changed — update this script",
                 file=sys.stderr,
             )
