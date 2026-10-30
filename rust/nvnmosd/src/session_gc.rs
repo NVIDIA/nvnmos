@@ -33,14 +33,19 @@ pub struct SessionGcConfig {
 impl SessionGcConfig {
     pub fn from_env() -> Self {
         let enabled = env_config::read_env_bool("NVNMOSD_SESSION_GC", EnvDefault::OptOut);
-        let subscribe_timeout = env_config::read_timeout_secs(
+        // A zero subscribe timeout would close every session before it
+        // could subscribe. A zero resubscribe timeout closes the session
+        // as soon as the activation stream ends.
+        let subscribe_timeout = Duration::from_secs(env_config::read_integer(
             "NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC",
             DEFAULT_SUBSCRIBE_TIMEOUT_SEC,
-        );
-        let resubscribe_timeout = env_config::read_timeout_secs(
+            1,
+        ));
+        let resubscribe_timeout = Duration::from_secs(env_config::read_integer(
             "NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC",
             DEFAULT_RESUBSCRIBE_TIMEOUT_SEC,
-        );
+            0,
+        ));
         Self {
             enabled,
             subscribe_timeout,

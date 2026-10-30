@@ -7,6 +7,7 @@
 //! `SubscribeChannelMappingActivations` and the channel-mapping RPCs.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
@@ -21,7 +22,10 @@ use tonic::transport::Channel;
 
 use gstreamer as gst;
 
-use crate::daemon::{DaemonError, connect_uds, parse_unix_uri};
+use crate::CAT;
+use crate::daemon::{
+    DaemonError, RPC_TIMEOUT, close_session, connect_uds, drive_call, parse_unix_uri, settle_task,
+};
 use crate::runtime::SHARED_RUNTIME;
 use crate::session::channel_mapping::ChannelMappingSettings;
 
@@ -54,8 +58,11 @@ pub(crate) struct ChannelMappingSession {
     pub(crate) created_node: bool,
     pub(crate) http_port: u16,
     channelmapping: Option<AddedChannelMapping>,
-    client: NvnmosDaemonClient<Channel>,
-    activation_task: JoinHandle<()>,
+    /// `None` once [`Self::detach`] has handed the client to the close.
+    client: Option<NvnmosDaemonClient<Channel>>,
+    activation_task: Option<JoinHandle<()>>,
+    inflight_add: Option<JoinHandle<Result<AddChannelMappingResponse, DaemonError>>>,
+    inflight_sync: Option<JoinHandle<Result<(), DaemonError>>>,
 }
 
 struct AddedChannelMapping {
@@ -118,8 +125,10 @@ impl ChannelMappingSession {
             created_node,
             http_port,
             channelmapping: None,
-            client,
-            activation_task,
+            client: Some(client),
+            activation_task: Some(activation_task),
+            inflight_add: None,
+            inflight_sync: None,
         })
     }
 
@@ -134,7 +143,17 @@ impl ChannelMappingSession {
         if self.channelmapping.is_some() {
             return Err(DaemonError::AlreadyAdded);
         }
-        let resp = self.client.add_channel_mapping(request).await?.into_inner();
+        let mut client = self.client()?;
+        let resp = drive_call(&mut self.inflight_add, || {
+            SHARED_RUNTIME.spawn(async move {
+                client
+                    .add_channel_mapping(request)
+                    .await
+                    .map(|response| response.into_inner())
+                    .map_err(DaemonError::from)
+            })
+        })
+        .await?;
         self.channelmapping = Some(AddedChannelMapping {
             handle: resp.channelmapping_handle.clone(),
         });
@@ -146,7 +165,7 @@ impl ChannelMappingSession {
         let Some(cm) = self.channelmapping.take() else {
             return Ok(());
         };
-        self.client
+        self.client()?
             .remove_channel_mapping(RemoveChannelMappingRequest {
                 session_handle: self.session_handle.clone(),
                 channelmapping_handle: cm.handle,
@@ -165,42 +184,95 @@ impl ChannelMappingSession {
             .as_ref()
             .map(|cm| cm.handle.clone())
             .ok_or(DaemonError::NoResource)?;
-        self.client
-            .sync_channel_mapping_state(SyncChannelMappingStateRequest {
-                session_handle: self.session_handle.clone(),
-                channelmapping_handle: handle,
-                output_id: output_id.to_owned(),
-                active_map,
+        let mut client = self.client()?;
+        let session_handle = self.session_handle.clone();
+        let output_id = output_id.to_owned();
+        drive_call(&mut self.inflight_sync, || {
+            SHARED_RUNTIME.spawn(async move {
+                client
+                    .sync_channel_mapping_state(SyncChannelMappingStateRequest {
+                        session_handle,
+                        channelmapping_handle: handle,
+                        output_id,
+                        active_map,
+                    })
+                    .await
+                    .map(|_| ())
+                    .map_err(DaemonError::from)
             })
-            .await?;
-        Ok(())
+        })
+        .await
     }
 
-    pub(crate) async fn close(mut self) -> Result<(), DaemonError> {
-        let ChannelMappingSession {
-            session_handle,
-            mut client,
-            activation_task,
-            ..
-        } = self;
-
-        activation_task.abort();
-        let _ = activation_task.await;
-
-        if let Some(cm) = self.channelmapping.take() {
-            let _ = client
-                .remove_channel_mapping(RemoveChannelMappingRequest {
-                    session_handle: session_handle.clone(),
-                    channelmapping_handle: cm.handle,
-                })
-                .await;
+    /// Cancel the activation task and close the session by `deadline`.
+    /// `CloseSession` removes the channel mapping, so no
+    /// `RemoveChannelMapping` is sent.
+    pub(crate) async fn close(mut self, deadline: Instant) -> Result<(), DaemonError> {
+        match self.detach() {
+            Some(detached) => detached.close(deadline).await,
+            None => Ok(()),
         }
+    }
 
-        client
-            .close_session(CloseSessionRequest { session_handle })
-            .await?;
+    fn client(&self) -> Result<NvnmosDaemonClient<Channel>, DaemonError> {
+        self.client.clone().ok_or(DaemonError::Closed)
+    }
 
-        Ok(())
+    fn detach(&mut self) -> Option<DetachedChannelMappingSession> {
+        Some(DetachedChannelMappingSession {
+            session_handle: self.session_handle.clone(),
+            client: self.client.take()?,
+            activation_task: self.activation_task.take(),
+            inflight_add: self.inflight_add.take(),
+            inflight_sync: self.inflight_sync.take(),
+        })
+    }
+}
+
+impl Drop for ChannelMappingSession {
+    fn drop(&mut self) {
+        let Some(detached) = self.detach() else {
+            return;
+        };
+        let handle = detached.session_handle.clone();
+        let deadline = Instant::now() + RPC_TIMEOUT;
+        SHARED_RUNTIME.spawn(async move {
+            match detached.close(deadline).await {
+                Ok(()) => gst::info!(CAT, "channel mapping session closed: handle={handle}"),
+                Err(e) => gst::warning!(CAT, "CloseSession (handle={handle}): {e}"),
+            }
+        });
+    }
+}
+
+struct DetachedChannelMappingSession {
+    session_handle: String,
+    client: NvnmosDaemonClient<Channel>,
+    activation_task: Option<JoinHandle<()>>,
+    inflight_add: Option<JoinHandle<Result<AddChannelMappingResponse, DaemonError>>>,
+    inflight_sync: Option<JoinHandle<Result<(), DaemonError>>>,
+}
+
+impl DetachedChannelMappingSession {
+    async fn close(self, deadline: Instant) -> Result<(), DaemonError> {
+        let Self {
+            session_handle,
+            client,
+            activation_task,
+            inflight_add,
+            inflight_sync,
+        } = self;
+        if let Some(task) = inflight_add {
+            settle_task(task, deadline).await;
+        }
+        if let Some(task) = inflight_sync {
+            settle_task(task, deadline).await;
+        }
+        if let Some(task) = activation_task {
+            task.abort();
+            let _ = task.await;
+        }
+        close_session(client, session_handle, deadline).await
     }
 }
 
@@ -467,7 +539,10 @@ mod session_integration {
                 .remove_channel_mapping()
                 .await
                 .expect("RemoveChannelMapping");
-            session.close().await.expect("CloseSession");
+            session
+                .close(Instant::now() + RPC_TIMEOUT)
+                .await
+                .expect("CloseSession");
         });
     }
 }

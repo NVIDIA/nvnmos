@@ -17,6 +17,7 @@ use crate::channel_mapping_session::{
     ChannelMappingActivationHandler, ChannelMappingActivationOutcome,
     ChannelMappingActivationRequest, ChannelMappingSession,
 };
+use crate::daemon::SessionPhase;
 use crate::session::channel_mapping::{
     CHANNELMAPPING_NAME_BLURB, ChannelMappingSettings, RESTRICT_ROUTABLE_INPUTS_BLURB,
     close as close_session, validate_and_open,
@@ -90,7 +91,7 @@ impl From<&Settings> for ChannelMappingSettings {
 #[derive(Default)]
 pub struct NmosAudioChannelMap {
     settings: Mutex<Settings>,
-    session: Mutex<Option<ChannelMappingSession>>,
+    session: Mutex<Option<SessionPhase<ChannelMappingSession>>>,
     internal: Mutex<Option<InternalGraph>>,
     topology: Mutex<Option<FrozenTopology>>,
     fixated: Mutex<bool>,
@@ -354,6 +355,8 @@ impl ElementImpl for NmosAudioChannelMap {
         if transition == gst::StateChange::ReadyToPaused {
             if !*self.fixated.lock().unwrap() {
                 if let Err(e) = self.fixate_and_build() {
+                    self.teardown_internals();
+                    *self.fixated.lock().unwrap() = false;
                     post_state_change_error!(element, &e, "channel mapping fixation failed: {e:#}");
                     return Err(gst::StateChangeError);
                 }
@@ -448,6 +451,15 @@ impl NmosAudioChannelMap {
             graph.teardown(bin);
         }
         *self.topology.lock().unwrap() = None;
+        let element = self.obj();
+        let bin: &gst::Bin = element.upcast_ref();
+        for pad in bin.pads() {
+            if let Some(sink) = pad.downcast_ref::<NmosAudioChannelMapSinkPad>() {
+                sink.imp().thaw();
+            } else if let Some(src) = pad.downcast_ref::<NmosAudioChannelMapSrcPad>() {
+                src.imp().thaw();
+            }
+        }
     }
 
     fn fixate_and_build(&self) -> Result<(), anyhow::Error> {
@@ -515,6 +527,7 @@ impl NmosAudioChannelMap {
         let mut session_guard = self.session.lock().unwrap();
         let session = session_guard
             .as_mut()
+            .and_then(SessionPhase::open_mut)
             .context("internal: no open channel mapping session")?;
 
         if session.channelmapping_handle().is_none() {
@@ -587,26 +600,32 @@ impl NmosAudioChannelMap {
             sync_entries.push((src.output_id.clone(), entries));
         }
 
-        let graph = InternalGraph::build(bin, &topology, &sink_pads, &src_pads, &output_routes)?;
+        if self.internal.lock().unwrap().is_none() {
+            let graph =
+                InternalGraph::build(bin, &topology, &sink_pads, &src_pads, &output_routes)?;
 
-        for pad in sink_pads.iter().chain(src_pads.iter()) {
-            if let Some(sink) = pad.downcast_ref::<NmosAudioChannelMapSinkPad>() {
-                sink.imp().freeze();
-            } else if let Some(src) = pad.downcast_ref::<NmosAudioChannelMapSrcPad>() {
-                src.imp().freeze();
+            for pad in sink_pads.iter().chain(src_pads.iter()) {
+                if let Some(sink) = pad.downcast_ref::<NmosAudioChannelMapSinkPad>() {
+                    sink.imp().freeze();
+                } else if let Some(src) = pad.downcast_ref::<NmosAudioChannelMapSrcPad>() {
+                    src.imp().freeze();
+                }
             }
+            *self.topology.lock().unwrap() = Some(topology);
+            *self.internal.lock().unwrap() = Some(graph);
         }
-        *self.fixated.lock().unwrap() = true;
-        *self.topology.lock().unwrap() = Some(topology);
-        *self.internal.lock().unwrap() = Some(graph);
 
         drop(session_guard);
         let mut session_guard = self.session.lock().unwrap();
-        let session = session_guard.as_mut().unwrap();
+        let session = session_guard
+            .as_mut()
+            .and_then(SessionPhase::open_mut)
+            .context("no open channel mapping session")?;
         for (output_id, entries) in sync_entries {
             block_on_async(session.sync_channel_mapping_state(&output_id, entries))
                 .with_context(|| format!("SyncChannelMappingState for output `{output_id}`"))?;
         }
+        *self.fixated.lock().unwrap() = true;
 
         Ok(())
     }

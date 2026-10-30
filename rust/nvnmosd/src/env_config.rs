@@ -10,8 +10,13 @@
 //!   `NVNMOSD_ANNOTATION_API`).
 //! * [`EnvDefault::OptIn`] — unset → **off**; `1` / `true` / `yes` / `on` → **on**;
 //!   anything else → **off** (`NVNMOSD_MALLOC_INFO`).
+//!
+//! Integer knobs use [`read_integer`]. Each caller passes its own minimum;
+//! a value that is not an integer, or is below that minimum, falls back to
+//! the default.
 
-use std::time::Duration;
+use std::fmt;
+use std::str::FromStr;
 
 const ENABLE_TOKENS: &[&str] = &["1", "true", "TRUE", "yes", "YES", "on", "ON"];
 const DISABLE_TOKENS: &[&str] = &["0", "false", "FALSE", "off", "OFF", "no", "NO"];
@@ -41,63 +46,36 @@ pub(crate) fn parse_env_bool(value: Option<&str>, default: EnvDefault) -> bool {
     }
 }
 
-/// Read a positive timeout in **seconds** from `name`, falling back to `default_secs`
-/// when unset or invalid (logs a warning for invalid non-empty values).
-pub(crate) fn read_timeout_secs(name: &str, default_secs: u64) -> Duration {
-    match std::env::var(name) {
-        Err(_) => Duration::from_secs(default_secs),
-        Ok(value) => match parse_timeout_secs(value.trim()) {
-            Some(duration) => duration,
-            None => {
-                tracing::warn!(
-                    env = name,
-                    value = value.trim(),
-                    default = default_secs,
-                    "invalid timeout; using default"
-                );
-                Duration::from_secs(default_secs)
-            }
-        },
-    }
-}
-
-/// Parse a timeout in **seconds**. Returns `None` for zero and non-numeric values.
-pub(crate) fn parse_timeout_secs(value: &str) -> Option<Duration> {
-    match value.parse::<u64>() {
-        Ok(0) => None,
-        Ok(secs) => Some(Duration::from_secs(secs)),
-        Err(_) => None,
-    }
-}
-
-/// Parse a TCP port number (`1..=65535`). Returns `None` for zero, out of
-/// range, and non-numeric values.
-pub(crate) fn parse_tcp_port(value: &str) -> Option<u16> {
-    match value.parse::<u32>() {
-        Ok(0) => None,
-        Ok(port) => u16::try_from(port).ok(),
-        Err(_) => None,
-    }
-}
-
-/// Read a TCP port from `name`, falling back to `default` when unset or
-/// invalid (logs a warning for invalid non-empty values).
-pub(crate) fn read_tcp_port(name: &str, default: u16) -> u16 {
+/// Read an integer from `name` and parse it with [`parse_integer`]. Falls
+/// back to `default` when unset or invalid, and logs a warning for an
+/// invalid value.
+pub(crate) fn read_integer<T>(name: &str, default: T, min: T) -> T
+where
+    T: FromStr + PartialOrd + Copy + fmt::Display,
+{
     match std::env::var(name) {
         Err(_) => default,
-        Ok(value) => match parse_tcp_port(value.trim()) {
-            Some(port) => port,
+        Ok(value) => match parse_integer(value.trim(), min) {
+            Some(parsed) => parsed,
             None => {
                 tracing::warn!(
                     env = name,
                     value = value.trim(),
-                    default,
-                    "invalid TCP port; using default"
+                    %default,
+                    %min,
+                    "invalid integer; using default"
                 );
                 default
             }
         },
     }
+}
+
+/// Parse an integer of type `T` that is at least `min`. Returns `None` for
+/// non-numeric values, fractions, values outside the range of `T`, and
+/// values below `min`.
+pub(crate) fn parse_integer<T: FromStr + PartialOrd>(value: &str, min: T) -> Option<T> {
+    value.parse::<T>().ok().filter(|parsed| *parsed >= min)
 }
 
 #[cfg(test)]
@@ -155,26 +133,24 @@ mod tests {
     }
 
     #[test]
-    fn timeout_parses_seconds() {
-        assert_eq!(parse_timeout_secs("30"), Some(Duration::from_secs(30)));
+    fn integer_parses_values_at_or_above_min() {
+        assert_eq!(parse_integer::<u64>("30", 1), Some(30));
+        assert_eq!(parse_integer::<u64>("1", 1), Some(1));
+        assert_eq!(parse_integer::<u64>("0", 0), Some(0));
     }
 
     #[test]
-    fn timeout_rejects_zero_and_garbage() {
-        assert_eq!(parse_timeout_secs("0"), None);
-        assert_eq!(parse_timeout_secs("nope"), None);
+    fn integer_rejects_values_below_min() {
+        assert_eq!(parse_integer::<u64>("0", 1), None);
+        assert_eq!(parse_integer::<u16>("0", 1), None);
     }
 
     #[test]
-    fn tcp_port_parses_valid_values() {
-        assert_eq!(parse_tcp_port("18080"), Some(18_080));
-        assert_eq!(parse_tcp_port("65535"), Some(65_535));
-    }
-
-    #[test]
-    fn tcp_port_rejects_zero_and_garbage() {
-        assert_eq!(parse_tcp_port("0"), None);
-        assert_eq!(parse_tcp_port("65536"), None);
-        assert_eq!(parse_tcp_port("nope"), None);
+    fn integer_rejects_fractions_garbage_and_out_of_range() {
+        assert_eq!(parse_integer::<u64>("0.001", 0), None);
+        assert_eq!(parse_integer::<u64>("nope", 0), None);
+        assert_eq!(parse_integer::<u64>("-1", 0), None);
+        assert_eq!(parse_integer::<u16>("65535", 1), Some(65_535));
+        assert_eq!(parse_integer::<u16>("65536", 1), None);
     }
 }

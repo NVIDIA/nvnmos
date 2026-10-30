@@ -11,19 +11,21 @@
 //! the settings critical section short.
 
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use gstreamer as gst;
 use nvnmos_rpc::v1::Transport as ProtoTransport;
 
-use crate::daemon::{ActivationHandler, ActivationRequest, Session};
-use crate::runtime::SHARED_RUNTIME;
+use crate::daemon::{
+    ActivationHandler, ActivationRequest, OpenJoin, RPC_TIMEOUT, Session, SessionPhase,
+    finish_opening, take_for_close,
+};
+use crate::runtime::{SHARED_RUNTIME, wait_for_task};
 use crate::types::{CapsMode, DEFAULT_DAEMON_URI, FlowFormat, Transport};
 
-/// Open-session timeout. Aligned with the daemon's activation ack
-/// timeout — same order of magnitude, no special meaning.
-const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+/// [`RPC_TIMEOUT`] for the open call.
+const OPEN_TIMEOUT: Duration = RPC_TIMEOUT;
 
 pub(crate) mod channel_mapping;
 pub(crate) mod connection_active;
@@ -31,6 +33,9 @@ pub(crate) mod error;
 pub(crate) mod node;
 pub(crate) mod resource_ids;
 pub(crate) mod types;
+
+#[cfg(test)]
+mod close_daemon;
 
 pub(crate) use node::NodeSettings;
 
@@ -809,7 +814,7 @@ pub(crate) fn validate_and_open(
     cat: &gst::DebugCategory,
     element: &str,
     settings: &CommonSettings,
-    session: &Mutex<Option<Session>>,
+    session: &Mutex<Option<SessionPhase<Session>>>,
     activation_handler: ActivationHandler,
 ) -> Result<InnerConfig, anyhow::Error> {
     if settings.node.node_seed.is_empty() {
@@ -850,29 +855,61 @@ pub(crate) fn validate_and_open(
     let side = settings.side;
     let name = resolve_resource_name(element, settings, transport_file.as_deref())?;
 
-    let new_session = SHARED_RUNTIME
-        .block_on(async {
-            tokio::time::timeout(
-                OPEN_TIMEOUT,
-                Session::open(
-                    &settings.daemon_uri,
-                    settings,
-                    side,
-                    &name,
-                    transport,
-                    transport_file.as_deref(),
-                    activation_handler,
-                ),
-            )
-            .await
-        })
-        .with_context(|| {
-            format!(
+    let slot = session.lock().unwrap().take();
+    match slot {
+        Some(SessionPhase::Pending(handle)) => match finish_opening(handle, OPEN_TIMEOUT) {
+            OpenJoin::Running(handle) => {
+                *session.lock().unwrap() = Some(SessionPhase::Pending(handle));
+                bail!(
+                    "{element}: OpenSession against {} is still running",
+                    settings.daemon_uri
+                );
+            }
+            OpenJoin::Ready(opened) => {
+                let _ = SHARED_RUNTIME.block_on(opened.close(Instant::now() + RPC_TIMEOUT));
+            }
+            OpenJoin::Finished => {}
+        },
+        Some(SessionPhase::Open(existing)) => {
+            *session.lock().unwrap() = Some(SessionPhase::Open(existing));
+            bail!("{element}: session is already open");
+        }
+        None => {}
+    }
+    let settings_for_open = settings.clone();
+    let handler = activation_handler.clone();
+    let uri = settings.daemon_uri.clone();
+    let name_for_open = name.clone();
+    let file = transport_file.clone();
+    let mut opening = SHARED_RUNTIME.spawn(async move {
+        Session::open(
+            &uri,
+            &settings_for_open,
+            side,
+            &name_for_open,
+            transport,
+            file.as_deref(),
+            handler,
+        )
+        .await
+    });
+    let new_session = match SHARED_RUNTIME.block_on(wait_for_task(&mut opening, OPEN_TIMEOUT)) {
+        None => {
+            *session.lock().unwrap() = Some(SessionPhase::Pending(opening));
+            bail!(
                 "{element}: OpenSession against {} timed out",
                 settings.daemon_uri
-            )
-        })?
-        .with_context(|| format!("{element}: OpenSession against {}", settings.daemon_uri))?;
+            );
+        }
+        Some(Ok(Ok(opened))) => opened,
+        Some(Ok(Err(error))) => {
+            return Err(anyhow::Error::new(error).context(format!(
+                "{element}: OpenSession against {}",
+                settings.daemon_uri
+            )));
+        }
+        Some(Err(join)) => bail!("{element}: OpenSession ended: {join}"),
+    };
 
     let resource_summary = match new_session.resource_id() {
         Some((handle, id)) => format!("resource added: resource_handle={handle} resource_id={id}"),
@@ -924,7 +961,7 @@ pub(crate) fn validate_and_open(
         inner_summary,
     );
 
-    *session.lock().unwrap() = Some(new_session);
+    *session.lock().unwrap() = Some(SessionPhase::Open(new_session));
     Ok(inner)
 }
 pub(super) fn caps_format(settings: &CommonSettings) -> FlowFormat {
@@ -1071,7 +1108,7 @@ pub(crate) fn add_deferred_sender(
     cat: &gst::DebugCategory,
     element: &str,
     settings: &CommonSettings,
-    session: &Mutex<Option<Session>>,
+    session: &Mutex<Option<SessionPhase<Session>>>,
     peer_caps: gst::Caps,
 ) -> Result<InnerConfig, anyhow::Error> {
     if settings.side != Side::Sender {
@@ -1101,7 +1138,7 @@ pub(crate) fn add_deferred_sender(
 fn finish_deferred_add_sender(
     cat: &gst::DebugCategory,
     element: &str,
-    session: &Mutex<Option<Session>>,
+    session: &Mutex<Option<SessionPhase<Session>>>,
     inner: InnerConfig,
     transport_file: &str,
     settings: &CommonSettings,
@@ -1113,25 +1150,24 @@ fn finish_deferred_add_sender(
     // (clippy's `await_holding_lock` lint, same pattern `close()` uses).
     // Put it back before checking the RPC result so READY→NULL always
     // has a session to close whether AddSender succeeded or failed.
-    let mut taken = session.lock().unwrap().take().ok_or_else(|| {
-        anyhow::anyhow!(
-            "{element}: internal: deferred AddSender but no open session — was NULL→READY skipped?"
-        )
-    })?;
-    let rpc_result = SHARED_RUNTIME.block_on(async {
-        tokio::time::timeout(
-            OPEN_TIMEOUT,
-            taken.add_resource(side, &name, transport, transport_file),
-        )
-        .await
-        .with_context(|| format!("{element}: AddSender (deferred) timed out"))?
-        .with_context(|| format!("{element}: AddSender (deferred)"))
-    });
+    let slot = session.lock().unwrap().take();
+    let mut taken = match slot {
+        Some(SessionPhase::Open(open)) => open,
+        other => {
+            *session.lock().unwrap() = other;
+            bail!(
+                "{element}: internal: deferred AddSender but no open session — was NULL→READY skipped?"
+            );
+        }
+    };
+    let rpc_result = SHARED_RUNTIME
+        .block_on(taken.add_resource(side, &name, transport, transport_file))
+        .with_context(|| format!("{element}: AddSender (deferred)"));
     let summary = taken
         .resource_id()
         .map(|(h, id)| format!("resource_handle={h} resource_id={id}"))
         .unwrap_or_else(|| "<no resource id>".to_owned());
-    *session.lock().unwrap() = Some(taken);
+    *session.lock().unwrap() = Some(SessionPhase::Open(taken));
     rpc_result?;
 
     gst::info!(
@@ -1159,29 +1195,31 @@ fn finish_deferred_add_sender(
 /// `mxlsrc` without `AddSender` / `AddReceiver` having succeeded
 /// first; in practice unreachable since `decide_inner_config` plus
 /// the `auto-activate` gate only let that happen after a successful
-/// AddSender / AddReceiver). Other RPC failures are returned so the caller can
-/// log them without forcing the inner swap itself to roll back.
+/// AddSender / AddReceiver). Other RPC failures fail the state change.
+/// A timeout leaves the call running; `NULL` joins it and closes the
+/// session. Retrying `PAUSED` does not send a second sync.
 pub(crate) fn sync_active(
     cat: &gst::DebugCategory,
     element: &str,
-    session: &Mutex<Option<Session>>,
+    session: &Mutex<Option<SessionPhase<Session>>>,
     transport_file: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    let mut taken = session
-        .lock()
-        .unwrap()
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("{element}: SyncResourceState but no open session"))?;
-    let rpc_result = SHARED_RUNTIME.block_on(async {
-        tokio::time::timeout(OPEN_TIMEOUT, taken.sync_resource_state(transport_file)).await
-    });
+    let slot = session.lock().unwrap().take();
+    let mut taken = match slot {
+        Some(SessionPhase::Open(open)) => open,
+        other => {
+            *session.lock().unwrap() = other;
+            bail!("{element}: SyncResourceState but no open session");
+        }
+    };
+    let rpc_result = SHARED_RUNTIME.block_on(taken.sync_resource_state(transport_file));
     let resource_summary = taken
         .resource_id()
         .map(|(h, id)| format!("resource_handle={h} resource_id={id}"))
         .unwrap_or_else(|| "<no resource id>".to_owned());
-    *session.lock().unwrap() = Some(taken);
+    *session.lock().unwrap() = Some(SessionPhase::Open(taken));
     match rpc_result {
-        Ok(Ok(())) => {
+        Ok(()) => {
             gst::info!(
                 cat,
                 "{element}: auto-activate sync complete (active={}, {resource_summary})",
@@ -1189,29 +1227,35 @@ pub(crate) fn sync_active(
             );
             Ok(())
         }
-        Ok(Err(crate::daemon::DaemonError::NoResource)) => {
+        Err(crate::daemon::DaemonError::NoResource) => {
             gst::warning!(
                 cat,
                 "{element}: auto-activate sync skipped — session has no resource yet ({resource_summary})",
             );
             Ok(())
         }
-        Ok(Err(e)) => Err(anyhow::Error::new(e).context(format!(
+        Err(e) => Err(anyhow::Error::new(e).context(format!(
             "{element}: SyncResourceState against the daemon ({resource_summary})"
         ))),
-        Err(_elapsed) => Err(anyhow::anyhow!(
-            "{element}: SyncResourceState against the daemon timed out ({resource_summary})"
-        )),
     }
 }
 
-/// Drop the session and tell the daemon to close it. Logged-only on
-/// error so state-change cleanup always succeeds.
-pub(crate) fn close(cat: &gst::DebugCategory, element: &str, session: &Mutex<Option<Session>>) {
-    let to_close = session.lock().unwrap().take();
-    if let Some(s) = to_close {
+/// Explicit close: wait for `CloseSession` and log the result. Joining a
+/// pending open, an outstanding call, and `CloseSession` share one
+/// [`RPC_TIMEOUT`]. An error is logged only, so state-change cleanup
+/// always succeeds.
+pub(crate) fn close(
+    cat: &gst::DebugCategory,
+    element: &str,
+    session: &Mutex<Option<SessionPhase<Session>>>,
+) {
+    let deadline = Instant::now() + RPC_TIMEOUT;
+    let Some(s) = take_for_close(session, deadline) else {
+        return;
+    };
+    {
         let handle = s.session_handle.clone();
-        let result = SHARED_RUNTIME.block_on(s.close());
+        let result = SHARED_RUNTIME.block_on(s.close(deadline));
         match result {
             Ok(()) => gst::info!(cat, "session closed: handle={handle}"),
             Err(e) => gst::warning!(

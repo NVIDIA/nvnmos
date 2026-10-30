@@ -59,8 +59,8 @@ impl fmt::Display for PortRange {
 /// still invalid (`min > max`), both defaults are used and a warning is
 /// logged.
 pub(crate) fn read_http_port_range() -> PortRange {
-    let min = env_config::read_tcp_port(ENV_HTTP_PORT_MIN, DEFAULT_HTTP_PORT_MIN);
-    let max = env_config::read_tcp_port(ENV_HTTP_PORT_MAX, DEFAULT_HTTP_PORT_MAX);
+    let min = env_config::read_integer(ENV_HTTP_PORT_MIN, DEFAULT_HTTP_PORT_MIN, 1);
+    let max = env_config::read_integer(ENV_HTTP_PORT_MAX, DEFAULT_HTTP_PORT_MAX, 1);
     match PortRange::new(min, max) {
         Ok(range) => range,
         Err(reason) => {
