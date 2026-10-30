@@ -94,13 +94,13 @@
  * Inner elements are created when the data path starts and must already be
  * registered: `mxl` uses `mxlsink` from the gst-mxl-rs plugin (and `libmxl.so`
  * on the dynamic loader path); `udp` uses `udpsink` plus an essence-specific
- * `rtp*pay` from gst-plugins-good; `udp2` prefers matching `*pay2` elements
- * from gst-plugins-rs where available, falling back to gst-plugins-good per
- * element (`udpsink` is always from gst-plugins-good); `nvdsudp` uses
- * `nvdsudpsink` from the DeepStream plugin (built-in payloading). The exact RTP
- * payloader is chosen from the configuring transport file and caps. See the
- * `transport` property for the full family list; plugin loading and
- * `GST_PLUGIN_PATH` setup are in the Usage Guide.
+ * `rtp*pay` from gst-plugins-good; `udp2` prefers `udpsink2` and the matching
+ * `*pay2` elements from gst-plugins-rs where available, falling back to
+ * gst-plugins-good per element; `nvdsudp` uses `nvdsudpsink` from the
+ * DeepStream plugin (built-in payloading). The exact RTP payloader is chosen
+ * from the configuring transport file and caps. See the `transport` property
+ * for the full family list; plugin loading and `GST_PLUGIN_PATH` setup are in
+ * the Usage Guide.
  *
  * ## Configuring the Sender
  *
