@@ -59,6 +59,7 @@ which properties matter for a task:
 | MXL | `mxl-domain-path`, `mxl-domain-id`, `mxl-flow-id` | Select the local MXL domain and optionally constrain the flow for `transport=mxl` |
 | Human-readable metadata | `label`, `description`, `group-hint` | Set human-readable labels, descriptions, and grouping metadata for NMOS resources |
 | Node and session | `daemon-uri`, `http-port`, `host-name`, `node-properties`, `domain`, `registration-url`, `system-url` | Connect to the daemon and configure the NMOS Node; Node properties are taken from the first session that creates a shared `node-seed` |
+| Resource IDs | `node-id`, `device-id`; `nmossink`: `sender-id`, `source-id`, `flow-id`; `nmossrc`: `receiver-id` | Read the NMOS ids the daemon assigns for this Node and its Sender or Receiver |
 | Inner-element overrides | `transport-properties`, `pay-properties`, `depay-properties` | Pass advanced properties to generated inner elements; payloader and depayloader overrides apply only to `udp` / `udp2` |
 
 The `source-ip` and `destination-port` properties follow the corresponding IS-05
@@ -155,11 +156,11 @@ an activation carrying audio.
 
 | Transition or event | User-visible effect |
 | --- | --- |
-| NULL→READY | Connect to the daemon and, if the element can prepare the configuring transport file, add the NMOS Sender or Receiver |
-| READY→PAUSED | For a deferred `nmossink`, derive the configuring transport file from upstream caps and add the Sender |
+| NULL→READY | Connect to the daemon and set `node-id` and `device-id`; if the configuring transport file can be prepared, add the Sender or Receiver and its ids |
+| READY→PAUSED | For a deferred `nmossink`, derive the transport file from upstream caps, add the Sender, and set `sender-id`, `source-id`, and `flow-id` |
 | Resource addition with `auto-activate=true` | Build the real inner transport, synchronize the NMOS active state, set read-only `active` to true, and post a `nmos-activation` element message; occurs during NULL→READY or deferred `nmossink` READY→PAUSED |
 | IS-05 activation | Build or replace the inner transport elements using the effective SDP or MXL flow definition delivered for activation; update read-only `active` and post a `nmos-activation` element message on the bus |
-| READY→NULL | Remove the Sender or Receiver and close the daemon session; `active` becomes false |
+| READY→NULL | Remove the Sender or Receiver and close the daemon session; `active` becomes false and the resource id properties become empty |
 
 When neither `transport-file*` nor `caps` is set, `nmossink` defers
 configuration until it can query upstream caps at READY→PAUSED. `nmossrc`

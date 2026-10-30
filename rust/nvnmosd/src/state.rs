@@ -246,6 +246,9 @@ struct NodeEntry {
     /// the state lock don't drop back into FFI for every read. Stable for
     /// the lifetime of the entry — libnvnmos derives it from the seed.
     node_id: String,
+    /// NMOS Device `id` cached at create time. Stable for the lifetime of
+    /// the entry — libnvnmos derives it from the seed.
+    device_id: String,
     /// What governs this Node's destruction.
     lifetime: Lifetime,
     /// Number of sessions currently attached. For
@@ -278,6 +281,7 @@ struct SessionEntry {
 pub struct OpenOutcome {
     pub session_handle: String,
     pub node_id: String,
+    pub device_id: String,
     /// Lifetime of the Node the session is attached to (existing or
     /// newly-created).
     pub lifetime: Lifetime,
@@ -995,6 +999,7 @@ impl State {
         if let Some(entry) = self.nodes.get_mut(&seed) {
             entry.attached_sessions += 1;
             let node_id = entry.node_id.clone();
+            let device_id = entry.device_id.clone();
             let lifetime = entry.lifetime;
             let http_port = entry.http_port;
             let session_handle = self.allocate_session_handle();
@@ -1009,6 +1014,7 @@ impl State {
             return Ok(OpenSessionPlan::Attached(OpenOutcome {
                 session_handle,
                 node_id,
+                device_id,
                 lifetime,
                 created_node: false,
                 http_port,
@@ -1042,6 +1048,7 @@ impl State {
             NodeEntry {
                 server: ready.server,
                 node_id: ready.node_id.clone(),
+                device_id: ready.device_id.clone(),
                 lifetime: Lifetime::SessionRefcounted,
                 attached_sessions: 1,
                 http_port: ready.http_port,
@@ -1059,6 +1066,7 @@ impl State {
         OpenOutcome {
             session_handle,
             node_id: ready.node_id,
+            device_id: ready.device_id,
             lifetime: Lifetime::SessionRefcounted,
             created_node: true,
             http_port: ready.http_port,
@@ -1267,6 +1275,7 @@ impl State {
             NodeEntry {
                 server: ready.server,
                 node_id: ready.node_id.clone(),
+                device_id: ready.device_id.clone(),
                 lifetime: Lifetime::Persistent,
                 attached_sessions: 0,
                 http_port: ready.http_port,

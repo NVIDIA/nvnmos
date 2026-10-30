@@ -298,6 +298,11 @@ message OpenSessionResponse {
   // Effective HTTP API port of the Node this session is attached to
   // (after daemon allocation when the creating call used `http_port = 0`).
   uint32 http_port = 4;
+
+  // Deterministic NMOS Device `id` derived from the Node seed.
+  // Informational; requests identify the Node by seed. A later
+  // OpenSession that attaches to this Node returns the same value.
+  string device_id = 5;
 }
 
 // Request to close a session and remove everything it owns.

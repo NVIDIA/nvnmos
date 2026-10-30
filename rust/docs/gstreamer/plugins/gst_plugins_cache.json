@@ -474,6 +474,18 @@
                         "type": "guint",
                         "writable": true
                     },
+                    "device-id": {
+                        "blurb": "NMOS Device `id` assigned when the daemon session opens. Empty until then. The same value on every element of this Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": false
+                    },
                     "domain": {
                         "blurb": "DNS domain used to discover NMOS services. Use `local` for mDNS. Empty selects automatic discovery. Only the first element to create the Node controls this value.",
                         "conditionally-available": false,
@@ -485,6 +497,18 @@
                         "readable": true,
                         "type": "gchararray",
                         "writable": true
+                    },
+                    "flow-id": {
+                        "blurb": "NMOS Flow `id` paired with this Sender. Assigned when the daemon adds the Sender. Empty until then.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": false
                     },
                     "format-bit-rate": {
                         "blurb": "Coded media bit rate in kilobits per second for JPEG XS. 0 is unset. When only one bit-rate property is set, the other is derived. Used only with RTP/UDP.",
@@ -586,6 +610,18 @@
                         "type": "gchararray",
                         "writable": true
                     },
+                    "node-id": {
+                        "blurb": "NMOS Node `id` assigned when the daemon session opens. Empty until then. The same value on every element of this Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": false
+                    },
                     "node-properties": {
                         "blurb": "Node and Device metadata. Supported fields are `label`, `description`, `manufacturer`, `product`, `instance-id`, and `functions`; the asset fields must be supplied together. For example `properties,label=Studio-A,manufacturer=Acme,product=(string)\"Widget Pro\",instance-id=XYZ123-456789,functions=(string)<Encoder,Decoder>`. Only the first element to create the Node controls this value.",
                         "conditionally-available": false,
@@ -632,6 +668,18 @@
                         "type": "gchararray",
                         "writable": true
                     },
+                    "sender-id": {
+                        "blurb": "NMOS Sender `id` assigned when the daemon adds this Sender. Empty until then, including while a deferred Sender waits for upstream caps.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": false
+                    },
                     "sender-name": {
                         "blurb": "Caller-chosen name for this Sender. It must be unique among Senders on the Node. Together with `node-seed`, it determines stable NMOS resource IDs. It is required unless supplied by `transport-file*`.",
                         "conditionally-available": false,
@@ -643,6 +691,18 @@
                         "readable": true,
                         "type": "gchararray",
                         "writable": true
+                    },
+                    "source-id": {
+                        "blurb": "NMOS Source `id` paired with this Sender. Assigned when the daemon adds the Sender. Empty until then.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": false
                     },
                     "source-ip": {
                         "blurb": "Local source address for RTP/UDP transmission. Empty selects it automatically. Corresponds to IS-05 Sender `transport_params.source_ip`. Used only with RTP/UDP.",
@@ -864,6 +924,18 @@
                         "type": "guint",
                         "writable": true
                     },
+                    "device-id": {
+                        "blurb": "NMOS Device `id` assigned when the daemon session opens. Empty until then. The same value on every element of this Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": false
+                    },
                     "domain": {
                         "blurb": "DNS domain used to discover NMOS services. Use `local` for mDNS. Empty selects automatic discovery. Only the first element to create the Node controls this value.",
                         "conditionally-available": false,
@@ -1000,6 +1072,18 @@
                         "type": "gchararray",
                         "writable": true
                     },
+                    "node-id": {
+                        "blurb": "NMOS Node `id` assigned when the daemon session opens. Empty until then. The same value on every element of this Node.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": false
+                    },
                     "node-properties": {
                         "blurb": "Node and Device metadata. Supported fields are `label`, `description`, `manufacturer`, `product`, `instance-id`, and `functions`; the asset fields must be supplied together. For example `properties,label=Studio-A,manufacturer=Acme,product=(string)\"Widget Pro\",instance-id=XYZ123-456789,functions=(string)<Encoder,Decoder>`. Only the first element to create the Node controls this value.",
                         "conditionally-available": false,
@@ -1034,6 +1118,18 @@
                         "readable": true,
                         "type": "GstNmosCapsMode",
                         "writable": true
+                    },
+                    "receiver-id": {
+                        "blurb": "NMOS Receiver `id` assigned when the daemon adds this Receiver. Empty until then.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": false
                     },
                     "receiver-name": {
                         "blurb": "Caller-chosen name for this Receiver. It must be unique among Receivers on the Node. Together with `node-seed`, it determines a stable NMOS Receiver ID. It is required unless supplied by `transport-file*`.",

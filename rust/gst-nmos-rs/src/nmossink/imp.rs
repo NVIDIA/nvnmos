@@ -32,7 +32,9 @@ use tokio::sync::oneshot;
 
 use anyhow::{Context, anyhow};
 
-use crate::daemon::{ActivationHandler, ActivationOutcome, ActivationRequest, Session};
+use crate::daemon::{
+    ActivationHandler, ActivationOutcome, ActivationRequest, ResourceIds, Session,
+};
 use crate::inner;
 use crate::session::error::{WithCode, post_state_change_error};
 use crate::session::{
@@ -135,6 +137,9 @@ pub struct NmosSink {
     settings: Mutex<Settings>,
     /// Whether the real inner transport chain is installed.
     active: Mutex<bool>,
+    /// NMOS ids assigned by the daemon. Empty until the session is open
+    /// and, for the Sender ids, until AddSender returns.
+    ids: Mutex<ResourceIds>,
     session: Mutex<Option<Session>>,
     /// Ghost pad that hides the current inner chain behind the bin.
     /// Created at `constructed`; the chain behind it swaps between
@@ -234,6 +239,36 @@ impl ObjectImpl for NmosSink {
                     .nick("Sender Active")
                     .blurb(crate::session::ACTIVE_BLURB)
                     .default_value(false)
+                    .read_only()
+                    .build(),
+                glib::ParamSpecString::builder("node-id")
+                    .nick("Node ID")
+                    .blurb(crate::session::NODE_ID_BLURB)
+                    .default_value(Some(""))
+                    .read_only()
+                    .build(),
+                glib::ParamSpecString::builder("device-id")
+                    .nick("Device ID")
+                    .blurb(crate::session::DEVICE_ID_BLURB)
+                    .default_value(Some(""))
+                    .read_only()
+                    .build(),
+                glib::ParamSpecString::builder("sender-id")
+                    .nick("Sender ID")
+                    .blurb(crate::session::SENDER_ID_BLURB)
+                    .default_value(Some(""))
+                    .read_only()
+                    .build(),
+                glib::ParamSpecString::builder("source-id")
+                    .nick("Source ID")
+                    .blurb(crate::session::SOURCE_ID_BLURB)
+                    .default_value(Some(""))
+                    .read_only()
+                    .build(),
+                glib::ParamSpecString::builder("flow-id")
+                    .nick("Flow ID")
+                    .blurb(crate::session::FLOW_ID_BLURB)
+                    .default_value(Some(""))
                     .read_only()
                     .build(),
                 glib::ParamSpecString::builder("label")
@@ -462,6 +497,9 @@ impl ObjectImpl for NmosSink {
             "mxl-flow-id" => settings.mxl_flow_id.to_value(),
             "auto-activate" => settings.auto_activate.to_value(),
             "active" => self.active.lock().unwrap().to_value(),
+            "node-id" | "device-id" | "sender-id" | "source-id" | "flow-id" => {
+                crate::session::resource_ids::get(&self.ids, pspec.name())
+            }
             "label" => settings.label.to_value(),
             "description" => settings.description.to_value(),
             "group-hint" => settings.group_hint.to_value(),
@@ -667,7 +705,19 @@ impl NmosSink {
             self.close_session();
             return Err(e);
         }
+        self.publish_resource_ids();
         Ok(())
+    }
+
+    fn publish_resource_ids(&self) {
+        let next = self
+            .session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(Session::resource_ids)
+            .unwrap_or_default();
+        crate::session::resource_ids::publish(self.obj().upcast_ref(), &self.ids, &next);
     }
 
     fn activate_inner(&self, bin: &gst::Bin, outcome: &InnerConfig) -> Result<(), anyhow::Error> {
@@ -709,6 +759,7 @@ impl NmosSink {
 
     fn close_session(&self) {
         crate::session::close(&CAT, "nmossink", &self.session);
+        self.publish_resource_ids();
         self.set_connection_active(false, "deactivate");
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
@@ -868,6 +919,7 @@ impl NmosSink {
             &self.session,
             peer_caps,
         )?;
+        self.publish_resource_ids();
 
         let bin = self.obj();
         let bin_ref: &gst::Bin = bin.upcast_ref();
@@ -1236,6 +1288,83 @@ mod tests {
         assert!(pspec.flags().contains(glib::ParamFlags::READABLE));
         assert!(!pspec.flags().contains(glib::ParamFlags::WRITABLE));
         assert_eq!(pspec.nick(), "Sender Active");
+    }
+
+    #[test]
+    fn resource_id_properties_are_read_only_and_start_empty() {
+        init_gst();
+        let element = glib::Object::builder::<crate::nmossink::NmosSink>().build();
+        for name in ["node-id", "device-id", "sender-id", "source-id", "flow-id"] {
+            assert_eq!(element.property::<String>(name), "", "{name}");
+            let pspec = element
+                .find_property(name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert!(pspec.flags().contains(glib::ParamFlags::READABLE), "{name}");
+            assert!(
+                !pspec.flags().contains(glib::ParamFlags::WRITABLE),
+                "{name}"
+            );
+        }
+        assert!(element.find_property("receiver-id").is_none());
+    }
+
+    #[test]
+    fn resource_id_notify_follows_publish_and_clear() {
+        init_gst();
+        let element = glib::Object::builder::<crate::nmossink::NmosSink>().build();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        for name in ["node-id", "device-id", "sender-id", "source-id", "flow-id"] {
+            let seen = std::sync::Arc::clone(&seen);
+            element.connect_notify(Some(name), move |element, pspec| {
+                seen.lock().unwrap().push((
+                    pspec.name().to_owned(),
+                    element.property::<String>(pspec.name()),
+                ));
+            });
+        }
+
+        let next = ResourceIds {
+            node_id: "node".into(),
+            device_id: "device".into(),
+            sender_id: "sender".into(),
+            source_id: "source".into(),
+            flow_id: "flow".into(),
+            receiver_id: "receiver".into(),
+        };
+        crate::session::resource_ids::publish(element.upcast_ref(), &element.imp().ids, &next);
+        assert_eq!(element.property::<String>("node-id"), "node");
+        assert_eq!(element.property::<String>("flow-id"), "flow");
+        let first = seen.lock().unwrap().clone();
+        assert!(
+            first
+                .iter()
+                .any(|(name, value)| name == "sender-id" && value == "sender"),
+            "{first:?}"
+        );
+        assert!(
+            !first.iter().any(|(name, _)| name == "receiver-id"),
+            "nmossink does not notify receiver-id: {first:?}"
+        );
+
+        crate::session::resource_ids::publish(element.upcast_ref(), &element.imp().ids, &next);
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            first.len(),
+            "unchanged ids do not notify"
+        );
+
+        crate::session::resource_ids::publish(
+            element.upcast_ref(),
+            &element.imp().ids,
+            &ResourceIds::default(),
+        );
+        assert_eq!(element.property::<String>("sender-id"), "");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(name, value)| name == "sender-id" && value.is_empty())
+        );
     }
 
     /// Pins the IS-05 Sender `transport_params` → `CommonSettings`

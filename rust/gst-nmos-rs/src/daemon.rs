@@ -97,6 +97,7 @@ pub(crate) type ActivationHandler =
 pub(crate) struct Session {
     pub(crate) session_handle: String,
     pub(crate) node_id: String,
+    pub(crate) device_id: String,
     pub(crate) created_node: bool,
     /// Effective HTTP API port of the attached Node (`OpenSessionResponse.http_port`).
     pub(crate) http_port: u16,
@@ -110,7 +111,31 @@ pub(crate) struct Session {
 
 struct AddedResource {
     handle: String,
-    id: String,
+    kind: AddedResourceKind,
+}
+
+enum AddedResourceKind {
+    Sender {
+        sender_id: String,
+        source_id: String,
+        flow_id: String,
+    },
+    Receiver {
+        receiver_id: String,
+    },
+}
+
+/// NMOS resource ids published on `nmossink` and `nmossrc`.
+///
+/// Strings stay empty until the daemon has assigned that id.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ResourceIds {
+    pub(crate) node_id: String,
+    pub(crate) device_id: String,
+    pub(crate) sender_id: String,
+    pub(crate) source_id: String,
+    pub(crate) flow_id: String,
+    pub(crate) receiver_id: String,
 }
 
 #[derive(Debug, Error)]
@@ -202,6 +227,7 @@ impl Session {
 
         let session_handle = resp.session_handle.clone();
         let node_id = resp.node_id.clone();
+        let device_id = resp.device_id.clone();
         let created_node = resp.created_node;
         let http_port = u16::try_from(resp.http_port).unwrap_or(0);
 
@@ -255,6 +281,7 @@ impl Session {
         Ok(Self {
             session_handle,
             node_id,
+            device_id,
             created_node,
             http_port,
             resource,
@@ -264,9 +291,41 @@ impl Session {
     }
 
     pub(crate) fn resource_id(&self) -> Option<(&str, &str)> {
-        self.resource
-            .as_ref()
-            .map(|r| (r.handle.as_str(), r.id.as_str()))
+        self.resource.as_ref().map(|r| {
+            let id = match &r.kind {
+                AddedResourceKind::Sender { sender_id, .. } => sender_id.as_str(),
+                AddedResourceKind::Receiver { receiver_id } => receiver_id.as_str(),
+            };
+            (r.handle.as_str(), id)
+        })
+    }
+
+    /// Ids to publish on the element. Node and Device ids are set once
+    /// the session is open. Sender or Receiver ids stay empty until
+    /// `AddSender` or `AddReceiver` succeeds.
+    pub(crate) fn resource_ids(&self) -> ResourceIds {
+        let mut ids = ResourceIds {
+            node_id: self.node_id.clone(),
+            device_id: self.device_id.clone(),
+            ..ResourceIds::default()
+        };
+        if let Some(resource) = &self.resource {
+            match &resource.kind {
+                AddedResourceKind::Sender {
+                    sender_id,
+                    source_id,
+                    flow_id,
+                } => {
+                    ids.sender_id.clone_from(sender_id);
+                    ids.source_id.clone_from(source_id);
+                    ids.flow_id.clone_from(flow_id);
+                }
+                AddedResourceKind::Receiver { receiver_id } => {
+                    ids.receiver_id.clone_from(receiver_id);
+                }
+            }
+        }
+        ids
     }
 
     /// Register a Sender or Receiver on this open session. Used by
@@ -387,7 +446,11 @@ async fn add_resource(
                 .into_inner();
             Ok(AddedResource {
                 handle: resp.resource_handle,
-                id: resp.sender_id,
+                kind: AddedResourceKind::Sender {
+                    sender_id: resp.sender_id,
+                    source_id: resp.source_id,
+                    flow_id: resp.flow_id,
+                },
             })
         }
         Side::Receiver => {
@@ -402,7 +465,9 @@ async fn add_resource(
                 .into_inner();
             Ok(AddedResource {
                 handle: resp.resource_handle,
-                id: resp.receiver_id,
+                kind: AddedResourceKind::Receiver {
+                    receiver_id: resp.receiver_id,
+                },
             })
         }
     }
