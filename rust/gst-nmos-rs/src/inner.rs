@@ -2088,15 +2088,25 @@ pub(crate) fn apply_properties_to_element(
             );
             continue;
         };
-        if !field_value.type_().is_a(pspec.value_type()) {
+        let Ok(value) = field_value.transform_with_type(pspec.value_type()) else {
             gst::warning!(
                 cat,
                 "{element}: ignoring type-mismatched inner property `{field_name}` on `{}`",
                 inner_element.name(),
             );
             continue;
+        };
+        if !pspec.value_is_valid(&value)
+            && !pspec.flags().contains(glib::ParamFlags::LAX_VALIDATION)
+        {
+            gst::warning!(
+                cat,
+                "{element}: ignoring out-of-range inner property `{field_name}` on `{}`",
+                inner_element.name(),
+            );
+            continue;
         }
-        inner_element.set_property(field_name.as_ref(), field_value);
+        inner_element.set_property_from_value(field_name.as_ref(), &value);
     }
 }
 
@@ -3628,6 +3638,21 @@ mod tests {
     }
 
     #[test]
+    fn apply_properties_to_element_skips_out_of_range_value_but_applies_valid_fields() {
+        init_gst();
+        let udpsrc = gst::ElementFactory::make("udpsrc")
+            .build()
+            .expect("udpsrc must construct");
+        let default = udpsrc.property::<i32>("buffer-size");
+        let mut props = gst::Structure::new_empty("properties");
+        props.set("buffer-size", -1i32);
+        props.set("reuse", false);
+        apply_properties_to_element(test_log_cat(), "nmossrc", &udpsrc, Some(&props));
+        assert_eq!(udpsrc.property::<i32>("buffer-size"), default);
+        assert!(!udpsrc.property::<bool>("reuse"));
+    }
+
+    #[test]
     fn nmossink_transport_properties_apply_to_udpsink_on_chain_build() {
         let chain = build_udpsink(&minimal_udp_media(), UdpVariant::V1)
             .expect("udp sink chain must construct");
@@ -3697,6 +3722,20 @@ mod tests {
             chain2.transport.property::<i32>("buffer-size"),
             default_buffer_size
         );
+    }
+
+    #[test]
+    fn transport_properties_convert_int_to_udpsrc2_uint_property() {
+        if !udpsrc2_available() {
+            return;
+        }
+        // An untyped integer parses as `int`; `udpsrc2` declares `buffer-size` as `uint`.
+        let chain = build_udpsrc(&minimal_udp_media(), UdpVariant::V2, None)
+            .expect("udp2 src chain must construct");
+        let props =
+            gst::Structure::from_str("properties,buffer-size=26214400").expect("props parse");
+        apply_udp_src_inner_properties(test_log_cat(), "nmossrc", &chain, Some(&props), None);
+        assert_eq!(chain.transport.property::<u32>("buffer-size"), 26214400);
     }
 
     #[test]
