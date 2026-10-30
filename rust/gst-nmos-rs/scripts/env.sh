@@ -35,12 +35,18 @@ export DEMO_HOST_NAME=${DEMO_HOST_NAME:-}
 # Override with DEMO_NIC_IP.
 _default_nic_ip() {
     local addr
-    if command -v ip >/dev/null 2>&1; then
+    if [[ "$(uname -s)" == Darwin ]]; then
+        local iface
+        iface=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}')
+        if [[ -n "$iface" ]]; then
+            addr=$(ipconfig getifaddr "$iface" 2>/dev/null)
+        fi
+    elif command -v ip >/dev/null 2>&1; then
         addr=$(ip -4 -o addr show 2>/dev/null \
             | awk '$2 != "lo" {print $4; exit}' \
             | cut -d/ -f1)
     fi
-    if [[ -z "${addr:-}" ]]; then
+    if [[ -z "${addr:-}" && "$(uname -s)" != Darwin ]]; then
         addr=$(hostname -I 2>/dev/null | awk '{print $1}')
     fi
     echo "${addr:-127.0.0.1}"
@@ -237,10 +243,59 @@ require_cmd() {
     }
 }
 
+# Native tools for Unix socket liveness and ownership checks.
+_demo_require_socket_tools() {
+    if [[ "$(uname -s)" == Darwin ]]; then
+        require_cmd nc
+        require_cmd netstat
+    else
+        require_cmd ss iproute2
+    fi
+}
+
+# A stale socket pathname is not a listening daemon.
+demo_uds_socket_listening() {
+    local path=$1
+    if [[ "$(uname -s)" == Darwin ]]; then
+        nc -w 1 -U "$path" </dev/null >/dev/null 2>&1
+    else
+        ss -xlpn 2>/dev/null | grep -F "LISTEN" | grep -qF "$path"
+    fi
+}
+
+# Verify that the expected process owns the socket, not another daemon.
+demo_uds_listener_owned_by_pid() {
+    local pid=$1 path=$2
+    if [[ "$(uname -s)" == Darwin ]]; then
+        # Verbose Darwin netstat reports the owning PID and SO_ACCEPTCONN
+        # (0x0002). Accepted connections can have the same pathname.
+        netstat -anv -f unix 2>/dev/null | awk -v pid="$pid" -v path="$path" '
+            $1 == "Address" {
+                for (i = 1; i <= NF; i++) {
+                    if ($i == "process:pid") proc = i
+                    if ($i == "options") opts = i
+                    if ($i == "Addr") addr = i
+                }
+                next
+            }
+            proc && opts && addr && $2 == "stream" &&
+                $proc ~ (":" pid "$") && $opts ~ /[2367abefABEF]$/ {
+                name = $0
+                for (i = 1; i < addr; i++)
+                    sub(/^[[:space:]]*[^[:space:]]+[[:space:]]*/, "", name)
+                if (name == path) found = 1
+            }
+            END { exit !found }
+        '
+    else
+        ss -xlpn 2>/dev/null | grep -F "$path" | grep -qE "pid=$pid[,)]"
+    fi
+}
+
 # Example pipelines prerequisites.
 require_nvnmosd() {
-    require_cmd ss iproute2
-    if ! ss -xlpn 2>/dev/null | grep -F "LISTEN" | grep -qF "$DEMO_DAEMON_SOCK"; then
+    _demo_require_socket_tools
+    if ! demo_uds_socket_listening "$DEMO_DAEMON_SOCK"; then
         echo "[error] $DEMO_DAEMON_SOCK is not listening — start nvnmosd first" >&2
         exit 1
     fi
@@ -249,7 +304,7 @@ require_nvnmosd() {
 # Interactive demo prerequisites.
 require_demo_tools() {
     # for daemon socket checks
-    require_cmd ss iproute2
+    _demo_require_socket_tools
     # for making IS-04/IS-05/IS-08 HTTP requests
     require_cmd curl curl
     # for JSON body parsing/creation

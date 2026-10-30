@@ -21,6 +21,12 @@ use tokio::net::{TcpStream as AsyncTcpStream, UnixStream};
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
+const LIBRARY_PATH_ENV: &str = if cfg!(target_os = "macos") {
+    "DYLD_LIBRARY_PATH"
+} else {
+    "LD_LIBRARY_PATH"
+};
+
 const HTTP_BUDGET: Duration = Duration::from_secs(30);
 
 pub type PortRange = RangeInclusive<u16>;
@@ -56,7 +62,7 @@ impl DaemonHarness {
             .env("NVNMOSD_HTTP_PORT_MIN", http_ports.start().to_string())
             .env("NVNMOSD_HTTP_PORT_MAX", http_ports.end().to_string())
             .env("RUST_LOG", "error")
-            .env("LD_LIBRARY_PATH", &ld_library_path)
+            .env(LIBRARY_PATH_ENV, &ld_library_path)
             .env_remove("NVNMOS_EXPERIMENTAL_SETTINGS")
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -145,8 +151,8 @@ fn find_libnvnmos_dir() -> String {
         }
     }
     panic!(
-        "could not find libnvnmos.so; build the C++ library (cmake --build build) \
-         or set NVNMOS_LIB_DIR to the directory containing libnvnmos.so"
+        "could not find the native libnvnmos library; build the C++ library (cmake --build build) \
+         or set NVNMOS_LIB_DIR to the directory containing libnvnmos"
     );
 }
 
@@ -157,7 +163,12 @@ fn absolutize_lib_dir(path: &Path) -> Option<String> {
         std::env::current_dir().ok()?.join(path)
     };
     let abs = abs.canonicalize().ok()?;
-    if abs.join("libnvnmos.so").is_file() {
+    let name = format!(
+        "{}nvnmos{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    if abs.join(name).is_file() {
         Some(abs.to_string_lossy().into_owned())
     } else {
         None
@@ -165,7 +176,7 @@ fn absolutize_lib_dir(path: &Path) -> Option<String> {
 }
 
 fn prepend_ld_library_path(dir: &str) -> String {
-    match std::env::var("LD_LIBRARY_PATH") {
+    match std::env::var(LIBRARY_PATH_ENV) {
         Ok(existing) if !existing.is_empty() => format!("{dir}:{existing}"),
         _ => dir.to_string(),
     }
@@ -190,7 +201,7 @@ async fn wait_for_daemon(uds: &Path, child: &mut Child) {
             let stderr = child_stderr(child);
             panic!(
                 "nvnmosd exited before binding UDS (status={status}); \
-                 ensure libnvnmos.so is in LD_LIBRARY_PATH (build the C++ \
+                 ensure libnvnmos is on the native loader path (build the C++ \
                  library under ../../build or set NVNMOS_LIB_DIR). stderr:\n{stderr}"
             );
         }

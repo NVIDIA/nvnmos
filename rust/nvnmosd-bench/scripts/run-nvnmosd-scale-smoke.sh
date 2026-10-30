@@ -55,12 +55,23 @@ PRESET_ROWS=("${SELECTED[@]}")
 
 mkdir -p "$RESULTS_DIR"
 LIB="${NVNMOS_LIB_DIR:-$REPO/build}"
-if [[ ! -f "$LIB/libnvnmos.so" ]]; then
-    echo "missing $LIB/libnvnmos.so — build nvnmos in \$REPO/build first" >&2
+PLATFORM=$(uname -s)
+if [[ "$PLATFORM" == Darwin ]]; then
+    LIBRARY_NAME=libnvnmos.dylib
+else
+    LIBRARY_NAME=libnvnmos.so
+fi
+if [[ ! -f "$LIB/$LIBRARY_NAME" ]]; then
+    echo "missing $LIB/$LIBRARY_NAME — build nvnmos in \$REPO/build first" >&2
     exit 1
 fi
 export NVNMOS_LIB_DIR="$LIB"
-export LD_LIBRARY_PATH="$LIB:${LD_LIBRARY_PATH:-}"
+if [[ "$PLATFORM" == Darwin ]]; then
+    export DYLD_LIBRARY_PATH="$LIB${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+    command -v lsof >/dev/null 2>&1 || { echo "lsof is required for port checks" >&2; exit 1; }
+else
+    export LD_LIBRARY_PATH="$LIB:${LD_LIBRARY_PATH:-}"
+fi
 
 # Fail fast if a prior nvnmosd (or other process) still owns the node HTTP port range.
 max_nodes=1
@@ -72,7 +83,13 @@ for row in "${PRESET_ROWS[@]}"; do
 done
 for ((i = 0; i < max_nodes; i++)); do
     port=$((BASE_HTTP_PORT + i))
-    if command -v ss >/dev/null 2>&1; then
+    if [[ "$PLATFORM" == Darwin ]]; then
+        holder=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+        if [[ -n "$holder" ]]; then
+            echo "port $port already in use — free it before running (e.g. stale nvnmosd). $holder" >&2
+            exit 1
+        fi
+    elif command -v ss >/dev/null 2>&1; then
         if ss -tln "sport = :$port" 2>/dev/null | grep -q LISTEN; then
             holder=$(ss -tlnp "sport = :$port" 2>/dev/null | head -1)
             echo "port $port already in use — free it before running (e.g. stale nvnmosd). $holder" >&2
@@ -88,8 +105,8 @@ echo "[build] cargo build -p nvnmosd -p nvnmosd-bench (NVNMOS_LIB_DIR=$LIB)"
 NVNMOS_LIB_DIR="$LIB" cargo build --manifest-path "$RUST_MANIFEST" -p nvnmosd -p nvnmosd-bench
 
 rm -f "$SOCK"
-echo "[daemon] $DAEMON_BIN --uds $SOCK (LD_LIBRARY_PATH includes $LIB)"
-LD_LIBRARY_PATH="$LIB:${LD_LIBRARY_PATH:-}" NVNMOSD_UDS="$SOCK" "$DAEMON_BIN" --uds "$SOCK" &
+echo "[daemon] $DAEMON_BIN --uds $SOCK (library path includes $LIB)"
+NVNMOSD_UDS="$SOCK" "$DAEMON_BIN" --uds "$SOCK" &
 DAEMON_PID=$!
 cleanup() {
     kill -TERM "$DAEMON_PID" 2>/dev/null || true

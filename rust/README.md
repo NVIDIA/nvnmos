@@ -20,17 +20,17 @@ Rust components for the NMOS daemon and GStreamer plugin family.
 ## Quick Start
 
 Three terminals on Linux: build once, start the daemon, then run a sender and
-receiver. The example scripts use RTP/UDP (`transport=udp`, ST 2110-style
+receiver. Linux commands are shown below, with macOS differences noted where needed. The example scripts use RTP/UDP (`transport=udp`, ST 2110-style
 multicast) with `auto-activate=true`, so video starts without an NMOS
 Controller or IS-05 PATCH step.
 
-Tested on **Ubuntu 24.04** (same as CI).
+Tested on **Ubuntu 24.04** (same as CI) and **macOS 26.7.1 (Apple Silicon)**.
 
 ### Prerequisites
 
 **System packages** — C++ compiler, CMake, Python, libclang (`bindgen` for
 `nvnmos-sys`), and GStreamer headers plus runtime plugins for the example
-pipelines:
+pipelines. On Ubuntu:
 
 ```sh
 sudo apt-get update
@@ -44,6 +44,17 @@ sudo apt-get install --no-install-recommends -y \
 
 `iproute2` (for `ss`), `curl`, and `jq` are only required by the example
 pipeline scripts and the interactive demo.
+
+**On macOS**, install the Xcode Command Line Tools and Python as described in
+[`building.md`](../doc/user/building.md), then use [Homebrew](https://brew.sh/):
+
+```sh
+brew install gstreamer pkgconf bash jq
+export LIBCLANG_PATH="$(dirname "$(xcrun --find clang)")/../lib"
+```
+
+This uses Xcode's libclang for bindgen. The interactive demo needs Bash 4.3+;
+macOS's bundled Bash 3.2 is too old.
 
 CMake must be **3.17+**. Ubuntu 24.04's `cmake` package is sufficient; on older
 distros use `pip install cmake~=3.17` inside the venv below (see
@@ -63,11 +74,12 @@ conan profile detect    # creates ~/.conan2/profiles/default
 ```
 
 Keep the venv activated while running `conan install` in the next section.
+On macOS, also install CMake in that venv with `pip install cmake~=3.17`.
 
 **Rust** — install [rustup](https://rustup.rs/) if `cargo` is not on your
 `PATH`. Building inside `rust/` picks up [`rust-toolchain.toml`](rust-toolchain.toml).
 
-### Build `libnvnmos.so`
+### Build `libnvnmos.so` or `libnvnmos.dylib` (macOS)
 
 From the **repository root** (full detail in
 [`building.md`](../doc/user/building.md#building-the-nvnmos-library)):
@@ -87,11 +99,20 @@ cmake -B build \
 cmake --build build --parallel
 ```
 
+On macOS, the same build commands produce `build/libnvnmos.dylib` ins.
+
 Point the Rust build at the shared library:
 
 ```sh
 export NVNMOS_LIB_DIR=$PWD/build
 export LD_LIBRARY_PATH=$NVNMOS_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+```
+
+**On macOS**, use `DYLD_LIBRARY_PATH` instead of `LD_LIBRARY_PATH` in each
+terminal's setup throughout this guide:
+
+```sh
+export DYLD_LIBRARY_PATH="$NVNMOS_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 ```
 
 ### Build `nvnmosd` and the GStreamer plugin
@@ -100,6 +121,14 @@ export LD_LIBRARY_PATH=$NVNMOS_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 cd rust
 cargo build -p nvnmosd -p gst-nmos-rs
 export GST_PLUGIN_PATH=$PWD/target/debug
+```
+
+The plugin is `libgstnmos.so` on Linux or `libgstnmos.dylib` on macOS;
+`GST_PLUGIN_PATH` points to the containing directory on both platforms.
+If the macOS plugin scanner cannot find Homebrew runtime libraries, set:
+
+```sh
+export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
 ```
 
 ### Start the daemon (terminal 1)
@@ -122,7 +151,7 @@ export LD_LIBRARY_PATH=$NVNMOS_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export GST_PLUGIN_PATH=/path/to/nvnmos/rust/target/debug
 
 cd rust/gst-nmos-rs
-# Optional: pick the NIC that carries multicast (defaults to first non-loopback).
+# Optional: pick the NIC that carries multicast (defaults to first non-loopback and in macOS defaults to the default-route interface).
 # export DEMO_NIC_IP=203.0.113.1
 ./scripts/example-pipelines/1080p25-sender-udp.sh
 ```
@@ -154,6 +183,13 @@ Use `RUST_LOG=info` on the daemon for verbose logs. Headless hosts: set
 
 **Next steps:** The interactive lab with IS-05 menu actions is
 [`gst-nmos-rs/scripts/gst-nmos-rs-demo.sh`](gst-nmos-rs/scripts/gst-nmos-rs-demo.sh).
+On macOS, run it from `rust/` with Homebrew Bash and select UDP:
+
+```sh
+DEMO_TRANSPORT=udp DEMO_VIDEO_SINK=fakesink DEMO_AUDIO_SINK=fakesink \
+  "$(brew --prefix)/bin/bash" gst-nmos-rs/scripts/gst-nmos-rs-demo.sh
+```
+
 For MXL (`transport=mxl`), build the [MXL SDK](https://github.com/dmf-mxl/mxl)
 first, then see [`pipeline-examples.md`](gst-nmos-rs/pipeline-examples.md) for
 example pipelines. For compliant ST 2110 (`transport=nvdsudp`)
@@ -183,18 +219,21 @@ For a combined image with `nvnmosd` + `gst-nmos-rs` + plugins for `transport=mxl
 
 The workspace **MSRV** is **Rust 1.87** (`rust-version` in [`Cargo.toml`](Cargo.toml)). Development, CI, and container builds pin **1.92** in [`rust-toolchain.toml`](rust-toolchain.toml) — the minimum needed for gst-plugins-rs `0.15.2` in [`docker/gst-nmos-rs`](../docker/gst-nmos-rs/).
 
-`nvnmos-sys` links against a pre-built `libnvnmos.so`. The Rust crate does **not** build the C library itself; use the CMake/Conan flow under `../src/` ([Quick start — Build `libnvnmos.so`](#build-libnvnmosso)), then:
+`nvnmos-sys` links against a pre-built `libnvnmos.so` (`libnvnmos.dylib` on macOS). The Rust crate does **not** build the C library itself; use the CMake/Conan flow under `../src/` ([Quick start — Build `libnvnmos.so`](#build-libnvnmosso)), then:
 
 ```sh
-export NVNMOS_LIB_DIR=/absolute/path/to/build     # contains libnvnmos.so
+export NVNMOS_LIB_DIR=/absolute/path/to/build     # contains libnvnmos.so or libnvnmos.dylib
 cargo build --workspace
 ```
 
-`NVNMOS_LIB_DIR` is optional when `libnvnmos.so` is installed on the system linker path.
+`NVNMOS_LIB_DIR` is optional when `libnvnmos` is installed on the system linker path.
 
 `NVNMOS_INCLUDE_DIR` defaults to `../src/` (where `nvnmos.h` lives in-tree). Override only to bindgen against a different header location.
 
 `protoc` is vendored via [`protobuf-src`](https://crates.io/crates/protobuf-src) — no system `protoc` is required.
+
+For integration test prerequisites, see
+[`gst-nmos-rs/tests/README.md`](gst-nmos-rs/tests/README.md).
 
 ## Scale Benchmark (`nvnmosd-bench`)
 
@@ -216,7 +255,7 @@ RPC-only regression client — no GStreamer. For a full media walk-through, use
 [Quick start](#quick-start) instead.
 
 ```sh
-# Terminal 1: daemon (with NVNMOS_LIB_DIR / LD_LIBRARY_PATH set)
+# Terminal 1: daemon (with NVNMOS_LIB_DIR and LD_LIBRARY_PATH or DYLD_LIBRARY_PATH set)
 cargo run --bin nvnmosd
 
 # Terminal 2: example client

@@ -7,6 +7,18 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Pre-Build Requirements
 
+### C++ Compiler
+
+**macOS**
+
+Install the Xcode Command Line Tools, which provide Apple Clang and the macOS SDK.
+
+```sh
+xcode-select --install
+```
+
+macOS 26.7.1 on Apple Silicon with Apple Clang 21 has been tested.
+
 ### Python
 
 Having Python 3 isn't an absolute requirement but it makes the subsequent steps to install the dependencies easier.
@@ -21,6 +33,11 @@ Use the system package manager to install Python 3 and the `venv` module (on Deb
 ```sh
 sudo apt install -y python3 python3-venv
 ```
+
+**macOS**
+
+Install Python 3 from [python.org](https://www.python.org/downloads/macos/) or your package manager.
+Use `python3` for the virtual environment commands below.
 
 **Windows**
 
@@ -48,7 +65,7 @@ python --version
 
 For manual builds, a **virtual environment** in the repository root (for example, `.venv`) is recommended. It isolates the Python environment used for Conan and other `pip`-installed build tools from the system interpreter, pins compatible tool versions on `PATH`, and on Linux avoids PEP 668 "externally managed" errors when using the system Python.
 
-**Linux**
+**Linux and macOS**
 
 ```sh
 python3 -m venv .venv
@@ -77,15 +94,16 @@ python -m venv .venv
 python -m pip install --upgrade pip
 ```
 
-To exit the virtual environment later, run `deactivate` (same on Linux and Windows).
+To exit the virtual environment later, run `deactivate` (same on Linux, macOS and Windows).
 
 ### CMake
 
 The project requires CMake 3.17 or higher; dependencies may require a higher version.
 
 There are x86_64 and arm64 packages for CMake 3.30.0 on the [Python Package Index (PyPI)](https://pypi.org/) which have been tested.
+CMake 3.31.10 has been tested on macOS.
 
-**Linux**
+**Linux and macOS**
 
 ```sh
 pip install cmake~=3.17
@@ -125,6 +143,26 @@ compiler.version=13
 os=Linux
 ```
 
+**macOS**
+
+```sh
+pip install conan~=2.2 --upgrade
+conan profile detect
+```
+
+Conan 2.33.0 with the following Apple Silicon profile has been tested.
+
+```ini
+[settings]
+arch=armv8
+build_type=Release
+compiler=apple-clang
+compiler.cppstd=gnu17
+compiler.libcxx=libc++
+compiler.version=21
+os=Macos
+```
+
 **Windows**
 
 ```PowerShell
@@ -152,7 +190,7 @@ os=Windows
 
 ## Building the NvNmos Library
 
-**Linux**
+**Linux and macOS**
 
 Prepare a `build` directory adjacent to the `src` directory.
 
@@ -193,6 +231,10 @@ Build the library and example application.
 ```sh
 cmake --build build --parallel
 ```
+
+On macOS, the shared library is `build/libnvnmos.dylib` and the example application is `build/nvnmos-example`.
+Use `--parallel 2` to limit concurrent build jobs if needed.
+The shared Release build and example application have been tested on Apple Silicon.
 
 **Windows**
 
@@ -296,3 +338,7 @@ apt install -y dbus avahi-daemon
 Install and start the Bonjour Service.
 
 See [Download Bonjour Print Services for Windows v2.0.2](https://support.apple.com/kb/DL999).
+
+**macOS**
+
+Bonjour (mDNSResponder) is included with macOS; no separate Avahi or Bonjour installation is required.

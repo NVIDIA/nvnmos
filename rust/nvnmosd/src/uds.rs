@@ -95,7 +95,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nvnmosd-uds-stale-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let sock = dir.join("nvnmosd.sock");
-        std::fs::write(&sock, b"").expect("create stale socket file");
+        let listener = StdUnixListener::bind(&sock).expect("bind test socket");
+        drop(listener);
 
         prepare_listen_path(&sock).expect("stale socket should be removed");
 
