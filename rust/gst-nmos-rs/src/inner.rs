@@ -1283,20 +1283,26 @@ pub(crate) fn build_udpsink(
         }
     }
 
-    let udpsink = gst::ElementFactory::make("udpsink")
+    let udpsink_factory = select_udpsink_factory(variant);
+    let udpsink = gst::ElementFactory::make(udpsink_factory)
         .name("nmossink-udpsink")
         .property("host", &media.primary.destination_ip)
-        .property("port", i32::from(media.primary.destination_port))
         .build()
         .with_context(|| {
             format!(
-                "instantiating `udpsink` (host={}, port={})",
+                "instantiating `{udpsink_factory}` (host={}, port={})",
                 media.primary.destination_ip, media.primary.destination_port,
             )
         })
         .with_code(gst::CoreError::MissingPlugin)?;
+    // `udpsink2` declares `port` and `bind-port` as `guint`; `udpsink` as `gint`.
+    let set_port = |name: &str, port: u16| match udpsink_factory {
+        "udpsink2" => udpsink.set_property(name, u32::from(port)),
+        _ => udpsink.set_property(name, i32::from(port)),
+    };
+    set_port("port", media.primary.destination_port);
     if let Some(port) = media.primary.source_port {
-        udpsink.set_property("bind-port", i32::from(port));
+        set_port("bind-port", port);
     }
     if let Some(addr) = media.primary.sender_interface_ip() {
         udpsink.set_property("bind-address", addr);
@@ -1448,11 +1454,6 @@ fn select_udp_src_capssetter_caps<'a>(
 /// drop-in API replacements for the properties this module sets
 /// today; see [`build_udpsrc`] for the one place the API differs
 /// (SSM source-filter property name).
-///
-/// No `udpsink2` exists upstream — `udpsrc2`'s motivation was
-/// fixing the receive-side packet-rate ceiling, which doesn't
-/// apply to sending — so the sender path doesn't need an
-/// analogous helper. [`build_udpsink`] hard-codes `udpsink`.
 fn select_udpsrc_factory(variant: UdpVariant) -> &'static str {
     match variant {
         UdpVariant::V1 => "udpsrc",
@@ -1461,6 +1462,24 @@ fn select_udpsrc_factory(variant: UdpVariant) -> &'static str {
                 "udpsrc2"
             } else {
                 "udpsrc"
+            }
+        }
+    }
+}
+
+/// Pick the UDP sink factory for the requested [`UdpVariant`].
+///
+/// `V1` is gst-plugins-good's `udpsink`. `V2` prefers
+/// gst-plugins-rs' `udpsink2` and falls back to `udpsink` when
+/// `udpsink2` isn't installed.
+fn select_udpsink_factory(variant: UdpVariant) -> &'static str {
+    match variant {
+        UdpVariant::V1 => "udpsink",
+        UdpVariant::V2 => {
+            if gst::ElementFactory::find("udpsink2").is_some() {
+                "udpsink2"
+            } else {
+                "udpsink"
             }
         }
     }
@@ -3394,6 +3413,41 @@ mod tests {
         let s = caps_on_udpsrc.structure(0).expect("rtp caps structure(0)");
         assert_eq!(s.name(), "application/x-rtp");
         assert_eq!(s.get::<&str>("encoding-name").unwrap(), "RAW");
+    }
+
+    fn udpsink2_available() -> bool {
+        init_gst();
+        gst::ElementFactory::find("udpsink2").is_some()
+    }
+
+    #[test]
+    fn select_udpsink_factory_v2_falls_back_to_udpsink_when_udpsink2_missing() {
+        if udpsink2_available() {
+            return;
+        }
+        assert_eq!(select_udpsink_factory(UdpVariant::V2), "udpsink");
+    }
+
+    #[test]
+    fn build_udpsink_v2_uses_udpsink2_when_available() {
+        if !udpsink2_available() {
+            return;
+        }
+        let chain = build_udpsink(&audio_l24_ptime_media(), UdpVariant::V2)
+            .expect("V2 sender must construct against udpsink2");
+        let bin = chain
+            .bin
+            .downcast::<gst::Bin>()
+            .expect("returned element is a Bin");
+        let udpsink = child(&bin, "nmossink-udpsink");
+        assert_eq!(
+            udpsink.factory().expect("udpsink has a factory").name(),
+            "udpsink2",
+        );
+        assert_eq!(udpsink.property::<String>("host"), "239.2.2.2");
+        assert_eq!(udpsink.property::<u32>("port"), 5004);
+        assert_eq!(udpsink.property::<u32>("bind-port"), 5005);
+        assert_eq!(udpsink.property::<String>("bind-address"), "192.0.2.10");
     }
 
     #[test]

@@ -29,15 +29,12 @@ pub(super) fn resource_name_from_transport_file(
 ///
 /// `V1` is gst-plugins-good throughout: `udpsrc` / `udpsink` /
 /// `rtpvrawpay` / `rtpL24pay` / etc. `V2` prefers gst-plugins-rs
-/// (`udpsrc2`, `rtpL24pay2`, `rtpL24depay2`, …) on a per-element
-/// basis and falls back to the V1 factory for any element that
-/// doesn't yet have a V2 sibling. Per-element fallback (rather
-/// than all-or-nothing) matters because the V2 family is rolled
-/// out incrementally upstream — for example today
-/// gst-plugins-rs ships `rtpL24pay2`/`depay2` but not yet
-/// `rtpvrawpay2`/`depay2`, and no `udpsink2` exists at all (the
-/// performance motivation for `udpsrc2` was kernel receive
-/// efficiency, which doesn't translate to the send side).
+/// (`udpsrc2`, `udpsink2`, `rtpL24pay2`, `rtpL24depay2`, …) on a
+/// per-element basis and falls back to the V1 factory for any
+/// element that isn't installed. Per-element fallback (rather
+/// than all-or-nothing) matters because the V2 elements reached
+/// gst-plugins-rs at different times and installations may carry
+/// an older build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UdpVariant {
     V1,

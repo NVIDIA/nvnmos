@@ -38,11 +38,10 @@ pub enum Transport {
     #[default]
     #[enum_value(name = "RTP/UDP via gst-plugins-good", nick = "udp")]
     Udp = 1,
-    /// ST 2110 via gst-plugins-rs' `udpsrc2` plus the
+    /// ST 2110 via gst-plugins-rs' `udpsrc2` / `udpsink2` plus the
     /// gst-plugins-rs `rtp*pay2` / `rtp*depay2` RTP elements where
     /// available, falling back to gst-plugins-good per-element
-    /// for any V1-only piece (notably `udpsink` — no `udpsink2`
-    /// exists).
+    /// for any piece that isn't installed.
     #[enum_value(name = "RTP/UDP via gst-plugins-rs", nick = "udp2")]
     Udp2 = 2,
     /// ST 2110 via DeepStream's `nvdsudpsrc` / `nvdsudpsink` (Rivermax).

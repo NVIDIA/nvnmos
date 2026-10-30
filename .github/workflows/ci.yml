@@ -109,7 +109,7 @@ jobs:
   rust:
     needs: build
     env:
-      GST_PLUGINS_RS_REF: 8fe3cc1195d7d54990a84d85ca189624db29b096
+      GST_PLUGINS_RS_REF: da8805b42b07d68944f1179ea1ae5cce1dde7297
       GST_PLUGINS_RS_TOOLCHAIN: "1.92"
       GST_PLUGINS_RS_PACKAGES: gst-plugin-closedcaption gst-plugin-rtp gst-plugin-udp
     strategy:
