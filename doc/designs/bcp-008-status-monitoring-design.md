@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Status: **proposed** (awaiting review)  
 Scope: libnvnmos C API, `nvnmos_impl.cpp`, nvnmosd gRPC, gst-nmos-rs (`nmossrc` / `nmossink`)  
-Depends on: [AMWA BCP-008-01](https://specs.amwa.tv/bcp-008-01/), [BCP-008-02](https://specs.amwa.tv/bcp-008-02/), [IS-12](https://specs.amwa.tv/is-12/), [MS-05-02](https://specs.amwa.tv/ms-05-02/), nmos-cpp control-protocol support
+Depends on: [AMWA BCP-008-01](https://specs.amwa.tv/bcp-008-01/), [BCP-008-02](https://specs.amwa.tv/bcp-008-02/), [IS-12](https://specs.amwa.tv/is-12/), [MS-05-02](https://specs.amwa.tv/ms-05-02/), nmos-cpp control-protocol support as of `nmos-cpp/cci.20261005` (the version nvnmos pins), which includes [sony/nmos-cpp#511](https://github.com/sony/nmos-cpp/pull/511) and [sony/nmos-cpp#527](https://github.com/sony/nmos-cpp/pull/527)
 
 ## 1. Summary
 
@@ -38,16 +38,24 @@ The nmos-cpp-node example looks heavy because it mixes BCP-008 with demo control
 | Piece | Role |
 |-------|------|
 | `control_protocol_ws_port` ≥ 0 | Enables IS-12 WS in `make_node_server` |
-| `control_protocol_state` + class/datatype/method descriptor handlers | Standard MS-05 / BCP-008 class tree (nmos-cpp built-ins) |
+| `experimental::control_protocol_state` | Holds the standard MS-05 / BCP-008 class and datatype descriptors (nmos-cpp built-ins) and the monitor domain profiles. Its constructor takes the optional `get_lost_packet_counters`, `get_late_packet_counters` and `reset_monitor` handlers |
+| `make_get_control_protocol_{class,datatype,method}_descriptor_handler(control_protocol_state)` | Descriptor handlers set on `node_implementation` |
+| `control_protocol_behaviour_thread(node_model, control_protocol_state, gate)` | Applies pending (delayed) status changes; runs alongside the node server threads |
 | Root block + ClassManager + `receiver-monitors` / `sender-monitors` blocks | Device model skeleton |
-| One monitor per IS-04 sender/receiver with touchpoint | BCP-008 identity mapping |
-| `on_monitor_activated` | On IS-05 activation: Inactive→Healthy (immediate) then honour `statusReportingDelay` for worse states; on deactivate → Inactive |
-| Application (or library) calls to `set_*_monitor_*_status` | Feed truthful domain values |
-| Optional packet-counter / `ResetMonitor` handlers | Methods on the monitor; empty collections are legal when the device cannot measure |
+| `make_receiver_monitor` / `make_sender_monitor` with an NMOS touchpoint | One monitor per IS-04 Sender/Receiver (BCP-008 identity mapping). Defaults: overall, connection, transmission, stream and essence Inactive; link AllUp; external sync NotUsed; `statusReportingDelay` 3 s; `autoResetCountersAndMessages` true |
+| `on_monitor_activated(make_monitor_connection_activation_handler(...))` | On IS-05 activation: Inactive→Healthy (immediate) then honour `statusReportingDelay` for worse states; on deactivate → Inactive |
+| `make_set_receiver_monitor_*_handler` / `make_set_sender_monitor_*_handler` | Per-domain setters keyed by monitor oid, including `synchronizationSourceId`. They wrap `nc::set_*_monitor_*_status`, which also needs the pending, class-descriptor and monitor-domain handlers |
+| `on_get_lost_packet_counters`, `on_get_late_packet_counters`, `on_reset_monitor` | Optional packet-counter / `ResetCountersAndMessages` hooks; empty collections are legal when the device cannot measure |
 
 nmos-cpp already implements `overallStatus` aggregation, transition counters, delayed reporting of healthier states, and property-changed notifications.
 
-### 2.3 Domains (reminder)
+Since sony/nmos-cpp#511, the domains of a monitor class are data, not code. `control_protocol_state::insert_monitor_domains(class_id, domains)` adds the domains for a class derived from `NcReceiverMonitor` or `NcSenderMonitor`. `nc::set_monitor_status` sets any of those domains with the same delay and transition-counter rules. The built-in domains above do not need this.
+
+### 2.3 What nvnmos does today
+
+libnvnmos calls `make_node_server(node_model, node_implementation, log_model, gate)` with no `control_protocol_state`, and sets `control_protocol_ws_port` to `-1` in `src/nvnmos.cpp` so that nmos-cpp does not mount IS-12. `rust/nvnmosd/tests/advertised_apis.rs` asserts that `-1`.
+
+### 2.4 Domains (reminder)
 
 **Receiver (`NcReceiverMonitor`):** `linkStatus`, `connectionStatus`, `externalSynchronizationStatus` (+ optional `synchronizationSourceId`), `streamStatus`, plus `overallStatus`. Methods: `GetLostPacketCounters`, `GetLatePacketCounters`, `ResetCountersAndMessages`.
 
@@ -105,10 +113,11 @@ Add to `NvNmosNodeConfig` (zero-init = disabled, preserving today's behaviour):
 
 When enabled at node create time:
 
-1. Construct `control_protocol_state` with library-owned handlers (standard class/datatype/method descriptors; stub or library-owned packet counters — see §5.4).
-2. Register `on_monitor_activated` so IS-05 activations drive monitor Inactive/Healthy transitions without an application callback.
-3. Ensure device-model skeleton exists (root, class manager, `receiver-monitors` / `sender-monitors` blocks).
-4. Run the control-protocol behaviour thread alongside the existing node server threads.
+1. Pass the configured port instead of `-1` for `control_protocol_ws_port` (§2.3).
+2. Construct `control_protocol_state` with library-owned packet-counter and reset handlers (§5.4), and set the descriptor handlers on `node_implementation`.
+3. Register `on_monitor_activated(make_monitor_connection_activation_handler(...))` so IS-05 activations drive monitor Inactive/Healthy transitions without an application callback.
+4. Ensure device-model skeleton exists (root, class manager, `receiver-monitors` / `sender-monitors` blocks).
+5. Run `control_protocol_behaviour_thread` alongside the existing node server threads.
 
 IS-04 Node controls / service advertisement for the control-protocol endpoint follows whatever nmos-cpp already publishes when the WS is enabled (no separate NvNmos invention).
 
@@ -118,14 +127,16 @@ Tied to existing add/remove:
 
 | Event | Action |
 |-------|--------|
-| `add_nmos_sender_to_node_server` / receiver add | Create matching `NcSenderMonitor` / `NcReceiverMonitor` under the monitors block; touchpoint = IS-04 resource id; role derived from caller-chosen `name` (stable, unique per side) |
+| `add_nmos_sender_to_node_server` / `add_nmos_receiver_to_node_server` | Create matching `NcSenderMonitor` / `NcReceiverMonitor` with `make_sender_monitor` / `make_receiver_monitor` under the monitors block; touchpoint = IS-04 resource id; role derived from caller-chosen `name` (stable, unique per side) |
 | remove sender/receiver | Remove the monitor object |
 | IS-05 activate / deactivate | Handled by `on_monitor_activated` (nmos-cpp) — **no new application callback** |
 | Application / element status update | §5.3 |
 
-Initial domain values before first activation: Inactive (or NotUsed for sync) as appropriate. Link status has no Inactive — default **AllUp** until a reporter says otherwise (honest "we have no NIC sensor" is better documented than inventing AllDown).
+Initial domain values before first activation are the nmos-cpp defaults (§2.2): Inactive, except external sync, which is **NotUsed** until a reporter has a real sensor. Link status has no Inactive. It defaults to **AllUp** until the library probe below or a reporter says otherwise.
 
-**Link-status probing note:** this may be supportable without a new resource-to-interface mapping. libnvnmos already resolves each RTP Sender's `source_ip` and each Receiver's `interface_ip` through nmos-cpp's host-interface list to build IS-04 `interface_bindings`; gst-nmos-rs also resolves interface IP addresses locally when building the data path and `a=x-nvnmos-iface`. A link-status implementation could reuse those resolved bindings, inspect every interface associated with the resource, and report AllUp / SomeDown / AllDown. The probing location still needs a decision: libnvnmos can only see interfaces in the nvnmosd process's network namespace, while gst-nmos-rs may be colocated with the data-plane interfaces. Avoid two independent reporters for the same domain; prefer the data-plane process when the namespaces differ, with library-side probing as a possible direct-C / colocated fallback.
+**Link-status probe in libnvnmos.** libnvnmos already resolves the interface name of each leg of an RTP Sender (from `source_ip`) or Receiver (from `interface_ip`) through nmos-cpp's host-interface list to build IS-04 `interface_bindings`. libnvnmos periodically reads the operational state of those interfaces and sets the monitor's link status to AllUp, SomeDown or AllDown, with a message naming the interfaces that are down. MXL Senders and Receivers have no interface bindings, so their link status stays AllUp.
+
+The probe sees the interfaces in the network namespace of the process that loads libnvnmos. When the data plane runs elsewhere, its process may see different interface state. The first link-status report through §5.3 for a resource therefore stops the library probe for that resource, so each domain has only one reporter.
 
 ### 5.3 Status update API (sketch)
 
@@ -162,7 +173,7 @@ bool nmos_resource_sync_source_id_update(
 );
 ```
 
-Implementation maps to nmos-cpp `set_receiver_monitor_*` / `set_sender_monitor_*` helpers (which already apply delay / transition-counter rules). overallStatus is **not** set by the caller — nmos-cpp derives it.
+libnvnmos keeps the monitor oid for each caller-chosen `name` and side, and calls the matching `make_set_receiver_monitor_*_handler` / `make_set_sender_monitor_*_handler` setter (§2.2), which applies the delay and transition-counter rules. overallStatus is **not** set by the caller — nmos-cpp derives it.
 
 Idempotent updates (same status + message) should be cheap / no-ops so elements can poll.
 
@@ -170,7 +181,27 @@ Idempotent updates (same status + message) should be cheap / no-ops so elements 
 
 **v1 recommendation:** implement Get*Counters methods returning **empty collections**; ResetCountersAndMessages resets transition counters and status messages via nmos-cpp's existing path, and is a no-op for packet counters.
 
-Rationale: BCP-008 explicitly allows empty collections when the device cannot measure; honest emptiness beats fake zeros. A later revision can add optional C callbacks (`get_lost_packet_counters`, etc.) or daemon-held counters if Rivermax / `rtpjitterbuffer` telemetry lands.
+Rationale: BCP-008 explicitly allows empty collections when the device cannot measure; honest emptiness beats fake zeros.
+
+**When counters are added**, the application pushes them, in the same way as status:
+
+```c
+bool nmos_resource_counters_update(
+    NvNmosNodeServer *server,
+    NvNmosSide side,
+    const char *name,
+    const NvNmosCounter *counters,  /* name, value, description */
+    unsigned int num_counters
+);
+```
+
+libnvnmos stores the latest values for each monitor. The `get_packet_counters_handler` functions that libnvnmos gives nmos-cpp return that stored copy, so a controller's Get*Counters call never waits on the application. The values are as fresh as the last push, which is adequate at a report interval of about a second.
+
+libnvnmos applies ResetCountersAndMessages itself through `reset_monitor_handler`: it records the stored values at reset time and reports later pushes minus those values. The application only ever counts upwards, and has no reset callback.
+
+The push model also suits nvnmosd: a pull would arrive on an nmos-cpp thread and would need a reverse stream to the session to answer it (§6.2). Possible sources are Rivermax statistics or the `rtpjitterbuffer` discussed in §7.4.
+
+nmos-cpp wires the Sender's GetTransmissionErrorCounters to the same `get_lost_packet_counters` handler as the Receiver's GetLostPacketCounters. The handler receives the monitor resource, so libnvnmos can tell the two apart.
 
 ### 5.5 Why not a general IS-12 C API
 
@@ -188,12 +219,15 @@ BCP-008 is the high-value feature set that *does* map cleanly onto named resourc
 
 ```protobuf
 message NodeConfig {
-  // ... existing fields ...
+  // ... existing fields 1-8 ...
   // TCP port for IS-12 Control Protocol WS. 0 = disabled (default).
-  // Honoured only when this RPC creates the Node.
+  // Honoured only when this call creates the Node; ignored when attaching
+  // to an existing Node (same `seed`).
   uint32 control_protocol_ws_port = 9;
 }
 ```
+
+`NodeConfig` is used by both `AddNode` (persistent Nodes) and `OpenSession` (session-refcounted Nodes), so both creation paths get the field.
 
 Optional later: allocate from an env range (like `http_port == 0`) if deployments want auto-pick; not required for the spike.
 
@@ -213,18 +247,26 @@ message ReportResourceStatusRequest {
 }
 
 enum StatusDomain {
-  STATUS_DOMAIN_LINK = 0;
-  STATUS_DOMAIN_CONNECTION = 1;
-  STATUS_DOMAIN_TRANSMISSION = 2;
-  STATUS_DOMAIN_EXTERNAL_SYNC = 3;
-  STATUS_DOMAIN_STREAM = 4;
-  STATUS_DOMAIN_ESSENCE = 5;
+  STATUS_DOMAIN_UNSPECIFIED = 0;
+  STATUS_DOMAIN_LINK = 1;
+  STATUS_DOMAIN_CONNECTION = 2;
+  STATUS_DOMAIN_TRANSMISSION = 3;
+  STATUS_DOMAIN_EXTERNAL_SYNC = 4;
+  STATUS_DOMAIN_STREAM = 5;
+  STATUS_DOMAIN_ESSENCE = 6;
 }
 ```
 
-Ownership rules match `SyncResourceState`: only the session that added the resource may report. Errors: `NOT_FOUND`, `PERMISSION_DENIED`, `FAILED_PRECONDITION` if IS-12 was not enabled on the Node.
+`STATUS_DOMAIN_UNSPECIFIED` is the proto3 zero value and is an error from a client, like `TRANSPORT_UNSPECIFIED` and `SIDE_UNSPECIFIED`.
 
-No reverse stream for ResetMonitor / GetCounters in v1.
+Ownership rules match `SyncResourceState`: only the session that added the resource may report. Status codes follow the service conventions in `nvnmosd.proto`:
+
+- `NOT_FOUND`: the session is unknown or does not own `resource_handle`.
+- `FAILED_PRECONDITION`: IS-12 is not enabled on the Node, as `UpdateAnnotation` does when the Annotation API is off.
+- `INVALID_ARGUMENT`: `STATUS_DOMAIN_UNSPECIFIED`, a domain that does not belong to the resource's side, or a status value outside that domain's enum.
+- `UNKNOWN`: libnvnmos rejects the update for another reason.
+
+There is no acknowledgement, like `UpdateAnnotation`. There is no reverse stream for ResetCountersAndMessages or Get*Counters: libnvnmos answers both from its own state (§5.4). When counters are added, a sibling RPC carries `nmos_resource_counters_update`.
 
 ### 6.3 What nvnmosd does *not* do
 
@@ -236,7 +278,9 @@ No reverse stream for ResetMonitor / GetCounters in v1.
 
 ### 7.1 Role
 
-When the Node has IS-12 enabled (discoverable from open-session / node create — exact signal TBD: element property `report-status=true` defaulting on if the Node supports it, or always attempt and ignore `FAILED_PRECONDITION`):
+The element always attempts to report. The first `FAILED_PRECONDITION` from `ReportResourceStatus` means IS-12 is off on the Node. The element then stops reporting for that resource, logging it at debug level only, and posts no warning or error. There is no element property for this.
+
+When IS-12 is enabled:
 
 1. On activation / deactivation paths already owned by the element, rely primarily on libnvnmos's `on_monitor_activated` for Inactive↔Healthy; optionally reinforce connection/transmission/stream/essence from local observation.
 2. Periodically or on bus messages, map observed health → `ReportResourceStatus`.
@@ -247,9 +291,9 @@ When the Node has IS-12 enabled (discoverable from open-session / node create �
 |--------|-------|----------------|-----------|-------|
 | connection / transmission | Buffer flow to/from `mxlsink`/`mxlsrc`; ERROR | Pad activity / ERROR; optional future `rtpjitterbuffer` stats | Pad activity / ERROR; Rivermax stats if exposed later | Core v1 value |
 | stream / essence | Caps / grain read success | Depayloader ERROR / unexpected EOS | Same + nvdsudp ERROR | Medium confidence |
-| link | Not observed | Weak: optional iface operstate if `interface_ip` known | Same | Default AllUp; document gap |
-| external sync | NotUsed or NotUsed unless MXL clock API exists | NotUsed | NotUsed unless true PTP lock API is available (`ptp-src` alone is insufficient) | Prefer NotUsed over lying Healthy |
-| lost / late / tx error counters | Empty | Empty unless jitterbuffer added | Empty unless Rivermax counters plumbed | See `inner.rs` note: jitterbuffer omitted until a status surface justifies latency |
+| link | No network interface; stays AllUp | Optional: operstate of the interfaces the element resolved for `multicast-iface` / `a=x-nvnmos-iface` | Same | libnvnmos probes by default (§5.2); an element report replaces that probe for the resource |
+| external sync | NotUsed unless MXL clock API exists | NotUsed | NotUsed unless true PTP lock API is available (`ptp-src` alone is insufficient) | Prefer NotUsed over lying Healthy |
+| lost / late / tx error counters | Empty | Empty unless jitterbuffer added | Empty unless Rivermax counters plumbed | See `inner.rs` note: jitterbuffer omitted until a status surface justifies latency. When added, pushed as in §5.4 |
 
 ST 2022-7: connection PartiallyHealthy when one leg recovers traffic and the other does not is desirable later; v1 may treat dual-leg as a single connection domain until leg-level sensors exist.
 
@@ -269,17 +313,18 @@ Phasing is for scheduling and review — not something to encode in source comme
 
 ### Phase A — libnvnmos BCP-008 core
 
-- Enable IS-12 via `control_protocol_ws_port`.
+- Enable IS-12 via `control_protocol_ws_port`, replacing the unconditional `-1` (§2.3); `control_protocol_state`, descriptor handlers and `control_protocol_behaviour_thread`.
 - Auto monitors on add/remove; touchpoints; `on_monitor_activated`.
 - `nmos_resource_status_update` (+ sync source id helper).
+- Link-status operstate probe for RTP resources (§5.2).
 - Empty counter methods; ResetCountersAndMessages via nmos-cpp.
 - Unit / integration tests against nmos-cpp helpers; manual IS-12 client or AMWA test suite smoke where practical.
 
 ### Phase B — nvnmosd pass-through
 
-- `NodeConfig.control_protocol_ws_port`.
+- `NodeConfig.control_protocol_ws_port`, for `AddNode` and `OpenSession`.
 - `ReportResourceStatus` RPC + ownership checks.
-- Daemon tests: report after add; reject wrong session; reject when IS-12 off.
+- Daemon tests: report after add; `NOT_FOUND` for the wrong session; `FAILED_PRECONDITION` when IS-12 off. `advertised_apis.rs` still asserts `-1` when the port is unset, and checks the port when it is set.
 
 ### Phase C — gst-nmos-rs observation
 
@@ -289,28 +334,29 @@ Phasing is for scheduling and review — not something to encode in source comme
 
 ### Phase D — fidelity upgrades (optional, separate approvals)
 
-- NIC operstate → linkStatus (possibly from daemon host netns or from the element process).
+- NIC operstate → linkStatus from the element process, for deployments where the data plane is in a different network namespace from libnvnmos.
 - PTP lock / `synchronizationSourceId` from Rivermax or system clock APIs.
-- Optional `rtpjitterbuffer` + lost/late counters; or nvdsudp / Rivermax counters.
+- Optional `rtpjitterbuffer` + lost/late counters; or nvdsudp / Rivermax counters; pushed through `nmos_resource_counters_update` (§5.4).
 - ST 2022-7 leg-aware PartiallyHealthy.
+- MXL-specific monitor classes using `insert_monitor_domains` (§2.2). Jonathan's unmerged `mxl-status-monitors` branch of nmos-cpp has example `NvMXLReceiverMonitor` / `NvMXLSenderMonitor` classes, with ring/publish, grain, flow and domain status domains.
 
 ## 9. Testing strategy
 
 | Layer | Approach |
 |-------|----------|
 | libnvnmos | Create node with control-protocol port; add sender/receiver; assert monitor objects + touchpoints; drive status updates; activate/deactivate and assert domain Inactive/Healthy behaviour (incl. delay where testable) |
-| nvnmosd | RPC round-trips; session ownership; disabled-IS-12 errors |
+| nvnmosd | RPC round-trips; session ownership (`NOT_FOUND`); disabled-IS-12 errors (`FAILED_PRECONDITION`) |
 | gst-nmos-rs | Integration: force inner ERROR or starve buffers → Unhealthy connection/stream report; activation path does not double-fight library activate handler |
-| Conformance | Track BCP-008-01 / BCP-008-02 (and IS-12) sheets used by nmos-cpp; note known gaps (counters empty, sync NotUsed, link always AllUp) so JT-NM / AMWA results are interpreted correctly |
+| Conformance | Track BCP-008-01 / BCP-008-02 (and IS-12) sheets used by nmos-cpp; note known gaps (counters empty, sync NotUsed, link reflects only the libnvnmos process's view of RTP interfaces and is always AllUp for MXL) so JT-NM / AMWA results are interpreted correctly |
 
 ## 10. Open questions for review
 
 1. **Enablement default:** opt-in via non-zero `control_protocol_ws_port` only (proposed), or also an explicit bool with auto-allocated WS port?
-2. **Sync domain default:** `NotUsed` when no sensor (proposed) vs always `Healthy` when SDP advertises `ts-refclk:ptp`?
-3. **Link domain default:** leave `AllUp` with no reporter (proposed) vs require an explicit first report?
-4. **Counters in v1:** empty collections only (proposed) vs invent a thin callback now?
-5. **Element reporting when IS-12 off:** silent no-op vs property to disable attempts?
-6. **Port collision:** reuse pattern of rejecting create when WS port conflicts with HTTP / events WS (nmos-cpp already rejects events==control-protocol same port)?
+2. **Sync domain default:** resolved: `NotUsed` when there is no sensor, even when the SDP advertises `ts-refclk:ptp` (§5.2).
+3. **Link domain default:** resolved: `AllUp`, with a libnvnmos operstate probe for RTP resources that a data-plane report replaces (§5.2).
+4. **Counters in v1:** empty collections only (proposed) vs application-pushed counters (§5.4) now? Resolved: when counters are added, the application pushes them; libnvnmos does not call back into the application.
+5. **Element reporting when IS-12 off:** resolved: silent no-op after the first `FAILED_PRECONDITION`, with no element property (§7.1).
+6. **Port collision:** resolved: rely on nmos-cpp's existing check (events WS and control-protocol WS on the same port) and on the bind failure; libnvnmos adds no check of its own.
 7. **DeepStream / in-process C path:** Phase A alone is enough for `nvnmos-example` and any Rivermax app; confirm whether Jonathan wants Phase C (GStreamer) in the same release train or after.
 
 ## 11. Appendix — rejected alternatives
@@ -321,6 +367,7 @@ Phasing is for scheduling and review — not something to encode in source comme
 | Status only via IS-07 events | Does not satisfy BCP-008; different feature set |
 | Derive all status inside libnvnmos with no app input | Library has no data plane; would only ever reflect IS-05 active/inactive |
 | Require `rtpjitterbuffer` before enabling BCP-008 | Blocks useful activation/ERROR-based status; counters are optional in the BCP |
+| Counters fetched by a callback into the application | Through nvnmosd, needs a reverse stream and a wait inside the IS-12 method call; the application would also have to handle reset (§5.4) |
 
 ## 12. Appendix — nmos-cpp-node mapping (what we keep / drop)
 
@@ -329,7 +376,8 @@ Phasing is for scheduling and review — not something to encode in source comme
 | control_protocol_ws + descriptor handlers | Keep (library-owned) |
 | monitor blocks + touchpoints | Keep (auto on add) |
 | `on_monitor_activated` | Keep |
-| `set_*_monitor_*_status` from app | Keep as `nmos_resource_status_update` |
+| `make_set_*_monitor_*_handler` setters called by the app | Keep, behind `nmos_resource_status_update` |
+| Custom monitor classes and domains (`insert_monitor_domains`) | Not in v1; possible MXL monitors in Phase D |
 | Gain / Temperature / Example / sender-control | Drop |
 | IS-14 fingerprint / create/remove object | Drop |
 | `simulate_status_monitor_activity` | Drop |
