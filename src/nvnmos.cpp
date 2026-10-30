@@ -187,62 +187,138 @@ namespace nvnmos
         throw std::logic_error("invalid nmos::type");
     }
 
+    inline void check_annotation_update(NvNmosUpdate update, const char* what)
+    {
+        switch (update)
+        {
+        case NVNMOS_UPDATE_UNCHANGED:
+        case NVNMOS_UPDATE_RESET:
+        case NVNMOS_UPDATE_SET:
+            return;
+        }
+        throw std::invalid_argument(std::string("invalid annotation ") + what);
+    }
+
+    inline utility::string_t annotation_tag_key(const NvNmosTag& tag)
+    {
+        if (!tag.key || 0 == tag.key[0])
+        {
+            throw std::invalid_argument("invalid annotation tag key");
+        }
+        const auto key = utility::s2us(tag.key);
+        if (impl::is_read_only_annotation_tag(key))
+        {
+            throw std::invalid_argument("read-only annotation tag");
+        }
+        return key;
+    }
+
+    inline web::json::value annotation_tag_values(const NvNmosTag& tag)
+    {
+        using web::json::value;
+
+        if (tag.num_values > 0 && !tag.values)
+        {
+            throw std::invalid_argument("invalid annotation tag values");
+        }
+        auto values = value::array();
+        for (unsigned int j = 0; j < tag.num_values; ++j)
+        {
+            if (!tag.values[j])
+            {
+                throw std::invalid_argument("invalid annotation tag value");
+            }
+            values[j] = value::string(utility::s2us(tag.values[j]));
+        }
+        return values;
+    }
+
+    // JSON merge-patch for an annotation. An unchanged member is left out and
+    // not read. SET writes the value. RESET writes JSON null.
+    web::json::value make_annotation_patch(const NvNmosAnnotation* annotation)
+    {
+        using web::json::value;
+
+        if (!annotation) throw std::invalid_argument("invalid annotation");
+        check_annotation_update(annotation->label_update, "label update");
+        check_annotation_update(annotation->description_update, "description update");
+        check_annotation_update(annotation->tags_update, "tags update");
+
+        auto patch = value::object();
+        if (NVNMOS_UPDATE_RESET == annotation->label_update)
+        {
+            patch[nmos::fields::label] = value::null();
+        }
+        else if (NVNMOS_UPDATE_SET == annotation->label_update)
+        {
+            if (!annotation->label) throw std::invalid_argument("invalid annotation label");
+            patch[nmos::fields::label] = value::string(utility::s2us(annotation->label));
+        }
+        if (NVNMOS_UPDATE_RESET == annotation->description_update)
+        {
+            patch[nmos::fields::description] = value::null();
+        }
+        else if (NVNMOS_UPDATE_SET == annotation->description_update)
+        {
+            if (!annotation->description) throw std::invalid_argument("invalid annotation description");
+            patch[nmos::fields::description] = value::string(utility::s2us(annotation->description));
+        }
+        if (NVNMOS_UPDATE_RESET == annotation->tags_update)
+        {
+            patch[nmos::fields::tags] = value::null();
+        }
+        else if (NVNMOS_UPDATE_SET == annotation->tags_update)
+        {
+            if (annotation->num_tags > 0 && !annotation->tags)
+            {
+                throw std::invalid_argument("invalid annotation tags");
+            }
+
+            std::set<utility::string_t> keys;
+            auto tags = value::object();
+            for (unsigned int i = 0; i < annotation->num_tags; ++i)
+            {
+                const auto& tag = annotation->tags[i];
+                check_annotation_update(tag.values_update, "values update");
+                if (NVNMOS_UPDATE_UNCHANGED == tag.values_update)
+                {
+                    continue;
+                }
+                const auto key = annotation_tag_key(tag);
+                if (!keys.insert(key).second)
+                {
+                    throw std::invalid_argument("duplicate annotation tag key");
+                }
+                tags[key] = NVNMOS_UPDATE_SET == tag.values_update
+                    ? annotation_tag_values(tag) : value::null();
+            }
+            patch[nmos::fields::tags] = std::move(tags);
+        }
+        return patch;
+    }
+
+    // Annotation applied when a resource is created. A null pointer applies
+    // nothing. JSON null in the patch is a reset, which create rejects.
     web::json::value make_annotation(const NvNmosAnnotation* annotation)
     {
         using web::json::value;
 
-        auto patch = value::object();
-        if (!annotation) return patch;
-        if (annotation->label)
+        if (!annotation) return value::object();
+        auto patch = make_annotation_patch(annotation);
+        for (const auto& field : patch.as_object())
         {
-            patch[nmos::fields::label] = value::string(utility::s2us(annotation->label));
-        }
-        if (annotation->description)
-        {
-            patch[nmos::fields::description] = value::string(utility::s2us(annotation->description));
-        }
-        if (annotation->num_tags > 0 && !annotation->tags)
-        {
-            throw std::invalid_argument("invalid annotation tags");
-        }
-
-        std::set<utility::string_t> keys;
-        auto tags = value::object();
-        for (unsigned int i = 0; i < annotation->num_tags; ++i)
-        {
-            const auto& tag = annotation->tags[i];
-            if (!tag.key || 0 == tag.key[0])
+            if (field.second.is_null())
             {
-                throw std::invalid_argument("invalid annotation tag key");
+                throw std::invalid_argument("annotation reset at create");
             }
-            const auto key = utility::s2us(tag.key);
-            if (impl::is_read_only_annotation_tag(key))
+            if (!field.second.is_object()) continue;
+            for (const auto& tag : field.second.as_object())
             {
-                throw std::invalid_argument("read-only annotation tag");
-            }
-            if (!keys.insert(key).second)
-            {
-                throw std::invalid_argument("duplicate annotation tag key");
-            }
-            if (tag.num_values > 0 && !tag.values)
-            {
-                throw std::invalid_argument("invalid annotation tag values");
-            }
-
-            auto values = value::array();
-            for (unsigned int j = 0; j < tag.num_values; ++j)
-            {
-                if (!tag.values[j])
+                if (tag.second.is_null())
                 {
-                    throw std::invalid_argument("invalid annotation tag value");
+                    throw std::invalid_argument("annotation reset at create");
                 }
-                values[j] = value::string(utility::s2us(tag.values[j]));
             }
-            tags[key] = std::move(values);
-        }
-        if (annotation->num_tags > 0)
-        {
-            patch[nmos::fields::tags] = std::move(tags);
         }
         return patch;
     }
@@ -332,6 +408,8 @@ namespace nvnmos
         void activate_connection(const nmos::type& type, const std::string& name, const std::string& transport_file);
         void activate_channelmapping(const std::string& name, const std::string& output_id, const NvNmosChannelMappingActiveMapEntry* active_map, size_t num_active_map);
 
+        void update_annotation(const nmos::type& type, const std::string& name, const NvNmosAnnotation* annotation);
+
         nmos::id node_id() const;
         nmos::id device_id() const;
         nmos::id sender_id(const std::string& sender_name) const;
@@ -377,7 +455,7 @@ namespace nvnmos
 
             const auto& connection_activated = config.connection_activated;
             const auto& channelmapping_activated = config.channelmapping_activated;
-            const auto& annotation_changed = config.annotation_changed;
+            const auto& annotation_updated = config.annotation_updated;
             auto connection_activated_handler = [connection_activated, server](const nmos::type& type, const nvnmos::name& name_, const std::string& transport_file)
             {
                 if (!connection_activated) return;
@@ -416,33 +494,50 @@ namespace nvnmos
                     throw std::runtime_error("Channel mapping activation failed for " + name + " output " + output_id);
                 }
             };
-            auto annotation_changed_handler = [annotation_changed, server](const nmos::resource& resource, const web::json::value& merged, const web::json::value& patch)
+            auto annotation_updated_handler = [annotation_updated, server](const nmos::resource& resource, const web::json::value& merged, const web::json::value& patch)
             {
-                if (!annotation_changed) return;
+                if (!annotation_updated) return;
 
                 NvNmosAnnotation annotation{};
-                const bool label_changed = patch.has_field(nmos::fields::label);
-                const bool description_changed = patch.has_field(nmos::fields::description);
-                const bool tags_changed = patch.has_field(nmos::fields::tags);
-
-                std::string label;
-                std::string description;
-                if (label_changed && !patch.at(nmos::fields::label).is_null())
+                // The operation comes from the PATCH. The value is the effective
+                // string after the merge, including a restored default.
+                std::string label = utility::us2s(merged.at(nmos::fields::label).as_string());
+                std::string description = utility::us2s(merged.at(nmos::fields::description).as_string());
+                annotation.label = label.c_str();
+                annotation.description = description.c_str();
+                if (patch.has_field(nmos::fields::label))
                 {
-                    label = utility::us2s(patch.at(nmos::fields::label).as_string());
-                    annotation.label = label.c_str();
+                    annotation.label_update = !patch.at(nmos::fields::label).is_null()
+                        ? NVNMOS_UPDATE_SET : NVNMOS_UPDATE_RESET;
                 }
-                if (description_changed && !patch.at(nmos::fields::description).is_null())
+                if (patch.has_field(nmos::fields::description))
                 {
-                    description = utility::us2s(patch.at(nmos::fields::description).as_string());
-                    annotation.description = description.c_str();
+                    annotation.description_update = !patch.at(nmos::fields::description).is_null()
+                        ? NVNMOS_UPDATE_SET : NVNMOS_UPDATE_RESET;
+                }
+
+                std::set<utility::string_t> written_keys;
+                if (patch.has_field(nmos::fields::tags))
+                {
+                    if (!patch.at(nmos::fields::tags).is_null())
+                    {
+                        annotation.tags_update = NVNMOS_UPDATE_SET;
+                        for (const auto& field : patch.at(nmos::fields::tags).as_object())
+                        {
+                            if (!field.second.is_null()) written_keys.insert(field.first);
+                        }
+                    }
+                    else
+                    {
+                        annotation.tags_update = NVNMOS_UPDATE_RESET;
+                    }
                 }
 
                 std::vector<std::string> tag_keys;
                 std::vector<std::vector<std::string>> tag_value_strings;
                 std::vector<std::vector<const char*>> tag_value_ptrs;
                 std::vector<NvNmosTag> tags;
-                if (tags_changed)
+                if (NVNMOS_UPDATE_RESET != annotation.tags_update)
                 {
                     const auto& merged_tags = merged.at(nmos::fields::tags).as_object();
                     for (const auto& field : merged_tags)
@@ -466,6 +561,7 @@ namespace nvnmos
                             tag_value_ptrs[i].push_back(value.c_str());
                         }
                         tags[i].key = tag_keys[i].c_str();
+                        tags[i].values_update = written_keys.count(utility::s2us(tag_keys[i])) ? NVNMOS_UPDATE_SET : NVNMOS_UPDATE_UNCHANGED;
                         tags[i].values = tag_value_ptrs[i].empty() ? nullptr : tag_value_ptrs[i].data();
                         tags[i].num_values = (unsigned int)tag_value_ptrs[i].size();
                     }
@@ -485,12 +581,12 @@ namespace nvnmos
                     }
                 }
 
-                if (!annotation_changed(server, type, !name.empty() ? name.c_str() : nullptr, &annotation, label_changed, description_changed, tags_changed))
+                if (!annotation_updated(server, type, !name.empty() ? name.c_str() : nullptr, &annotation))
                 {
                     throw std::runtime_error("Annotation not accepted for " + utility::us2s(resource.type.name) + ": " + utility::us2s(resource.id) + (!name.empty() ? " (" + name + ")" : ""));
                 }
             };
-            node_implementation = make_node_implementation(node_model, connection_activated_handler, channelmapping_activated_handler, annotation_changed_handler, gate);
+            node_implementation = make_node_implementation(node_model, connection_activated_handler, channelmapping_activated_handler, annotation_updated_handler, gate);
 
             // Set up the node server
 
@@ -653,8 +749,8 @@ namespace nvnmos
         web::json::insert(settings, std::make_pair(nmos::fields::events_ws_port, -1));
         web::json::insert(settings, std::make_pair(nmos::fields::control_protocol_ws_port, -1));
         web::json::insert(settings, std::make_pair(nmos::fields::configuration_port, -1));
-        // IS-05 and IS-08 still run when their callbacks are null; IS-13 is mounted only when annotation_changed is set.
-        if (!config.annotation_changed)
+        // IS-05 and IS-08 still run when their callbacks are null; IS-13 is mounted only when annotation_updated is set.
+        if (!config.annotation_updated)
         {
             web::json::insert(settings, std::make_pair(nmos::fields::annotation_port, -1));
         }
@@ -896,6 +992,25 @@ namespace nvnmos
         }
     }
 
+    void server::update_annotation(const nmos::type& type, const std::string& name, const NvNmosAnnotation* annotation)
+    {
+        try
+        {
+            const auto patch = make_annotation_patch(annotation);
+            const bool node_or_device = nmos::types::node == type || nmos::types::device == type;
+            if (node_or_device == !name.empty())
+            {
+                throw std::invalid_argument("invalid annotation resource name");
+            }
+            node_implementation_update_annotation(node_model, node_implementation.merge_annotation_patch, type, utility::s2us(name), patch, gate);
+        }
+        catch (...)
+        {
+            log_current_exception();
+            throw;
+        }
+    }
+
     void server::activate_channelmapping(const std::string& name, const std::string& output_id, const NvNmosChannelMappingActiveMapEntry* active_map, size_t num_active_map)
     {
         try
@@ -1129,6 +1244,30 @@ bool nmos_connection_activate(
     {
         const auto type = nvnmos::type_from_side(side);
         impl->activate_connection(type, name, transport_file);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+NVNMOS_API
+bool nmos_annotation_update(
+    NvNmosNodeServer* server,
+    NvNmosResourceType type,
+    const char* name,
+    const NvNmosAnnotation* annotation)
+{
+    if (!server) return false;
+    auto impl = (nvnmos::server*)server->impl;
+    if (!impl) return false;
+    if (!annotation) return false;
+
+    try
+    {
+        const auto resource_type = nvnmos::type_from_resource_type(type);
+        impl->update_annotation(resource_type, name ? name : "", annotation);
         return true;
     }
     catch (...)

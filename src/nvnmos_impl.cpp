@@ -1595,6 +1595,47 @@ namespace nvnmos
         model.notify();
     }
 
+    void node_implementation_update_annotation(nmos::node_model& model, const nmos::annotation_patch_merger& merge_annotation_patch, const nmos::type& type, const nvnmos::name& name, const web::json::value& patch, slog::base_gate& gate)
+    {
+        using web::json::value_of;
+
+        auto lock = model.write_lock();
+
+        const auto seed_id = nmos::experimental::fields::seed_id(model.settings);
+        const auto resource_id = impl::make_id(seed_id, type, name);
+        const std::pair<nmos::id, nmos::type> id_type{ resource_id, type };
+        auto resource = nmos::find_resource(model.node_resources, id_type);
+        if (model.node_resources.end() == resource)
+        {
+            throw std::invalid_argument("Could not find " + utility::us2s(type.name) + ": " + utility::us2s(resource_id) + (name.empty() ? "" : " (" + utility::us2s(name) + ")"));
+        }
+
+        if (0 == patch.size()) return;
+
+        auto merged = value_of({
+            { nmos::fields::label, resource->data.at(nmos::fields::label) },
+            { nmos::fields::description, resource->data.at(nmos::fields::description) },
+            { nmos::fields::tags, resource->data.at(nmos::fields::tags) }
+        });
+        if (!merge_annotation_patch)
+        {
+            throw std::logic_error("Annotation update without a merger");
+        }
+        merge_annotation_patch(*resource, merged, patch);
+
+        slog::log<slog::severities::info>(gate, SLOG_FLF) << "Updating annotation for " << type.name << (name.empty() ? "" : " (" + utility::us2s(name) + ")");
+
+        nmos::modify_resource(model.node_resources, resource_id, [&](nmos::resource& res)
+        {
+            res.data[nmos::fields::version] = web::json::value::string(nmos::make_version());
+            if (merged.has_string_field(nmos::fields::label)) res.data[nmos::fields::label] = merged.at(nmos::fields::label);
+            if (merged.has_string_field(nmos::fields::description)) res.data[nmos::fields::description] = merged.at(nmos::fields::description);
+            if (merged.has_object_field(nmos::fields::tags)) res.data[nmos::fields::tags] = merged.at(nmos::fields::tags);
+        });
+
+        model.notify();
+    }
+
     namespace impl
     {
         // like nmos::make_session_description for 'internal' use
@@ -2754,7 +2795,7 @@ namespace nvnmos
     }
 
     // This constructs all the callbacks used to integrate the application into the server instance for the NMOS Node.
-    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, channelmapping_activation_handler channelmapping_activated, annotation_handler annotation_changed, slog::base_gate& gate)
+    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, channelmapping_activation_handler channelmapping_activated, annotation_handler annotation_updated, slog::base_gate& gate)
     {
         return nmos::experimental::node_implementation()
             .on_load_server_certificates(nmos::make_load_server_certificates_handler(model.settings, gate))
@@ -2768,6 +2809,6 @@ namespace nvnmos
             .on_set_transportfile(make_node_implementation_transportfile_setter(model.node_resources, model.settings))
             .on_connection_activated(make_node_implementation_connection_activation_handler(std::move(connection_activated), model.settings, gate))
             .on_channelmapping_activated(make_node_implementation_channelmapping_activation_handler(std::move(channelmapping_activated), model.settings, gate))
-            .on_merge_annotation_patch(make_node_implementation_annotation_patch_merger(std::move(annotation_changed), model.settings));
+            .on_merge_annotation_patch(make_node_implementation_annotation_patch_merger(std::move(annotation_updated), model.settings));
     }
 }

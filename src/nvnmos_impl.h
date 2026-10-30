@@ -224,7 +224,7 @@ namespace nvnmos
     typedef std::function<void(const nmos::resource& resource, const web::json::value& merged, const web::json::value& patch)> annotation_handler;
 
     // This constructs all the callbacks used to integrate the application into the server instance for the NMOS Node.
-    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, channelmapping_activation_handler channelmapping_activated, annotation_handler annotation_changed, slog::base_gate& gate);
+    nmos::experimental::node_implementation make_node_implementation(nmos::node_model& model, connection_activation_handler connection_activated, channelmapping_activation_handler channelmapping_activated, annotation_handler annotation_updated, slog::base_gate& gate);
 
     nmos::annotation_patch_merger make_node_implementation_annotation_patch_merger(annotation_handler callback, nmos::settings& settings);
 
@@ -233,6 +233,10 @@ namespace nvnmos
     // For now, the transport file is not validated against the existing sender or receiver capabilities and constraints.
     // Does not invoke the application's connection activation callback.
     void node_implementation_activate_connection(nmos::node_model& model, const nmos::type& type, const nvnmos::name& name, const std::string& transport_file, slog::base_gate& gate);
+
+    // Merge an IS-13 annotation patch into one resource and invoke the annotation callback before the resource is updated.
+    // `merge_annotation_patch` is the merger an HTTP Annotation API PATCH uses.
+    void node_implementation_update_annotation(nmos::node_model& model, const nmos::annotation_patch_merger& merge_annotation_patch, const nmos::type& type, const nvnmos::name& name, const web::json::value& patch, slog::base_gate& gate);
 
     // This updates the published active map for the specified output in the channel mapping, based on the specified active map.
     // `output_id` is the IS-08 output id. `active_map` length must equal that output's channel count; index i is output channel i.

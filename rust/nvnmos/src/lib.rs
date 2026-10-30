@@ -26,7 +26,7 @@
 //!   without needing a running server. [`make_id`] and [`NodeServer::get_id`]
 //!   are the generic forms.
 //! * [`NodeServer::builder`] — opt into IS-05 [`Activation`] handling, IS-13
-//!   [`AnnotationChange`] handling, and / or forward libnvnmos's slog output
+//!   [`AnnotationUpdate`] handling, and / or forward libnvnmos's slog output
 //!   via [`LogMessage`]. The knobs are chainable on the returned
 //!   [`NodeServerBuilder`]; the bare [`NodeServer::new`] is shorthand for
 //!   "no callbacks".
@@ -38,7 +38,6 @@
 
 #![warn(missing_docs)]
 
-use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, NulError};
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -340,47 +339,122 @@ pub struct LogMessage<'a> {
 
 type LogCallback = Box<dyn Fn(&LogMessage<'_>) + Send + Sync + 'static>;
 
-/// IS-13 annotation applied when a resource is created.
+/// IS-13 annotation.
 ///
-/// `None` for [`Self::label`] or [`Self::description`] omits that property.
-/// `Some("")` is an annotated empty string.
+/// The same struct is passed at create, to [`NodeServer::update_annotation`],
+/// and inside [`AnnotationUpdate`].
+///
+/// At create, [`Update::Set`] writes the property. [`Update::Unchanged`]
+/// leaves the constructed value in place. [`Update::Reset`] is invalid.
+///
+/// On the callback, `label` and `description` are the effective strings
+/// after the merge. [`Update::Set`] means that string was written as the
+/// overlay. [`Update::Reset`] means the overlay was cleared and the string
+/// is the restored default. [`Update::Unchanged`] means the overlay was
+/// left alone. `tags` is the writable-tag overlay after the merge. A
+/// `tags_update` of [`Update::Set`] means the merge wrote the tags object.
+/// A key this merge wrote is [`Update::Set`]. A key this merge left in
+/// place is [`Update::Unchanged`]. A key this merge cleared is absent. A
+/// `tags_update` of [`Update::Reset`] means every writable tag was cleared
+/// and `tags` is empty. A `tags_update` of [`Update::Unchanged`] means the
+/// merge left the tags object alone. `tags` still lists the overlay, and
+/// each key is [`Update::Unchanged`].
+///
+/// On [`NodeServer::update_annotation`], only [`Update::Set`] and
+/// [`Update::Reset`] are applied, and a value on an unchanged or reset
+/// field is ignored. `tags` lists the keys to update. A tag whose
+/// operation is [`Update::Unchanged`] is ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Annotation {
-    /// Label overlay. `None` omits `label`.
+    /// Whether `label` is unchanged, written, or cleared.
+    pub label_update: Update,
+    /// Label. On the callback this is the effective string. At create and
+    /// on [`NodeServer::update_annotation`] it is read when
+    /// [`Self::label_update`] is [`Update::Set`]. An empty string is a
+    /// valid overlay.
     pub label: Option<String>,
-    /// Description overlay. `None` omits `description`.
+    /// Whether `description` is unchanged, written, or cleared.
+    pub description_update: Update,
+    /// Description. On the callback this is the effective string. At create
+    /// and on [`NodeServer::update_annotation`] it is read when
+    /// [`Self::description_update`] is [`Update::Set`]. An empty string is a
+    /// valid overlay.
     pub description: Option<String>,
-    /// Writable tags. Empty omits `tags`; an empty value `Vec` is an empty
-    /// JSON array, not a removed key.
-    pub tags: BTreeMap<String, Vec<String>>,
+    /// Whether `tags` is unchanged, written, or cleared.
+    pub tags_update: Update,
+    /// Writable tags. On the callback this is the overlay after the merge.
+    /// At create and on [`NodeServer::update_annotation`] it lists the keys
+    /// to update and is read when [`Self::tags_update`] is [`Update::Set`].
+    /// A tag whose operation is [`Update::Unchanged`] is ignored.
+    pub tags: Vec<AnnotationTag>,
 }
 
-/// An IS-13 Annotation API merge reported through
-/// [`NodeServerBuilder::on_annotation_changed`].
+/// Whether an IS-13 field is left alone, written, or cleared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Update {
+    /// Leave the field as it is.
+    #[default]
+    Unchanged,
+    /// Write the accompanying value. An empty string or an empty tag value
+    /// list is an overlay, not a reset.
+    Set,
+    /// Clear the field. JSON null.
+    Reset,
+}
+
+impl Update {
+    fn from_ffi(update: sys::NvNmosUpdate) -> Option<Self> {
+        match update {
+            sys::_NvNmosUpdate_NVNMOS_UPDATE_UNCHANGED => Some(Self::Unchanged),
+            sys::_NvNmosUpdate_NVNMOS_UPDATE_SET => Some(Self::Set),
+            sys::_NvNmosUpdate_NVNMOS_UPDATE_RESET => Some(Self::Reset),
+            _ => None,
+        }
+    }
+
+    fn to_ffi(self) -> sys::NvNmosUpdate {
+        match self {
+            Self::Unchanged => sys::_NvNmosUpdate_NVNMOS_UPDATE_UNCHANGED,
+            Self::Set => sys::_NvNmosUpdate_NVNMOS_UPDATE_SET,
+            Self::Reset => sys::_NvNmosUpdate_NVNMOS_UPDATE_RESET,
+        }
+    }
+}
+
+/// One writable tag in an [`Annotation`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotationTag {
+    /// Tag key.
+    pub key: String,
+    /// Whether [`Self::values`] is unchanged, written, or cleared.
+    /// On the callback, a key removed by the merge is absent. A key this
+    /// merge left in place is [`Update::Unchanged`]. A key this merge wrote
+    /// is [`Update::Set`].
+    pub values_update: Update,
+    /// Tag values. On the callback, a key this merge wrote or left in place
+    /// carries them. At create and on [`NodeServer::update_annotation`] they
+    /// are read when [`Self::values_update`] is [`Update::Set`]. An empty
+    /// list is an empty array.
+    pub values: Vec<String>,
+}
+
+/// Which resource [`NodeServerBuilder::on_annotation_updated`] reports.
 ///
-/// `annotation` and `name` are only valid for the duration of the callback.
-/// Copy anything that must outlive the call. A `None` label or description is
-/// meaningful only when the matching `*_changed` flag is true; then it is a
-/// reset, while `Some("")` is an annotated empty value.
-#[derive(Debug)]
-pub struct AnnotationChange<'a> {
+/// Create and [`NodeServer::update_annotation`] already name the resource,
+/// so they take [`Annotation`] alone. The callback receives the resource
+/// beside the annotation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotationUpdate {
     /// Which IS-04 resource was updated.
     pub resource_type: ResourceType,
     /// Caller-chosen sender or receiver name. `None` for Node and Device.
-    pub name: Option<&'a str>,
-    /// Values for the properties this merge changed.
-    pub annotation: &'a Annotation,
-    /// This merge included `label`.
-    pub label_changed: bool,
-    /// This merge included `description`.
-    pub description_changed: bool,
-    /// This merge included `tags`. Then [`Annotation::tags`] is the full
-    /// writable-tag overlay after the merge.
-    pub tags_changed: bool,
+    pub name: Option<String>,
+    /// Annotation after the merge.
+    pub annotation: Annotation,
 }
 
 type AnnotationCallback =
-    Box<dyn Fn(&AnnotationChange<'_>) -> std::result::Result<(), String> + Send + Sync + 'static>;
+    Box<dyn Fn(&AnnotationUpdate) -> std::result::Result<(), String> + Send + Sync + 'static>;
 
 struct CallbackState {
     activation: Option<ActivationCallback>,
@@ -558,9 +632,6 @@ unsafe extern "C" fn annotation_trampoline(
     resource_type: sys::NvNmosResourceType,
     name: *const c_char,
     annotation: *const sys::NvNmosAnnotation,
-    label_changed: bool,
-    description_changed: bool,
-    tags_changed: bool,
 ) -> bool {
     if server.is_null() || annotation.is_null() {
         return false;
@@ -586,6 +657,15 @@ unsafe extern "C" fn annotation_trampoline(
         }
     };
     let raw = unsafe { &*annotation };
+    let Some(label_update) = Update::from_ffi(raw.label_update) else {
+        return false;
+    };
+    let Some(description_update) = Update::from_ffi(raw.description_update) else {
+        return false;
+    };
+    let Some(tags_update) = Update::from_ffi(raw.tags_update) else {
+        return false;
+    };
     let label = match cstr_option(raw.label) {
         Ok(value) => value.map(str::to_owned),
         Err(()) => return false,
@@ -594,13 +674,16 @@ unsafe extern "C" fn annotation_trampoline(
         Ok(value) => value.map(str::to_owned),
         Err(()) => return false,
     };
-    let mut tags = BTreeMap::new();
+    let mut tags = Vec::with_capacity(raw.num_tags as usize);
     if !raw.tags.is_null() {
         for index in 0..raw.num_tags as usize {
             let tag = unsafe { &*raw.tags.add(index) };
             let key = match cstr_option(tag.key) {
                 Ok(Some(key)) => key.to_owned(),
                 _ => return false,
+            };
+            let Some(values_update) = Update::from_ffi(tag.values_update) else {
+                return false;
             };
             let mut values = Vec::with_capacity(tag.num_values as usize);
             if !tag.values.is_null() {
@@ -612,24 +695,27 @@ unsafe extern "C" fn annotation_trampoline(
                     }
                 }
             }
-            tags.insert(key, values);
+            tags.push(AnnotationTag {
+                key,
+                values_update,
+                values,
+            });
         }
     }
-    let annotation = Annotation {
-        label,
-        description,
-        tags,
-    };
-    let change = AnnotationChange {
+    let update = AnnotationUpdate {
         resource_type,
-        name,
-        annotation: &annotation,
-        label_changed,
-        description_changed,
-        tags_changed,
+        name: name.map(str::to_owned),
+        annotation: Annotation {
+            label_update,
+            label,
+            description_update,
+            description,
+            tags_update,
+            tags,
+        },
     };
     matches!(
-        catch_unwind(AssertUnwindSafe(|| callback(&change))),
+        catch_unwind(AssertUnwindSafe(|| callback(&update))),
         Ok(Ok(()))
     )
 }
@@ -956,31 +1042,49 @@ struct MarshalledAnnotation {
 impl MarshalledAnnotation {
     fn new(annotation: &Annotation) -> Result<Self> {
         let mut strings = Vec::new();
-        let label = store_exact_string(&mut strings, annotation.label.as_deref())?;
-        let description = store_exact_string(&mut strings, annotation.description.as_deref())?;
+        let label = match annotation.label_update {
+            Update::Unchanged => ptr::null(),
+            Update::Set => store_exact_string(&mut strings, annotation.label.as_deref())?,
+            Update::Reset => ptr::null(),
+        };
+        let description = match annotation.description_update {
+            Update::Unchanged => ptr::null(),
+            Update::Set => store_exact_string(&mut strings, annotation.description.as_deref())?,
+            Update::Reset => ptr::null(),
+        };
         let mut value_ptrs = Vec::new();
-        let mut tags = Vec::with_capacity(annotation.tags.len());
-        for (tag, tag_values) in &annotation.tags {
-            let key = store_exact_string(&mut strings, Some(tag.as_str()))?;
-            let mut values = Vec::with_capacity(tag_values.len());
-            for value in tag_values {
-                values.push(store_exact_string(&mut strings, Some(value.as_str()))?);
+        let mut tags = Vec::new();
+        if annotation.tags_update != Update::Reset {
+            for tag in &annotation.tags {
+                let key = store_exact_string(&mut strings, Some(tag.key.as_str()))?;
+                let values = match tag.values_update {
+                    Update::Unchanged | Update::Set => tag
+                        .values
+                        .iter()
+                        .map(|value| store_exact_string(&mut strings, Some(value.as_str())))
+                        .collect::<Result<Vec<_>>>()?,
+                    Update::Reset => Vec::new(),
+                };
+                value_ptrs.push(values);
+                let values = value_ptrs.last().unwrap();
+                tags.push(sys::NvNmosTag {
+                    key,
+                    values_update: tag.values_update.to_ffi(),
+                    values: if values.is_empty() {
+                        ptr::null_mut()
+                    } else {
+                        values.as_ptr() as *mut _
+                    },
+                    num_values: values.len() as u32,
+                });
             }
-            value_ptrs.push(values);
-            let values = value_ptrs.last().unwrap();
-            tags.push(sys::NvNmosTag {
-                key,
-                values: if values.is_empty() {
-                    ptr::null_mut()
-                } else {
-                    values.as_ptr() as *mut _
-                },
-                num_values: values.len() as u32,
-            });
         }
-        let annotation = sys::NvNmosAnnotation {
+        let raw = sys::NvNmosAnnotation {
+            label_update: annotation.label_update.to_ffi(),
             label,
+            description_update: annotation.description_update.to_ffi(),
             description,
+            tags_update: annotation.tags_update.to_ffi(),
             tags: if tags.is_empty() {
                 ptr::null()
             } else {
@@ -992,7 +1096,7 @@ impl MarshalledAnnotation {
             tags,
             _value_ptrs: value_ptrs,
             _strings: strings,
-            annotation,
+            annotation: raw,
         })
     }
 
@@ -1421,17 +1525,14 @@ impl<'a> NodeServerBuilder<'a> {
     /// Install an IS-13 annotation callback. This also mounts the Annotation API.
     /// Without it, libnvnmos leaves that API unmounted.
     ///
-    /// Invoked synchronously on a libnvnmos worker thread when an Annotation
-    /// API request patches a resource, once the patch data has been validated
-    /// and merged with the resource's current values, before the resource is
-    /// updated and before the HTTP response. Returning `Ok(())` accepts the
-    /// change. `Err(_)` leaves the resource unchanged and fails the request
-    /// with 500 Internal Error. Panics are caught and treated as `Err`.
-    /// [`AnnotationChange`] borrows are valid only for this call; copy
-    /// anything that must be kept. Must be `Send + Sync + 'static`.
-    pub fn on_annotation_changed<F>(mut self, callback: F) -> Self
+    /// Invoked synchronously, before the resource is updated, for an Annotation
+    /// API PATCH and for [`NodeServer::update_annotation`]. Returning `Ok(())`
+    /// accepts the update. `Err(_)` leaves the resource unchanged and fails the
+    /// request. Panics are caught and treated as `Err`. Must be
+    /// `Send + Sync + 'static`.
+    pub fn on_annotation_updated<F>(mut self, callback: F) -> Self
     where
-        F: Fn(&AnnotationChange<'_>) -> std::result::Result<(), String> + Send + Sync + 'static,
+        F: Fn(&AnnotationUpdate) -> std::result::Result<(), String> + Send + Sync + 'static,
     {
         self.annotation = Some(Box::new(callback));
         self
@@ -1610,10 +1711,10 @@ impl NodeServer {
             device_annotation: device_annotation
                 .as_ref()
                 .map_or(ptr::null(), |m| m.as_ptr()),
-            annotation_changed: callback_state
+            annotation_updated: callback_state
                 .as_ref()
                 .filter(|s| s.annotation.is_some())
-                .map(|_| annotation_trampoline as unsafe extern "C" fn(_, _, _, _, _, _, _) -> _),
+                .map(|_| annotation_trampoline as unsafe extern "C" fn(_, _, _, _) -> _),
             ..Default::default()
         };
 
@@ -1813,6 +1914,33 @@ impl NodeServer {
         };
         if !ok {
             return Err(Error::Failed("nmos_connection_activate"));
+        }
+        Ok(())
+    }
+
+    /// Update the IS-13 annotation of one resource.
+    ///
+    /// The annotation callback runs on this thread, inside the call, before the
+    /// resource is updated. `Err` indicates the annotation is invalid, no such
+    /// resource exists, or the callback failed.
+    pub fn update_annotation(
+        &self,
+        resource_type: ResourceType,
+        name: Option<&str>,
+        annotation: &Annotation,
+    ) -> Result<()> {
+        let marshalled = MarshalledAnnotation::new(annotation)?;
+        let cname = name.map(CString::new).transpose()?;
+        let ok = unsafe {
+            sys::nmos_annotation_update(
+                self.raw_ptr_mut(),
+                resource_type.to_ffi(),
+                cname.as_ref().map_or(ptr::null(), |name| name.as_ptr()),
+                marshalled.as_ptr(),
+            )
+        };
+        if !ok {
+            return Err(Error::Failed("nmos_annotation_update"));
         }
         Ok(())
     }
@@ -2109,21 +2237,32 @@ mod tests {
     #[test]
     fn annotation_marshalling_preserves_empty_values() {
         let annotation = Annotation {
+            label_update: Update::Set,
             label: Some(String::new()),
+            description_update: Update::Unchanged,
             description: None,
-            tags: BTreeMap::from([
-                ("empty".to_string(), Vec::new()),
-                (
-                    "values".to_string(),
-                    vec![String::new(), "value".to_string()],
-                ),
-            ]),
+            tags_update: Update::Set,
+            tags: vec![
+                AnnotationTag {
+                    key: "empty".to_string(),
+                    values_update: Update::Set,
+                    values: Vec::new(),
+                },
+                AnnotationTag {
+                    key: "values".to_string(),
+                    values_update: Update::Set,
+                    values: vec![String::new(), "value".to_string()],
+                },
+            ],
         };
         let marshalled = MarshalledAnnotation::new(&annotation).unwrap();
         let raw = unsafe { &*marshalled.as_ptr() };
 
+        assert_eq!(raw.label_update, Update::Set.to_ffi());
         assert_eq!(unsafe { CStr::from_ptr(raw.label) }.to_str().unwrap(), "");
+        assert_eq!(raw.description_update, Update::Unchanged.to_ffi());
         assert!(raw.description.is_null());
+        assert_eq!(raw.tags_update, Update::Set.to_ffi());
         assert_eq!(raw.num_tags, 2);
 
         let tags = unsafe { std::slice::from_raw_parts(raw.tags, raw.num_tags as usize) };
@@ -2131,6 +2270,7 @@ mod tests {
             unsafe { CStr::from_ptr(tags[0].key) }.to_str().unwrap(),
             "empty"
         );
+        assert_eq!(tags[0].values_update, Update::Set.to_ffi());
         assert_eq!(tags[0].num_values, 0);
         assert!(tags[0].values.is_null());
         assert_eq!(
