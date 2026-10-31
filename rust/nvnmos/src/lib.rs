@@ -2174,6 +2174,40 @@ mod tests {
     }
 
     #[test]
+    fn library_version_matches_crate_version() {
+        let mut version = std::mem::MaybeUninit::<sys::NvNmosVersion>::uninit();
+        assert!(unsafe { sys::nmos_get_version(version.as_mut_ptr()) });
+        let version = unsafe { version.assume_init() };
+        assert_eq!(
+            version.major,
+            env!("CARGO_PKG_VERSION_MAJOR").parse::<u32>().unwrap()
+        );
+        assert_eq!(
+            version.minor,
+            env!("CARGO_PKG_VERSION_MINOR").parse::<u32>().unwrap()
+        );
+        assert_eq!(
+            version.patch,
+            env!("CARGO_PKG_VERSION_PATCH").parse::<u32>().unwrap()
+        );
+        let prerelease = unsafe { std::ffi::CStr::from_ptr(version.prerelease) };
+        assert_eq!(prerelease.to_str().unwrap(), env!("CARGO_PKG_VERSION_PRE"));
+        let string = unsafe { std::ffi::CStr::from_ptr(version.string) };
+        let string = string.to_str().unwrap();
+        let metadata = string
+            .strip_prefix(env!("CARGO_PKG_VERSION"))
+            .unwrap_or_else(|| panic!("{string:?} does not start with the crate version"));
+        assert!(
+            metadata.is_empty()
+                || metadata
+                    .strip_prefix("+g")
+                    .is_some_and(|commit| !commit.is_empty()
+                        && commit.chars().all(|c| c.is_ascii_hexdigit())),
+            "{string:?} has unexpected build metadata"
+        );
+    }
+
+    #[test]
     fn sender_and_source_ids_diverge() {
         let sender = make_sender_id("seed", "video").unwrap();
         let source = make_source_id("seed", "video").unwrap();

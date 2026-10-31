@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -35,4 +35,13 @@ configure_package_config_file(cmake/nvnmos-config.cmake.in
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/nvnmos
     )
 
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/cmake/nvnmos-config.cmake" DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/nvnmos)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/cmake/nvnmos-config-version.cmake"
+    COMPATIBILITY ${NVNMOS_VERSION_COMPATIBILITY}
+    )
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/cmake/nvnmos-config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/cmake/nvnmos-config-version.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/nvnmos
+    )

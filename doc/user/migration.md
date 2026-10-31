@@ -5,22 +5,28 @@ SPDX-License-Identifier: Apache-2.0
 
 # Migration
 
-## API Changes for MXL Support
+Each section lists the changes that applications need to make for a release, newest first.
+
+## Migrating to 0.1.0
+
+NvNmos had no version number before 0.1.0. These changes apply to applications written for earlier versions.
+
+### API Changes for MXL Support
 
 Existing application code needs to be updated as itemised below - mostly possible with search-and-replace.
 
-### Configuration Changes
+#### Configuration Changes
 
 - `NvNmosSenderConfig::sdp` and `NvNmosReceiverConfig::sdp` (`const char *`) are now `NvNmosSenderConfig::transport_file` and `NvNmosReceiverConfig::transport_file`. A new sibling `NvNmosTransport transport` field selects the format: `NVNMOS_TRANSPORT_RTP` for SDP (the zero-initialised default), `NVNMOS_TRANSPORT_MXL` for an MXL flow definition (JSON).
 - The SDP identity attribute `a=x-nvnmos-id:<id>` is now `a=x-nvnmos-name:<name>` — renamed for clarity, since its value has always been the caller-chosen name (unique within the Node), not a UUID. The NMOS resource UUIDs are generated deterministically by the library from `NvNmosNodeConfig::seed` + name and are now also exposed via the new ID accessors below.
 - `remove_nmos_sender_from_node_server` and `remove_nmos_receiver_from_node_server` now take a caller-chosen name (`sender_name` / `receiver_name`) instead of a UUID.
 
-### Activation Changes
+#### Activation Changes
 
 - The IS-05 activation callback typedef `nmos_connection_rtp_activation_callback` is now `nmos_connection_activation_callback`, and its signature changed from `(server, id, sdp)` to `(server, side, name, transport_file)`. The matching `NvNmosNodeConfig::rtp_connection_activated` field is now `connection_activated`. The new `NvNmosSide` parameter (`NVNMOS_SIDE_SENDER` / `NVNMOS_SIDE_RECEIVER`) disambiguates a name that may now be shared between a Sender and a Receiver on the same Node — names are scoped per side.
 - `nmos_connection_rtp_activate(server, id, sdp)` is now `nmos_connection_activate(server, side, name, transport_file)`.
 
-### New ID Accessors
+#### New ID Accessors
 
 The NMOS resource UUIDs are deterministic pure functions of `(seed, side, name)`. Pure accessors compute them without a server:
 
@@ -42,7 +48,7 @@ Live accessors look them up on a running server:
 
 All write a null-terminated UUID into a buffer of at least `NVNMOS_ID_LEN` bytes (37, including the terminator). Each returns `bool`.
 
-### MXL Transport File Format
+#### MXL Transport File Format
 
 For `NVNMOS_TRANSPORT_MXL` the transport file is an MXL flow definition JSON (the form consumed by the MXL SDK), with NvNmos extensions carried as entries in the standard `tags` property keyed by `urn:x-nvnmos:tag:*` URN strings. See [NvNmos Extensions to the Transport File](transport-files.md) for the full set.
 
@@ -50,7 +56,7 @@ For MXL Senders, omitting the top-level `id` now leaves IS-05 `mxl_flow_id` unco
 
 For the full per-field documentation see the [C API reference](https://nvidia.github.io/nvnmos/nvnmos_8h.html).
 
-## API Changes for RTP/UDP Sender IS-05 Defaults
+### API Changes for RTP/UDP Sender IS-05 Defaults
 
 On IS-05 activation, `"auto"` values for RTP/UDP Senders are now resolved based on the config SDP:
 

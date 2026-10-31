@@ -68,6 +68,28 @@
 #define NVNMOS_H
 
 /**
+ * @def NVNMOS_VERSION_MAJOR
+ * Major version of this header.
+ * @def NVNMOS_VERSION_MINOR
+ * Minor version of this header.
+ * @def NVNMOS_VERSION_PATCH
+ * Patch version of this header.
+ * @def NVNMOS_VERSION_PRERELEASE
+ * Pre-release identifier of this header, such as "alpha", or an empty
+ * string for a release.
+ * @def NVNMOS_VERSION_STRING
+ * Version of this header as a Semantic Versioning string, such as
+ * "0.1.0-alpha" or "0.1.0".
+ *
+ * Use @ref nmos_get_version to get the version of the loaded library.
+ */
+#define NVNMOS_VERSION_MAJOR 0
+#define NVNMOS_VERSION_MINOR 1
+#define NVNMOS_VERSION_PATCH 0
+#define NVNMOS_VERSION_PRERELEASE "alpha"
+#define NVNMOS_VERSION_STRING "0.1.0-alpha"
+
+/**
  * @def NVNMOS_API
  * Marks a symbol as part of the public NvNmos library ABI, expanding to the
  * appropriate import, export or visibility attribute for the platform.
@@ -106,6 +128,58 @@
 extern "C"
 {
 #endif
+
+/**
+ * Version of the NvNmos library, as reported by @ref nmos_get_version.
+ */
+typedef struct _NvNmosVersion
+{
+    /** Holds the major version. */
+    unsigned int major;
+    /** Holds the minor version. */
+    unsigned int minor;
+    /** Holds the patch version. */
+    unsigned int patch;
+    /** Holds the pre-release identifier, such as "alpha", or an empty
+     *  string for a release. */
+    const char *prerelease;
+    /** Holds the version as a Semantic Versioning string. The string
+     *  may end with build metadata, such as the Git commit that the
+     *  library was built from: "0.1.0-alpha+g0123abc". */
+    const char *string;
+} NvNmosVersion;
+
+/**
+ * Get the version of the loaded library.
+ *
+ * The strings are owned by the library and remain valid while it is
+ * loaded.
+ *
+ * @param[out] version Receives the version. Must not be null.
+ * @return Whether @p version has been written.
+ */
+NVNMOS_API
+bool nmos_get_version(
+    NvNmosVersion *version);
+
+/**
+ * Check whether a library with the specified version can be used by
+ * code built against this header.
+ *
+ * Compatibility follows Semantic Versioning.
+ *
+ * @param[in] version Library version from @ref nmos_get_version.
+ *                    Must not be null.
+ * @return Whether the library is compatible with this header.
+ */
+static inline bool nmos_is_compatible_version(
+    const NvNmosVersion *version)
+{
+    return version->major == NVNMOS_VERSION_MAJOR
+        && (NVNMOS_VERSION_MAJOR == 0
+            ? version->minor == NVNMOS_VERSION_MINOR
+            : version->minor >= NVNMOS_VERSION_MINOR);
+}
 
 /**
  * Buffer size, in bytes, that is always sufficient to hold an NMOS

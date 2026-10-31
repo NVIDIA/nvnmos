@@ -26,6 +26,20 @@ fn main() {
     println!("cargo:rerun-if-changed={}/nvnmos.h", include_dir);
     println!("cargo:include={}", include_dir);
 
+    // libnvnmos and the Rust crates share one version.
+    let header = std::fs::read_to_string(PathBuf::from(&include_dir).join("nvnmos.h"))
+        .expect("failed to read nvnmos.h");
+    let header_version = header
+        .lines()
+        .find_map(|line| line.strip_prefix("#define NVNMOS_VERSION_STRING "))
+        .map(|value| value.trim().trim_matches('"'))
+        .expect("nvnmos.h does not define NVNMOS_VERSION_STRING");
+    let crate_version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION not set");
+    assert_eq!(
+        header_version, crate_version,
+        "NVNMOS_VERSION_STRING in {include_dir}/nvnmos.h does not match the crate version"
+    );
+
     // Link strategy.
     //
     // `NVNMOS_LIB_DIR`, when set, is prepended to the linker search path.

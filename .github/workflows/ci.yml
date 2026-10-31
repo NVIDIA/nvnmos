@@ -103,15 +103,41 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cmake --build build --config=${{ matrix.config }} --parallel 2
+      - name: Check nvnmos.dll version (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $expected = (Select-String -Path src/nvnmos.h -Pattern '^#define NVNMOS_VERSION_STRING "(.*)"$').Matches[0].Groups[1].Value
+          $pattern = '^' + [regex]::Escape($expected) + '(\+g[0-9a-f]+)?$'
+          $info = (Get-Item build/${{ matrix.config }}/nvnmos.dll).VersionInfo
+          $info | Format-List FileVersion, ProductVersion, FileDescription, ProductName
+          if ($info.FileVersion -notmatch $pattern -or $info.ProductVersion -notmatch $pattern) {
+            Write-Error "nvnmos.dll version resource does not match version $expected"
+            exit 1
+          }
+      - name: Upload nvnmos.dll (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvnmos-${{ matrix.os }}
+          path: build/${{ matrix.config }}/nvnmos.dll
+          if-no-files-found: error
+          retention-days: 1
       # Upload the Linux shared library so the `rust` job can link against
       # it without rebuilding the C side from scratch. The artifact name
       # includes the runner label so the build for each runner stays separate.
+      # Binaries load the library by its soname (libnvnmos.so.<major>.<minor>),
+      # so the versioned file is uploaded with its symlinks. upload-artifact
+      # does not keep symlinks, so they are packed in a tar archive.
+      - name: Pack libnvnmos.so (Linux)
+        if: runner.os == 'Linux'
+        run: cd build && tar -cf ../libnvnmos.tar libnvnmos.so*
       - name: Upload libnvnmos.so (Linux)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v7
         with:
           name: libnvnmos-${{ matrix.os }}
-          path: build/libnvnmos.so
+          path: libnvnmos.tar
           if-no-files-found: error
           retention-days: 1
   rust:
@@ -135,7 +161,8 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           name: libnvnmos-${{ matrix.os }}
-          path: build
+      - name: Unpack libnvnmos.so
+        run: mkdir -p build && tar -C build -xf libnvnmos.tar && rm libnvnmos.tar
 
       # bindgen (nvnmos-sys) needs libclang; gst-nmos-rs links GStreamer 1.x.
       # Unit tests instantiate real elements (udpsrc, rtpvrawdepay, …) from
@@ -341,3 +368,21 @@ jobs:
     - uses: actions/checkout@v6
     - name: REUSE Compliance Check
       uses: fsfe/reuse-action@v6
+  # libnvnmos, nvnmosd, and gst-nmos-rs are released with one version.
+  version-check:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v6
+    - name: Check the header, Cargo, and tag versions match
+      run: |
+        header_version=$(sed -n 's/^#define NVNMOS_VERSION_STRING "\(.*\)"$/\1/p' src/nvnmos.h)
+        cargo_version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' rust/Cargo.toml)
+        echo "nvnmos.h: ${header_version:-<not found>}, Cargo: ${cargo_version:-<not found>}"
+        if [[ -z "$header_version" || "$header_version" != "$cargo_version" ]]; then
+          echo "::error::src/nvnmos.h and rust/Cargo.toml must declare the same version"
+          exit 1
+        fi
+        if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF#refs/tags/v}" != "$header_version" ]]; then
+          echo "::error::tag ${GITHUB_REF#refs/tags/} does not match version $header_version"
+          exit 1
+        fi

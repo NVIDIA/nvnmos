@@ -60,3 +60,4 @@ cdp-types = "0.3"
 
 [build-dependencies]
 gst-plugin-version-helper = "0.8.3"
+nvnmos-build = { path = "../nvnmos-build" }

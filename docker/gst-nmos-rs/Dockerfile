@@ -145,7 +145,9 @@ RUN cmake -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=ON \
     src \
-    && cmake --build build --parallel
+    && cmake --build build --parallel \
+    && mkdir lib \
+    && cp -a build/libnvnmos.so* lib/
 
 # -----------------------------------------------------------------------------
 # Rust — nvnmosd and gst-nmos-rs (MXL is built in mxl-builder).
@@ -235,8 +237,8 @@ RUN cargo cbuild -p gst-plugin-udp -p gst-plugin-rtp -p gst-plugin-closedcaption
 # -----------------------------------------------------------------------------
 FROM ${BASE_IMAGE} AS staging
 
-RUN mkdir -p /nvnmos-lib
-COPY --from=nvnmos-cpp-builder /nvnmos/build/libnvnmos.so /nvnmos-lib/
+# Copying the directory keeps the library's symlinks.
+COPY --from=nvnmos-cpp-builder /nvnmos/lib /nvnmos-lib
 COPY --from=mxl-builder /mxl/install/lib /mxl-lib
 COPY --from=nvnmos-rust-builder /nvnmos/rust/target/release/nvnmosd /bin/nvnmosd
 COPY --from=nvnmos-rust-builder /nvnmos/rust/target/release/libgstnmos.so /plugins/

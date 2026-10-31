@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,7 +23,22 @@ else()
     cmake_minimum_required(VERSION 3.17 FATAL_ERROR)
 endif()
 
-project(NvNmos)
+# nvnmos.h declares the version
+file(STRINGS nvnmos.h _nvnmos_version_defines REGEX "^#define NVNMOS_VERSION_[A-Z]+ ")
+foreach(_nvnmos_version_define IN LISTS _nvnmos_version_defines)
+    if(_nvnmos_version_define MATCHES "^#define NVNMOS_VERSION_([A-Z]+) \"?([^\"]*)\"?$")
+        set(NVNMOS_VERSION_${CMAKE_MATCH_1} "${CMAKE_MATCH_2}")
+    endif()
+endforeach()
+set(_nvnmos_version_parts "${NVNMOS_VERSION_MAJOR}.${NVNMOS_VERSION_MINOR}.${NVNMOS_VERSION_PATCH}")
+if(NOT "${NVNMOS_VERSION_PRERELEASE}" STREQUAL "")
+    string(APPEND _nvnmos_version_parts "-${NVNMOS_VERSION_PRERELEASE}")
+endif()
+if(NOT "${NVNMOS_VERSION_STRING}" STREQUAL "${_nvnmos_version_parts}")
+    message(FATAL_ERROR "NVNMOS_VERSION_STRING \"${NVNMOS_VERSION_STRING}\" in nvnmos.h does not match version ${_nvnmos_version_parts}")
+endif()
+
+project(NvNmos VERSION ${NVNMOS_VERSION_MAJOR}.${NVNMOS_VERSION_MINOR}.${NVNMOS_VERSION_PATCH})
 
 option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
 set(NVNMOS_BUILD_EXAMPLES ON CACHE BOOL "Build example applications")
@@ -63,6 +78,7 @@ endif()
 set(NVNMOS_SOURCES
     nvnmos.cpp
     nvnmos_impl.cpp
+    nvnmos_version.cpp
     )
 set(NVNMOS_INTERFACE_HEADERS
     nvnmos.h
@@ -83,6 +99,76 @@ add_library(
 
 source_group("Source Files" FILES ${NVNMOS_SOURCES})
 source_group("Header Files" FILES ${NVNMOS_HEADERS})
+
+# According to semver, while the major version is 0, a minor release may break the ABI,
+# so the soname and the installed package's compatibility include the minor version.
+if(PROJECT_VERSION_MAJOR EQUAL 0)
+    set(NVNMOS_SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR})
+    set(NVNMOS_VERSION_COMPATIBILITY SameMinorVersion)
+else()
+    set(NVNMOS_SOVERSION ${PROJECT_VERSION_MAJOR})
+    set(NVNMOS_VERSION_COMPATIBILITY SameMajorVersion)
+endif()
+set_target_properties(nvnmos PROPERTIES
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${NVNMOS_SOVERSION}
+    )
+
+# The version reported by the library ends with the Git commit as build metadata.
+# Moving HEAD reconfigures, so the commit stays current.
+set(NVNMOS_VERSION "${NVNMOS_VERSION_STRING}")
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short=7 HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE _nvnmos_git_commit
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        )
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --path-format=absolute --git-path HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE _nvnmos_git_head
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        )
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} symbolic-ref -q HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE _nvnmos_git_branch
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        )
+    if(_nvnmos_git_branch)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} rev-parse --path-format=absolute --git-path ${_nvnmos_git_branch}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            OUTPUT_VARIABLE _nvnmos_git_branch_ref
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+            )
+    endif()
+    foreach(_nvnmos_git_file IN ITEMS "${_nvnmos_git_head}" "${_nvnmos_git_branch_ref}")
+        if(_nvnmos_git_file AND EXISTS "${_nvnmos_git_file}")
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_nvnmos_git_file}")
+        endif()
+    endforeach()
+endif()
+if(_nvnmos_git_commit)
+    set(NVNMOS_VERSION_BUILD "g${_nvnmos_git_commit}")
+    string(APPEND NVNMOS_VERSION "+${NVNMOS_VERSION_BUILD}")
+    # Only this small file is recompiled when the commit changes.
+    set_source_files_properties(nvnmos_version.cpp PROPERTIES
+        COMPILE_DEFINITIONS "NVNMOS_VERSION_BUILD=\"${NVNMOS_VERSION_BUILD}\""
+        )
+endif()
+
+# Windows reads the DLL's file and product version from a version resource.
+if(WIN32 AND BUILD_SHARED_LIBS)
+    configure_file(nvnmos.rc.in "${CMAKE_CURRENT_BINARY_DIR}/nvnmos.rc" @ONLY)
+    target_sources(nvnmos PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/nvnmos.rc")
+endif()
 
 if(BUILD_SHARED_LIBS)
     target_compile_definitions(
