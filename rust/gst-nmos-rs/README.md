@@ -6,8 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 # Usage Guide
 
 GStreamer plugin (`nmos`) providing the `nmossrc`, `nmossink`, and
-`nmosaudiochannelmap` elements. They talk to the `nvnmosd` NMOS daemon over
-gRPC. See the
+`nmosaudiochannelmap` elements. The
+[gst-nmos-rs](https://tech.ebu.ch/publications/presentations/2026/ibc_open_source_meetup/gst-nmos-rs)
+talk at the IBC 2026 Open Source Meetup introduces them. They talk to the
+`nvnmosd` NMOS daemon over gRPC. Also see the
 [Daemon design record](https://github.com/NVIDIA/nvnmos/blob/main/doc/designs/nvnmosd/README.md)
 and the
 [Rust workspace quick start](https://github.com/NVIDIA/nvnmos/blob/main/rust/README.md).
