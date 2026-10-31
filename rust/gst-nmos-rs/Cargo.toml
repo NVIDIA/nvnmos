@@ -17,7 +17,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 glib = { version = "0.21.5", features = ["v2_74"] }
-gstreamer = "0.24.4"
+gstreamer = { version = "0.24.4", features = ["v1_18"] }
 gstreamer-base = "0.24.4"
 gstreamer-audio = "0.24.4"
 gstreamer-sdp = "0.24.4"
