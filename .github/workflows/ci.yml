@@ -6,6 +6,11 @@ name: Build
 on:
   push:
   pull_request:
+  # Scheduled and manual runs also build on platforms that NvNmos does not
+  # use yet, to give early warning of problems with them.
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
 
 defaults:
   run:
@@ -18,6 +23,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2025]
         config: [Release]
+        include: >-
+          ${{ fromJSON(contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
+          && '[{"os": "ubuntu-26.04", "config": "Release"}]' || '[]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -97,7 +105,7 @@ jobs:
           cmake --build build --config=${{ matrix.config }} --parallel 2
       # Upload the Linux shared library so the `rust` job can link against
       # it without rebuilding the C side from scratch. The artifact name
-      # includes the runner label so the amd64 and arm64 builds stay separate.
+      # includes the runner label so the build for each runner stays separate.
       - name: Upload libnvnmos.so (Linux)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v7
@@ -116,6 +124,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
+        include: >-
+          ${{ fromJSON(contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
+          && '[{"os": "ubuntu-26.04"}]' || '[]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
