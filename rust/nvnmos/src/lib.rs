@@ -2199,10 +2199,11 @@ mod tests {
             .unwrap_or_else(|| panic!("{string:?} does not start with the crate version"));
         assert!(
             metadata.is_empty()
-                || metadata
-                    .strip_prefix("+g")
-                    .is_some_and(|commit| !commit.is_empty()
-                        && commit.chars().all(|c| c.is_ascii_hexdigit())),
+                || metadata.strip_prefix('+').is_some_and(|build| {
+                    build.split('.').all(|id| {
+                        !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                    })
+                }),
             "{string:?} has unexpected build metadata"
         );
     }

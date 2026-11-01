@@ -11,6 +11,12 @@
 # Build from the repository root:
 #   docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst .
 #
+# NVNMOS_SOURCE sets the image's source repository label, for builds from a fork.
+# NVNMOS_VERSION sets the image's version label, which is otherwise empty.
+# NVNMOS_REVISION sets the image's revision label, such as the full commit hash.
+# The build has no Git checkout. To include the commit in the reported version:
+#   --build-arg NVNMOS_VERSION_BUILD=g$(git rev-parse --short=7 HEAD)
+#
 # Optional extra distro packages (space-separated apt names), e.g. gst-plugins-bad/-ugly:
 #   docker build -f docker/gst-nmos-rs/Dockerfile -t nvnmos-gst \
 #     --build-arg EXTRA_APT_PACKAGES="gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly" .
@@ -37,6 +43,10 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
 ARG CONAN_LOCKFILE=src/conan.lock
 ARG RUST_TOOLCHAIN=1.92
+ARG NVNMOS_SOURCE=https://github.com/NVIDIA/nvnmos
+ARG NVNMOS_VERSION=
+ARG NVNMOS_VERSION_BUILD=
+ARG NVNMOS_REVISION=
 
 # External sources
 ARG MXL_REPO=https://github.com/dmf-mxl/mxl.git
@@ -140,6 +150,7 @@ RUN conan install src \
     --lockfile=${CONAN_LOCKFILE} \
     --lockfile-out=src/conan.lock
 
+ARG NVNMOS_VERSION_BUILD
 RUN cmake -B build \
     -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
     -DCMAKE_BUILD_TYPE=Release \
@@ -178,6 +189,7 @@ COPY --from=nvnmos-cpp-builder /nvnmos /nvnmos
 COPY rust/ /nvnmos/rust/
 
 WORKDIR /nvnmos
+ARG NVNMOS_VERSION_BUILD
 RUN NVNMOS_LIB_DIR=/nvnmos/build \
     cargo build --manifest-path rust/Cargo.toml \
     -p nvnmosd -p gst-nmos-rs -p gst-avsynctest-rs \
@@ -326,5 +338,12 @@ RUN chmod +x /opt/nvnmos/entrypoint.sh /opt/nvnmos/entrypoint-setup.sh \
 
 USER nvnmos
 WORKDIR /opt/nvnmos
+
+ARG NVNMOS_SOURCE
+ARG NVNMOS_VERSION
+ARG NVNMOS_REVISION
+LABEL org.opencontainers.image.source=${NVNMOS_SOURCE} \
+    org.opencontainers.image.version=${NVNMOS_VERSION} \
+    org.opencontainers.image.revision=${NVNMOS_REVISION}
 
 ENTRYPOINT ["/usr/bin/dumb-init", "--", "/opt/nvnmos/entrypoint.sh"]

@@ -39,6 +39,10 @@ The nvnmos tree is taken from the build context (`COPY src/`, `COPY rust/` via t
 | `BASE_IMAGE` | `ubuntu:24.04` | Base for **every** stage, including the final runtime. Override with a DeepStream image to be able to use DeepStream plugins (see below). |
 | `CONAN_LOCKFILE` | `src/conan.lock` | Input lockfile for `conan install`. Pass an empty value to resolve the latest compatible graph instead. |
 | `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for all Rust stages in this image. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); gst-plugins-rs MSRV is **1.92**. Workspace MSRV is **1.87** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
+| `NVNMOS_SOURCE` | `https://github.com/NVIDIA/nvnmos` | Repository URL for the image's `org.opencontainers.image.source` label. Set it when building from a fork. |
+| `NVNMOS_VERSION` | *(empty)* | Version for the image's `org.opencontainers.image.version` label, such as `0.1.0-alpha+g0123abc`. Without it, the label is empty rather than the base image's version. |
+| `NVNMOS_VERSION_BUILD` | *(empty)* | Build metadata that the reported version ends with, such as `g0123abc`. The build has no Git checkout, so without this argument the version has no commit. Pass `--build-arg NVNMOS_VERSION_BUILD=g$(git rev-parse --short=7 HEAD)`. |
+| `NVNMOS_REVISION` | *(empty)* | Commit hash for the image's `org.opencontainers.image.revision` label. Pass `--build-arg NVNMOS_REVISION=$(git rev-parse HEAD)`. |
 | `MXL_REPO` | `https://github.com/dmf-mxl/mxl.git` | MXL source repository (`libmxl`, `gst-mxl-rs`). |
 | `MXL_REF` | `8f3f1096e804bfb822eb959cdf2fc23199a7d15d` | Pinned MXL commit (`8f3f109`, the `v1.1.0` release tag). Use a full 40-character SHA or a branch/tag name. |
 | `GST_PLUGINS_RS_REPO` | `https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git` | gst-plugins-rs source. |

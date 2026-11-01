@@ -297,6 +297,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+      # The image build has no Git checkout, so each docker build passes the
+      # commit as build metadata for the reported version. Every stage build
+      # must pass the same value, or the final image build cannot reuse the
+      # stage layers. The final image build also passes the full version and
+      # the full commit hash for its labels.
+      - name: Get the version
+        run: |
+          build=g$(git rev-parse --short=7 HEAD)
+          version=$(sed -n 's/^#define NVNMOS_VERSION_STRING "\(.*\)"$/\1/p' src/nvnmos.h)
+          echo "NVNMOS_VERSION_BUILD=${build}" >> "$GITHUB_ENV"
+          echo "NVNMOS_VERSION=${version}+${build}" >> "$GITHUB_ENV"
 
       # Package binaries from the previous image build. The image copies
       # docker/nvnmos/conan-cache into Conan's package storage. Export and
@@ -322,12 +333,18 @@ jobs:
             cargo-docker-${{ runner.os }}-${{ runner.arch }}-
       - name: Build C++ stage
         id: cpp
-        run: docker build -f docker/nvnmos/Dockerfile --target cpp-builder -t nvnmos-cpp:ci .
+        run: docker build -f docker/nvnmos/Dockerfile --target cpp-builder --build-arg NVNMOS_VERSION_BUILD -t nvnmos-cpp:ci .
       - name: Build Rust stage
         id: rust
-        run: docker build -f docker/nvnmos/Dockerfile --target rust-builder -t nvnmos-rust:ci .
+        run: docker build -f docker/nvnmos/Dockerfile --target rust-builder --build-arg NVNMOS_VERSION_BUILD -t nvnmos-rust:ci .
       - name: Build image
-        run: docker build -f docker/nvnmos/Dockerfile -t nvnmos:ci .
+        run: >-
+          docker build -f docker/nvnmos/Dockerfile
+          --build-arg NVNMOS_SOURCE=${{ github.server_url }}/${{ github.repository }}
+          --build-arg NVNMOS_VERSION
+          --build-arg NVNMOS_VERSION_BUILD
+          --build-arg NVNMOS_REVISION=${{ github.sha }}
+          -t nvnmos:ci .
       - name: Export Conan cache
         if: always() && steps.cpp.outcome == 'success' && steps.conan-cache.outputs.cache-hit != 'true'
         run: |

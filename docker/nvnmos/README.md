@@ -24,6 +24,10 @@ With default build arguments the image produces `nvnmos-ubuntu-24.04.tar.gz` (`B
 | `PACKAGE_SUFFIX` | _(empty; derived from `BASE_IMAGE` and, on BuildKit, the target architecture)_ | Replaces the whole package directory and tarball suffix. For `ubuntu:24.04` the derived suffix is `-ubuntu-24.04`, or `-ubuntu-24.04-amd64` / `-ubuntu-24.04-arm64` when BuildKit set the architecture. |
 | `CONAN_LOCKFILE` | `src/conan.lock` | Input lockfile for `conan install`. Pass an empty value, e.g. `--build-arg CONAN_LOCKFILE=`, to resolve the latest compatible graph instead. |
 | `RUST_TOOLCHAIN` | `1.92` | Rust toolchain for the workspace build. Matches [`rust/rust-toolchain.toml`](../../rust/rust-toolchain.toml); workspace MSRV is **1.87** in [`rust/Cargo.toml`](../../rust/Cargo.toml). |
+| `NVNMOS_SOURCE` | `https://github.com/NVIDIA/nvnmos` | Repository URL for the image's `org.opencontainers.image.source` label. Set it when building from a fork. |
+| `NVNMOS_VERSION` | _(empty)_ | Version for the image's `org.opencontainers.image.version` label, such as `0.1.0-alpha+g0123abc`. Without it, the label is empty rather than the base image's version. |
+| `NVNMOS_VERSION_BUILD` | _(empty)_ | Build metadata that the reported version ends with, such as `g0123abc`. The build has no Git checkout, so without this argument the version has no commit. Pass `--build-arg NVNMOS_VERSION_BUILD=g$(git rev-parse --short=7 HEAD)`. |
+| `NVNMOS_REVISION` | _(empty)_ | Commit hash for the image's `org.opencontainers.image.revision` label. Pass `--build-arg NVNMOS_REVISION=$(git rev-parse HEAD)`. |
 
 The image installs the Conan Center `nmos-cpp` dependency graph via `conan install` (using `CONAN_LOCKFILE` when set), writes the resolved `conan.lock` into the package tarball, then builds the Rust workspace (`nvnmosd`, `gst-nmos-rs`, …) against the built `libnvnmos.so`. Conan (`~=2.2`) and CMake (`~=3.17`) versions match the manual build instructions in the top-level README and CI.
 

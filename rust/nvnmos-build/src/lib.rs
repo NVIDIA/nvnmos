@@ -11,10 +11,25 @@ use std::process::Command;
 ///
 /// The value is the crate version. When the crate is built from a Git
 /// checkout, the version ends with the commit as Semantic Versioning build
-/// metadata, such as `0.1.0-alpha+g0123abc`.
+/// metadata, such as `0.1.0-alpha+g0123abc`. A build without a Git checkout,
+/// such as a Docker build, can set the build metadata in the
+/// `NVNMOS_VERSION_BUILD` environment variable instead.
 pub fn set_version_env() {
     let mut version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION not set");
-    if let Some(commit) = git(&["rev-parse", "--short=7", "HEAD"]) {
+    println!("cargo:rerun-if-env-changed=NVNMOS_VERSION_BUILD");
+    if let Some(build) = env::var("NVNMOS_VERSION_BUILD")
+        .ok()
+        .filter(|build| !build.is_empty())
+    {
+        assert!(
+            build.split('.').all(|id| {
+                !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            }),
+            "NVNMOS_VERSION_BUILD is not Semantic Versioning build metadata: {build}"
+        );
+        version.push('+');
+        version.push_str(&build);
+    } else if let Some(commit) = git(&["rev-parse", "--short=7", "HEAD"]) {
         version.push_str("+g");
         version.push_str(&commit);
 

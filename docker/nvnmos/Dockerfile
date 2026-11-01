@@ -9,6 +9,12 @@
 # library image for Jetson and for SBSA. --platform requires BuildKit.
 #   docker build -f docker/nvnmos/Dockerfile -t nvnmos .
 #   docker build --platform linux/arm64 -f docker/nvnmos/Dockerfile -t nvnmos:arm64 .
+#
+# NVNMOS_SOURCE sets the image's source repository label, for builds from a fork.
+# NVNMOS_VERSION sets the image's version label, which is otherwise empty.
+# NVNMOS_REVISION sets the image's revision label, such as the full commit hash.
+# The build has no Git checkout. To include the commit in the reported version:
+#   --build-arg NVNMOS_VERSION_BUILD=g$(git rev-parse --short=7 HEAD)
 
 ARG BASE_IMAGE=ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
@@ -16,6 +22,10 @@ ARG PACKAGE_SUFFIX
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
 ARG CONAN_LOCKFILE=src/conan.lock
 ARG RUST_TOOLCHAIN=1.92
+ARG NVNMOS_SOURCE=https://github.com/NVIDIA/nvnmos
+ARG NVNMOS_VERSION=
+ARG NVNMOS_VERSION_BUILD=
+ARG NVNMOS_REVISION=
 
 # The default suffix is based on the BASE_IMAGE, plus BuildKit's TARGETARCH
 # (amd64, arm64, …) when it is set. Pattern replacement cleans '/' and ':'
@@ -62,6 +72,7 @@ RUN conan install src \
     --lockfile-out=src/conan.lock \
     && conan cache clean "*" --source --build --temp
 
+ARG NVNMOS_VERSION_BUILD
 RUN cmake -B build \
     -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
     -DCMAKE_BUILD_TYPE=Release \
@@ -107,6 +118,7 @@ COPY docker/nvnmos/cargo-cache/ /nvnmos/rust/target/
 
 COPY rust/ rust/
 
+ARG NVNMOS_VERSION_BUILD
 RUN NVNMOS_LIB_DIR=/nvnmos/build cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
 
 # -----------------------------------------------------------------------------
@@ -185,5 +197,12 @@ COPY --from=package \
     /nvnmos/entrypoint.sh \
     /nvnmos/entrypoint-setup.sh \
     ./
+
+ARG NVNMOS_SOURCE
+ARG NVNMOS_VERSION
+ARG NVNMOS_REVISION
+LABEL org.opencontainers.image.source=${NVNMOS_SOURCE} \
+    org.opencontainers.image.version=${NVNMOS_VERSION} \
+    org.opencontainers.image.revision=${NVNMOS_REVISION}
 
 ENTRYPOINT ["/entrypoint.sh"]
