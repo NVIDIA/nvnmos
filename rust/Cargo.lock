@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "gst-avsynctest-rs"
-version = "0.1.0-alpha"
+version = "0.1.0"
 dependencies = [
  "cdp-types",
  "cea708-types",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "gst-nmos-rs"
-version = "0.1.0-alpha"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "cdp-types",
@@ -1301,7 +1301,7 @@ dependencies = [
 
 [[package]]
 name = "nvnmos"
-version = "0.1.0-alpha"
+version = "0.1.0"
 dependencies = [
  "nvnmos-sys",
  "serde_json",
@@ -1310,11 +1310,11 @@ dependencies = [
 
 [[package]]
 name = "nvnmos-build"
-version = "0.1.0-alpha"
+version = "0.1.0"
 
 [[package]]
 name = "nvnmos-rpc"
-version = "0.1.0-alpha"
+version = "0.1.0"
 dependencies = [
  "prost",
  "protobuf-src",
@@ -1324,14 +1324,14 @@ dependencies = [
 
 [[package]]
 name = "nvnmos-sys"
-version = "0.1.0-alpha"
+version = "0.1.0"
 dependencies = [
  "bindgen",
 ]
 
 [[package]]
 name = "nvnmosd"
-version = "0.1.0-alpha"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1354,7 +1354,7 @@ dependencies = [
 
 [[package]]
 name = "nvnmosd-bench"
-version = "0.1.0-alpha"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "nvnmosd-example"
-version = "0.1.0-alpha"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1822,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "test-skip"
-version = "0.1.0-alpha"
+version = "0.1.0"
 
 [[package]]
 name = "thiserror"
