@@ -4,7 +4,6 @@
 project(
   'nvnmos-gstreamer-docs',
   'c',
-  version: '0.1.0',
   meson_version: '>= 1.2',
   default_options: ['buildtype=plain'],
 )
@@ -24,6 +23,8 @@ gio_dep = dependency('gio-2.0')
 
 cdir = meson.current_source_dir()
 rust_root = cdir / '..' / '..'
+# The Rust workspace declares the version.
+nvnmos_version = import('fs').read(rust_root / 'Cargo.toml').split('[workspace.package]')[1].split('version = "')[1].split('"')[0]
 plugins_cache = cdir / 'plugins' / 'gst_plugins_cache.json'
 build_plugins_cache = meson.current_build_dir() / 'gst_plugins_cache.json'
 if host_machine.system() == 'windows'
@@ -167,7 +168,7 @@ gst_avsynctest_rs_globs = [
 
 nmos_doc = hotdoc.generate_doc(
   'nmos',
-  project_version: meson.project_version(),
+  project_version: nvnmos_version,
   sitemap: cdir / 'plugins' / 'sitemap.txt',
   index: cdir / 'plugins' / 'nmos' / 'index.md',
   gst_index: cdir / 'plugins' / 'nmos' / 'index.md',
@@ -183,7 +184,7 @@ nmos_doc = hotdoc.generate_doc(
 
 avsynctest_doc = hotdoc.generate_doc(
   'avsynctest',
-  project_version: meson.project_version(),
+  project_version: nvnmos_version,
   sitemap: cdir / 'plugins' / 'sitemap.txt',
   index: cdir / 'plugins' / 'avsynctest' / 'index.md',
   gst_index: cdir / 'plugins' / 'avsynctest' / 'index.md',
@@ -242,7 +243,7 @@ html_theme = 'https://github.com/hotdoc/hotdoc_lumen_theme/releases/download/0.1
 
 nvnmos_gstreamer_doc = hotdoc.generate_doc(
   'NvNmos-GStreamer',
-  project_version: meson.project_version(),
+  project_version: nvnmos_version,
   sitemap: portal_sitemap,
   index: cdir / 'portal' / 'index.md',
   gst_index: cdir / 'portal' / 'plugins_doc.md',

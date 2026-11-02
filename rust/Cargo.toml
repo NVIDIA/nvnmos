@@ -4,6 +4,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "nvnmos-build",
     "nvnmos-sys",
     "nvnmos",
     "nvnmos-rpc",
@@ -17,7 +18,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "0.1.0-alpha"
 rust-version = "1.87"
 license = "Apache-2.0"
 publish = false

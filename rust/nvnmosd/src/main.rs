@@ -74,7 +74,7 @@ use crate::state::{
 const SUBSCRIPTION_BUFFER: usize = 16;
 
 #[derive(Parser, Debug)]
-#[command(version, about = "NMOS daemon (nvnmosd)")]
+#[command(version = env!("NVNMOS_VERSION"), about = "NMOS daemon (nvnmosd)")]
 struct Args {
     /// Path to the UDS socket to listen on. Fails at startup if another
     /// listener is already accepting connections on this path; removes

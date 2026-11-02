@@ -76,6 +76,11 @@ The following operating systems and compilers have been tested.
 * Ubuntu 24.04 with GCC 13
 * Windows 10 with Visual Studio 2022
 
+## Versioning
+
+The C library, the daemon and its gRPC API, and the GStreamer plugins share one version number, which follows [Semantic Versioning](https://semver.org/).
+The [migration guide](doc/user/migration.md) describes the changes that applications need to make.
+
 ## Contributing
 
 - [How to contribute](https://github.com/NVIDIA/nvnmos/blob/main/CONTRIBUTING.md)

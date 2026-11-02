@@ -3,4 +3,5 @@
 
 fn main() {
     gst_plugin_version_helper::info();
+    nvnmos_build::set_version_env();
 }

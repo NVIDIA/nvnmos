@@ -474,6 +474,19 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    NvNmosVersion version;
+    if (!nmos_get_version(&version))
+    {
+        printf("Failed to get NvNmos library version\n");
+        return 1;
+    }
+    printf("Built with NvNmos %s, running with %s\n", NVNMOS_VERSION_STRING, version.string);
+    if (!nmos_is_compatible_version(&version))
+    {
+        printf("NvNmos library version is not compatible\n");
+        return 1;
+    }
+
     const char* functions[1] = {
         "Example"
     };
