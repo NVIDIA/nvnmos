@@ -389,23 +389,25 @@ typedef struct _NvNmosTag
  * At create, #NVNMOS_UPDATE_SET writes the property. #NVNMOS_UPDATE_UNCHANGED
  * leaves the constructed value in place. #NVNMOS_UPDATE_RESET is invalid.
  *
- * On the callback, #label and #description are the effective strings after the
- * merge. #NVNMOS_UPDATE_SET means that string was written as the overlay.
- * #NVNMOS_UPDATE_RESET means the overlay was cleared and the string is the
- * restored default. #NVNMOS_UPDATE_UNCHANGED means the overlay was left alone.
- * #tags is the writable-tag overlay after the merge. A #tags_update of
- * #NVNMOS_UPDATE_SET means the merge wrote the tags object. A key this merge
- * wrote is #NVNMOS_UPDATE_SET. A key this merge left in place is
- * #NVNMOS_UPDATE_UNCHANGED. A key this merge cleared is absent. A #tags_update
- * of #NVNMOS_UPDATE_RESET means every writable tag was cleared and #tags is
- * empty. A #tags_update of #NVNMOS_UPDATE_UNCHANGED means the merge left the
- * tags object alone. #tags still lists the overlay, and each key is
- * #NVNMOS_UPDATE_UNCHANGED.
+ * On the callback, NvNmosAnnotation::label and NvNmosAnnotation::description
+ * are the effective strings after the merge. #NVNMOS_UPDATE_SET means that
+ * string was written as the overlay. #NVNMOS_UPDATE_RESET means the overlay
+ * was cleared and the string is the restored default.
+ * #NVNMOS_UPDATE_UNCHANGED means the overlay was left alone.
+ * NvNmosAnnotation::tags is the writable-tag overlay after the merge. A
+ * NvNmosAnnotation::tags_update of #NVNMOS_UPDATE_SET means the merge wrote
+ * the tags object. A key this merge wrote is #NVNMOS_UPDATE_SET. A key this
+ * merge left in place is #NVNMOS_UPDATE_UNCHANGED. A key this merge cleared
+ * is absent. A NvNmosAnnotation::tags_update of #NVNMOS_UPDATE_RESET means
+ * every writable tag was cleared and NvNmosAnnotation::tags is empty. A
+ * NvNmosAnnotation::tags_update of #NVNMOS_UPDATE_UNCHANGED means the merge
+ * left the tags object alone. NvNmosAnnotation::tags still lists the
+ * overlay, and each key is #NVNMOS_UPDATE_UNCHANGED.
  *
  * On @ref nmos_annotation_update, only an operation of #NVNMOS_UPDATE_SET or
  * #NVNMOS_UPDATE_RESET is applied, and a value on an unchanged or reset field
- * is ignored. #tags lists the keys to update. A tag whose operation is
- * #NVNMOS_UPDATE_UNCHANGED is ignored.
+ * is ignored. NvNmosAnnotation::tags lists the keys to update. A tag whose
+ * operation is #NVNMOS_UPDATE_UNCHANGED is ignored.
  */
 typedef struct _NvNmosAnnotation
 {

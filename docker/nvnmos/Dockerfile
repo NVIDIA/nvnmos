@@ -149,6 +149,7 @@ COPY --from=rust-builder /nvnmos/rust/target/release/nvnmosd-example \
 
 COPY docker/nvnmos/entrypoint.sh docker/nvnmos/entrypoint-setup.sh LICENSE README.md Doxyfile ./
 COPY doc/doxygen doc/doxygen
+COPY doc/images doc/images
 COPY doc/user doc/user
 
 RUN chmod +x entrypoint.sh entrypoint-setup.sh \
