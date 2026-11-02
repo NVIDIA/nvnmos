@@ -84,10 +84,10 @@
  * Use @ref nmos_get_version to get the version of the loaded library.
  */
 #define NVNMOS_VERSION_MAJOR 0
-#define NVNMOS_VERSION_MINOR 1
+#define NVNMOS_VERSION_MINOR 2
 #define NVNMOS_VERSION_PATCH 0
 #define NVNMOS_VERSION_PRERELEASE "alpha"
-#define NVNMOS_VERSION_STRING "0.1.0-alpha"
+#define NVNMOS_VERSION_STRING "0.2.0-alpha"
 
 /**
  * @def NVNMOS_API
