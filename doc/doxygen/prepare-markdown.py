@@ -127,15 +127,17 @@ def rewrite_user_doc_links(text: str, page_ids: set[str]) -> str:
 
 
 def to_dox(text: str) -> str:
-    """Wrap page text as a Doxygen comment with Javadoc-style `` *`` line prefixes.
+    """Wrap page text as Doxygen ``//!`` line comments.
 
-    Without those prefixes, Doxygen strips a leading ``*`` from each line and
-    corrupts Markdown bold markers such as ``**Linux**`` into ``Linux**``.
+    In a ``/*! ... */`` block, Doxygen treats ``/*`` in the text, such as
+    ``cmake/*`` in a code block, as opening a nested comment, so the page never
+    ends. Without a prefix on each line, Doxygen would also strip a leading
+    ``*`` and corrupt Markdown bold markers such as ``**Linux**`` into
+    ``Linux**``.
     """
     if "*/" in text:
-        raise RuntimeError("documentation contains */ which would close the .dox comment")
-    body = "\n".join(f" * {line}" if line else " *" for line in text.rstrip().splitlines())
-    return f"/*!\n{body}\n */\n"
+        raise RuntimeError("documentation contains */ which Doxygen does not render as written")
+    return "".join(f"//! {line}\n" if line else "//!\n" for line in text.rstrip().splitlines())
 
 
 def stage(destination_name: str, text: str, page_command: str, page_ids: set[str]) -> None:

@@ -403,3 +403,120 @@ jobs:
           echo "::error::tag ${GITHUB_REF#refs/tags/} does not match version $header_version"
           exit 1
         fi
+  # Scheduled and manual runs also install the latest dependencies from Conan
+  # Center, without src/conan.lock, on the latest runners and compilers, and
+  # build nvnmos with them. Each run uploads the resulting lockfile, so that it
+  # can be compared with src/conan.lock. The nmos_cpp_from_source variant
+  # builds nmos-cpp from the latest sony/nmos-cpp source instead of its package.
+  # No job depends on this one, so a failure does not stop the others.
+  canary:
+    name: canary (${{ matrix.os }}, ${{ matrix.config }}${{ matrix.nmos_cpp_from_source && ', nmos-cpp from source' || '' }})
+    if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        config: [Release]
+        nmos_cpp_from_source: [false, true]
+    runs-on: ${{ matrix.os }}
+    env:
+      CANARY: conan-canary${{ matrix.nmos_cpp_from_source && '-from-source' || '' }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Clone nmos-cpp alongside nvnmos
+        if: matrix.nmos_cpp_from_source
+        run: |
+          parent="$(dirname "${GITHUB_WORKSPACE}")"
+          git clone --depth 1 https://github.com/sony/nmos-cpp.git "${parent}/nmos-cpp"
+
+      - name: Install Conan
+        run: pip install conan~=2.2 && conan profile detect
+      # Unlike the build job, keep the compiler version that Conan detects.
+      # Visual Studio 2026 needs CMake 4.2 or later for its generator, but the
+      # nmos-cpp recipe's tool requirement allows only CMake 3. Replace it until
+      # conan-io/conan-center-index#31314 is merged.
+      - name: Prepare Conan profile (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $profile = conan profile path default
+          (Get-Content $profile) `
+            -replace '^compiler\.cppstd=.*$', 'compiler.cppstd=17' |
+            Set-Content $profile
+          Add-Content -Path $profile -Value @(
+            '',
+            '[replace_tool_requires]',
+            'cmake/*: cmake/[>=4.2 <5]'
+          )
+      - name: Install dependencies without lockfile
+        id: conan-install
+        run: |
+          mkdir -p "$CANARY"
+          conan install src \
+            --settings:all build_type=${{ matrix.config }} \
+            --build=missing \
+            --output-folder=src/conan \
+            --lockfile="" \
+            -o "&:nmos_cpp_from_source=${{ matrix.nmos_cpp_from_source && 'True' || 'False' }}" \
+            --lockfile-out="$CANARY/$CANARY.lock"
+      - name: Record canary metadata
+        if: always()
+        run: |
+          mkdir -p "$CANARY"
+          {
+            echo "workflow=${{ github.workflow }}"
+            echo "job=${{ github.job }}"
+            echo "nmos_cpp_from_source=${{ matrix.nmos_cpp_from_source }}"
+            echo "ref=${{ github.ref }}"
+            echo "sha=${{ github.sha }}"
+            echo "runner_os=${{ runner.os }}"
+            echo "conan_install_outcome=${{ steps.conan-install.outcome }}"
+          } >> "$CANARY/summary.txt"
+          cat "$CANARY/summary.txt"
+          if [[ "${{ matrix.nmos_cpp_from_source }}" != "true" ]]; then
+            cp src/conan.lock "$CANARY/conan.lock"
+            diff -u "$CANARY/conan.lock" "$CANARY/$CANARY.lock" | head -n 200 || true
+          fi
+      - name: Upload canary artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.CANARY }}-${{ matrix.os }}
+          path: ${{ env.CANARY }}/
+      - name: Generate nvnmos (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
+            -DUSE_ADD_SUBDIRECTORY=${{ matrix.nmos_cpp_from_source && 'ON' || 'OFF' }} \
+            src
+      - name: Generate nvnmos (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
+            -DCMAKE_CONFIGURATION_TYPES=${{ matrix.config }} \
+            -DUSE_ADD_SUBDIRECTORY=${{ matrix.nmos_cpp_from_source && 'ON' || 'OFF' }} \
+            src
+      - name: Build nvnmos (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # default -j$(nproc) causes out of memory on hosted runners (cc1plus killed).
+          cmake --build build --parallel 2
+      - name: Build nvnmos (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake --build build --config=${{ matrix.config }} --parallel 2
+      - name: Check nvnmos.dll version (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $expected = (Select-String -Path src/nvnmos.h -Pattern '^#define NVNMOS_VERSION_STRING "(.*)"$').Matches[0].Groups[1].Value
+          $pattern = '^' + [regex]::Escape($expected) + '(\+g[0-9a-f]+)?$'
+          $info = (Get-Item build/${{ matrix.config }}/nvnmos.dll).VersionInfo
+          $info | Format-List FileVersion, ProductVersion, FileDescription, ProductName
+          if ($info.FileVersion -notmatch $pattern -or $info.ProductVersion -notmatch $pattern) {
+            Write-Error "nvnmos.dll version resource does not match version $expected"
+            exit 1
+          }

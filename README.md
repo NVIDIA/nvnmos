@@ -74,7 +74,7 @@ The library is intended to be portable to different environments.
 The following operating systems and compilers have been tested.
 
 * Ubuntu 24.04 with GCC 13
-* Windows 10 with Visual Studio 2022
+* Windows 11 with Visual Studio 2022
 
 ## Versioning
 
