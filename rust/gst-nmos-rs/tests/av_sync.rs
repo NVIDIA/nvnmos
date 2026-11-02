@@ -462,10 +462,16 @@ fn pull_video(sink: &gst_app::AppSink) -> Vec<VideoFrame> {
 
 /// Drain `(running_time_ns, amplitude)` for every audio sample until `done` or
 /// EOS/deadline (see gst-mxl-rs av_sync for why we drain continuously).
+///
+/// Sample times count samples from the running time of the first buffer, and
+/// of each `DISCONT` buffer after a loss. The `udp` receive path timestamps
+/// each 1 ms RTP packet with its arrival time, and the producer sends packets
+/// in bursts, so buffer timestamps would overlap and put samples out of order.
 fn drain_audio(sink: &gst_app::AppSink, done: &AtomicBool) -> Vec<(u64, f32)> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let timeout = gst::ClockTime::from_mseconds(200);
     let mut out = Vec::new();
+    let mut anchor: Option<(u64, u64)> = None;
     while std::time::Instant::now() < deadline {
         let Some(sample) = sink.try_pull_sample(timeout) else {
             if sink.is_eos() || done.load(Ordering::Relaxed) {
@@ -476,14 +482,18 @@ fn drain_audio(sink: &gst_app::AppSink, done: &AtomicBool) -> Vec<(u64, f32)> {
         let Some(rt) = running_time(&sample) else {
             continue;
         };
-        let base = rt.nseconds();
         let buffer = sample.buffer().expect("audio buffer");
+        if anchor.is_none() || buffer.flags().contains(gst::BufferFlags::DISCONT) {
+            anchor = Some((rt.nseconds(), 0));
+        }
+        let (base, count) = anchor.as_mut().unwrap();
         let map = buffer.map_readable().expect("audio readable");
         let body =
             gstavsynctest::analyze::f32le_samples(map.as_slice()).expect("F32LE buffer aligned");
-        for (i, &v) in body.iter().enumerate() {
-            let t = base + i as u64 * gst::ClockTime::SECOND.nseconds() / RATE as u64;
+        for &v in body {
+            let t = *base + *count * gst::ClockTime::SECOND.nseconds() / RATE as u64;
             out.push((t, v));
+            *count += 1;
         }
     }
     out
