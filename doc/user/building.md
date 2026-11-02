@@ -84,6 +84,7 @@ To exit the virtual environment later, run `deactivate` (same on Linux and Windo
 The project requires CMake 3.17 or higher; dependencies may require a higher version.
 
 There are x86_64 and arm64 packages for CMake 3.30.0 on the [Python Package Index (PyPI)](https://pypi.org/) which have been tested.
+Visual Studio 2026 requires CMake 4.2 or higher, which `pip install cmake~=4.2` installs.
 
 **Linux**
 
@@ -134,8 +135,19 @@ notepad (conan profile path default)
 ```
 
 You may wish to edit the detected profile.
-Conan Center prebuilt binaries target MSVC 193/194, not 195 (Visual Studio 2026).
-Pin MSVC 194 so `conan install` downloads packages instead of building from source, with `compiler.version=194` and `compiler.cppstd=17`.
+Conan Center prebuilt binaries target MSVC 193/194 (Visual Studio 2022), not 195 (Visual Studio 2026).
+Set `compiler.version=194` and `compiler.cppstd=17` so that `conan install` downloads packages instead of building them from source.
+With Visual Studio 2026, this requires its MSVC v143 build tools, which the Visual Studio Installer offers as an individual component.
+
+Alternatively, with Visual Studio 2026, keep the detected `compiler.version=195`.
+Conan then builds every dependency from source, which takes much longer.
+The `nmos-cpp` package needs CMake 4.2 or higher to build with Visual Studio 2026, but its recipe currently allows only CMake 3.
+Add the following to the profile so that Conan uses CMake 4 instead.
+
+```ini
+[replace_tool_requires]
+cmake/*: cmake/[>=4.2 <5]
+```
 
 The following settings have been tested.
 
@@ -224,11 +236,13 @@ Use the following CMake command to configure the build.
 
 ```PowerShell
 cmake -B build `
-  -G "Visual Studio 17 2022" `
   -DCMAKE_TOOLCHAIN_FILE="conan/conan_toolchain.cmake" `
   -DCMAKE_CONFIGURATION_TYPES="Debug;Release" `
   src
 ```
+
+CMake uses the newest installed version of Visual Studio that it supports.
+To select a generator explicitly, add for example `-G "Visual Studio 17 2022"`.
 
 Build the library and application with the following command or manually using the generated Visual Studio solution.
 
