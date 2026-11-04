@@ -17,7 +17,7 @@
 set -euo pipefail
 
 _nvdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=entrypoint-setup.sh
+# shellcheck source=../nvnmos/entrypoint-setup.sh
 source "${_nvdir}/entrypoint-setup.sh"
 
 NVNMOSD_UDS="${NVNMOSD_UDS:-/tmp/nvnmosd.sock}"
@@ -28,6 +28,7 @@ export GST_PLUGIN_PATH="/opt/nvnmos/plugins${GST_PLUGIN_PATH:+:${GST_PLUGIN_PATH
 
 nvnmosd_pid=""
 
+# shellcheck disable=SC2317 # called from the trap below
 stop_nvnmosd() {
     if [[ -n "${nvnmosd_pid}" ]]; then
         kill -TERM "${nvnmosd_pid}" 2>/dev/null || true

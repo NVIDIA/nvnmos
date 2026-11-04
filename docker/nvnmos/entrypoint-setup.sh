@@ -71,7 +71,8 @@ pids+=($!)
 # Some DNS-SD clients give up rather than wait if avahi-daemon is not yet
 # running, so wait for AVAHI_SERVER_RUNNING (2) before returning
 for _ in {1..50}; do
-    avahi_state=$(dbus-send --system --print-reply --dest=org.freedesktop.Avahi / \
+    avahi_state=$(dbus-send --system --print-reply --reply-timeout=400 \
+        --dest=org.freedesktop.Avahi / \
         org.freedesktop.Avahi.Server.GetState 2>/dev/null | awk '/int32/ {print $2}') || true
     [ "$avahi_state" = 2 ] && break
     sleep 0.1
