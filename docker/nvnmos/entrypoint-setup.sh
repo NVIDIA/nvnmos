@@ -68,6 +68,16 @@ for _ in {1..20}; do [ -S "$dbus_path" ] && break; sleep 0.1; done
 avahi-daemon --no-drop-root --no-chroot &
 pids+=($!)
 
+# Some DNS-SD clients give up rather than wait if avahi-daemon is not yet
+# running, so wait for AVAHI_SERVER_RUNNING (2) before returning
+for _ in {1..50}; do
+    avahi_state=$(dbus-send --system --print-reply --dest=org.freedesktop.Avahi / \
+        org.freedesktop.Avahi.Server.GetState 2>/dev/null | awk '/int32/ {print $2}') || true
+    [ "$avahi_state" = 2 ] && break
+    sleep 0.1
+done
+[ "$avahi_state" = 2 ] || { echo "avahi-daemon failed to start"; exit 1; }
+
 cleanup() {
     echo "Stopping background processes..."
     local pid
@@ -87,4 +97,12 @@ publish_mdns_hostname() {
         avahi-publish-address -R "$mdns_hostname" "$ip" &
         pids+=($!)
     done < <(hostname --all-ip-addresses | tr ' ' '\n')
+
+    # The name resolves once avahi-daemon has finished probing for it
+    for _ in {1..10}; do
+        timeout 0.4 getent ahostsv4 "$mdns_hostname" >/dev/null && return 0
+        sleep 0.1
+    done
+    echo "mDNS hostname $mdns_hostname did not resolve" >&2
+    return 1
 }

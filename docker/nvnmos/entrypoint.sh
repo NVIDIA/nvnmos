@@ -32,7 +32,6 @@ HOSTIP="$(awk 'END{print $1}' /etc/hosts)"
 # User-mode Avahi does not register the host name the way systemd does; publish
 # explicitly so nvnmos-example's ${HOSTNAME}.local resolves in the container.
 publish_mdns_hostname "${HOSTNAME}.local"
-sleep 1
 
 export LD_LIBRARY_PATH="${PACKAGE_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
