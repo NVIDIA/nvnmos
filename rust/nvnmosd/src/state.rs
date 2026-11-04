@@ -735,6 +735,7 @@ pub struct AddResourcePrep {
 /// Output of [`AddResourcePrep::run_ffi`] for a Sender, fed to
 /// [`State::commit_add_sender`].
 pub struct AddSenderReady {
+    server: Arc<NodeServer>,
     name: String,
     node_seed: String,
     session_handle: String,
@@ -746,6 +747,7 @@ pub struct AddSenderReady {
 /// Output of [`AddResourcePrep::run_ffi`] for a Receiver, fed to
 /// [`State::commit_add_receiver`].
 pub struct AddReceiverReady {
+    server: Arc<NodeServer>,
     name: String,
     node_seed: String,
     session_handle: String,
@@ -830,6 +832,7 @@ impl AddResourcePrep {
                         )
                     })?;
                 Ok(AddResourceReady::Sender(AddSenderReady {
+                    server: self.server,
                     name: self.name,
                     node_seed: self.node_seed,
                     session_handle: self.session_handle,
@@ -839,6 +842,7 @@ impl AddResourcePrep {
                 }))
             }
             Side::Receiver => Ok(AddResourceReady::Receiver(AddReceiverReady {
+                server: self.server,
                 name: self.name,
                 node_seed: self.node_seed,
                 session_handle: self.session_handle,
@@ -909,6 +913,7 @@ pub struct AddChannelMappingPrep {
 /// Output of [`AddChannelMappingPrep::run_ffi`], fed to
 /// [`State::commit_add_channelmapping`].
 pub struct AddChannelMappingReady {
+    server: Arc<NodeServer>,
     name: String,
     node_seed: String,
     session_handle: String,
@@ -922,6 +927,7 @@ impl AddChannelMappingPrep {
             .add_channelmapping(&self.name, &self.mapping)
             .map_err(|e| libnvnmos_status(format!("add channel mapping {:?}", self.name), e))?;
         Ok(AddChannelMappingReady {
+            server: self.server,
             name: self.name,
             node_seed: self.node_seed,
             session_handle: self.session_handle,
@@ -1579,14 +1585,16 @@ impl State {
     /// The session must still exist. If it was closed while the FFI ran,
     /// this returns `NOT_FOUND` and a [`RemoveResourceFfi`] for the object
     /// libnvnmos already added. The caller runs that remove outside the
-    /// state lock. A Node that this close destroyed has already dropped
-    /// out of the map, so the remove is a no-op and the object goes with
-    /// the Node.
+    /// state lock. The remove runs on the Node the add ran on, not on
+    /// whichever Node now has the seed. If the close destroyed that Node,
+    /// another session may already have created a new Node with the same
+    /// seed.
     pub fn commit_add_sender(
         &mut self,
         ready: AddSenderReady,
     ) -> Result<AddSenderOutcome, (Status, RemoveResourceFfi)> {
         let resource_handle = self.commit_add_resource(
+            ready.server,
             Side::Sender,
             &ready.name,
             &ready.node_seed,
@@ -1612,6 +1620,7 @@ impl State {
         ready: AddReceiverReady,
     ) -> Result<AddReceiverOutcome, (Status, RemoveResourceFfi)> {
         let resource_handle = self.commit_add_resource(
+            ready.server,
             Side::Receiver,
             &ready.name,
             &ready.node_seed,
@@ -1626,6 +1635,7 @@ impl State {
 
     fn commit_add_resource(
         &mut self,
+        server: Arc<NodeServer>,
         side: Side,
         name: &str,
         node_seed: &str,
@@ -1640,13 +1650,12 @@ impl State {
                 "AddSender/AddReceiver: session closed while libnvnmos add was \
                  in flight; removing the libnvnmos resource"
             );
-            let server = self.nodes.get(node_seed).map(|node| node.server.clone());
             return Err((
                 Status::not_found(format!(
                     "session {session_handle:?} closed before the add completed"
                 )),
                 RemoveResourceFfi {
-                    server,
+                    server: Some(server),
                     side,
                     name: name.to_string(),
                 },
@@ -2582,6 +2591,7 @@ impl State {
         ready: AddChannelMappingReady,
     ) -> Result<AddChannelMappingOutcome, (Status, RemoveChannelMappingFfi)> {
         let AddChannelMappingReady {
+            server,
             name,
             node_seed,
             session_handle,
@@ -2597,13 +2607,12 @@ impl State {
                 "AddChannelMapping: session closed while libnvnmos add was in \
                  flight; removing the libnvnmos channel mapping"
             );
-            let server = self.nodes.get(&node_seed).map(|node| node.server.clone());
             return Err((
                 Status::not_found(format!(
                     "session {session_handle:?} closed before the add completed"
                 )),
                 RemoveChannelMappingFfi {
-                    server,
+                    server: Some(server),
                     name: name.clone(),
                 },
             ));
@@ -3449,5 +3458,86 @@ mod commit_after_close_tests {
         close_ffi.run();
         let (_outcome, remove_node) = state.remove_node(seed).expect("remove node");
         remove_node.run();
+    }
+
+    /// The close destroys the session-refcounted Node, and a new session
+    /// creates another Node with the same seed and adds the same name
+    /// before the first add commits. The first add's remove must not take
+    /// the name off the new Node.
+    #[test]
+    fn commit_after_close_leaves_a_recreated_node_alone() {
+        let mut state = State::new();
+        let seed = "commit-after-close-recreated";
+        let ports = ports();
+        let name = "sender-recreated";
+
+        let ready_sender = |state: &mut State| {
+            let OpenSessionPlan::Create(prep) = state
+                .prepare_open_session(
+                    nvnmos::NodeConfig {
+                        seed: seed.to_string(),
+                        http_port: 0,
+                        ..nvnmos::NodeConfig::default()
+                    },
+                    &ports,
+                )
+                .expect("open")
+            else {
+                panic!("no Node exists, so the session should create one");
+            };
+            let ready = prep
+                .run_ffi(
+                    |_| Ok(()),
+                    |_| Ok(()),
+                    None,
+                    std::sync::Arc::new(std::sync::Mutex::new(State::new())),
+                )
+                .expect("build node");
+            let open = state.commit_open_session(ready);
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            state
+                .subscribe_activations(&open.session_handle, tx)
+                .expect("subscribe");
+            let prep = state
+                .prepare_add_resource(
+                    Side::Sender,
+                    &open.session_handle,
+                    Transport::Rtp,
+                    &minimal_sender_sdp(name, &iface_ip()),
+                    name,
+                )
+                .expect("prepare add");
+            let super::AddResourceReady::Sender(ready) = prep.run_ffi(None).expect("libnvnmos add")
+            else {
+                panic!("sender add");
+            };
+            (open.session_handle, ready)
+        };
+
+        let (first_session, first_ready) = ready_sender(&mut state);
+        let (outcome, close_ffi) = state.close_session(&first_session).expect("close");
+        assert!(outcome.node_destroyed);
+        close_ffi.run();
+
+        let (second_session, second_ready) = ready_sender(&mut state);
+        if let Err((status, _)) = state.commit_add_sender(second_ready) {
+            panic!("commit second add: {status}");
+        }
+
+        let (status, remove) = state
+            .commit_add_sender(first_ready)
+            .expect_err("session is gone");
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        remove.run();
+
+        let server = state.nodes.get(seed).expect("second Node").server.clone();
+        assert!(
+            server.sender_id(name).expect("lookup").is_some(),
+            "the second session's Sender must still be in libnvnmos"
+        );
+        drop(server);
+
+        let (_outcome, close_ffi) = state.close_session(&second_session).expect("close");
+        close_ffi.run();
     }
 }
