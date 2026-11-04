@@ -40,7 +40,6 @@ trap 'stop_nvnmosd; cleanup' EXIT INT TERM
 
 if [[ "${NVNMOS_PUBLISH_MDNS:-1}" != "0" ]]; then
     publish_mdns_hostname "${HOSTNAME}.local"
-    sleep 1
 fi
 
 rm -f "${NVNMOSD_UDS}"
