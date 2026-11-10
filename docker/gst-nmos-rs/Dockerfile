@@ -52,7 +52,7 @@ ARG NVNMOS_REVISION=
 ARG MXL_REPO=https://github.com/dmf-mxl/mxl.git
 ARG MXL_REF=a298f226f0189869f944b2d5a202af94645ac99c
 ARG GST_PLUGINS_RS_REPO=https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git
-ARG GST_PLUGINS_RS_REF=ab625ae567748b77d43c3939442011deecb2dabe
+ARG GST_PLUGINS_RS_REF=da5fb84ba03ac94a6ed4a9672d5a6c8e0c13cbcd
 
 # Final image arguments
 ARG NVNMOS_UID=10001
