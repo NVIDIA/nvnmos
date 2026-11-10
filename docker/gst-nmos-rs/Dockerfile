@@ -50,7 +50,7 @@ ARG NVNMOS_REVISION=
 
 # External sources
 ARG MXL_REPO=https://github.com/dmf-mxl/mxl.git
-ARG MXL_REF=8f3f1096e804bfb822eb959cdf2fc23199a7d15d
+ARG MXL_REF=a298f226f0189869f944b2d5a202af94645ac99c
 ARG GST_PLUGINS_RS_REPO=https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git
 ARG GST_PLUGINS_RS_REF=ab625ae567748b77d43c3939442011deecb2dabe
 
@@ -62,7 +62,7 @@ ARG EXTRA_APT_PACKAGES=
 # -----------------------------------------------------------------------------
 # MXL — vcpkg + gst-mxl-rs. libmxl is built once by mxl-sys via cargo (no
 # separate cmake step, no mxl-not-built). Runtime resolves libmxl.so via
-# LD_LIBRARY_PATH; CMakePresets expect vcpkg at ~/vcpkg (i.e. /root/vcpkg).
+# LD_LIBRARY_PATH; CMakePresets find vcpkg through VCPKG_ROOT.
 # -----------------------------------------------------------------------------
 FROM ${BASE_IMAGE} AS mxl-builder
 
@@ -96,6 +96,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal
 
 ENV PATH="/root/.cargo/bin:${PATH}"
+ENV VCPKG_ROOT=/root/vcpkg
 
 RUN git clone https://github.com/microsoft/vcpkg.git /root/vcpkg \
     && /root/vcpkg/bootstrap-vcpkg.sh -disableMetrics
