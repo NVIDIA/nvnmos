@@ -319,13 +319,17 @@ pub(crate) fn audio_from_caps(
     }
 
     let sample_bytes = audio_sample_bytes(format)?;
-    let numerator = u64::from(rate)
-        .checked_mul(ptime_ns)
-        .and_then(|n| n.checked_mul(u64::from(sample_bytes)))
-        .and_then(|n| n.checked_mul(u64::from(channels)))
+    // Round to a whole number of sample frames, so that a ptime that is not a
+    // multiple of the sample period (e.g. 0.333 ms at 48 kHz) does not split
+    // a sampling instant across packets (RFC 3190 §7).
+    let sample_frames = ptime_ns
+        .mul_div_round(u64::from(rate), gst::ClockTime::SECOND.nseconds())
         .context("audio payload size calculation overflow")?;
-    // Round to nearest whole byte when ptime does not divide sample grid exactly.
-    let src_payload = ((numerator + 500_000_000) / 1_000_000_000) as u32;
+    let src_payload = sample_frames
+        .checked_mul(u64::from(sample_bytes))
+        .and_then(|n| n.checked_mul(u64::from(channels)))
+        .and_then(|n| u32::try_from(n).ok())
+        .context("audio payload size calculation overflow")?;
     if src_payload == 0 {
         bail!(
             "computed audio payload size is zero (rate={rate}, ptime_ns={ptime_ns}, \
@@ -509,6 +513,20 @@ mod tests {
         let pkt = audio_from_caps(&caps, ptime_ns).unwrap();
         assert_eq!(pkt.src_payload_size, 36);
         assert_eq!(pkt.sink_payload_size, 48);
+    }
+
+    #[test]
+    fn l24_48k_16ch_ptime_333us_rounds_to_whole_sample_frames() {
+        init_gst();
+        let caps = gst::Caps::from_str(
+            "audio/x-raw,format=S24BE,rate=48000,channels=16,layout=interleaved",
+        )
+        .unwrap();
+        // 0.333 ms is 15.984 sample periods at 48 kHz, so 16 sample frames of 48 bytes.
+        let ptime_ns = parse_ptime_ms_as_ns("0.333").unwrap();
+        let pkt = audio_from_caps(&caps, ptime_ns).unwrap();
+        assert_eq!(pkt.src_payload_size, 768);
+        assert_eq!(pkt.sink_payload_size, 780);
     }
 
     #[test]
