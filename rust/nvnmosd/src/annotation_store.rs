@@ -34,8 +34,15 @@ use crate::env_config;
 const CHECKPOINT_VERSION: u32 = 1;
 const DEFAULT_DEBOUNCE_MS: u64 = 1000;
 const DEFAULT_ENTRY_LIMIT: u64 = 10_000;
+const DEFAULT_LENGTH_LIMIT: u64 = 1024;
+const DEFAULT_TAG_LIMIT: u64 = 5;
+const DEFAULT_VALUE_LIMIT: u64 = 5;
+const TAG_NAME_LIMIT: usize = 256;
 const ENV_DEBOUNCE_MS: &str = "NVNMOSD_ANNOTATION_DEBOUNCE_MS";
 const ENV_ENTRY_LIMIT: &str = "NVNMOSD_ANNOTATION_ENTRY_LIMIT";
+const ENV_LENGTH_LIMIT: &str = "NVNMOSD_ANNOTATION_LENGTH_LIMIT";
+const ENV_TAG_LIMIT: &str = "NVNMOSD_ANNOTATION_TAG_LIMIT";
+const ENV_VALUE_LIMIT: &str = "NVNMOSD_ANNOTATION_VALUE_LIMIT";
 const ENV_CHECKPOINT_FILE: &str = "NVNMOSD_ANNOTATION_CHECKPOINT_FILE";
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -101,6 +108,89 @@ fn present_value(update: Update, value: &Option<String>) -> Option<String> {
 struct Inner {
     entries: HashMap<Key, Annotation>,
     limit: usize,
+    sizes: SizeLimits,
+}
+
+/// Limits on one stored annotation. The length limit, in UTF-8 bytes,
+/// applies to the label, the description, and each tag value. Tag names
+/// have the fixed [`TAG_NAME_LIMIT`].
+#[derive(Clone, Copy)]
+struct SizeLimits {
+    length: usize,
+    tags: usize,
+    values: usize,
+}
+
+impl Default for SizeLimits {
+    fn default() -> Self {
+        Self {
+            length: DEFAULT_LENGTH_LIMIT as usize,
+            tags: DEFAULT_TAG_LIMIT as usize,
+            values: DEFAULT_VALUE_LIMIT as usize,
+        }
+    }
+}
+
+impl SizeLimits {
+    fn from_env() -> Self {
+        let read = |name, default| {
+            usize::try_from(env_config::read_integer(name, default, 0)).unwrap_or(usize::MAX)
+        };
+        Self {
+            length: read(ENV_LENGTH_LIMIT, DEFAULT_LENGTH_LIMIT),
+            tags: read(ENV_TAG_LIMIT, DEFAULT_TAG_LIMIT),
+            values: read(ENV_VALUE_LIMIT, DEFAULT_VALUE_LIMIT),
+        }
+    }
+
+    /// Fails with the first limit that `annotation` exceeds.
+    fn check(&self, annotation: &Annotation) -> Result<(), String> {
+        let length = |what: &str, value: &str| {
+            if value.len() > self.length {
+                Err(format!(
+                    "{what} is {} bytes, more than {ENV_LENGTH_LIMIT}={}",
+                    value.len(),
+                    self.length
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        if let Some(label) = &annotation.label {
+            length("label", label)?;
+        }
+        if let Some(description) = &annotation.description {
+            length("description", description)?;
+        }
+        if annotation.tags.len() > self.tags {
+            return Err(format!(
+                "{} tags, more than {ENV_TAG_LIMIT}={}",
+                annotation.tags.len(),
+                self.tags
+            ));
+        }
+        for tag in &annotation.tags {
+            // the name is not quoted until it is known to be short
+            if tag.key.len() > TAG_NAME_LIMIT {
+                return Err(format!(
+                    "a tag name is {} bytes, more than {TAG_NAME_LIMIT}",
+                    tag.key.len()
+                ));
+            }
+            if tag.values.len() > self.values {
+                return Err(format!(
+                    "tag {:?} has {} values, more than {ENV_VALUE_LIMIT}={}",
+                    tag.key,
+                    tag.values.len(),
+                    self.values
+                ));
+            }
+            for value in &tag.values {
+                length(&format!("a value of tag {:?}", tag.key), value)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 enum Msg {
@@ -130,10 +220,10 @@ impl std::error::Error for CheckpointError {}
 impl AnnotationStore {
     /// Load `path`, or start empty when the file is absent, then replace
     /// `path` with that store. Fails when an existing file cannot be read
-    /// or parsed, holds more entries than the limit, or when the
-    /// replacement write fails.
+    /// or parsed, holds more entries than the limit or an annotation over
+    /// a size limit, or when the replacement write fails.
     ///
-    /// Debounce and the entry limit come from the environment.
+    /// Debounce and the limits come from the environment.
     pub fn open(path: &Path) -> Result<Self, CheckpointError> {
         Self::with_file(
             path,
@@ -148,11 +238,17 @@ impl AnnotationStore {
                 0,
             ))
             .unwrap_or(usize::MAX),
+            SizeLimits::from_env(),
         )
     }
 
-    fn with_file(path: &Path, debounce: Duration, limit: usize) -> Result<Self, CheckpointError> {
-        let entries = read_checkpoint(path)?;
+    fn with_file(
+        path: &Path,
+        debounce: Duration,
+        limit: usize,
+        sizes: SizeLimits,
+    ) -> Result<Self, CheckpointError> {
+        let entries = read_checkpoint(path, &sizes)?;
         if entries.len() > limit {
             return Err(CheckpointError(format!(
                 "{} holds {} entries, more than {ENV_ENTRY_LIMIT}={limit}",
@@ -167,10 +263,17 @@ impl AnnotationStore {
             path = %path.display(),
             entries = entries.len(),
             limit,
+            length_limit = sizes.length,
+            tag_limit = sizes.tags,
+            value_limit = sizes.values,
             debounce_ms = debounce.as_millis() as u64,
             "annotation checkpoint"
         );
-        let inner = Arc::new(Mutex::new(Inner { entries, limit }));
+        let inner = Arc::new(Mutex::new(Inner {
+            entries,
+            limit,
+            sizes,
+        }));
         let (tx, rx) = mpsc::channel();
         let writer_inner = Arc::clone(&inner);
         let writer_path = path.to_path_buf();
@@ -188,11 +291,12 @@ impl AnnotationStore {
     }
 
     #[cfg(test)]
-    fn memory(limit: usize) -> Self {
+    fn memory(limit: usize, sizes: SizeLimits) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 entries: HashMap::new(),
                 limit,
+                sizes,
             })),
             tx: None,
             writer: None,
@@ -208,8 +312,9 @@ impl AnnotationStore {
         self.lock().entries.get(&key).cloned()
     }
 
-    /// Apply one annotation update. A new key at the limit is logged and refused,
-    /// so the caller can fail the Annotation API request.
+    /// Apply one annotation update. A new key at the entry limit, or an
+    /// annotation over a size limit, is logged and refused, so the caller
+    /// can fail the Annotation API request.
     /// An entry with nothing left annotated is deleted.
     pub fn apply(&self, seed: &str, update: &AnnotationUpdate) -> Result<(), String> {
         let name = update.name.as_deref().unwrap_or("");
@@ -283,6 +388,15 @@ impl AnnotationStore {
             && entry.tags_update == Update::Reset
         {
             inner.entries.remove(&key);
+        } else if let Err(reason) = inner.sizes.check(&entry) {
+            tracing::warn!(
+                seed,
+                resource_type = resource_type_name(update.resource_type),
+                name,
+                reason,
+                "refusing an annotation over a size limit"
+            );
+            return Err(format!("annotation not stored: {reason}"));
         } else if !inner.entries.contains_key(&key) && inner.entries.len() >= inner.limit {
             tracing::error!(
                 seed,
@@ -457,7 +571,10 @@ struct CheckpointRecord {
     tags: BTreeMap<String, Vec<String>>,
 }
 
-fn read_checkpoint(path: &Path) -> Result<HashMap<Key, Annotation>, CheckpointError> {
+fn read_checkpoint(
+    path: &Path,
+    sizes: &SizeLimits,
+) -> Result<HashMap<Key, Annotation>, CheckpointError> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(HashMap::new()),
@@ -492,6 +609,15 @@ fn read_checkpoint(path: &Path) -> Result<HashMap<Key, Annotation>, CheckpointEr
             )));
         }
         let annotation = stored_annotation(record.label, record.description, record.tags);
+        sizes.check(&annotation).map_err(|reason| {
+            CheckpointError(format!(
+                "annotation for {} {:?} of seed {:?} in {}: {reason}",
+                resource_type_name(key.resource_type),
+                key.name,
+                key.seed,
+                path.display()
+            ))
+        })?;
         if entries.insert(key, annotation).is_some() {
             return Err(CheckpointError(format!(
                 "duplicate annotation in {}",
@@ -631,7 +757,7 @@ mod tests {
 
     #[test]
     fn apply_keeps_unflagged_members_and_deletes_an_empty_entry() {
-        let store = AnnotationStore::memory(8);
+        let store = AnnotationStore::memory(8, SizeLimits::default());
         store
             .apply(
                 "seed",
@@ -686,7 +812,7 @@ mod tests {
 
     #[test]
     fn limit_refuses_a_new_key_and_still_updates_an_existing_one() {
-        let store = AnnotationStore::memory(1);
+        let store = AnnotationStore::memory(1, SizeLimits::default());
         store
             .apply(
                 "seed",
@@ -751,11 +877,107 @@ mod tests {
     }
 
     #[test]
+    fn size_limits_refuse_an_annotation_and_keep_the_stored_one() {
+        let store = AnnotationStore::memory(
+            8,
+            SizeLimits {
+                length: 4,
+                tags: 2,
+                values: 2,
+            },
+        );
+        let tag = |key: &str, values: &[&str]| AnnotationTag {
+            key: key.into(),
+            values_update: Update::Set,
+            values: values.iter().map(|value| value.to_string()).collect(),
+        };
+        let apply = |annotation| {
+            store.apply(
+                "seed",
+                &report(ResourceType::Sender, Some("video"), annotation),
+            )
+        };
+        let at_the_limits = Annotation {
+            label_update: Update::Set,
+            label: Some("four".into()),
+            description_update: Update::Set,
+            description: Some("4444".into()),
+            tags_update: Update::Set,
+            tags: vec![
+                tag("a", &["1234", "5678"]),
+                tag(&"b".repeat(TAG_NAME_LIMIT), &[]),
+            ],
+        };
+        apply(at_the_limits.clone()).unwrap();
+
+        let over = [
+            (
+                "label",
+                Annotation {
+                    label: Some("five5".into()),
+                    ..at_the_limits.clone()
+                },
+            ),
+            (
+                "description",
+                Annotation {
+                    description: Some("five5".into()),
+                    ..at_the_limits.clone()
+                },
+            ),
+            (
+                "3 tags",
+                Annotation {
+                    tags: vec![tag("a", &[]), tag("b", &[]), tag("c", &[])],
+                    ..at_the_limits.clone()
+                },
+            ),
+            (
+                "a tag name",
+                Annotation {
+                    tags: vec![tag(&"c".repeat(TAG_NAME_LIMIT + 1), &[])],
+                    ..at_the_limits.clone()
+                },
+            ),
+            (
+                "3 values",
+                Annotation {
+                    tags: vec![tag("a", &["1", "2", "3"])],
+                    ..at_the_limits.clone()
+                },
+            ),
+            (
+                "a value of tag \"a\"",
+                Annotation {
+                    tags: vec![tag("a", &["12345"])],
+                    ..at_the_limits.clone()
+                },
+            ),
+        ];
+        for (expected, annotation) in over {
+            let reason = apply(annotation).expect_err(expected);
+            assert!(reason.contains(expected), "{reason}");
+        }
+        let stored = store.get("seed", ResourceType::Sender, "video").unwrap();
+        assert_eq!(stored.label.as_deref(), Some("four"));
+        assert_eq!(stored.tags.len(), 2);
+
+        apply(Annotation {
+            label_update: Update::Reset,
+            description_update: Update::Reset,
+            tags_update: Update::Reset,
+            ..Annotation::default()
+        })
+        .unwrap();
+        assert!(store.get("seed", ResourceType::Sender, "video").is_none());
+    }
+
+    #[test]
     fn checkpoint_round_trip_and_corrupt_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("annotations.json");
         assert!(
-            AnnotationStore::with_file(&path, Duration::ZERO, 8)
+            AnnotationStore::with_file(&path, Duration::ZERO, 8, SizeLimits::default())
                 .unwrap()
                 .get("seed", ResourceType::Node, "")
                 .is_none()
@@ -763,7 +985,13 @@ mod tests {
         assert!(path.is_file(), "missing checkpoint is created empty");
 
         {
-            let store = AnnotationStore::with_file(&path, Duration::from_secs(60), 8).unwrap();
+            let store = AnnotationStore::with_file(
+                &path,
+                Duration::from_secs(60),
+                8,
+                SizeLimits::default(),
+            )
+            .unwrap();
             store
                 .apply(
                     "seed",
@@ -786,7 +1014,8 @@ mod tests {
                 .unwrap();
             store.flush();
         }
-        let restored = AnnotationStore::with_file(&path, Duration::ZERO, 8).unwrap();
+        let restored =
+            AnnotationStore::with_file(&path, Duration::ZERO, 8, SizeLimits::default()).unwrap();
         let node = restored.get("seed", ResourceType::Node, "").unwrap();
         assert_eq!(node.label_update, Update::Unchanged);
         assert_eq!(node.label.as_deref(), Some("node-overlay"));
@@ -801,7 +1030,9 @@ mod tests {
         );
 
         std::fs::write(&path, b"not-json").unwrap();
-        assert!(AnnotationStore::with_file(&path, Duration::ZERO, 8).is_err());
+        assert!(
+            AnnotationStore::with_file(&path, Duration::ZERO, 8, SizeLimits::default()).is_err()
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"not-json");
     }
 
@@ -811,13 +1042,36 @@ mod tests {
         let path = dir.path().join("annotations.json");
         let body = r#"{"version":1,"annotations":[{"seed":"s","resource_type":"sender","name":"a","label":"one"},{"seed":"s","resource_type":"sender","name":"b","label":"two"}]}"#;
         std::fs::write(&path, body).unwrap();
-        assert!(AnnotationStore::with_file(&path, Duration::ZERO, 2).is_ok());
-        let error = match AnnotationStore::with_file(&path, Duration::ZERO, 1) {
-            Err(error) => error,
-            Ok(_) => panic!("a checkpoint over the limit should fail open"),
-        };
+        assert!(
+            AnnotationStore::with_file(&path, Duration::ZERO, 2, SizeLimits::default()).is_ok()
+        );
+        let error =
+            match AnnotationStore::with_file(&path, Duration::ZERO, 1, SizeLimits::default()) {
+                Err(error) => error,
+                Ok(_) => panic!("a checkpoint over the limit should fail open"),
+            };
         let message = error.to_string();
         assert!(message.contains(ENV_ENTRY_LIMIT), "{message}");
+    }
+
+    #[test]
+    fn checkpoint_over_a_size_limit_fails_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("annotations.json");
+        let body = r#"{"version":1,"annotations":[{"seed":"s","resource_type":"sender","name":"a","tags":{"t":["1","2"]}}]}"#;
+        std::fs::write(&path, body).unwrap();
+        let sizes = |values| SizeLimits {
+            values,
+            ..SizeLimits::default()
+        };
+        assert!(AnnotationStore::with_file(&path, Duration::ZERO, 8, sizes(2)).is_ok());
+        let error = match AnnotationStore::with_file(&path, Duration::ZERO, 8, sizes(1)) {
+            Err(error) => error,
+            Ok(_) => panic!("a checkpoint over a size limit should fail open"),
+        };
+        let message = error.to_string();
+        assert!(message.contains(ENV_VALUE_LIMIT), "{message}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
     }
 
     #[test]
@@ -842,10 +1096,11 @@ mod tests {
                 r#"{{"version":1,"annotations":[{{"seed":"s","resource_type":"sender","name":"v","tags":{{"{key}":["x"]}}}}]}}"#
             );
             std::fs::write(&path, &body).unwrap();
-            let error = match AnnotationStore::with_file(&path, Duration::ZERO, 8) {
-                Err(error) => error,
-                Ok(_) => panic!("read-only tag {key} should fail open"),
-            };
+            let error =
+                match AnnotationStore::with_file(&path, Duration::ZERO, 8, SizeLimits::default()) {
+                    Err(error) => error,
+                    Ok(_) => panic!("read-only tag {key} should fail open"),
+                };
             let message = error.to_string();
             assert!(
                 message.contains(key),
@@ -864,10 +1119,11 @@ mod tests {
         let mut perms = std::fs::metadata(dir.path()).unwrap().permissions();
         perms.set_mode(0o555);
         std::fs::set_permissions(dir.path(), perms).unwrap();
-        let error = match AnnotationStore::with_file(&path, Duration::ZERO, 8) {
-            Err(error) => error,
-            Ok(_) => panic!("unwritable directory should fail open"),
-        };
+        let error =
+            match AnnotationStore::with_file(&path, Duration::ZERO, 8, SizeLimits::default()) {
+                Err(error) => error,
+                Ok(_) => panic!("unwritable directory should fail open"),
+            };
         let mut perms = std::fs::metadata(dir.path()).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(dir.path(), perms).unwrap();
