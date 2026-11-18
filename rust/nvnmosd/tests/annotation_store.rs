@@ -26,7 +26,7 @@ const CORRUPT_CHECKPOINT_PORTS: PortRange = 18_270..=18_279;
 const ANNOTATION_API_DISABLED_PORTS: PortRange = 18_280..=18_289;
 const UNWRITABLE_CHECKPOINT_PORTS: PortRange = 18_290..=18_299;
 const ANNOTATION_ENTRY_LIMIT_PORTS: PortRange = 18_300..=18_309;
-const ANNOTATION_LENGTH_LIMIT_PORTS: PortRange = 18_400..=18_409;
+const ANNOTATION_LENGTH_LIMIT_PORTS: PortRange = 18_410..=18_419;
 
 fn minimal_sender_sdp(name: &str, iface_ip: &str) -> String {
     format!(

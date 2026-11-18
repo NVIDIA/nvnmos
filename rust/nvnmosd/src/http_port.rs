@@ -102,15 +102,17 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
 
+    // Tests that start no Node use ports in 20_000..=20_099 and may share
+    // them. Each test that starts a Node has its own block of 18_xxx ports.
     #[test]
     fn port_range_iterates_inclusive_span() {
-        let range = PortRange::new(18_080, 18_099).expect("range");
+        let range = PortRange::new(20_000, 20_019).expect("range");
         assert_eq!(range.iter().count(), 20);
     }
 
     #[test]
     fn port_range_rejects_min_greater_than_max() {
-        assert!(PortRange::new(18_100, 18_080).is_err());
+        assert!(PortRange::new(20_019, 20_000).is_err());
     }
 
     #[test]

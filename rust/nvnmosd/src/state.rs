@@ -3179,10 +3179,10 @@ mod http_port_allocation_tests {
     #[test]
     fn explicit_port_rejects_conflict_with_assigned_port() {
         let mut state = State::new();
-        let range = PortRange::new(18_080, 18_099).expect("range");
-        state.assign_http_port_for_test(18_010, "other-seed");
+        let range = PortRange::new(20_000, 20_019).expect("range");
+        state.assign_http_port_for_test(20_020, "other-seed");
         let err = state
-            .resolve_http_port_for_test(18_010, &range)
+            .resolve_http_port_for_test(20_020, &range)
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::AlreadyExists);
     }
@@ -3196,7 +3196,7 @@ mod open_session_tests {
     #[test]
     fn open_session_during_node_create_is_unavailable() {
         let mut state = State::new();
-        let range = PortRange::new(18_400, 18_409).expect("range");
+        let range = PortRange::new(20_000, 20_009).expect("range");
         let config = || {
             translate_config(Some(&ProtoNodeConfig {
                 seed: "pending-seed".into(),
@@ -3332,10 +3332,6 @@ mod commit_after_close_tests {
         sock.local_addr().expect("local addr").ip().to_string()
     }
 
-    fn ports() -> super::PortRange {
-        super::PortRange::new(18_320, 18_329).expect("range")
-    }
-
     fn minimal_sender_sdp(name: &str, iface_ip: &str) -> String {
         format!(
             "v=0\r\n\
@@ -3366,7 +3362,7 @@ mod commit_after_close_tests {
             http_port: 0,
             ..nvnmos::NodeConfig::default()
         };
-        let ports = ports();
+        let ports = super::PortRange::new(18_320, 18_329).expect("range");
         let prep = state
             .prepare_add_node(config, &ports)
             .expect("prepare node");
@@ -3468,7 +3464,7 @@ mod commit_after_close_tests {
     fn commit_after_close_leaves_a_recreated_node_alone() {
         let mut state = State::new();
         let seed = "commit-after-close-recreated";
-        let ports = ports();
+        let ports = super::PortRange::new(18_430, 18_439).expect("range");
         let name = "sender-recreated";
 
         let ready_sender = |state: &mut State| {
