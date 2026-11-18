@@ -26,6 +26,7 @@ const CORRUPT_CHECKPOINT_PORTS: PortRange = 18_270..=18_279;
 const ANNOTATION_API_DISABLED_PORTS: PortRange = 18_280..=18_289;
 const UNWRITABLE_CHECKPOINT_PORTS: PortRange = 18_290..=18_299;
 const ANNOTATION_ENTRY_LIMIT_PORTS: PortRange = 18_300..=18_309;
+const ANNOTATION_LENGTH_LIMIT_PORTS: PortRange = 18_410..=18_419;
 
 fn minimal_sender_sdp(name: &str, iface_ip: &str) -> String {
     format!(
@@ -438,4 +439,44 @@ async fn limit_fails_a_new_patch_and_keeps_the_stored_one() {
     let dropped_id = dropped.sender_id;
     assert_eq!(label(port, "senders", &kept_id).await, "kept");
     assert_eq!(label(port, "senders", &dropped_id).await, "session-default");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn length_limit_fails_a_patch_and_keeps_the_stored_label() {
+    let dir = TempDir::new().expect("checkpoint dir");
+    let checkpoint = dir.path().join("annotations.json");
+    let iface = autodetect_iface_ip();
+    let mut harness = spawn(
+        &checkpoint,
+        ANNOTATION_LENGTH_LIMIT_PORTS,
+        &[("NVNMOSD_ANNOTATION_LENGTH_LIMIT", "8")],
+    );
+    harness.ready().await;
+    let mut client = connect(&harness.uds).await;
+    let (session, port) = open_session(&mut client, "seed-length").await;
+    let added = add_sender(&mut client, &session.handle, "video", &iface).await;
+    let sender_id = added.sender_id;
+    let path = format!("/x-nmos/annotation/v1.0/node/senders/{sender_id}/");
+    patch_annotation(port, &path, serde_json::json!({ "label": "8 bytes!" })).await;
+    let (status, response) = http_patch(
+        "127.0.0.1",
+        port,
+        &path,
+        &serde_json::json!({ "label": "nine byte" }).to_string(),
+    )
+    .await
+    .expect("PATCH over the length limit");
+    assert_eq!(status, 500, "{response}");
+    assert!(
+        response.contains(&format!(
+            "Annotation not accepted for sender: {sender_id} (video)"
+        )),
+        "{response}"
+    );
+    assert_eq!(label(port, "senders", &sender_id).await, "8 bytes!");
+    drop(session);
+    drop(client);
+    harness.terminate();
+    let file = std::fs::read_to_string(&checkpoint).expect("checkpoint");
+    assert!(file.contains("\"label\":\"8 bytes!\""), "{file}");
 }

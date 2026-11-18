@@ -12,7 +12,7 @@ use tonic::transport::Channel;
 
 use common::{DaemonHarness, connect, http_get_json};
 
-const PORTS: std::ops::RangeInclusive<u16> = 18_380..=18_389;
+const PORTS: std::ops::RangeInclusive<u16> = 18_420..=18_429;
 
 async fn open(client: &mut NvnmosDaemonClient<Channel>, seed: &str) -> OpenSessionResponse {
     client
