@@ -50,6 +50,7 @@
 #include "nmos/clock_name.h"
 #include "nmos/clock_ref_type.h"
 #include "nmos/colorspace.h"
+#include "nmos/components.h"
 #include "nmos/connection_resources.h"
 #include "nmos/format.h"
 #include "nmos/group_hint.h"
@@ -192,6 +193,9 @@ namespace nvnmos
 
     namespace impl
     {
+        // MXL video media types
+        const std::vector<nmos::media_type> mxl_video_types{ nmos::media_types::video_v210, nmos::media_types::video_v210a };
+
         // parse an MXL flow definition (JSON) including nvnmos extensions
         // (urn:x-nvnmos:tag:* entries inside the `tags` property);
         // propagates web::json::json_exception on parse error
@@ -675,6 +679,11 @@ namespace nvnmos
 
         if (impl::format::video == format)
         {
+            if (impl::mxl_video_types.end() == boost::range::find(impl::mxl_video_types, media_type))
+            {
+                throw std::invalid_argument("Unsupported media type for MXL sender: " + utility::us2s(media_type.name));
+            }
+
             // assuming an MXL flow definition follows IS-04 v1.3 once an MXL SDK schema lands,
             // the structural properties (grain_rate, frame_width, frame_height, colorspace) are
             // required; let nmos::fields::* propagate json_exception if absent
@@ -687,20 +696,20 @@ namespace nvnmos
             const auto interlace_mode = nmos::interlace_mode{ nmos::fields::interlace_mode(flow_def) };
             const auto transfer_characteristic = nmos::transfer_characteristic{ nmos::fields::transfer_characteristic(flow_def) };
 
-            // components is required (carries sampling and bit depth); use nmos-cpp's helper
-            // to classify the sampling and let it throw on unsupported components
-            const auto& components = nmos::fields::components(flow_def);
-            const auto sampling = nmos::details::make_sampling(components);
-            const auto bit_depth = nmos::fields::bit_depth(components.at(0));
-
             source = nmos::make_video_source(source_id, device_id, clock, grain_rate, settings);
+            // video/v210 and video/v210a determine the components, so the flow_def's components are not used
             flow = nmos::make_coded_video_flow(
                 flow_id, source_id, device_id,
                 grain_rate, frame_width, frame_height, interlace_mode,
-                colorspace, transfer_characteristic, sampling, bit_depth,
+                colorspace, transfer_characteristic, sdp::samplings::YCbCr_4_2_2, 10,
                 media_type,
                 settings
             );
+            // video/v210a adds a full-size 10-bit alpha (key) component to the video/v210 components
+            if (nmos::media_types::video_v210a == media_type)
+            {
+                web::json::push_back(flow.data[nmos::fields::components], nmos::make_component(nmos::component_names::A, frame_width, frame_height, 10));
+            }
         }
         else if (impl::format::audio == format)
         {
@@ -791,6 +800,11 @@ namespace nvnmos
 
         if (impl::format::video == format)
         {
+            if (impl::mxl_video_types.end() == boost::range::find(impl::mxl_video_types, media_type))
+            {
+                throw std::invalid_argument("Unsupported media type for MXL receiver: " + utility::us2s(media_type.name));
+            }
+
             receiver = nmos::make_receiver(receiver_id, device_id, nmos::transports::mxl, {}, nmos::formats::video, { media_type }, settings);
 
             if (want_caps)
@@ -799,8 +813,6 @@ namespace nvnmos
                 const auto grain_rate = nmos::parse_rational(nmos::fields::grain_rate(flow_def));
                 const auto frame_width = nmos::fields::frame_width(flow_def);
                 const auto frame_height = nmos::fields::frame_height(flow_def);
-                const auto& components = nmos::fields::components(flow_def);
-                const auto sampling = nmos::details::make_sampling(components);
                 const auto interlace_mode_name = nmos::fields::interlace_mode(flow_def);
                 const auto interlace_modes = nmos::interlace_modes::progressive.name == interlace_mode_name
                     ? std::vector<utility::string_t>{ nmos::interlace_modes::progressive.name }
@@ -812,8 +824,7 @@ namespace nvnmos
                         { nmos::caps::format::grain_rate, nmos::make_caps_rational_constraint({ grain_rate }) },
                         { nmos::caps::format::frame_width, nmos::make_caps_integer_constraint({ frame_width }) },
                         { nmos::caps::format::frame_height, nmos::make_caps_integer_constraint({ frame_height }) },
-                        { !interlace_mode_name.empty() ? nmos::caps::format::interlace_mode.key : U(""), nmos::make_caps_string_constraint(interlace_modes) },
-                        { nmos::caps::format::color_sampling, nmos::make_caps_string_constraint({ sampling.name }) }
+                        { !interlace_mode_name.empty() ? nmos::caps::format::interlace_mode.key : U(""), nmos::make_caps_string_constraint(interlace_modes) }
                     })
                 });
                 receiver.data[nmos::fields::version] = receiver.data[nmos::fields::caps][nmos::fields::version] = value(nmos::make_version());
