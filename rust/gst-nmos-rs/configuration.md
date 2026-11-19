@@ -160,6 +160,7 @@ an activation carrying audio.
 | READY→PAUSED | For a deferred `nmossink`, derive the transport file from upstream caps, add the Sender, and set `sender-id`, `source-id`, and `flow-id` |
 | Resource addition with `auto-activate=true` | Build the real inner transport, synchronize the NMOS active state, set read-only `active` to true, and post a `nmos-activation` element message; occurs during NULL→READY or deferred `nmossink` READY→PAUSED |
 | IS-05 activation | Build or replace the inner transport elements using the effective SDP or MXL flow definition delivered for activation; update read-only `active` and post a `nmos-activation` element message on the bus |
+| Rejected IS-05 activation, or an ERROR from an inner element | Replace the inner transport elements with placeholder elements, set read-only `active` to false, post a `nmos-activation` element message, and post a WARNING with the reason; the pipeline keeps running |
 | READY→NULL | Remove the Sender or Receiver and close the daemon session; `active` becomes false and the resource id properties become empty |
 
 When neither `transport-file*` nor `caps` is set, `nmossink` defers

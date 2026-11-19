@@ -661,10 +661,13 @@ impl BinImpl for NmosSink {
                 match build_fake_sink_for_settings(&settings)
                     .and_then(|fake| imp.swap_inner(sink.upcast_ref(), &fake, None))
                 {
-                    Ok(()) => gst::warning!(
-                        CAT,
-                        "nmossink inner chain posted ERROR; restored fake chain: {glib_error}"
-                    ),
+                    Ok(()) => {
+                        gst::warning!(
+                            CAT,
+                            "nmossink inner chain posted ERROR; restored fake chain: {glib_error}"
+                        );
+                        imp.set_connection_active(false, "inner-error");
+                    }
                     Err(restore_error) => gst::warning!(
                         CAT,
                         "nmossink inner chain posted ERROR and fake-chain restore failed: \
@@ -1140,9 +1143,15 @@ impl NmosSink {
                 self.set_connection_active(new_active, reason);
                 ActivationOutcome::Applied
             }
-            ActivationAck::Failure { reason } => ActivationOutcome::Failed {
-                reason: reason.clone(),
-            },
+            ActivationAck::Failure { reason } => {
+                // A scheduled activation has no HTTP response to carry the
+                // reason, so the bus warning is what an application sees.
+                self.set_connection_active(false, "activation-rejected");
+                gst::element_imp_warning!(self, gst::StreamError::Format, ("{reason}"));
+                ActivationOutcome::Failed {
+                    reason: reason.clone(),
+                }
+            }
         }
     }
 }
@@ -1601,6 +1610,7 @@ mod tests {
             .swap_inner(sink.upcast_ref(), &real, None)
             .expect("install real sink");
         assert!(sink.imp().current_chain_is_real());
+        sink.imp().set_connection_active(true, "activate");
 
         real.post_message(
             gst::message::Error::builder(gst::CoreError::Failed, "test inner failure")
@@ -1621,5 +1631,56 @@ mod tests {
             "inner error escaped the bin: {message:?}",
         );
         assert!(!sink.imp().current_chain_is_real());
+        assert!(!sink.property::<bool>("active"));
+    }
+
+    #[test]
+    fn rejected_activation_posts_warning_and_clears_active() {
+        use std::str::FromStr;
+        init_gst();
+        let pipeline = gst::Pipeline::new();
+        let caps =
+            gst::Caps::from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=25/1")
+                .expect("caps");
+        let sink = glib::Object::builder::<crate::nmossink::NmosSink>()
+            .property("caps", caps)
+            .build();
+        pipeline.add(&sink).expect("add nmossink");
+        let real = gst::ElementFactory::make("fakesink")
+            .build()
+            .expect("real sink");
+        sink.imp()
+            .swap_inner(sink.upcast_ref(), &real, None)
+            .expect("install real sink");
+        sink.imp().set_connection_active(true, "activate");
+
+        let plan = ActivationPlan {
+            inner: InnerConfig::Fake {
+                kind: crate::session::FakeKind::Misconfigured,
+                detail: "test rejection".into(),
+            },
+            ack: ActivationAck::Failure {
+                reason: "test rejection".into(),
+            },
+        };
+        let ActivationOutcome::Failed { reason } = sink.imp().execute_activation_plan(&plan) else {
+            panic!("rejected activation was applied");
+        };
+        assert_eq!(reason, "test rejection");
+
+        let bus = pipeline.bus().expect("pipeline bus");
+        let message = bus
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(2),
+                &[gst::MessageType::Error, gst::MessageType::Warning],
+            )
+            .expect("rejected activation must post a warning");
+        let gst::MessageView::Warning(warning) = message.view() else {
+            panic!("expected a warning: {message:?}");
+        };
+        assert!(warning.error().matches(gst::StreamError::Format));
+        assert!(warning.error().to_string().contains("test rejection"));
+        assert!(!sink.imp().current_chain_is_real());
+        assert!(!sink.property::<bool>("active"));
     }
 }

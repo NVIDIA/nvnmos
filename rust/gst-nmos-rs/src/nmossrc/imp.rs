@@ -612,10 +612,13 @@ impl BinImpl for NmosSrc {
                 match build_fake_src_for_settings(&settings).and_then(|fake| {
                     imp.swap_inner(src.upcast_ref(), &fake, inner::RebuildChainOpts::default())
                 }) {
-                    Ok(()) => gst::warning!(
-                        CAT,
-                        "nmossrc inner chain posted ERROR; restored fake chain: {glib_error}"
-                    ),
+                    Ok(()) => {
+                        gst::warning!(
+                            CAT,
+                            "nmossrc inner chain posted ERROR; restored fake chain: {glib_error}"
+                        );
+                        imp.set_connection_active(false, "inner-error");
+                    }
                     Err(restore_error) => gst::warning!(
                         CAT,
                         "nmossrc inner chain posted ERROR and fake-chain restore failed: \
@@ -1088,9 +1091,15 @@ impl NmosSrc {
                 self.set_connection_active(new_active, reason);
                 ActivationOutcome::Applied
             }
-            ActivationAck::Failure { reason } => ActivationOutcome::Failed {
-                reason: reason.clone(),
-            },
+            ActivationAck::Failure { reason } => {
+                // A scheduled activation has no HTTP response to carry the
+                // reason, so the bus warning is what an application sees.
+                self.set_connection_active(false, "activation-rejected");
+                gst::element_imp_warning!(self, gst::StreamError::Format, ("{reason}"));
+                ActivationOutcome::Failed {
+                    reason: reason.clone(),
+                }
+            }
         }
     }
 }
@@ -1686,6 +1695,7 @@ mod tests {
             .swap_inner(src.upcast_ref(), &real, inner::RebuildChainOpts::default())
             .expect("install real src");
         assert!(src.imp().current_chain_is_real());
+        src.imp().set_connection_active(true, "activate");
 
         real.post_message(
             gst::message::Error::builder(gst::CoreError::Failed, "test inner failure")
@@ -1706,5 +1716,56 @@ mod tests {
             "inner error escaped the bin: {message:?}",
         );
         assert!(!src.imp().current_chain_is_real());
+        assert!(!src.property::<bool>("active"));
+    }
+
+    #[test]
+    fn rejected_activation_posts_warning_and_clears_active() {
+        use std::str::FromStr;
+        init_gst();
+        let pipeline = gst::Pipeline::new();
+        let caps =
+            gst::Caps::from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=25/1")
+                .expect("caps");
+        let src = glib::Object::builder::<crate::nmossrc::NmosSrc>()
+            .property("caps", caps)
+            .build();
+        pipeline.add(&src).expect("add nmossrc");
+        let real = gst::ElementFactory::make("fakesrc")
+            .build()
+            .expect("real src");
+        src.imp()
+            .swap_inner(src.upcast_ref(), &real, inner::RebuildChainOpts::default())
+            .expect("install real src");
+        src.imp().set_connection_active(true, "activate");
+
+        let plan = ActivationPlan {
+            inner: InnerConfig::Fake {
+                kind: crate::session::FakeKind::Misconfigured,
+                detail: "test rejection".into(),
+            },
+            ack: ActivationAck::Failure {
+                reason: "test rejection".into(),
+            },
+        };
+        let ActivationOutcome::Failed { reason } = src.imp().execute_activation_plan(&plan) else {
+            panic!("rejected activation was applied");
+        };
+        assert_eq!(reason, "test rejection");
+
+        let bus = pipeline.bus().expect("pipeline bus");
+        let message = bus
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(2),
+                &[gst::MessageType::Error, gst::MessageType::Warning],
+            )
+            .expect("rejected activation must post a warning");
+        let gst::MessageView::Warning(warning) = message.view() else {
+            panic!("expected a warning: {message:?}");
+        };
+        assert!(warning.error().matches(gst::StreamError::Format));
+        assert!(warning.error().to_string().contains("test rejection"));
+        assert!(!src.imp().current_chain_is_real());
+        assert!(!src.property::<bool>("active"));
     }
 }
