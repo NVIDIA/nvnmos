@@ -7,8 +7,9 @@
 use gstreamer as gst;
 
 /// Build GStreamer essence caps from parsed transport state: optional
-/// fields are filled in where absent (audio `channel-mask` and
-/// `channel-order`; video and ANC pass through unchanged).
+/// fields are filled in where absent (audio `channel-order`; video and
+/// ANC pass through unchanged). Audio `channel-mask` is left unset, so a
+/// sender accepts any mask; receivers add one with [`with_channel_mask`].
 ///
 /// `caps` is the minimal essence shape (from [`crate::flow_def::caps_from`]
 /// or SDP parse). When `rtp_caps` is supplied, audio `channel-order`
@@ -70,9 +71,7 @@ fn audio_caps_from(caps: &gst::Caps, channel_order: Option<&str>) -> gst::Caps {
         return caps.clone();
     };
     debug_assert_eq!(s.name(), "audio/x-raw");
-    let needs_mask = s.get::<gst::Bitmask>("channel-mask").is_err();
-    let needs_order = s.get::<&str>("channel-order").is_err();
-    if !needs_mask && !needs_order {
+    if s.get::<&str>("channel-order").is_ok() {
         return caps.clone();
     }
     let channels = s.get::<i32>("channels").unwrap_or(1);
@@ -81,16 +80,32 @@ fn audio_caps_from(caps: &gst::Caps, channel_order: Option<&str>) -> gst::Caps {
     let Some(s) = out_mut.structure_mut(0) else {
         return out;
     };
-    if needs_mask {
-        if let Some(mask) = default_channel_mask(channels) {
-            s.set("channel-mask", mask);
-        }
+    let order = channel_order
+        .map(str::to_owned)
+        .unwrap_or_else(|| default_smpte2110_channel_order(channels));
+    s.set("channel-order", &order);
+    out
+}
+
+/// Fill an absent audio `channel-mask` for caps that a receiver outputs.
+///
+/// The mask depends only on the channel count, not on an ST 2110-30
+/// `channel-order`. Mono and stereo get no mask, which GStreamer reads as
+/// mono and as front left and right. More channels require a mask, so they
+/// get the unpositioned mask (`0x0`). Other caps are returned unchanged.
+pub(crate) fn with_channel_mask(caps: &gst::Caps) -> gst::Caps {
+    let Some(s) = caps.structure(0) else {
+        return caps.clone();
+    };
+    if s.name() != "audio/x-raw" || s.has_field("channel-mask") {
+        return caps.clone();
     }
-    if needs_order {
-        let order = channel_order
-            .map(str::to_owned)
-            .unwrap_or_else(|| default_smpte2110_channel_order(channels));
-        s.set("channel-order", &order);
+    if !s.get::<i32>("channels").is_ok_and(|channels| channels > 2) {
+        return caps.clone();
+    }
+    let mut out = caps.clone();
+    if let Some(s) = out.make_mut().structure_mut(0) {
+        s.set("channel-mask", gst::Bitmask::new(0));
     }
     out
 }
@@ -111,18 +126,6 @@ pub(crate) fn default_smpte2110_channel_order(channels: i32) -> String {
 /// fmtp `channel-order` parameter from SDP).
 pub(crate) fn channel_order_from_rtp_structure(s: &gst::StructureRef) -> Option<String> {
     s.get::<&str>("channel-order").ok().map(str::to_owned)
-}
-
-fn default_channel_mask(channels: i32) -> Option<gst::Bitmask> {
-    if !(1..=64).contains(&channels) {
-        return None;
-    }
-    let mask = if channels == 64 {
-        u64::MAX
-    } else {
-        (1u64 << channels) - 1
-    };
-    Some(gst::Bitmask::new(mask))
 }
 
 #[cfg(test)]
@@ -159,15 +162,26 @@ mod tests {
     }
 
     #[test]
-    fn caps_from_adds_sequential_channel_mask_for_audio() {
+    fn caps_from_leaves_channel_mask_unset_for_audio() {
         init_gst();
         let caps = raw_audio_caps("S24BE", 48_000, 6);
         let out = caps_from(&caps, None);
         let s = out.structure(0).expect("structure");
-        assert_eq!(
-            s.get::<gst::Bitmask>("channel-mask").unwrap(),
-            gst::Bitmask::new((1u64 << 6) - 1),
-        );
+        assert!(!s.has_field("channel-mask"), "caps: {out}");
+        assert_eq!(s.get::<&str>("channel-order").unwrap(), "SMPTE2110.(U06)");
+    }
+
+    #[test]
+    fn with_channel_mask_keeps_explicit_mask_and_other_media() {
+        init_gst();
+        let explicit = gst::Caps::from_str(
+            "audio/x-raw,format=S24BE,rate=48000,channels=6,layout=interleaved,\
+             channel-mask=(bitmask)0x3f",
+        )
+        .expect("caps");
+        assert_eq!(with_channel_mask(&explicit), explicit);
+        let video = gst::Caps::from_str("video/x-raw,format=UYVY").expect("caps");
+        assert_eq!(with_channel_mask(&video), video);
     }
 
     #[test]

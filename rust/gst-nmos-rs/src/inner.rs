@@ -1941,7 +1941,11 @@ pub(crate) fn build_nvdsudpsrc(
     // grouping Mode 3 produces. Fill `alignment=frame` so a downstream
     // `st2038combiner` sees it — the src-side counterpart of the same
     // default `build_nvdsudpsink` applies before the shared sink capsfilter.
-    let caps = packetization::with_st2038_frame_alignment(&media.caps);
+    // Audio gets the receiver `channel-mask` that the capssetter carries on
+    // the other transports.
+    let caps = crate::essence_caps::with_channel_mask(&packetization::with_st2038_frame_alignment(
+        &media.caps,
+    ));
     let pkt = packetization::from_media(media.format, &caps, &media.rtp_caps)
         .with_code(gst::ResourceError::Settings)?;
 

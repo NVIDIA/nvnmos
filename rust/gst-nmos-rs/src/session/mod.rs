@@ -1967,11 +1967,7 @@ mod tests {
                 "SMPTE2110.(ST)",
                 "stereo default channel-order",
             );
-            assert_eq!(
-                s.get::<gst::Bitmask>("channel-mask").unwrap(),
-                gst::Bitmask::new(0x3),
-                "stereo default channel-mask",
-            );
+            assert!(!s.has_field("channel-mask"), "caps: {out}");
         }
 
         #[test]
