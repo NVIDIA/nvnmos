@@ -210,31 +210,12 @@ pub(crate) mod defaults {
     // (e.g. `2110TPW` for `udp` / `udp2`, `2110TPN` for `nvdsudp`) per the
     // nvnmosd design notes.
 
-    /// ST 2110-20 §7.5 / §7.2 fmtp `colorimetry` default. The
-    /// fmtp parameter is REQUIRED — nmos-cpp's
-    /// `get_video_raw_parameters` (`Development/nmos/sdp_utils.cpp`)
-    /// throws when absent and libnvnmos's
-    /// `add_nmos_sender_to_node_server` catches that and
-    /// silently returns `false`. When `from_caps`'s essence
-    /// caps don't carry an explicit colorimetry, we have to
-    /// pick one — ST 2110 SDR's BT709 is what nmos-cpp's
-    /// `make_video_sdp_parameters` picks for a Flow without a
-    /// colorimetry tag and what the SMPTE ST 2110-20 reference
-    /// SDPs use, so a synthesised SDP with this default plays
-    /// against both libnvnmos and any other ST 2110 peer.
-    /// Callers wanting BT2020 / BT2100 colorimetry need to set
-    /// it explicitly on the essence caps upstream of the
-    /// `nmossink`.
-    pub(crate) const ST2110_20_COLORIMETRY: &str = "BT709";
-
-    /// ST 2110-20 §7.3 default `TCS`, written with
-    /// [`ST2110_20_COLORIMETRY`] when the essence caps have no
-    /// colorimetry, and assumed when an SDP has no `TCS`.
+    /// ST 2110-20 §7.3 default `TCS`, assumed when an SDP has no
+    /// `TCS`.
     pub(crate) const ST2110_20_TCS: &str = "SDR";
 
-    /// ST 2110-20 §7.3 default `RANGE`, written with
-    /// [`ST2110_20_COLORIMETRY`] when the essence caps have no
-    /// colorimetry, and assumed when an SDP has no `RANGE`.
+    /// ST 2110-20 §7.3 default `RANGE`, assumed when an SDP has no
+    /// `RANGE`.
     pub(crate) const ST2110_20_RANGE: &str = "NARROW";
 }
 
@@ -2366,7 +2347,7 @@ fn format_ptime_ns_as_ms(ns: u64) -> String {
 /// Inverse of [`caps_from_rtp_video`]: the synthesised RTP
 /// caps round-trip back to an equivalent `video/x-raw` caps via
 /// the parse-direction helper (modulo preset-collapsing
-/// colorimetry — see [`sdp_colorimetry_from_caps`]).
+/// colorimetry — see [`crate::colorimetry::from_gst`]).
 ///
 /// Source `video/x-raw` fields consumed:
 ///
@@ -2388,7 +2369,9 @@ fn format_ptime_ns_as_ms(ns: u64) -> String {
 /// Returns [`SdpError::UnsupportedEssence`] for `format` values
 /// outside the {`UYVY`, `UYVP`} subset [`caps_from_rtp_video`]
 /// understands today; widening the matrix here without widening
-/// the inverse first would break the round-trip contract.
+/// the inverse first would break the round-trip contract. Also
+/// returns it for a `colorimetry` that [`crate::colorimetry::from_gst`]
+/// cannot map.
 fn rtp_caps_from_video(
     caps: &gst::Caps,
     payload_type: u8,
@@ -2421,9 +2404,6 @@ fn rtp_caps_from_video(
         .map_err(|_| SdpError::UnsupportedEssence("raw video caps missing framerate".to_owned()))?;
     let exactframerate = format_exact_framerate(fr_num, fr_den);
     let interlace_mode = s.get::<&str>("interlace-mode").unwrap_or("progressive");
-    let colorimetry_caps = s.get::<&str>("colorimetry").ok();
-    let colorimetry_sdp = colorimetry_caps.and_then(sdp_colorimetry_from_caps);
-
     // `encoding-name=RAW` matches rsrtp / gst-plugins-good pay/depay
     // pad templates (caps intersection is case-sensitive). SDP text
     // is rewritten to lower-case `raw` by [`canonicalise_st2110_sdp_case`]
@@ -2455,21 +2435,16 @@ fn rtp_caps_from_video(
     // nmos-cpp's `get_video_raw_parameters` throws if absent
     // (see `nmos-cpp/Development/nmos/sdp_utils.cpp::get_video_raw_parameters`),
     // and libnvnmos's `add_nmos_sender_to_node_server` catches
-    // the throw and silently returns `false`. When the caller's
-    // `video/x-raw` caps carry a `colorimetry` that the SDP can
-    // express, we round-trip it via [`sdp_colorimetry_from_caps`];
-    // otherwise we default to ST 2110 SDR's
-    // [`defaults::ST2110_20_COLORIMETRY`] (`BT709`) — the same
-    // value `nmos-cpp`'s `make_video_sdp_parameters` picks when
-    // a Flow has no colorimetry tag set and the value our test
-    // SDP fixtures use — with the default `TCS` and `RANGE`.
-    // Callers wanting BT2020 / BT2100 etc. need to set
-    // `colorimetry` upstream of the `nmossink`.
-    let colorimetry = colorimetry_sdp.unwrap_or(Colorimetry {
-        colorspace: defaults::ST2110_20_COLORIMETRY,
-        transfer_characteristic: defaults::ST2110_20_TCS,
-        component_range: defaults::ST2110_20_RANGE,
-    });
+    // the throw and silently returns `false`. As for the flow_def
+    // built from the same caps, caps without `colorimetry` get
+    // GStreamer's default for the frame size (BT709 for HD, BT601
+    // for SD), and caps whose colorimetry the SDP cannot express
+    // are rejected.
+    let colorimetry = gst_video::VideoInfo::from_caps(caps)
+        .map_err(|e| SdpError::UnsupportedEssence(format!("raw video caps: {e}")))?
+        .colorimetry();
+    let colorimetry = crate::colorimetry::from_gst(&colorimetry)
+        .ok_or_else(|| SdpError::UnsupportedEssence(format!("video colorimetry={colorimetry}")))?;
     caps_text.push_str(&format!(",colorimetry=(string){}", colorimetry.colorspace));
     caps_text.push_str(&format!(
         ",tcs=(string){}",
@@ -5210,33 +5185,38 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_video_falls_back_to_default_on_unrecognised_colorimetry() {
+    fn rtp_caps_from_video_falls_back_to_gst_default_for_frame_size() {
+        init_gst();
+        // `colorimetry` is REQUIRED by nmos-cpp's
+        // `get_video_raw_parameters`, so caps without one get
+        // GStreamer's default for the frame size rather than no
+        // colorimetry.
+        for (width, height, expected) in [(1920, 1080, "BT709"), (720, 576, "BT601")] {
+            let raw = raw_video_caps("UYVP", width, height, gst::Fraction::new(25, 1), None);
+            let rtp = rtp_caps_from_video(&raw, 96, false).expect("synth");
+            let s = rtp.structure(0).expect("rtp");
+            assert_eq!(s.get::<&str>("colorimetry").unwrap(), expected, "{raw}");
+            assert_eq!(s.get::<&str>("tcs").unwrap(), "SDR", "{raw}");
+            assert_eq!(s.get::<&str>("range").unwrap(), "NARROW", "{raw}");
+        }
+    }
+
+    #[test]
+    fn rtp_caps_from_video_rejects_unexpressible_colorimetry() {
         init_gst();
         let raw = raw_video_caps(
             "UYVP",
-            1920,
-            1080,
-            gst::Fraction::new(50, 1),
+            720,
+            576,
+            gst::Fraction::new(25, 1),
             // BT.470M primaries
             Some("colorimetry=2:4:5:2"),
         );
-        let rtp = rtp_caps_from_video(&raw, 96, false).expect("synth");
-        let s = rtp.structure(0).expect("rtp");
-        // `colorimetry` is REQUIRED by nmos-cpp's
-        // `get_video_raw_parameters`; an unrecognised value on
-        // the essence caps doesn't translate to a known SDP
-        // colorimetry preset, but we still have to emit one or
-        // libnvnmos silently rejects the sender. Fall back to
-        // [`defaults::ST2110_20_COLORIMETRY`] (BT709) rather
-        // than dropping the field entirely.
-        assert_eq!(
-            s.get::<&str>("colorimetry").unwrap(),
-            defaults::ST2110_20_COLORIMETRY,
-            "unrecognised input colorimetry must fall back to the BT709 default, \
-             not drop the field (libnvnmos rejects SDPs without colorimetry)",
+        let err = rtp_caps_from_video(&raw, 96, false).expect_err("must reject");
+        assert!(
+            matches!(&err, SdpError::UnsupportedEssence(m) if m.contains("2:4:5:2")),
+            "got: {err:?}",
         );
-        assert_eq!(s.get::<&str>("tcs").unwrap(), defaults::ST2110_20_TCS);
-        assert_eq!(s.get::<&str>("range").unwrap(), defaults::ST2110_20_RANGE);
     }
 
     #[test]
@@ -5461,17 +5441,6 @@ mod tests {
         // nmos-cpp `make_video_smpte291_parameters` emits
         // `ST2110-40:2018` when `TM` is omitted (ST 2110-40 §7).
         assert_eq!(defaults::ST2110_40_SSN, "ST2110-40:2018");
-    }
-
-    /// `colorimetry` is REQUIRED by nmos-cpp's
-    /// `get_video_raw_parameters` and the SMPTE ST 2110-20
-    /// reference SDPs all use `BT709` for SDR. Keep the default
-    /// pinned so a synthesised SDP without an explicit
-    /// colorimetry on the essence caps still parses against
-    /// nmos-cpp / libnvnmos.
-    #[test]
-    fn defaults_st2110_20_colorimetry_is_bt709() {
-        assert_eq!(defaults::ST2110_20_COLORIMETRY, "BT709");
     }
 
     // -- from_caps + helpers (resolve_payload_type,
