@@ -50,7 +50,8 @@
 //! using its own JSON built from upstream caps and the `flow-id`
 //! property — that is a separate `FlowParser` path from this
 //! configuring document. Only the caps shapes that `mxlsink`
-//! advertises today are accepted: v210 video, F32LE audio, ST 2038 ANC.
+//! advertises today are accepted: v210 and A422_10LE (MXL `video/v210a`)
+//! video, F32LE audio, ST 2038 ANC.
 
 use std::collections::HashMap;
 
@@ -147,7 +148,7 @@ pub(crate) enum FlowDefError {
     #[error("caps are empty or ANY; an essence shape is required to synthesise a flow_def")]
     EmptyCaps,
     #[error(
-        "caps `{0}` are not supported by the caps→flow_def builder; supported shapes are `video/x-raw,format=v210,…`, `audio/x-raw,format=F32LE,…`, and `meta/x-st-2038,framerate=…,…`"
+        "caps `{0}` are not supported by the caps→flow_def builder; supported shapes are `video/x-raw,format=v210,…`, `video/x-raw,format=A422_10LE,…`, `audio/x-raw,format=F32LE,…`, and `meta/x-st-2038,framerate=…,…`"
     )]
     UnsupportedCaps(String),
     #[error("caps `{name}` are missing required field `{field}`{}", .hint.as_deref().map(|h| format!(" ({h})")).unwrap_or_default())]
@@ -615,8 +616,10 @@ pub(crate) fn from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDef
 /// don't carry them explicitly: `libnvnmos` requires both. They're
 /// derived deterministically from `format=v210` (HD-default BT709
 /// primaries; standard Y/Cb/Cr 4:2:2 10-bit triple with Cb/Cr at
-/// half horizontal resolution). Users wanting BT2020 / a different
-/// component layout should supply a `transport-file` instead.
+/// half horizontal resolution). `format=A422_10LE` is how the MXL
+/// plugin carries `video/v210a`, which adds a full-size 10-bit alpha
+/// (key) component. Users wanting BT2020 should supply a
+/// `transport-file` instead.
 fn build_video_body(
     structure: &gst::StructureRef,
 ) -> Result<(FlowFormat, Vec<(String, serde_json::Value)>), FlowDefError> {
@@ -624,6 +627,7 @@ fn build_video_body(
     let format = caps_field_string(structure, "format")?;
     let media_type = match format.as_str() {
         "v210" => "video/v210",
+        "A422_10LE" => "video/v210a",
         other => {
             return Err(FlowDefError::UnsupportedCapsValue {
                 name: name.to_string(),
@@ -637,6 +641,17 @@ fn build_video_body(
     let framerate = caps_field_fraction(structure, "framerate", None)?;
 
     let chroma_width = width / 2;
+    let mut components = serde_json::json!([
+        { "name": "Y",  "width": width,        "height": height, "bit_depth": 10 },
+        { "name": "Cb", "width": chroma_width, "height": height, "bit_depth": 10 },
+        { "name": "Cr", "width": chroma_width, "height": height, "bit_depth": 10 },
+    ]);
+    if media_type == "video/v210a" {
+        components
+            .as_array_mut()
+            .expect("components is an array")
+            .push(serde_json::json!({ "name": "A", "width": width, "height": height, "bit_depth": 10 }));
+    }
     let mut fields: Vec<(String, serde_json::Value)> = vec![
         (
             "media_type".to_owned(),
@@ -655,14 +670,7 @@ fn build_video_body(
             "colorspace".to_owned(),
             serde_json::Value::String("BT709".to_owned()),
         ),
-        (
-            "components".to_owned(),
-            serde_json::json!([
-                { "name": "Y",  "width": width,        "height": height, "bit_depth": 10 },
-                { "name": "Cb", "width": chroma_width, "height": height, "bit_depth": 10 },
-                { "name": "Cr", "width": chroma_width, "height": height, "bit_depth": 10 },
-            ]),
-        ),
+        ("components".to_owned(), components),
     ];
     if let Ok(interlace_mode) = structure.get::<String>("interlace-mode") {
         fields.push((
@@ -748,7 +756,7 @@ pub(crate) enum FlowDefCapsError {
     )]
     MissingField(&'static str),
     #[error(
-        "transport file `media_type` `{0}` is not supported by the caps reverse mapping; supported: `video/v210`, `audio/float32`, `video/smpte291`"
+        "transport file `media_type` `{0}` is not supported by the caps reverse mapping; supported: `video/v210`, `video/v210a`, `audio/float32`, `video/smpte291`"
     )]
     UnsupportedMediaType(String),
     #[error("transport file `{field}` has an out-of-range value `{value}` (must fit in i32)")]
@@ -762,6 +770,7 @@ pub(crate) enum FlowDefCapsError {
 ///
 /// Supports the same caps shapes the forward path emits:
 /// * `media_type=video/v210` → `video/x-raw,format=v210,width=…,height=…,framerate=…[,interlace-mode=…]`
+/// * `media_type=video/v210a` → the same, with `format=A422_10LE`
 /// * `media_type=audio/float32` → `audio/x-raw,format=F32LE,rate=…,channels=…,layout=interleaved`
 /// * `media_type=video/smpte291` → `meta/x-st-2038,framerate=…`
 ///
@@ -777,7 +786,12 @@ pub(crate) fn caps_from(text: &str) -> Result<gst::Caps, FlowDefCapsError> {
         .media_type
         .ok_or(FlowDefCapsError::MissingField("media_type"))?;
     match media_type.as_str() {
-        "video/v210" => {
+        "video/v210" | "video/v210a" => {
+            let format = if media_type == "video/v210a" {
+                "A422_10LE"
+            } else {
+                "v210"
+            };
             let rate = raw
                 .grain_rate
                 .ok_or(FlowDefCapsError::MissingField("grain_rate"))?;
@@ -789,7 +803,7 @@ pub(crate) fn caps_from(text: &str) -> Result<gst::Caps, FlowDefCapsError> {
                 .ok_or(FlowDefCapsError::MissingField("frame_height"))?;
             let framerate = rational_to_gst_fraction("grain_rate", rate)?;
             let mut builder = gst::Caps::builder("video/x-raw")
-                .field("format", "v210")
+                .field("format", format)
                 .field("width", width)
                 .field("height", height)
                 .field("framerate", framerate);
@@ -1348,6 +1362,24 @@ mod tests {
     }
 
     #[test]
+    fn build_video_v210a_from_a422_10le() {
+        let caps = caps_from_str(
+            "video/x-raw,format=A422_10LE,width=1920,height=1080,framerate=30000/1001",
+        );
+        let json = from_caps(&input(UUID_A, "cam-1", &concrete_domain(), &caps)).unwrap();
+        let v = parse(&json);
+        assert_eq!(v["format"], "urn:x-nmos:format:video");
+        assert_eq!(v["media_type"], "video/v210a");
+        let components = v["components"].as_array().expect("components is an array");
+        let names: Vec<_> = components.iter().map(|c| c["name"].clone()).collect();
+        assert_eq!(names, ["Y", "Cb", "Cr", "A"]);
+        assert_eq!(components[1]["width"], 960, "Cb is half-width for 4:2:2");
+        assert_eq!(components[3]["width"], 1920, "A is full-size");
+        assert_eq!(components[3]["height"], 1080);
+        assert_eq!(components[3]["bit_depth"], 10);
+    }
+
+    #[test]
     fn build_audio_f32le_minimal() {
         let caps =
             caps_from_str("audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved");
@@ -1621,6 +1653,23 @@ mod tests {
         }
 
         #[test]
+        fn video_v210a_is_a422_10le() {
+            init_gst();
+            let json = r#"{
+                "format": "urn:x-nmos:format:video",
+                "media_type": "video/v210a",
+                "grain_rate": { "numerator": 25, "denominator": 1 },
+                "frame_width": 1920, "frame_height": 1080
+            }"#;
+            let caps = super::caps_from(json).unwrap();
+            let s = caps.structure(0).expect("structure");
+            assert_eq!(s.name().as_str(), "video/x-raw");
+            assert_eq!(s.get::<String>("format").unwrap(), "A422_10LE");
+            assert_eq!(s.get::<i32>("width").unwrap(), 1920);
+            assert_eq!(s.get::<i32>("height").unwrap(), 1080);
+        }
+
+        #[test]
         fn audio_f32le() {
             init_gst();
             let json = r#"{
@@ -1723,6 +1772,21 @@ mod tests {
             // Both should agree on the structure name + the essence
             // fields the builder emits (framerate, width, height,
             // format).
+            assert!(
+                derived.can_intersect(&original_caps),
+                "derived caps `{derived}` should intersect original `{original_caps}`"
+            );
+        }
+
+        #[test]
+        fn round_trip_with_build_from_caps_video_v210a() {
+            init_gst();
+            let original_caps = caps_from_str(
+                "video/x-raw,format=A422_10LE,width=1920,height=1080,framerate=30000/1001",
+            );
+            let json =
+                from_caps(&input(UUID_A, "cam-1", &concrete_domain(), &original_caps)).unwrap();
+            let derived = super::caps_from(&json).unwrap();
             assert!(
                 derived.can_intersect(&original_caps),
                 "derived caps `{derived}` should intersect original `{original_caps}`"
