@@ -702,16 +702,20 @@ fn build_video_body(
 }
 
 /// flow_def attributes that describe the colorimetry of a video flow.
-struct FlowColorimetry {
-    colorspace: &'static str,
-    transfer_characteristic: &'static str,
-    component_range: &'static str,
+/// Their values are also the values of the ST 2110-20 fmtp
+/// `colorimetry`, `TCS` and `RANGE` parameters.
+pub(crate) struct FlowColorimetry {
+    pub(crate) colorspace: &'static str,
+    pub(crate) transfer_characteristic: &'static str,
+    pub(crate) component_range: &'static str,
 }
 
 /// The flow_def attributes for `colorimetry`, or `None` when they
 /// cannot express it. This is the mapping that `mxlsink` uses, and
 /// `mxlsink` refuses the same colorimetries.
-fn flow_colorimetry_from_gst(colorimetry: &gst_video::VideoColorimetry) -> Option<FlowColorimetry> {
+pub(crate) fn flow_colorimetry_from_gst(
+    colorimetry: &gst_video::VideoColorimetry,
+) -> Option<FlowColorimetry> {
     use gst_video::{
         VideoColorMatrix, VideoColorPrimaries, VideoColorRange, VideoTransferFunction,
     };
