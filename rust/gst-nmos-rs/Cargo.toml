@@ -21,6 +21,7 @@ gstreamer = { version = "0.24.4", features = ["v1_18"] }
 gstreamer-base = "0.24.4"
 gstreamer-audio = "0.24.4"
 gstreamer-sdp = "0.24.4"
+gstreamer-video = { version = "0.24.4", features = ["v1_18"] }
 
 nvnmos-rpc = { path = "../nvnmos-rpc" }
 tonic = { workspace = true }
