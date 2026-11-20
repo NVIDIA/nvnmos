@@ -7,7 +7,7 @@ use anyhow::{Context, bail};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 
-use super::caps::{caps_with_channel_count, caps_with_channel_mask, sequential_channel_mask};
+use super::caps::{caps_with_channel_count, caps_with_channel_mask};
 use super::pad::{NmosAudioChannelMapSinkPad, NmosAudioChannelMapSrcPad};
 use crate::channel_mapping::active_map::ActiveMapRoute;
 use crate::channel_mapping::matrix::{
@@ -80,9 +80,9 @@ impl InternalGraph {
 
         // Pin the mixer output bus to its channel count so the downstream
         // per-output audiomixmatrix in-channels dimension matches. The
-        // channel-mask is not required to negotiate, but a sequential mask
-        // gives the bus well-defined channel positions and avoids
-        // "invalid channel positions" warnings in the log.
+        // channel-mask is not required to negotiate, but an unpositioned mask
+        // avoids "invalid channel positions" warnings in the log without
+        // claiming positions the bus does not have.
         let mixer_capsfilter = gst::ElementFactory::make("capsfilter")
             .name("mixer-capsfilter")
             .property("caps", caps_with_channel_mask(topology.input_bus_channels))
@@ -174,19 +174,6 @@ impl InternalGraph {
                 .build()
                 .context("creating audiomixmatrix")
                 .with_code(gst::CoreError::MissingPlugin)?;
-            // Give >2-channel outputs a sequential channel-mask so the matrix src
-            // caps carry defined positions (keeps "invalid channel positions"
-            // warnings out of the log). Mono/stereo are left at the property
-            // default (0 = unpositioned): their positions are implied, and a
-            // sequential mask for 1 channel would wrongly read as front-left
-            // rather than mono. (-1 is not usable here: this audiomixmatrix emits
-            // it verbatim as an all-bits mask rather than the canonical layout.)
-            if output_ch > 2 && mixmatrix.has_property("channel-mask") {
-                if let Some(mask) = sequential_channel_mask(output_ch) {
-                    mixmatrix.set_property("channel-mask", mask.0);
-                }
-            }
-
             let routes = &output_routes[src_idx];
             let mix = build_output_mix_matrix(topology, output_ch, routes)?;
             mixmatrix.set_property("matrix", matrix_to_audiomixmatrix_gvalue(&mix));
@@ -298,33 +285,36 @@ mod tests {
     // and reaches PLAYING".
     #[test]
     fn internal_graph_build_reaches_playing() {
+        internal_graph_build_reaches_playing_with(2, None);
+    }
+
+    #[test]
+    fn internal_graph_build_reaches_playing_with_unpositioned_audio() {
+        internal_graph_build_reaches_playing_with(8, Some(0x0));
+    }
+
+    fn internal_graph_build_reaches_playing_with(input_ch: u32, input_mask: Option<u64>) {
         use crate::channel_mapping::active_map::ActiveMapRoute;
         use crate::channel_mapping::types::FrozenTopology;
         use gst::glib;
 
         init_gst();
-        let input_ch = 2u32;
         let topology = FrozenTopology {
-            input_bus_channels: 4,
+            input_bus_channels: 2 * input_ch,
             input_channels: vec![input_ch, input_ch],
-            input_bus_offsets: vec![0, 2],
+            input_bus_offsets: vec![0, input_ch],
             output_channels: vec![input_ch, input_ch],
             input_ids: vec!["input0".into(), "input1".into()],
             output_ids: vec!["output0".into(), "output1".into()],
         };
         let identity_routes = |input_id: &str| {
-            vec![
-                ActiveMapRoute {
-                    output_channel: 0,
+            (0..input_ch)
+                .map(|channel| ActiveMapRoute {
+                    output_channel: channel,
                     input_id: input_id.into(),
-                    input_channel: 0,
-                },
-                ActiveMapRoute {
-                    output_channel: 1,
-                    input_id: input_id.into(),
-                    input_channel: 1,
-                },
-            ]
+                    input_channel: channel,
+                })
+                .collect::<Vec<_>>()
         };
         let output_routes = vec![identity_routes("input0"), identity_routes("input1")];
 
@@ -370,6 +360,7 @@ mod tests {
                         .field("rate", 48_000i32)
                         .field("layout", "interleaved")
                         .field("channels", input_ch as i32)
+                        .field_if_some("channel-mask", input_mask.map(gst::Bitmask::new))
                         .build(),
                 )
                 .build()
@@ -404,7 +395,7 @@ mod tests {
         init_gst();
         let pipe = gst::Pipeline::new();
         let mixer = gst::ElementFactory::make("audiomixer").build().unwrap();
-        // Pin the bus src to 10ch + sequential mask, as production does.
+        // Pin the bus src to 10ch + unpositioned mask, as production does.
         let bus_cf = gst::ElementFactory::make("capsfilter")
             .property("caps", caps_with_channel_mask(10))
             .build()

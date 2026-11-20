@@ -85,7 +85,12 @@ struct RawFlowMetadata {
 #[derive(Debug, Deserialize)]
 struct RawRational {
     numerator: i64,
+    #[serde(default = "default_denominator")]
     denominator: i64,
+}
+
+fn default_denominator() -> i64 {
+    1
 }
 
 /// Subset of the flow_def schema needed by [`caps_from`].
@@ -1842,6 +1847,29 @@ mod tests {
             assert!(
                 s.get::<gst::Bitmask>("channel-mask").is_err(),
                 "caps_from() should only carry minimal essence fields; channel-mask is optional",
+            );
+        }
+
+        /// IS-04 makes `numerator` the only required field of `grain_rate`
+        /// and `sample_rate`, with `denominator` defaulting to 1.
+        #[test]
+        fn rational_denominator_defaults_to_one() {
+            init_gst();
+            let caps = super::caps_from(
+                r#"{"media_type":"audio/float32","sample_rate":{"numerator":48000},"channel_count":2,"bit_depth":32}"#,
+            )
+            .unwrap();
+            let s = caps.structure(0).expect("structure");
+            assert_eq!(s.get::<i32>("rate").unwrap(), 48000);
+
+            let caps = super::caps_from(
+                r#"{"media_type":"video/smpte291","grain_rate":{"numerator":30}}"#,
+            )
+            .unwrap();
+            let s = caps.structure(0).expect("structure");
+            assert_eq!(
+                s.get::<gst::Fraction>("framerate").unwrap(),
+                gst::Fraction::new(30, 1)
             );
         }
 

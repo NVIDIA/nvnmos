@@ -3516,8 +3516,8 @@ mod tests {
         assert_eq!(raw_s.get::<i32>("channels").unwrap(), 2);
         assert_eq!(raw_s.get::<&str>("layout").unwrap(), "interleaved");
         assert!(
-            raw_s.get::<gst::Bitmask>("channel-mask").is_ok(),
-            "parse path adds a default channel-mask for downstream elements",
+            !raw_s.has_field("channel-mask"),
+            "parse path leaves channel-mask unset, so a sender accepts any mask",
         );
         assert_eq!(
             raw_s.get::<&str>("channel-order").unwrap(),
@@ -5495,8 +5495,8 @@ mod tests {
         assert_eq!(rt.get::<i32>("rate"), orig.get::<i32>("rate"));
         assert_eq!(rt.get::<i32>("channels"), orig.get::<i32>("channels"));
         assert!(
-            rt.get::<gst::Bitmask>("channel-mask").is_ok(),
-            "round-trip parse adds default channel-mask",
+            !rt.has_field("channel-mask"),
+            "round-trip parse leaves channel-mask unset",
         );
     }
 

@@ -1138,7 +1138,7 @@ fn intermediate_fake_src_caps(
         }) => Ok(udp_capssetter_caps(transport_file.as_deref(), media)),
         InnerConfig::Real(TransportConfig::NvDsUdp { media, .. }) => {
             // No capssetter hop on nvdsudp — essence caps are set on nvdsudpsrc.
-            Ok(Some(media.caps.clone()))
+            Ok(Some(crate::essence_caps::with_channel_mask(&media.caps)))
         }
         _ => fake_caps_from_settings(snapshot),
     }
@@ -1174,7 +1174,10 @@ fn mxl_capssetter_caps(transport_file: Option<&str>) -> Result<Option<gst::Caps>
         );
         return Ok(None);
     }
-    crate::session::caps_from_flow_def("nmossrc", transport_file)
+    Ok(
+        crate::session::caps_from_flow_def("nmossrc", transport_file)?
+            .map(|caps| crate::essence_caps::with_channel_mask(&caps)),
+    )
 }
 
 /// Caps for the optional UDP inner `capssetter`. When the effective
@@ -1197,7 +1200,7 @@ fn udp_capssetter_caps(
         );
         return None;
     }
-    Some(media.caps.clone())
+    Some(crate::essence_caps::with_channel_mask(&media.caps))
 }
 
 /// Best-available caps for the bin's fake chain, resolved from
@@ -1214,13 +1217,14 @@ fn udp_capssetter_caps(
 /// to reach PLAYING in that state. Filesystem / parse errors when
 /// a source is set are propagated as `Err`.
 fn fake_caps_from_settings(settings: &Settings) -> Result<Option<gst::Caps>, anyhow::Error> {
-    crate::session::fake_caps_from_settings(
+    Ok(crate::session::fake_caps_from_settings(
         "nmossrc",
         settings.transport,
         settings.caps.as_ref(),
         &settings.transport_file,
         &settings.transport_file_path,
-    )
+    )?
+    .map(|caps| crate::essence_caps::with_channel_mask(&caps)))
 }
 
 fn string_or_empty(value: &glib::Value) -> String {
@@ -1473,6 +1477,66 @@ mod tests {
             udp_capssetter_caps(Some(UNCONSTRAINED_SDP), &unconstrained_media).is_none(),
             "unconstrained SDP (a=x-nvnmos-caps) must skip capssetter",
         );
+    }
+
+    /// Neither a transport file nor a caps property records channel
+    /// positions, so nmossrc claims none: mono and stereo have no
+    /// `channel-mask`, and more channels are unpositioned.
+    #[test]
+    fn receiver_caps_claim_no_channel_positions() {
+        init_gst();
+        let mask = |caps: &gst::Caps| {
+            caps.structure(0)
+                .expect("structure")
+                .get_optional::<gst::Bitmask>("channel-mask")
+                .expect("channel-mask type")
+                .map(|mask| mask.0)
+        };
+        for (channels, expected) in [(1, None), (2, None), (8, Some(0x0))] {
+            let sdp = format!(
+                "v=0\r\n\
+                 o=- 1 0 IN IP4 192.0.2.10\r\n\
+                 s=Example\r\n\
+                 t=0 0\r\n\
+                 m=audio 5004 RTP/AVP 97\r\n\
+                 c=IN IP4 239.2.2.2/64\r\n\
+                 a=rtpmap:97 L24/48000/{channels}\r\n\
+                 a=ptime:1\r\n"
+            );
+            let media = crate::sdp::parse_sdp(&sdp).expect("parse SDP");
+            let caps = udp_capssetter_caps(Some(&sdp), &media).expect("capssetter caps");
+            assert_eq!(mask(&caps), expected, "UDP {caps}");
+
+            let flow_def = format!(
+                r#"{{
+                    "format":"urn:x-nmos:format:audio",
+                    "media_type":"audio/float32",
+                    "sample_rate":{{"numerator":48000}},
+                    "channel_count":{channels},
+                    "bit_depth":32
+                }}"#
+            );
+            let caps = mxl_capssetter_caps(Some(&flow_def))
+                .expect("MXL caps")
+                .expect("capssetter caps");
+            assert_eq!(mask(&caps), expected, "MXL {caps}");
+
+            let settings = Settings {
+                caps: Some(
+                    gst::Caps::builder("audio/x-raw")
+                        .field("format", "S24BE")
+                        .field("rate", 48000)
+                        .field("channels", channels)
+                        .field("layout", "interleaved")
+                        .build(),
+                ),
+                ..Settings::default()
+            };
+            let caps = fake_caps_from_settings(&settings)
+                .expect("fake caps")
+                .expect("Some");
+            assert_eq!(mask(&caps), expected, "fake chain {caps}");
+        }
     }
 
     fn mxl_activation_plan(transport_file: &str) -> ActivationPlan {
