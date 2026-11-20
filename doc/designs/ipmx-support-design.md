@@ -14,7 +14,7 @@ Add the **NMOS and SDP** pieces needed so senders and receivers can interoperate
 
 This document maps TR-10 requirements onto layers, records what already exists, and proposes phased work. Full TR-10-8 "IPMX Device" conformance is **not** required for the first useful slice.
 
-Related upstream tracker: [nmos-cpp#456](https://github.com/sony/nmos-cpp/issues/456).
+Related upstream tracker: [sony/nmos-cpp#456](https://github.com/sony/nmos-cpp/issues/456). nmos-cpp [#534](https://github.com/sony/nmos-cpp/pull/534) (merged 2026-11-13) added the TR-10-1 fmtp parameters, TR-10-8 Link Offset Delay and TR-10-9 default multicast addresses; §6.4 and §7.1 describe what it covers.
 
 ## 2. Motivation
 
@@ -37,8 +37,8 @@ Authoritative index: [VSF TR-10-0](https://static.vsf.tv/download/technical_reco
 | **TR-10-1** | System timing, `a=ts-refclk` / `a=mediaclk`, mandatory `IPMX` in `a=fmtp`, measured rates, RTCP SR + IPMX Info Block |
 | **TR-10-2 / -3 / -4** | Uncompressed video / PCM audio / ST 291 ANC deltas vs ST 2110-20/-30/-40 (Media Info Block types, essence rules) |
 | **TR-10-8** | Minimum NMOS for an IPMX Device (IS-04/05, caps, DLO, …) |
-| **TR-10-9** | System environment / device behaviour (multicast addressing, DNS-SD browse order, non-baseband measured-parameter defaults) |
-| TR-10-5 / -13 | HKEP / PEP — **out of scope** for the first slices (nmos-cpp already parses `a=hkep:`) |
+| **TR-10-9** | System environment / device behaviour (default multicast addresses §17.1, DNS-SD browse order, non-baseband measured-parameter defaults) |
+| TR-10-5 / -13 | HKEP / PEP — **out of scope** for the first slices (nmos-cpp already parses `a=hkep:`, and validates the registered `ext_privacy_*` transport parameters against their schema) |
 | TR-10-7 / -11 / -15 | Compressed / JPEG XS — follow existing BCP-006-01 / jxsv work separately |
 | TR-10-6, -10, -12, -14, -16 | FEC, HDMI InfoFrame, AES3, USB, HDR Info Block — later |
 
@@ -46,7 +46,8 @@ AMWA companions (not VSF, but referenced by TR-10-8 and related BCPs):
 
 - [BCP-004-01](https://specs.amwa.tv/bcp-004-01/) Receiver Capabilities — **already used** by NvNmos / gst-nmos-rs
 - [BCP-004-02](https://specs.amwa.tv/bcp-004-02/) Sender Capabilities — TR-10-8:2026 **shall** for IPMX Senders
-- [IS-11](https://specs.amwa.tv/is-11/) Stream Compatibility Management — TR-10-8:2026 **shall** for IPMX Devices; long-running nmos-cpp draft: [#474](https://github.com/sony/nmos-cpp/pull/474) (supersedes [#271](https://github.com/sony/nmos-cpp/pull/271))
+- [IS-11](https://specs.amwa.tv/is-11/) Stream Compatibility Management — TR-10-8:2026 **shall** for IPMX Devices; nmos-cpp PR [#474](https://github.com/sony/nmos-cpp/pull/474) is still open, not merged (supersedes [#271](https://github.com/sony/nmos-cpp/pull/271))
+- [NMOS Parameter Registers, Transport Parameters](https://github.com/AMWA-TV/nmos-parameter-registers/tree/main/transport-parameters) — registers `ext_link_offset_delay`; nmos-cpp bundles its schemas and validates registered `ext_` parameters in `/staged`
 - [BCP-005-02](https://specs.amwa.tv/bcp-005-02/) / [BCP-005-03](https://specs.amwa.tv/bcp-005-03/) HKEP / PEP over NMOS — deferred with HKEP/PEP
 
 ## 4. Compliance posture
@@ -101,11 +102,13 @@ Passthrough of a user-supplied IPMX configuring SDP already preserves many attri
                              │
 ┌────────────────────────────▼────────────────────────────────┐
 │ nmos-cpp                                                    │
-│  • SDP parse/generate (fmtp tokens, mediaclk, ts-refclk)    │
-│  • IS-05 ext_* already allowed by schema patternProperties  │
+│  • SDP incl. typed IPMX fmtp (done, sony/nmos-cpp#534)      │
+│  • ext_link_offset_delay field + register schema (done)     │
+│  • TR-10-9 default multicast address helper (done)          │
 │  • DNS-SD browse mode (TR-10-9 §15) already present         │
-│  • Demo / helpers in nmos-cpp-node (see #456)               │
-│  • Later: BCP-004-02, IS-11 (if required)                   │
+│  • IPMX demo in nmos-cpp-node ("ipmx": true) (done)         │
+│  • Later, if required: BCP-004-02,                          │
+│    IS-11 (sony/nmos-cpp#474 open)                           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -130,16 +133,11 @@ When the Sender converts from a baseband signal:
 | Video | `measuredpixclk`, `vtotal`, `htotal` |
 | Audio | `measuredsamplerate` |
 
-TR-10-9 §10 gives defaults for **non-baseband** senders (e.g. pattern generators, file playout): video measured pixel clock ≈ `width * height * exactframerate`; audio measured sample rate ≈ rtpmap clock rate. Software gst-nmos-rs senders typically fall in this bucket unless wired to a real baseband clock measurement.
+TR-10-9 §10 gives defaults for **non-baseband** senders (e.g. pattern generators, file playout): video measured pixel clock ≈ `width * height * exactframerate`; audio measured sample rate ≈ rtpmap clock rate. Software gst-nmos-rs senders typically fall in this bucket unless wired to a real baseband clock measurement. nmos-cpp-node computes video values differently (see §6.4); open question 2 covers which to follow.
 
-**Preferred starting path (NvNmos, not nmos-cpp typed fields):** `sdp_parameters::fmtp` is already an open name/value list. Bare keywords use an empty value (same pattern as `interlace` / `segmented`), so libnvnmos can own small helpers that:
+**Current path: nmos-cpp typed fields.** Since [nmos-cpp#534](https://github.com/sony/nmos-cpp/pull/534), the IPMX fmtp parameters are fields of the nmos-cpp parameter structs (§6.4). libnvnmos sets them on the struct before calling `make_sdp_parameters`, and reads them back from `get_*_parameters`. libnvnmos does not need its own fmtp inject/parse helpers. Because the typed rebuild `get_*_parameters` → `make_*_sdp_parameters` now carries these parameters, it no longer drops them.
 
-- **Generate:** after `make_video_raw_sdp_parameters` / `make_audio_L_sdp_parameters` (or after parsing a configuring SDP), append `{U("IPMX"), {}}` plus the measured tokens above (TR-10-9 §10 defaults when not baseband-measured).
-- **Parse:** `nmos::details::find_fmtp` when needed; otherwise leave tokens untouched in `sdp_params.fmtp`.
-
-That matches the app-side option in [nmos-cpp#456](https://github.com/sony/nmos-cpp/issues/456). No changes to `video_raw_parameters` / `audio_L_parameters` are required for round-trip **as long as** IPMX tokens stay on `sdp_params.fmtp` (or are re-appended after any typed rebuild). Hazard: `get_*_parameters` → `make_*_sdp_parameters` rebuilds fmtp from ST 2110 fields only and drops unknowns — every such path in IPMX mode must re-inject.
-
-`mediaclk` / `ts-refclk` are already first-class on `sdp_parameters`; those are set/preserved separately (see §6.5), not via fmtp stuffing.
+`mediaclk` / `ts-refclk` are already first-class on `sdp_parameters`; those are set/preserved separately (see §6.5), not in fmtp.
 
 ### 6.3 Examples (informative, from TR-10)
 
@@ -163,26 +161,34 @@ a=mediaclk:sender
 
 ### 6.4 nmos-cpp today
 
-Already present:
+Already present before [#534](https://github.com/sony/nmos-cpp/pull/534):
 
-- `sdp_parameters::mediaclk` (default `direct=0` in the convenience constructor)
-- `ts_refclk` including `local_mac`
-- Generic `fmtp` as name/value pairs (app can already insert `IPMX`, measured fields)
+- `sdp_parameters::mediaclk`, with `sdp::mediaclk_sources::sender` and `direct`; the convenience constructor defaults to `direct=0`
+- `ts_refclk` including `local_mac`; `nmos::details::make_ts_refclk` emits `localmac=<port_id>` for each interface binding when the Source's clock is `internal`, and PTP otherwise
 - Grammar for `a=hkep:` (TR-10-5)
 
-Open (from #456 and this design):
+Added by [#534](https://github.com/sony/nmos-cpp/pull/534):
 
-- Whether / when to promote IPMX fmtp tokens into nmos-cpp typed fields / `make_*` helpers (optional later; not required for NvNmos — see §6.2)
-- Whether `mediaclk:sender` is exercised end-to-end in nmos-cpp-node demos
-- Whether SDP→IS-04 Flow attribute mapping should ignore or surface measured parameters
+- `bool ipmx` on `video_raw_parameters`, `video_jxsv_parameters`, `audio_L_parameters` and `video_smpte291_parameters`; `measuredpixclk`, `vtotal` and `htotal` on the two video structs; `measuredsamplerate` on `audio_L_parameters`. Zero means omitted. `make_*_sdp_parameters` emits them in the order of the TR-10-1 §10 examples, and `get_*_parameters` parses them. The existing ST 2110 constructors are kept, so existing callers compile unchanged.
+- `sdp::fields::IPMX`, `measuredpixclk`, `vtotal`, `htotal` and `measuredsamplerate` in `sdp/json.h`.
+- `nmos::ipmx::make_default_multicast_address_v4(interface_address, stream_number)` in `nmos/ipmx.h`, which returns 239.S.C.D for media network port address A.B.C.D and stream number S (1–127), per TR-10-9 §17.1.
+- `nmos::fields::ext_link_offset_delay` and Connection API handling for it (§7.1).
+- An `"ipmx": true` setting in nmos-cpp-node, which marks the SDP of its video, audio and data Senders as IPMX. It also numbers its RTP Senders from 1 as IPMX stream numbers to resolve `destination_ip` `"auto"` to the default multicast address, and gives every RTP Receiver a Link Offset Delay. For video it sets the nominal `htotal` / `vtotal` of 720, 1080 and 2160 rasters at 24, 25, 30, 50 and 60 Hz (and the 1/1.001 rates), and `measuredpixclk = htotal * vtotal * exactframerate`. For other video formats it omits all three. For audio it sets `measuredsamplerate` to the sample rate.
 
-**Recommendation:** start with **NvNmos fmtp inject/parse helpers** (§6.2). Promote into nmos-cpp only if multiple consumers (e.g. nmos-cpp-node demos + NvNmos) need shared spelling, or if typed rebuild round-trips become too easy to get wrong.
+Still open at the nmos-cpp layer:
+
+- `make_sdp_parameters` always sets `mediaclk:direct=0`. The application overrides `sdp_params.mediaclk` for `mediaclk:sender`, and nmos-cpp-node does not demonstrate that.
+- The library does not resolve `ext_link_offset_delay` `"auto"`, or maintain its constraints. The application does both (§7.1).
+- BCP-004-02 Sender Capabilities and IS-11 (§7).
+- Whether SDP→IS-04 Flow attribute mapping should ignore or surface measured parameters.
+
+**Packaging:** NvNmos builds against Conan Center `nmos-cpp/cci.20261005` (`src/conanfile.py`), which predates [#534](https://github.com/sony/nmos-cpp/pull/534). Phase A needs either a newer Conan Center nmos-cpp version or the `nmos_cpp_from_source` build.
 
 ### 6.5 libnvnmos / gst-nmos-rs today
 
 - Configuring SDP **passthrough** preserves `ts-refclk` / `mediaclk` / unknown fmtp tokens for registration.
 - **Synthesis** (`from_caps` → `build_sdp`) follows ST 2110-oriented defaults (`mediaclk:direct=0`, PTP-oriented ts-refclk when clocks exist).
-- Activation may rewrite SDP via nmos-cpp paths that re-emit ts-refclk from Node clocks — IPMX `localmac` + `mediaclk:sender` must survive activation round-trips when in IPMX profile.
+- On activation, libnvnmos builds the Sender `/transportfile` from the parsed configuring SDP. It keeps that SDP's fmtp and `mediaclk`, apart from the `x-nvnmos-` parameters, and replaces `ts-refclk` with `nmos::details::make_ts_refclk` from the Node clock. libnvnmos derives that Node clock from the configuring SDP's `ts-refclk`, making it `internal` when there is no PTP reference. So `IPMX` and `mediaclk:sender` survive activation, and a `localmac` configuring SDP gives a `localmac` `/transportfile` with the MAC address of each bound Node interface.
 
 ## 7. NMOS control plane (TR-10-8) — gap analysis
 
@@ -199,9 +205,9 @@ Open (from #456 and this design):
 | RTP multicast transport_params | Done | |
 | BCP-004-01 Receivers | Done | Constrained vs unconstrained |
 | BCP-004-02 Senders | **Not done** | Optional per §4.1 |
-| IS-11 | **Not done** | Optional per §4.1; upstream draft [nmos-cpp#474](https://github.com/sony/nmos-cpp/pull/474) |
+| IS-11 | **Not done** | Optional per §4.1; upstream PR [nmos-cpp#474](https://github.com/sony/nmos-cpp/pull/474) still open |
 | BCP-005-01 EDID→caps | Out of scope | Needs baseband EDID path |
-| **`ext_link_offset_delay`** | **Not done** | Schema allows `ext_*`; need app constraints, `auto` resolve, active value, min/max when receiving |
+| **`ext_link_offset_delay`** | **Done in nmos-cpp; not done in NvNmos** | nmos-cpp validates the value and permits `"auto"`; NvNmos still needs constraints, `auto` resolve, active value, min/max when receiving (§7.1) |
 
 ### 7.1 Link Offset Delay (DLO)
 
@@ -213,7 +219,13 @@ TR-10-8 §8:
 - When inactive: active value `0`; do not advertise min/max constraints
 - When active: publish min/max from earliest reconstructable packet vs max buffer; clamp staged value into range
 
-IS-05 JSON Schema already permits `^ext_[a-zA-Z0-9_]+$` on receiver RTP params and constraints. nmos-cpp Connection API validates staged against the resource's constraints schema — so DLO is primarily **application / libnvnmos** work: seed constraints, resolve `auto`, update constraints on activation, feed the data plane.
+What nmos-cpp does since [#534](https://github.com/sony/nmos-cpp/pull/534):
+
+- Validates each `/staged` `transport_params` leg against the bundled NMOS Parameter Registers schema, which allows `ext_link_offset_delay` to be an integer of at least 0 or `"auto"`.
+- Permits `"auto"` for `ext_link_offset_delay` in the schema it builds from the Receiver's constraints. It also permits `"auto"` and null for any unregistered `ext_` parameter.
+- Does not resolve `"auto"` in `nmos::resolve_rtp_auto`, and does not change the constraints or the active value.
+
+So the remaining DLO work is in the application, which for NvNmos is libnvnmos. On creation it adds an empty `ext_link_offset_delay` constraint and stages `"auto"`. Its connection auto resolver resolves `"auto"` to the constraint minimum, or 0 when there is none. After each activation it sets the min/max constraints and clamps the active value while receiving, and removes the constraints and sets the active value to 0 when inactive. It also feeds the active value to the data plane. nmos-cpp-node's `impl::update_link_offset_delay` is a working example of the constraint and active-value updates, using a fixed example range of 15–52 µs.
 
 gst-nmos-rs must eventually honour DLO for software receivers (buffering / playout offset). Until RTCP timing exists, DLO may be exposed as a control-plane stub or limited to "store and report".
 
@@ -252,20 +264,23 @@ Exact playout / DLO algorithm on the Rivermax path is part of the nvdsudp spike;
 
 ## 9. Proposed phases
 
-### Phase A — Control/SDP vocabulary (NvNmos first; optional nmos-cpp demos)
+### Phase A — Control/SDP vocabulary
 
-1. NvNmos helpers to inject/parse `IPMX` + measured fmtp tokens on `sdp_params.fmtp` (§6.2); set `mediaclk` / `ts-refclk` via existing `sdp_parameters` fields.
-2. Ensure every typed SDP rebuild path re-appends IPMX fmtp tokens when the IPMX profile is on.
-3. Optional: nmos-cpp-node example advertising an IPMX Sender SDP (addresses #456) — can stuff fmtp the same way without library API changes.
-4. Confirm `ext_*` staged params round-trip; sketch DLO `auto` resolve (bullet 2 of #456).
-5. No IS-11 / BCP-004-02. No requirement for nmos-cpp typed IPMX fields in this phase.
+Done in nmos-cpp by [#534](https://github.com/sony/nmos-cpp/pull/534): typed IPMX fmtp fields, `ext_link_offset_delay` validation and `"auto"`, the TR-10-9 default multicast address helper, and the nmos-cpp-node `"ipmx"` demo (§6.4, §7.1).
+
+Remaining:
+
+1. Build NvNmos against an nmos-cpp that includes [#534](https://github.com/sony/nmos-cpp/pull/534). That needs a Conan Center nmos-cpp version newer than `cci.20261005`; until then, `nmos_cpp_from_source`.
+2. libnvnmos reads `ipmx` and the measured parameters with `get_*_parameters`, and sets them on the typed structs wherever it builds SDP from them (§6.2). It sets `sdp_params.mediaclk` for `mediaclk:sender`.
+3. No IS-11 / BCP-004-02.
 
 ### Phase B — NvNmos / nvnmosd IPMX profile
 
 1. Opt-in IPMX profile on add-sender / add-receiver (or detect from configuring SDP).
-2. Ensure transportfile generation and activation preserve IPMX attributes (fmtp inject path + no silent rewrite of `ts-refclk` / `mediaclk` to ST 2110-only clocks).
-3. Wire DLO into Receiver connection resources (constraints lifecycle per TR-10-8 §8); surface changes to clients via existing activation callbacks / gRPC.
-4. Align DNS-SD defaults with TR-10-8 when profile enabled (if not already).
+2. Test that the Sender `/transportfile` keeps the configuring SDP's `IPMX` fmtp, measured parameters, `mediaclk:sender` and `localmac` `ts-refclk` across activation. The current code path is expected to keep them (§6.5).
+3. Wire DLO into Receiver connection resources (constraints lifecycle per TR-10-8 §8, following nmos-cpp-node's `impl::update_link_offset_delay`); surface changes to clients via existing activation callbacks / gRPC.
+4. Proposal: resolve Sender `destination_ip` `"auto"` with `nmos::ipmx::make_default_multicast_address_v4` when the profile is on (TR-10-9 §17.1). This needs a stream number for each Sender (open question 7).
+5. Align DNS-SD defaults with TR-10-8 when profile enabled (if not already).
 
 ### Phase C — gst-nmos-rs IPMX SDP on all RTP transports; data plane via nvdsudp
 
@@ -293,11 +308,12 @@ Exact playout / DLO algorithm on the Rivermax path is part of the nvdsudp spike;
 ## 11. Open questions
 
 1. **Profile switch:** explicit element/daemon property (`ipmx=true`) vs infer-from-configuring-SDP (`IPMX` in fmtp) vs both (infer for receivers, explicit for synthesised senders)?
-2. **Measured parameters without baseband:** always use TR-10-9 §10 defaults for gst-nmos-rs synthesis, or allow overrides via `transport-properties` / caps fields?
+2. **Measured parameters without baseband:** always use TR-10-9 §10 defaults for gst-nmos-rs synthesis, or allow overrides via `transport-properties` / caps fields? The defaults differ between sources. §6.2 gives `width * height * exactframerate` for TR-10-9 §10. nmos-cpp-node uses nominal baseband `htotal * vtotal * exactframerate`, and omits all three video parameters for unknown rasters. Check TR-10-9 §10 before choosing.
 3. **DLO data plane:** minimum useful behaviour before Rivermax IPMX RTCP sync is wired (e.g. store-and-report only)?
-4. **nmos-cpp ownership:** keep IPMX fmtp on the NvNmos inject/parse path (§6.2) unless/until demos or other apps justify promoting tokens into nmos-cpp typed helpers?
+4. **nmos-cpp ownership:** resolved. nmos-cpp has typed IPMX fmtp fields ([#534](https://github.com/sony/nmos-cpp/pull/534)), so NvNmos uses those (§6.2).
 5. **BCP-004-02 / IS-11:** confirm product can ship Phases A–C without them; if a partner controller requires them, Phase D priority changes.
 6. **nvdsudp ↔ Rivermax IPMX:** can the existing Media API path in `gst-nvdsudp` grow IPMX SR send/receive, or must it integrate RDK `IPMXStreamSender` / receiver timeline tracker as a separate mode? What Rivermax SDK version / API surface does current nvdsudp require?
+7. **IPMX stream numbers:** TR-10-9 §17.1 default multicast addresses need a stream number from 1 to 127 for each Sender on a media network port. nmos-cpp-node numbers its RTP Senders in creation order. libnvnmos adds and removes Senders at run time, so should it allocate the lowest free number, take one from the caller, or leave `destination_ip` to the caller?
 
 ## 12. References
 
@@ -307,7 +323,9 @@ Exact playout / DLO algorithm on the Rivermax path is part of the nvdsudp spike;
 - [VSF TR-10-9 v2 System Environment](https://static.vsf.tv/download/technical_recommendations/VSF_TR-10-9_v2_2025-05-13.pdf)
 - [AMWA BCP-004-01](https://specs.amwa.tv/bcp-004-01/), [BCP-004-02](https://specs.amwa.tv/bcp-004-02/), [IS-11](https://specs.amwa.tv/is-11/)
 - [nmos-cpp#456 IPMX support?](https://github.com/sony/nmos-cpp/issues/456)
-- [nmos-cpp#474 Add IS-11 support](https://github.com/sony/nmos-cpp/pull/474) (draft; supersedes [#271](https://github.com/sony/nmos-cpp/pull/271))
+- [nmos-cpp#534 Add IPMX TR-10-1 SDP parameters, TR-10-8 Link Offset Delay and TR-10-9 default multicast addresses](https://github.com/sony/nmos-cpp/pull/534) (merged)
+- [nmos-cpp#474 Add IS-11 support](https://github.com/sony/nmos-cpp/pull/474) (open; supersedes [#271](https://github.com/sony/nmos-cpp/pull/271))
+- [NMOS Parameter Registers, Transport Parameters](https://github.com/AMWA-TV/nmos-parameter-registers/tree/main/transport-parameters)
 - Rivermax Dev Kit IPMX apps / IO: [NVIDIA/rivermax-dev-kit](https://github.com/NVIDIA/rivermax-dev-kit/) — [`rdk_ipmx_sender`](https://github.com/NVIDIA/rivermax-dev-kit/tree/main/source/apps/ipmx_sender), [`rdk_ipmx_receiver`](https://github.com/NVIDIA/rivermax-dev-kit/tree/main/source/apps/ipmx_receiver), [`ipmx_sender_io_node`](https://github.com/NVIDIA/rivermax-dev-kit/tree/main/source/io_node/senders), [`services/media/ipmx`](https://github.com/NVIDIA/rivermax-dev-kit/blob/main/source/services/media/include/rdk/services/media/ipmx.h) (RTCP SR + Info Block `0x5831`)
 - Rivermax SDK SDP `IPMX` fmtp keyword parse lives in the SDK tree (`src/utils/sdp/smpte2110_sdp_parser.c`); not linked here (private SDK repo)
 - Existing stack docs: [`doc/user/transport-files.md`](../user/transport-files.md), [`doc/designs/nvnmosd/README.md`](nvnmosd/README.md), [`gst-nmos-rs-st2022-7-dual-leg-plan.md`](gst-nmos-rs-st2022-7-dual-leg-plan.md) (SDP layering / passthrough)
