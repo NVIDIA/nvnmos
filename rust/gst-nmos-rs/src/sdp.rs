@@ -2090,7 +2090,9 @@ fn sdp_colorimetry_from_caps(caps_colorimetry: &str) -> Option<Colorimetry> {
 ///     and `RANGE` via [`caps_colorimetry_from_sdp`].
 ///
 /// Deliberately omitted (kept off the raw caps even when the SDP
-/// carries a value):
+/// carries a value). nmossrc's `capssetter` merges these caps over
+/// the output of either depayloader, so a field set here replaces
+/// the depayloader's value:
 ///   * `pixel-aspect-ratio` (ST 2110-20 §7.3 `PAR=<n>:<d>`) —
 ///     neither V1 nor V2 depayloader reads the fmtp `PAR` (V2's
 ///     `set_sink_caps` only consumes width/height/depth/sampling/
@@ -2098,22 +2100,16 @@ fn sdp_colorimetry_from_caps(caps_colorimetry: &str) -> Option<Colorimetry> {
 ///     both emit `pixel-aspect-ratio=1/1` from
 ///     `gst_video_info_set_format`. ST 2110-20 is square-pixel by
 ///     normative reference (ITU-R BT.709 / BT.2020 picture geom),
-///     so 1/1 is the correct value in practice. Plumbing a
-///     non-1/1 PAR onto raw caps would *break* negotiation on the
-///     V2-capsfilter path (V2 still emits 1/1, so the
-///     intersection collapses), and on the V1-capssetter path it
-///     would lie about content that the depay actually treats as
+///     so 1/1 is the correct value in practice. A non-1/1 PAR
+///     here would describe pixels that the depayloader treats as
 ///     square. Once one of the depayloaders honours `par`, we
 ///     can revisit.
 ///   * `chroma-site` (RFC 4175 §6.1 `chroma-position=<n>`) — V2
-///     reads it; V1 emits the format default (`jpeg` /
-///     `MPEG2_CHROMA_SITE_HORIZONTAL` for UYVY) which conflicts
-///     with the SMPTE ST 2110-20 norm of co-sited. Adding it
-///     would require the V1-capssetter trick too, but unlike
-///     colorimetry there's no production-impacting evidence yet
-///     that downstream consumers rely on it; defer until a
-///     specific consumer needs it. (`identity` / `videoconvert`
-///     ignore `chroma-site` mismatch in our smoke matrix.)
+///     reads it; V1 emits the format default, which conflicts
+///     with the SMPTE ST 2110-20 norm of co-sited. Setting it
+///     here would correct V1, but unlike colorimetry there's no
+///     evidence yet that downstream consumers rely on it; defer
+///     until a specific consumer needs it.
 fn caps_from_rtp_video(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
     let s = rtp_caps
         .structure(0)
@@ -2928,9 +2924,9 @@ mod tests {
         );
         assert_eq!(raw_s.get::<&str>("interlace-mode").unwrap(), "progressive");
         // The fixture's fmtp `colorimetry=BT709` must round-trip to
-        // the GStreamer preset `bt709` on raw caps; otherwise the
-        // V1-receiver capssetter fix-up has no value to inject and
-        // the V2-receiver capsfilter intersection drops it.
+        // the GStreamer preset `bt709` on raw caps, so that nmossrc's
+        // `capssetter` replaces V1 `rtpvrawdepay`'s default
+        // colorimetry.
         assert_eq!(raw_s.get::<&str>("colorimetry").unwrap(), "bt709");
     }
 
