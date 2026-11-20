@@ -73,7 +73,7 @@ use gstreamer_video as gst_video;
 use thiserror::Error;
 use unicase::Ascii;
 
-use crate::flow_def::{FlowColorimetry, flow_colorimetry_from_gst};
+use crate::colorimetry::Colorimetry;
 use crate::session::types::Side;
 use crate::session::udp::types::{UdpLeg, UdpMedia};
 use crate::types::{CapsMode, FlowFormat};
@@ -187,9 +187,8 @@ pub(crate) mod defaults {
     /// Default `ST2110-20:2017` matches nmos-cpp for ordinary
     /// colorimetry / TCS; ST 2110-20:2022 requires
     /// `ST2110-20:2022` when `colorimetry` is `ALPHA` or `TCS`
-    /// is `ST2115LOGS3`. Synthesis does not map either of
-    /// those yet (`sdp_colorimetry_from_caps` /
-    /// `caps_colorimetry_from_sdp`).
+    /// is `ST2115LOGS3`. [`crate::colorimetry`] does not map
+    /// either of those yet.
     pub(crate) const ST2110_20_SSN: &str = "ST2110-20:2017";
 
     /// ST 2110-22 §7.2 fmtp `SSN` parameter for JPEG XS. Identifies
@@ -211,31 +210,12 @@ pub(crate) mod defaults {
     // (e.g. `2110TPW` for `udp` / `udp2`, `2110TPN` for `nvdsudp`) per the
     // nvnmosd design notes.
 
-    /// ST 2110-20 §7.5 / §7.2 fmtp `colorimetry` default. The
-    /// fmtp parameter is REQUIRED — nmos-cpp's
-    /// `get_video_raw_parameters` (`Development/nmos/sdp_utils.cpp`)
-    /// throws when absent and libnvnmos's
-    /// `add_nmos_sender_to_node_server` catches that and
-    /// silently returns `false`. When `from_caps`'s essence
-    /// caps don't carry an explicit colorimetry, we have to
-    /// pick one — ST 2110 SDR's BT709 is what nmos-cpp's
-    /// `make_video_sdp_parameters` picks for a Flow without a
-    /// colorimetry tag and what the SMPTE ST 2110-20 reference
-    /// SDPs use, so a synthesised SDP with this default plays
-    /// against both libnvnmos and any other ST 2110 peer.
-    /// Callers wanting BT2020 / BT2100 colorimetry need to set
-    /// it explicitly on the essence caps upstream of the
-    /// `nmossink`.
-    pub(crate) const ST2110_20_COLORIMETRY: &str = "BT709";
-
-    /// ST 2110-20 §7.3 default `TCS`, written with
-    /// [`ST2110_20_COLORIMETRY`] when the essence caps have no
-    /// colorimetry.
+    /// ST 2110-20 §7.3 default `TCS`, assumed when an SDP has no
+    /// `TCS`.
     pub(crate) const ST2110_20_TCS: &str = "SDR";
 
-    /// ST 2110-20 §7.3 default `RANGE`, written with
-    /// [`ST2110_20_COLORIMETRY`] when the essence caps have no
-    /// colorimetry.
+    /// ST 2110-20 §7.3 default `RANGE`, assumed when an SDP has no
+    /// `RANGE`.
     pub(crate) const ST2110_20_RANGE: &str = "NARROW";
 }
 
@@ -2043,90 +2023,48 @@ fn extract_source_ip_from_filter(value: &str) -> Option<String> {
     Some(src.to_owned())
 }
 
-/// Map an ST 2110-20 fmtp `colorimetry` (and optional `TCS` for
-/// `BT2100`) to the GStreamer `colorimetry` caps preset name.
+/// Map the ST 2110-20 fmtp `colorimetry`, `TCS` and `RANGE`
+/// parameters to a GStreamer caps `colorimetry`, or `None` when
+/// GStreamer has no equivalent (for example `UNSPECIFIED`, `XYZ` or
+/// `TCS=LINEAR`). An absent `TCS` or `RANGE` takes its ST 2110-20
+/// default, [`defaults::ST2110_20_TCS`] or
+/// [`defaults::ST2110_20_RANGE`]. The mapping is
+/// [`crate::colorimetry::to_gst`]; `depth` is the fmtp `depth`.
 ///
-/// Both depay variants need this on the raw `video/x-raw` caps,
-/// but for different reasons:
-///
-/// * V2 `rtpvrawdepay2` (gst-plugins-rs `>=0.15`) reads SDP
-///   `colorimetry` from the RTP caps and emits the equivalent
-///   GStreamer preset on its `video/x-raw` output. Pinning the
-///   same preset on the tail `capsfilter` keeps the intersection
-///   non-empty; pinning a strictly *narrower* preset than what
-///   V2 emits is also fine, because the intersection just adds
-///   the constraint.
-/// * V1 `rtpvrawdepay` (gst-plugins-good) **ignores** SDP
-///   colorimetry — `gst_rtp_vraw_depay_setcaps` only reads
-///   width/height/depth/sampling/interlace and lets
-///   `gst_video_info_set_format` pick the format's default,
-///   which for UYVY is `bt601`. The tail `capssetter` then
-///   merges the preset emitted here over V1's wrong default.
-///
-/// Coverage mirrors
-/// `net/rtp/src/raw_video/depay/imp.rs::set_sink_caps` in
-/// gst-plugins-rs `>=0.15`:
-///
-/// | SDP `colorimetry`     | extra hints  | caps preset      |
-/// |-----------------------|--------------|------------------|
-/// | `BT601-5`, `BT601`    | -            | `bt601`          |
-/// | `BT709-2`, `BT709`    | -            | `bt709`          |
-/// | `SMPTE240M`           | -            | `smpte240m`      |
-/// | `BT2020`              | `depth<10`   | `bt2020`         |
-/// | `BT2020`              | `depth>=10`  | `bt2020-10`      |
-/// | `BT2100`              | `TCS=PQ`     | `bt2100-pq`      |
-/// | `BT2100`              | `TCS=HLG`    | `bt2100-hlg`     |
-/// | `BT2100`              | TCS missing/unknown | `bt2100-pq` (assume PQ) |
-/// | `UNSPECIFIED`, `ST2065-1`, `ST2065-3`, `XYZ` | - | `None` |
-///
-/// One deliberate divergence from V2: V2's fallback for
-/// `BT2100` with missing/unknown `TCS` attempts to construct
-/// `VideoColorimetry::from_str("bt2100-pg")` — a typo for
-/// `…-pq` — which fails, so V2 silently emits no colorimetry.
-/// The surrounding warning ("assuming PQ") shows the intent was
-/// "assume PQ"; we honour that intent here and return
-/// `bt2100-pq`. This stays V2-output-compatible because
-/// intersecting our `bt2100-pq` against V2's missing-colorimetry
-/// caps still yields `bt2100-pq`, while the V1 capssetter path
-/// now actually honours the assumed transfer characteristic
-/// instead of leaving `bt601` (the UYVY format default) in
-/// place. Tracked at
-/// <https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/work_items/805>.
-///
-/// Note that the returned preset always implies the standard
-/// narrow range (`16_235`) of its colorimetry tuple. ST 2110-21
-/// `RANGE=FULL` / `FULLPROTECT` is **not** propagated; see
-/// `caps_from_rtp_video`'s docstring for the rationale (V2
-/// doesn't read `RANGE` either, so plumbing it asymmetrically
-/// via the V1 capssetter would diverge V1/V2 output).
-fn caps_colorimetry_from_sdp(sdp: &str, depth: u32, tcs: Option<&str>) -> Option<&'static str> {
-    match sdp.to_ascii_uppercase().as_str() {
-        "BT601-5" | "BT601" => Some("bt601"),
-        "BT709-2" | "BT709" => Some("bt709"),
-        "SMPTE240M" => Some("smpte240m"),
-        "BT2020" if depth >= 10 => Some("bt2020-10"),
-        "BT2020" => Some("bt2020"),
-        "BT2100" if tcs.is_some_and(|t| t.eq_ignore_ascii_case("HLG")) => Some("bt2100-hlg"),
-        "BT2100" => Some("bt2100-pq"),
-        _ => None,
-    }
+/// nmossrc's `capssetter` after the depayloader merges the raw
+/// `video/x-raw` caps over the depayloader's output, so this value is
+/// the colorimetry downstream sees. `rtpvrawdepay2` makes the same
+/// mapping for the values it recognises. `rtpvrawdepay` ignores these
+/// parameters and outputs the format's default colorimetry (`bt601`
+/// for UYVY).
+fn caps_colorimetry_from_sdp(
+    colorimetry: &str,
+    tcs: Option<&str>,
+    range: Option<&str>,
+    depth: u32,
+) -> Option<String> {
+    crate::colorimetry::to_gst(
+        colorimetry,
+        tcs.unwrap_or(defaults::ST2110_20_TCS),
+        range.unwrap_or(defaults::ST2110_20_RANGE),
+        depth,
+    )
+    .map(|colorimetry| colorimetry.to_string())
 }
 
 /// Inverse of [`caps_colorimetry_from_sdp`]: given a GStreamer
 /// caps `colorimetry`, either a preset such as `bt709` or the
 /// `<range>:<matrix>:<transfer>:<primaries>` form such as `1:3:5:1`,
 /// return the ST 2110-20 fmtp `colorimetry`, `TCS` and `RANGE`
-/// values, or `None` when they cannot express it. The values are
-/// those of the flow_def `colorspace`, `transfer_characteristic`
-/// and `component_range`, so the mapping is the one in
-/// [`crate::flow_def::flow_colorimetry_from_gst`].
+/// values, or `None` when they cannot express it. The mapping is
+/// [`crate::colorimetry::from_gst`].
 ///
-/// The mapping is not strictly bijective: `bt2020` (8-bit) and
+/// The mapping is not strictly bijective: `bt2020` (12-bit) and
 /// `bt2020-10` (10-bit) both map back to SDP `BT2020`, with the
 /// bit-depth carried separately by the `depth` fmtp parameter.
-fn sdp_colorimetry_from_caps(caps_colorimetry: &str) -> Option<FlowColorimetry> {
+fn sdp_colorimetry_from_caps(caps_colorimetry: &str) -> Option<Colorimetry> {
     let colorimetry = gst_video::VideoColorimetry::from_str(caps_colorimetry).ok()?;
-    flow_colorimetry_from_gst(&colorimetry)
+    crate::colorimetry::from_gst(&colorimetry)
 }
 
 /// Derive `video/x-raw,...` caps from an `application/x-rtp,...`
@@ -2148,14 +2086,13 @@ fn sdp_colorimetry_from_caps(caps_colorimetry: &str) -> Option<FlowColorimetry> 
 ///
 /// Optional fields (added only when the SDP provides a recognised
 /// value):
-///   * `colorimetry` — translated from fmtp `colorimetry` (+ `TCS`
-///     for `BT2100`) via [`caps_colorimetry_from_sdp`]. Required for
-///     correctness on the V1 receiver path where the depayloader
-///     ignores SDP colorimetry; see [`caps_colorimetry_from_sdp`]'s
-///     docs for the V1/V2 split rationale.
+///   * `colorimetry` — translated from fmtp `colorimetry`, `TCS`
+///     and `RANGE` via [`caps_colorimetry_from_sdp`].
 ///
 /// Deliberately omitted (kept off the raw caps even when the SDP
-/// carries a value):
+/// carries a value). nmossrc's `capssetter` merges these caps over
+/// the output of either depayloader, so a field set here replaces
+/// the depayloader's value:
 ///   * `pixel-aspect-ratio` (ST 2110-20 §7.3 `PAR=<n>:<d>`) —
 ///     neither V1 nor V2 depayloader reads the fmtp `PAR` (V2's
 ///     `set_sink_caps` only consumes width/height/depth/sampling/
@@ -2163,45 +2100,16 @@ fn sdp_colorimetry_from_caps(caps_colorimetry: &str) -> Option<FlowColorimetry> 
 ///     both emit `pixel-aspect-ratio=1/1` from
 ///     `gst_video_info_set_format`. ST 2110-20 is square-pixel by
 ///     normative reference (ITU-R BT.709 / BT.2020 picture geom),
-///     so 1/1 is the correct value in practice. Plumbing a
-///     non-1/1 PAR onto raw caps would *break* negotiation on the
-///     V2-capsfilter path (V2 still emits 1/1, so the
-///     intersection collapses), and on the V1-capssetter path it
-///     would lie about content that the depay actually treats as
+///     so 1/1 is the correct value in practice. A non-1/1 PAR
+///     here would describe pixels that the depayloader treats as
 ///     square. Once one of the depayloaders honours `par`, we
 ///     can revisit.
 ///   * `chroma-site` (RFC 4175 §6.1 `chroma-position=<n>`) — V2
-///     reads it; V1 emits the format default (`jpeg` /
-///     `MPEG2_CHROMA_SITE_HORIZONTAL` for UYVY) which conflicts
-///     with the SMPTE ST 2110-20 norm of co-sited. Adding it
-///     would require the V1-capssetter trick too, but unlike
-///     colorimetry there's no production-impacting evidence yet
-///     that downstream consumers rely on it; defer until a
-///     specific consumer needs it. (`identity` / `videoconvert`
-///     ignore `chroma-site` mismatch in our smoke matrix.)
-///   * SMPTE ST 2110-21 `RANGE=NARROW|FULL|FULLPROTECT` — *neither*
-///     V1 (`rtpvrawdepay`) nor V2 (`rtpvrawdepay2`) reads this
-///     fmtp parameter; both produce raw caps whose colorimetry
-///     preset (`bt709`, `bt2020-10`, `bt2100-pq`, …) carries the
-///     standard preset's *narrow* range. Honouring `RANGE=FULL`
-///     would require us to bake an explicit
-///     `<range>:<matrix>:<transfer>:<primaries>` form (e.g.
-///     `1:3:5:1` for full-range BT.709) into caps. That works
-///     for the V1 capssetter (it would actively override the
-///     depay's narrow preset) but breaks the V2 capsfilter
-///     intersection, because V2 also emits the narrow preset and
-///     `narrow ∩ full = ∅`. Rather than diverge V1 and V2 output,
-///     we drop `RANGE` on the floor here and defer until V2
-///     reads `RANGE` upstream; at that point both paths can
-///     advertise full-range raw caps uniformly. Track alongside
-///     the V2 BT2100 typo fix
-///     (<https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/work_items/805>).
-///     In practice ST 2110 SDR/HDR broadcast workflows are
-///     `RANGE=NARROW` by far the most often; FULL/FULLPROTECT
-///     mostly shows up in IPMX graphics / computer-generated
-///     content where `videoconvert` will still produce
-///     visually-correct output (just at the wrong dynamic range
-///     mapping).
+///     reads it; V1 emits the format default, which conflicts
+///     with the SMPTE ST 2110-20 norm of co-sited. Setting it
+///     here would correct V1, but unlike colorimetry there's no
+///     evidence yet that downstream consumers rely on it; defer
+///     until a specific consumer needs it.
 fn caps_from_rtp_video(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
     let s = rtp_caps
         .structure(0)
@@ -2253,10 +2161,12 @@ fn caps_from_rtp_video(rtp_caps: &gst::Caps) -> Result<gst::Caps, SdpError> {
     };
     let colorimetry_caps = caps_colorimetry_from_sdp(
         s.get::<&str>("colorimetry").unwrap_or(""),
-        depth,
-        // ST 2110-20 fmtp `TCS` lands as `tcs=(string)…` on the
-        // caps after `caps_from_media`'s lower-case-ification.
+        // ST 2110-20 fmtp `TCS` and `RANGE` land as `tcs=(string)…`
+        // and `range=(string)…` on the caps after `caps_from_media`'s
+        // lower-case-ification.
         s.get::<&str>("tcs").ok(),
+        s.get::<&str>("range").ok(),
+        depth,
     );
     let mut caps_text = format!(
         "video/x-raw,format={format_str},width={width},height={height},\
@@ -2433,7 +2343,7 @@ fn format_ptime_ns_as_ms(ns: u64) -> String {
 /// Inverse of [`caps_from_rtp_video`]: the synthesised RTP
 /// caps round-trip back to an equivalent `video/x-raw` caps via
 /// the parse-direction helper (modulo preset-collapsing
-/// colorimetry — see [`sdp_colorimetry_from_caps`]).
+/// colorimetry — see [`crate::colorimetry::from_gst`]).
 ///
 /// Source `video/x-raw` fields consumed:
 ///
@@ -2455,7 +2365,9 @@ fn format_ptime_ns_as_ms(ns: u64) -> String {
 /// Returns [`SdpError::UnsupportedEssence`] for `format` values
 /// outside the {`UYVY`, `UYVP`} subset [`caps_from_rtp_video`]
 /// understands today; widening the matrix here without widening
-/// the inverse first would break the round-trip contract.
+/// the inverse first would break the round-trip contract. Also
+/// returns it for a `colorimetry` that [`crate::colorimetry::from_gst`]
+/// cannot map.
 fn rtp_caps_from_video(
     caps: &gst::Caps,
     payload_type: u8,
@@ -2488,9 +2400,6 @@ fn rtp_caps_from_video(
         .map_err(|_| SdpError::UnsupportedEssence("raw video caps missing framerate".to_owned()))?;
     let exactframerate = format_exact_framerate(fr_num, fr_den);
     let interlace_mode = s.get::<&str>("interlace-mode").unwrap_or("progressive");
-    let colorimetry_caps = s.get::<&str>("colorimetry").ok();
-    let colorimetry_sdp = colorimetry_caps.and_then(sdp_colorimetry_from_caps);
-
     // `encoding-name=RAW` matches rsrtp / gst-plugins-good pay/depay
     // pad templates (caps intersection is case-sensitive). SDP text
     // is rewritten to lower-case `raw` by [`canonicalise_st2110_sdp_case`]
@@ -2522,21 +2431,16 @@ fn rtp_caps_from_video(
     // nmos-cpp's `get_video_raw_parameters` throws if absent
     // (see `nmos-cpp/Development/nmos/sdp_utils.cpp::get_video_raw_parameters`),
     // and libnvnmos's `add_nmos_sender_to_node_server` catches
-    // the throw and silently returns `false`. When the caller's
-    // `video/x-raw` caps carry a `colorimetry` that the SDP can
-    // express, we round-trip it via [`sdp_colorimetry_from_caps`];
-    // otherwise we default to ST 2110 SDR's
-    // [`defaults::ST2110_20_COLORIMETRY`] (`BT709`) — the same
-    // value `nmos-cpp`'s `make_video_sdp_parameters` picks when
-    // a Flow has no colorimetry tag set and the value our test
-    // SDP fixtures use — with the default `TCS` and `RANGE`.
-    // Callers wanting BT2020 / BT2100 etc. need to set
-    // `colorimetry` upstream of the `nmossink`.
-    let colorimetry = colorimetry_sdp.unwrap_or(FlowColorimetry {
-        colorspace: defaults::ST2110_20_COLORIMETRY,
-        transfer_characteristic: defaults::ST2110_20_TCS,
-        component_range: defaults::ST2110_20_RANGE,
-    });
+    // the throw and silently returns `false`. As for the flow_def
+    // built from the same caps, caps without `colorimetry` get
+    // GStreamer's default for the frame size (BT709 for HD, BT601
+    // for SD), and caps whose colorimetry the SDP cannot express
+    // are rejected.
+    let colorimetry = gst_video::VideoInfo::from_caps(caps)
+        .map_err(|e| SdpError::UnsupportedEssence(format!("raw video caps: {e}")))?
+        .colorimetry();
+    let colorimetry = crate::colorimetry::from_gst(&colorimetry)
+        .ok_or_else(|| SdpError::UnsupportedEssence(format!("video colorimetry={colorimetry}")))?;
     caps_text.push_str(&format!(",colorimetry=(string){}", colorimetry.colorspace));
     caps_text.push_str(&format!(
         ",tcs=(string){}",
@@ -3020,9 +2924,9 @@ mod tests {
         );
         assert_eq!(raw_s.get::<&str>("interlace-mode").unwrap(), "progressive");
         // The fixture's fmtp `colorimetry=BT709` must round-trip to
-        // the GStreamer preset `bt709` on raw caps; otherwise the
-        // V1-receiver capssetter fix-up has no value to inject and
-        // the V2-receiver capsfilter intersection drops it.
+        // the GStreamer preset `bt709` on raw caps, so that nmossrc's
+        // `capssetter` replaces V1 `rtpvrawdepay`'s default
+        // colorimetry.
         assert_eq!(raw_s.get::<&str>("colorimetry").unwrap(), "bt709");
     }
 
@@ -3098,19 +3002,21 @@ mod tests {
 
     /// Round-trip the colorimetry mapping through `parse_sdp` rather
     /// than calling `caps_colorimetry_from_sdp` directly; this keeps the
-    /// fmtp-key-name plumbing (`colorimetry` vs `tcs`) covered too.
+    /// fmtp-key-name plumbing (`colorimetry`, `tcs`, `range`) covered too.
     fn colorimetry_via_parse(
         sdp_colorimetry: &str,
         depth: u32,
         tcs: Option<&str>,
+        range: Option<&str>,
     ) -> Option<String> {
         init_gst();
         let depth_str = depth.to_string();
+        let range = range.map_or(String::new(), |v| format!(" RANGE={v};"));
         let mut sdp = VIDEO_YCBCR_422_10BIT_1080P50_SDP
             .replace("depth=10;", &format!("depth={depth_str};"))
             .replace(
                 "colorimetry=BT709;",
-                &format!("colorimetry={sdp_colorimetry};"),
+                &format!("colorimetry={sdp_colorimetry};{range}"),
             );
         // The fixture's `TCS=SDR;` lives just before `colorimetry`,
         // so rewrite the TCS value too (or drop it).
@@ -3127,12 +3033,8 @@ mod tests {
 
     #[test]
     fn colorimetry_bt709_maps_to_bt709_caps() {
-        // SDP fmtp `colorimetry=BT709` is the common case for HD
-        // SDR; the V2 depay would also emit `bt709` on output, so
-        // this needs to round-trip to keep the V2 capsfilter
-        // intersection happy.
         assert_eq!(
-            colorimetry_via_parse("BT709", 10, Some("SDR")).as_deref(),
+            colorimetry_via_parse("BT709", 10, Some("SDR"), None).as_deref(),
             Some("bt709"),
         );
     }
@@ -3140,74 +3042,72 @@ mod tests {
     #[test]
     fn colorimetry_bt601_maps_to_bt601_caps() {
         assert_eq!(
-            colorimetry_via_parse("BT601", 8, Some("SDR")).as_deref(),
+            colorimetry_via_parse("BT601", 8, Some("SDR"), None).as_deref(),
             Some("bt601"),
         );
         // The `-5` suffix is the ITU-R version qualifier; both
         // spellings appear in the wild.
         assert_eq!(
-            colorimetry_via_parse("BT601-5", 8, Some("SDR")).as_deref(),
+            colorimetry_via_parse("BT601-5", 8, Some("SDR"), None).as_deref(),
             Some("bt601"),
         );
     }
 
     #[test]
-    fn colorimetry_bt2020_is_depth_aware() {
-        // At depth=10 (or higher) the GStreamer preset is
-        // `bt2020-10` (matrix + 10-bit colorimetry); at depth=8 it
-        // collapses to the looser `bt2020`. Mirrors V2's split.
+    fn colorimetry_bt2020_below_12_bits_is_bt2020_10() {
+        for depth in [8, 10] {
+            assert_eq!(
+                colorimetry_via_parse("BT2020", depth, Some("SDR"), None).as_deref(),
+                Some("bt2020-10"),
+                "depth={depth}",
+            );
+        }
+    }
+
+    #[test]
+    fn colorimetry_bt2100_uses_tcs() {
         assert_eq!(
-            colorimetry_via_parse("BT2020", 10, Some("SDR")).as_deref(),
-            Some("bt2020-10"),
+            colorimetry_via_parse("BT2100", 10, Some("PQ"), None).as_deref(),
+            Some("bt2100-pq"),
         );
         assert_eq!(
-            colorimetry_via_parse("BT2020", 8, Some("SDR")).as_deref(),
-            Some("bt2020"),
+            colorimetry_via_parse("BT2100", 10, Some("HLG"), None).as_deref(),
+            Some("bt2100-hlg"),
+        );
+        // ST 2110-20 defaults an absent TCS to SDR, which for BT2100
+        // has no GStreamer preset and gives the BT.2020 SDR transfer.
+        assert_eq!(
+            colorimetry_via_parse("BT2100", 10, None, None).as_deref(),
+            Some("bt2020-10"),
+        );
+        // No GStreamer transfer function for LINEAR.
+        assert_eq!(
+            colorimetry_via_parse("BT2100", 10, Some("LINEAR"), None),
+            None
         );
     }
 
     #[test]
-    fn colorimetry_bt2100_uses_tcs_or_assumes_pq() {
-        // BT2100 implies a transfer characteristic — PQ for
-        // HDR10, HLG for broadcast HLG-HDR.
+    fn colorimetry_takes_range() {
         assert_eq!(
-            colorimetry_via_parse("BT2100", 10, Some("PQ")).as_deref(),
-            Some("bt2100-pq"),
+            colorimetry_via_parse("BT709", 10, Some("SDR"), Some("FULL")).as_deref(),
+            Some("1:3:5:1"),
         );
         assert_eq!(
-            colorimetry_via_parse("BT2100", 10, Some("HLG")).as_deref(),
-            Some("bt2100-hlg"),
-        );
-        // Missing TCS — V2's source intends "assume PQ" but a
-        // typo (`bt2100-pg`) neutralises that to `None`. We
-        // honour V2's stated intent here so the V1 capssetter
-        // path doesn't fall back to `bt601` on UYVY/UYVP HDR
-        // streams. The choice is V2-output-compatible because
-        // V2 emits no colorimetry in this case and intersecting
-        // "missing" with our `bt2100-pq` still gives
-        // `bt2100-pq` downstream.
-        assert_eq!(
-            colorimetry_via_parse("BT2100", 10, None).as_deref(),
-            Some("bt2100-pq"),
-        );
-        // Unknown TCS values also land on PQ.
-        assert_eq!(
-            colorimetry_via_parse("BT2100", 10, Some("LINEAR")).as_deref(),
-            Some("bt2100-pq"),
+            colorimetry_via_parse("BT709", 10, Some("SDR"), Some("NARROW")).as_deref(),
+            Some("bt709"),
         );
     }
 
     #[test]
     fn colorimetry_unspecified_or_unknown_yields_none() {
-        // `UNSPECIFIED` and unrecognised values (`ST2065-1`, `XYZ`)
-        // must NOT smuggle a guess onto the caps; the V1 depay's
-        // format-default takes over and the V2 depay also emits
-        // nothing. depth=10 here is just to stay inside the
-        // `YCbCr-4:2:2` samplings `caps_from_rtp_video` accepts
-        // today — the depth value doesn't otherwise affect the
-        // `XYZ` / `UNSPECIFIED` arms.
-        assert_eq!(colorimetry_via_parse("UNSPECIFIED", 10, Some("SDR")), None);
-        assert_eq!(colorimetry_via_parse("XYZ", 10, None), None);
+        // depth=10 here is just to stay inside the `YCbCr-4:2:2`
+        // samplings `caps_from_rtp_video` accepts today.
+        assert_eq!(
+            colorimetry_via_parse("UNSPECIFIED", 10, Some("SDR"), None),
+            None
+        );
+        assert_eq!(colorimetry_via_parse("XYZ", 10, None, None), None);
     }
 
     #[test]
@@ -5056,7 +4956,7 @@ mod tests {
     }
 
     // -- synthesis-side helpers: format_exact_framerate +
-    //    format_ptime_ns_as_ms + sdp_colorimetry_from_caps
+    //    format_ptime_ns_as_ms
 
     #[test]
     fn format_exact_framerate_emits_bare_integer_when_denominator_is_one() {
@@ -5100,66 +5000,6 @@ mod tests {
     fn format_ptime_ns_as_ms_pins_st2110_30_canonical_values() {
         assert_eq!(format_ptime_ns_as_ms(defaults::AUDIO_PTIME_NS), "1");
         assert_eq!(format_ptime_ns_as_ms(125_000), "0.125");
-    }
-
-    fn sdp_colorimetry(
-        caps_colorimetry: &str,
-    ) -> Option<(&'static str, &'static str, &'static str)> {
-        sdp_colorimetry_from_caps(caps_colorimetry)
-            .map(|c| (c.colorspace, c.transfer_characteristic, c.component_range))
-    }
-
-    #[test]
-    fn sdp_colorimetry_from_caps_pins_each_preset() {
-        init_gst();
-        for (caps, expected) in [
-            ("bt601", ("BT601", "SDR", "NARROW")),
-            ("bt709", ("BT709", "SDR", "NARROW")),
-            ("smpte240m", ("SMPTE240M", "SDR", "NARROW")),
-        ] {
-            assert_eq!(sdp_colorimetry(caps), Some(expected), "{caps}");
-        }
-    }
-
-    #[test]
-    fn sdp_colorimetry_from_caps_collapses_bt2020_depth_variants_to_one_sdp_value() {
-        init_gst();
-        for caps in ["bt2020", "bt2020-10"] {
-            assert_eq!(
-                sdp_colorimetry(caps),
-                Some(("BT2020", "SDR", "NARROW")),
-                "{caps}"
-            );
-        }
-    }
-
-    #[test]
-    fn sdp_colorimetry_from_caps_splits_bt2100_via_tcs() {
-        init_gst();
-        assert_eq!(
-            sdp_colorimetry("bt2100-pq"),
-            Some(("BT2100", "PQ", "NARROW"))
-        );
-        assert_eq!(
-            sdp_colorimetry("bt2100-hlg"),
-            Some(("BT2100", "HLG", "NARROW"))
-        );
-    }
-
-    #[test]
-    fn sdp_colorimetry_from_caps_maps_full_range() {
-        init_gst();
-        // full range BT.709
-        assert_eq!(sdp_colorimetry("1:3:5:1"), Some(("BT709", "SDR", "FULL")));
-    }
-
-    #[test]
-    fn sdp_colorimetry_from_caps_unrecognised_inputs_yield_none() {
-        init_gst();
-        assert_eq!(sdp_colorimetry(""), None);
-        assert_eq!(sdp_colorimetry("sRGB"), None);
-        // BT.601 625-line primaries
-        assert_eq!(sdp_colorimetry("2:4:5:3"), None);
     }
 
     // -- rtp_caps_from_video
@@ -5341,33 +5181,38 @@ mod tests {
     }
 
     #[test]
-    fn rtp_caps_from_video_falls_back_to_default_on_unrecognised_colorimetry() {
+    fn rtp_caps_from_video_falls_back_to_gst_default_for_frame_size() {
+        init_gst();
+        // `colorimetry` is REQUIRED by nmos-cpp's
+        // `get_video_raw_parameters`, so caps without one get
+        // GStreamer's default for the frame size rather than no
+        // colorimetry.
+        for (width, height, expected) in [(1920, 1080, "BT709"), (720, 576, "BT601")] {
+            let raw = raw_video_caps("UYVP", width, height, gst::Fraction::new(25, 1), None);
+            let rtp = rtp_caps_from_video(&raw, 96, false).expect("synth");
+            let s = rtp.structure(0).expect("rtp");
+            assert_eq!(s.get::<&str>("colorimetry").unwrap(), expected, "{raw}");
+            assert_eq!(s.get::<&str>("tcs").unwrap(), "SDR", "{raw}");
+            assert_eq!(s.get::<&str>("range").unwrap(), "NARROW", "{raw}");
+        }
+    }
+
+    #[test]
+    fn rtp_caps_from_video_rejects_unexpressible_colorimetry() {
         init_gst();
         let raw = raw_video_caps(
             "UYVP",
-            1920,
-            1080,
-            gst::Fraction::new(50, 1),
-            // BT.601 625-line primaries
-            Some("colorimetry=2:4:5:3"),
+            720,
+            576,
+            gst::Fraction::new(25, 1),
+            // BT.470M primaries
+            Some("colorimetry=2:4:5:2"),
         );
-        let rtp = rtp_caps_from_video(&raw, 96, false).expect("synth");
-        let s = rtp.structure(0).expect("rtp");
-        // `colorimetry` is REQUIRED by nmos-cpp's
-        // `get_video_raw_parameters`; an unrecognised value on
-        // the essence caps doesn't translate to a known SDP
-        // colorimetry preset, but we still have to emit one or
-        // libnvnmos silently rejects the sender. Fall back to
-        // [`defaults::ST2110_20_COLORIMETRY`] (BT709) rather
-        // than dropping the field entirely.
-        assert_eq!(
-            s.get::<&str>("colorimetry").unwrap(),
-            defaults::ST2110_20_COLORIMETRY,
-            "unrecognised input colorimetry must fall back to the BT709 default, \
-             not drop the field (libnvnmos rejects SDPs without colorimetry)",
+        let err = rtp_caps_from_video(&raw, 96, false).expect_err("must reject");
+        assert!(
+            matches!(&err, SdpError::UnsupportedEssence(m) if m.contains("2:4:5:2")),
+            "got: {err:?}",
         );
-        assert_eq!(s.get::<&str>("tcs").unwrap(), defaults::ST2110_20_TCS);
-        assert_eq!(s.get::<&str>("range").unwrap(), defaults::ST2110_20_RANGE);
     }
 
     #[test]
@@ -5592,17 +5437,6 @@ mod tests {
         // nmos-cpp `make_video_smpte291_parameters` emits
         // `ST2110-40:2018` when `TM` is omitted (ST 2110-40 §7).
         assert_eq!(defaults::ST2110_40_SSN, "ST2110-40:2018");
-    }
-
-    /// `colorimetry` is REQUIRED by nmos-cpp's
-    /// `get_video_raw_parameters` and the SMPTE ST 2110-20
-    /// reference SDPs all use `BT709` for SDR. Keep the default
-    /// pinned so a synthesised SDP without an explicit
-    /// colorimetry on the essence caps still parses against
-    /// nmos-cpp / libnvnmos.
-    #[test]
-    fn defaults_st2110_20_colorimetry_is_bt709() {
-        assert_eq!(defaults::ST2110_20_COLORIMETRY, "BT709");
     }
 
     // -- from_caps + helpers (resolve_payload_type,

@@ -1240,8 +1240,8 @@ pub(crate) fn build_mxlsrc(
 /// defaults despite the SDP saying otherwise (`framerate=0/1`,
 /// `colorimetry=bt601` on UYVY, etc.). The sender side has the
 /// opposite gap: V1 `rtpvrawpay` omits `exactframerate` /
-/// `chroma-position` / `tcs` from the SDP fmtp, and V1 / V2
-/// `rtpvrawpay` both omit `RANGE`. None of those omissions
+/// `chroma-position` / `tcs` / `range` from the SDP fmtp, which
+/// V2 `rtpvrawpay2` writes. None of those omissions
 /// propagate to the receiver in our deployment model: the
 /// receiver gets its caps from the **SDP we publish** (which
 /// `parse_sdp` pins onto `udpsrc.caps` in [`build_udpsrc`]),
@@ -1253,7 +1253,7 @@ pub(crate) fn build_mxlsrc(
 /// [`crate::sdp::from_caps`] reads the app's **input** caps to
 /// `nmossink` (which carry full GStreamer colorimetry including
 /// range, framerate, etc.) rather than the payloader output,
-/// and `rtp_caps_from_raw_video` synthesises a self-consistent
+/// and `rtp_caps_from_video` synthesises a self-consistent
 /// `application/x-rtp` view of those caps. So nothing to
 /// capssetter-fix here.
 pub(crate) fn build_udpsink(
@@ -1567,7 +1567,7 @@ fn multicast_iface_name(destination_ip: &str, interface_ip: Option<&str>) -> Opt
 
 /// Build the inner RTP/UDP source chain for `nmossrc`. Always
 /// constructs a sub-bin:
-/// `udpsrc(caps=rtp_caps) ! rtp<essence>depay [! capsfilter(advertise_caps)]`
+/// `udpsrc(caps=rtp_caps) ! rtp<essence>depay [! capssetter(advertise_caps)]`
 /// (with the udpsrc factory picked via [`select_udpsrc_factory`]
 /// and the depayloader picked via [`select_rtp_factory`], so
 /// [`UdpVariant::V2`] auto-upgrades to `gst-plugins-rs`' `udpsrc2`

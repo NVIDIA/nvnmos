@@ -149,6 +149,7 @@ use gstreamer as gst;
 
 mod channel_mapping;
 mod channel_mapping_session;
+mod colorimetry;
 mod daemon;
 mod domain;
 mod essence_caps;

@@ -648,7 +648,7 @@ fn build_video_body(
     let colorimetry = gst_video::VideoInfo::from_caps(&gst::Caps::from(structure.to_owned()))
         .map_err(|_| FlowDefError::UnsupportedCaps(structure.to_string()))?
         .colorimetry();
-    let flow_colorimetry = flow_colorimetry_from_gst(&colorimetry).ok_or_else(|| {
+    let flow_colorimetry = crate::colorimetry::from_gst(&colorimetry).ok_or_else(|| {
         FlowDefError::UnsupportedCapsValue {
             name: name.to_string(),
             field: "colorimetry",
@@ -704,59 +704,6 @@ fn build_video_body(
     }
 
     Ok((FlowFormat::Video, fields))
-}
-
-/// flow_def attributes that describe the colorimetry of a video flow.
-/// Their values are also the values of the ST 2110-20 fmtp
-/// `colorimetry`, `TCS` and `RANGE` parameters.
-pub(crate) struct FlowColorimetry {
-    pub(crate) colorspace: &'static str,
-    pub(crate) transfer_characteristic: &'static str,
-    pub(crate) component_range: &'static str,
-}
-
-/// The flow_def attributes for `colorimetry`, or `None` when they
-/// cannot express it. This is the mapping that `mxlsink` uses, and
-/// `mxlsink` refuses the same colorimetries.
-pub(crate) fn flow_colorimetry_from_gst(
-    colorimetry: &gst_video::VideoColorimetry,
-) -> Option<FlowColorimetry> {
-    use gst_video::{
-        VideoColorMatrix, VideoColorPrimaries, VideoColorRange, VideoTransferFunction,
-    };
-
-    let component_range = match colorimetry.range() {
-        VideoColorRange::Range16_235 => "NARROW",
-        VideoColorRange::Range0_255 => "FULL",
-        _ => return None,
-    };
-    let transfer_characteristic = match colorimetry.transfer() {
-        VideoTransferFunction::Bt709
-        | VideoTransferFunction::Bt601
-        | VideoTransferFunction::Smpte240m
-        | VideoTransferFunction::Bt202010
-        | VideoTransferFunction::Bt202012 => "SDR",
-        VideoTransferFunction::Smpte2084 => "PQ",
-        VideoTransferFunction::AribStdB67 => "HLG",
-        _ => return None,
-    };
-    let colorspace = match (colorimetry.matrix(), colorimetry.primaries()) {
-        (VideoColorMatrix::Bt601, VideoColorPrimaries::Smpte170m) => "BT601",
-        (VideoColorMatrix::Bt709, VideoColorPrimaries::Bt709) => "BT709",
-        (VideoColorMatrix::Smpte240m, VideoColorPrimaries::Smpte240m) => "SMPTE240M",
-        (VideoColorMatrix::Bt2020, VideoColorPrimaries::Bt2020)
-            if transfer_characteristic == "SDR" =>
-        {
-            "BT2020"
-        }
-        (VideoColorMatrix::Bt2020, VideoColorPrimaries::Bt2020) => "BT2100",
-        _ => return None,
-    };
-    Some(FlowColorimetry {
-        colorspace,
-        transfer_characteristic,
-        component_range,
-    })
 }
 
 fn build_audio_body(
@@ -1462,30 +1409,6 @@ mod tests {
     fn build_video_colorimetry_from_caps() {
         for (caps, colorspace, transfer_characteristic, component_range) in [
             (
-                "width=1920,height=1080,colorimetry=bt709",
-                "BT709",
-                "SDR",
-                "NARROW",
-            ),
-            (
-                "width=1920,height=1080,colorimetry=bt601",
-                "BT601",
-                "SDR",
-                "NARROW",
-            ),
-            (
-                "width=3840,height=2160,colorimetry=bt2020-10",
-                "BT2020",
-                "SDR",
-                "NARROW",
-            ),
-            (
-                "width=3840,height=2160,colorimetry=bt2100-pq",
-                "BT2100",
-                "PQ",
-                "NARROW",
-            ),
-            (
                 "width=3840,height=2160,colorimetry=bt2100-hlg",
                 "BT2100",
                 "HLG",
@@ -1519,9 +1442,9 @@ mod tests {
 
     #[test]
     fn build_video_rejects_colorimetry_mxl_cannot_express() {
-        // BT.601 625-line primaries
+        // BT.470M primaries
         let caps = caps_from_str(
-            "video/x-raw,format=v210,width=720,height=576,framerate=25/1,colorimetry=2:4:5:3",
+            "video/x-raw,format=v210,width=720,height=576,framerate=25/1,colorimetry=2:4:5:2",
         );
         let err = from_caps(&input(UUID_A, "cam-1", &concrete_domain(), &caps)).unwrap_err();
         assert!(
