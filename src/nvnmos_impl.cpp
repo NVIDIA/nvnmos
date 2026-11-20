@@ -196,6 +196,9 @@ namespace nvnmos
         // MXL video media types
         const std::vector<nmos::media_type> mxl_video_types{ nmos::media_types::video_v210, nmos::media_types::video_v210a };
 
+        // IS-04 v1.3 video Flow attribute, which nmos::fields does not provide
+        const web::json::field_as_string_or component_range{ U("component_range"), U("") };
+
         // parse an MXL flow definition (JSON) including nvnmos extensions
         // (urn:x-nvnmos:tag:* entries inside the `tags` property);
         // propagates web::json::json_exception on parse error
@@ -691,10 +694,11 @@ namespace nvnmos
             const auto frame_width = nmos::fields::frame_width(flow_def);
             const auto frame_height = nmos::fields::frame_height(flow_def);
             const auto colorspace = nmos::colorspace{ nmos::fields::colorspace(flow_def) };
-            // interlace_mode and transfer_characteristic have defaults; absent in MXL flow_def
+            // interlace_mode, transfer_characteristic and component_range have defaults; absent in MXL flow_def
             // maps to absent in NMOS Flow
             const auto interlace_mode = nmos::interlace_mode{ nmos::fields::interlace_mode(flow_def) };
             const auto transfer_characteristic = nmos::transfer_characteristic{ nmos::fields::transfer_characteristic(flow_def) };
+            const auto component_range = impl::component_range(flow_def);
 
             source = nmos::make_video_source(source_id, device_id, clock, grain_rate, settings);
             // video/v210 and video/v210a determine the components, so the flow_def's components are not used
@@ -709,6 +713,10 @@ namespace nvnmos
             if (nmos::media_types::video_v210a == media_type)
             {
                 web::json::push_back(flow.data[nmos::fields::components], nmos::make_component(nmos::component_names::A, frame_width, frame_height, 10));
+            }
+            if (!component_range.empty())
+            {
+                flow.data[impl::component_range.key] = value::string(component_range);
             }
         }
         else if (impl::format::audio == format)
