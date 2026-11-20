@@ -351,12 +351,14 @@ namespace nvnmos
         {
             const auto audio = nmos::get_audio_L_parameters(sdp_params);
 
-            // hm, if present, should parse audio.channel_order into the equivalent vector of nmos::channel
-            // but currently no nmos::parse_fmtp_channel_order
+            // channels that the channel order does not declare are undefined, see SMPTE ST 2110-30:2025 Section 6.2.2
+            // nmos::parse_fmtp_channel_order returns no symbols for a channel order it cannot parse
+            const auto symbols = nmos::parse_fmtp_channel_order(audio.channel_order);
+            const auto declared = (int)symbols.size();
             const auto channels = boost::copy_range<std::vector<nmos::channel>>(
                 boost::irange(0, (int)audio.channel_count) | boost::adaptors::transformed([&](const int& index)
             {
-                return nmos::channel{ U(""), nmos::channel_symbols::Undefined(1 + index) };
+                return nmos::channel{ U(""), index < declared ? symbols[index] : nmos::channel_symbols::Undefined(1 + index - declared) };
             }));
 
             // hmm, should this take account of audio.packet_time?
