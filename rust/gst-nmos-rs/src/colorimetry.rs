@@ -8,8 +8,9 @@
 //! `component_range` take the same values as the ST 2110-20 fmtp
 //! parameters `colorimetry`, `TCS` and `RANGE`. For the values it
 //! recognises, the mapping to and from GStreamer matches gst-plugins-rs
-//! `rtpvrawpay2` / `rtpvrawdepay2` and gst-mxl-rs `mxlsink` / `mxlsrc`.
-//! It returns `None` for any other value.
+//! `rtpvrawpay2` / `rtpvrawdepay2` and gst-mxl-rs `mxlsink` / `mxlsrc`,
+//! except that BT.601 625-line colorimetry also maps to `BT601`. It
+//! returns `None` for any other value.
 
 use gstreamer_video as gst_video;
 use gstreamer_video::{
@@ -25,7 +26,11 @@ pub(crate) struct Colorimetry {
 }
 
 /// The values for a GStreamer `colorimetry`, or `None` when they cannot
-/// express it. `mxlsink` refuses the same colorimetries.
+/// express it.
+///
+/// `BT601` is ITU-R BT.601-7, which has 525-line (SMPTE 170M) and
+/// 625-line (BT.470BG) primaries, so both map to it. [`to_gst`] maps
+/// `BT601` back to the 525-line primaries of GStreamer's `bt601`.
 pub(crate) fn from_gst(colorimetry: &gst_video::VideoColorimetry) -> Option<Colorimetry> {
     let component_range = match colorimetry.range() {
         VideoColorRange::Range16_235 => "NARROW",
@@ -43,7 +48,10 @@ pub(crate) fn from_gst(colorimetry: &gst_video::VideoColorimetry) -> Option<Colo
         _ => return None,
     };
     let colorspace = match (colorimetry.matrix(), colorimetry.primaries()) {
-        (VideoColorMatrix::Bt601, VideoColorPrimaries::Smpte170m) => "BT601",
+        (
+            VideoColorMatrix::Bt601,
+            VideoColorPrimaries::Smpte170m | VideoColorPrimaries::Bt470bg,
+        ) => "BT601",
         (VideoColorMatrix::Bt709, VideoColorPrimaries::Bt709) => "BT709",
         (VideoColorMatrix::Smpte240m, VideoColorPrimaries::Smpte240m) => "SMPTE240M",
         (VideoColorMatrix::Bt2020, VideoColorPrimaries::Bt2020)
@@ -122,6 +130,8 @@ mod tests {
         init_gst();
         for (colorimetry, expected) in [
             ("bt601", ("BT601", "SDR", "NARROW")),
+            // BT.601 625-line primaries
+            ("2:4:5:3", ("BT601", "SDR", "NARROW")),
             ("bt709", ("BT709", "SDR", "NARROW")),
             ("smpte240m", ("SMPTE240M", "SDR", "NARROW")),
             // both BT.2020 transfers collapse to one value; depth is separate
@@ -140,8 +150,8 @@ mod tests {
     fn from_gst_rejects_values_it_cannot_express() {
         init_gst();
         assert_eq!(from_gst_str("sRGB"), None);
-        // BT.601 625-line primaries
-        assert_eq!(from_gst_str("2:4:5:3"), None);
+        // BT.470M primaries
+        assert_eq!(from_gst_str("2:4:5:2"), None);
     }
 
     #[test]

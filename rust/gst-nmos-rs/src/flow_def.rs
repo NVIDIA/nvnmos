@@ -1442,9 +1442,9 @@ mod tests {
 
     #[test]
     fn build_video_rejects_colorimetry_mxl_cannot_express() {
-        // BT.601 625-line primaries
+        // BT.470M primaries
         let caps = caps_from_str(
-            "video/x-raw,format=v210,width=720,height=576,framerate=25/1,colorimetry=2:4:5:3",
+            "video/x-raw,format=v210,width=720,height=576,framerate=25/1,colorimetry=2:4:5:2",
         );
         let err = from_caps(&input(UUID_A, "cam-1", &concrete_domain(), &caps)).unwrap_err();
         assert!(

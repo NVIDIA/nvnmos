@@ -5217,8 +5217,8 @@ mod tests {
             1920,
             1080,
             gst::Fraction::new(50, 1),
-            // BT.601 625-line primaries
-            Some("colorimetry=2:4:5:3"),
+            // BT.470M primaries
+            Some("colorimetry=2:4:5:2"),
         );
         let rtp = rtp_caps_from_video(&raw, 96, false).expect("synth");
         let s = rtp.structure(0).expect("rtp");
