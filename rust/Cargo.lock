@@ -588,6 +588,7 @@ dependencies = [
  "gstreamer-audio",
  "gstreamer-base",
  "gstreamer-sdp",
+ "gstreamer-video",
  "hyper-util",
  "nix",
  "nvnmos-build",

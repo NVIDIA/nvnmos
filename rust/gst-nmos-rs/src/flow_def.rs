@@ -56,6 +56,7 @@
 use std::collections::HashMap;
 
 use gstreamer as gst;
+use gstreamer_video as gst_video;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -543,10 +544,9 @@ pub(crate) struct FlowDefBuildInput<'a> {
 ///
 /// Per-format essence fields (`grain_rate`, `frame_width`, …) are
 /// taken from `caps` and are **required** by libnvnmos. Fields not
-/// present in the caps (`colorspace`, `components`, … for v210) are
+/// present in the caps (`components`, … for v210) are
 /// derived deterministically where libnvnmos requires them — see
-/// [`build_video_body`]. Users wanting non-default values should
-/// supply a `transport-file` instead.
+/// [`build_video_body`].
 pub(crate) fn from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDefError> {
     if input.name.is_empty() {
         return Err(FlowDefError::MissingName);
@@ -612,14 +612,15 @@ pub(crate) fn from_caps(input: &FlowDefBuildInput<'_>) -> Result<String, FlowDef
 /// [`FlowFormat`] (always [`FlowFormat::Video`]) alongside, so the
 /// outer builder can do its format cross-check uniformly.
 ///
-/// `colorspace` and `components` are emitted even though the caps
-/// don't carry them explicitly: `libnvnmos` requires both. They're
-/// derived deterministically from `format=v210` (HD-default BT709
-/// primaries; standard Y/Cb/Cr 4:2:2 10-bit triple with Cb/Cr at
-/// half horizontal resolution). `format=A422_10LE` is how the MXL
-/// plugin carries `video/v210a`, which adds a full-size 10-bit alpha
-/// (key) component. Users wanting BT2020 should supply a
-/// `transport-file` instead.
+/// `colorspace`, `transfer_characteristic` and `component_range` come from the caps
+/// `colorimetry`, or GStreamer's default for the frame size when the
+/// caps have none, so that they match the MXL flow definition that
+/// `mxlsink` writes. `components` is emitted even though the caps
+/// don't carry it explicitly: `libnvnmos` requires it. It's derived
+/// deterministically from `format=v210` (standard Y/Cb/Cr 4:2:2
+/// 10-bit triple with Cb/Cr at half horizontal resolution).
+/// `format=A422_10LE` is how the MXL plugin carries `video/v210a`,
+/// which adds a full-size 10-bit alpha (key) component.
 fn build_video_body(
     structure: &gst::StructureRef,
 ) -> Result<(FlowFormat, Vec<(String, serde_json::Value)>), FlowDefError> {
@@ -639,6 +640,16 @@ fn build_video_body(
     let width = caps_field_i32(structure, "width")?;
     let height = caps_field_i32(structure, "height")?;
     let framerate = caps_field_fraction(structure, "framerate", None)?;
+    let colorimetry = gst_video::VideoInfo::from_caps(&gst::Caps::from(structure.to_owned()))
+        .map_err(|_| FlowDefError::UnsupportedCaps(structure.to_string()))?
+        .colorimetry();
+    let flow_colorimetry = flow_colorimetry_from_gst(&colorimetry).ok_or_else(|| {
+        FlowDefError::UnsupportedCapsValue {
+            name: name.to_string(),
+            field: "colorimetry",
+            value: colorimetry.to_string(),
+        }
+    })?;
 
     let chroma_width = width / 2;
     let mut components = serde_json::json!([
@@ -668,7 +679,15 @@ fn build_video_body(
         ("frame_height".to_owned(), serde_json::json!(height)),
         (
             "colorspace".to_owned(),
-            serde_json::Value::String("BT709".to_owned()),
+            serde_json::Value::String(flow_colorimetry.colorspace.to_owned()),
+        ),
+        (
+            "transfer_characteristic".to_owned(),
+            serde_json::Value::String(flow_colorimetry.transfer_characteristic.to_owned()),
+        ),
+        (
+            "component_range".to_owned(),
+            serde_json::Value::String(flow_colorimetry.component_range.to_owned()),
         ),
         ("components".to_owned(), components),
     ];
@@ -680,6 +699,55 @@ fn build_video_body(
     }
 
     Ok((FlowFormat::Video, fields))
+}
+
+/// flow_def attributes that describe the colorimetry of a video flow.
+struct FlowColorimetry {
+    colorspace: &'static str,
+    transfer_characteristic: &'static str,
+    component_range: &'static str,
+}
+
+/// The flow_def attributes for `colorimetry`, or `None` when they
+/// cannot express it. This is the mapping that `mxlsink` uses, and
+/// `mxlsink` refuses the same colorimetries.
+fn flow_colorimetry_from_gst(colorimetry: &gst_video::VideoColorimetry) -> Option<FlowColorimetry> {
+    use gst_video::{
+        VideoColorMatrix, VideoColorPrimaries, VideoColorRange, VideoTransferFunction,
+    };
+
+    let component_range = match colorimetry.range() {
+        VideoColorRange::Range16_235 => "NARROW",
+        VideoColorRange::Range0_255 => "FULL",
+        _ => return None,
+    };
+    let transfer_characteristic = match colorimetry.transfer() {
+        VideoTransferFunction::Bt709
+        | VideoTransferFunction::Bt601
+        | VideoTransferFunction::Smpte240m
+        | VideoTransferFunction::Bt202010
+        | VideoTransferFunction::Bt202012 => "SDR",
+        VideoTransferFunction::Smpte2084 => "PQ",
+        VideoTransferFunction::AribStdB67 => "HLG",
+        _ => return None,
+    };
+    let colorspace = match (colorimetry.matrix(), colorimetry.primaries()) {
+        (VideoColorMatrix::Bt601, VideoColorPrimaries::Smpte170m) => "BT601",
+        (VideoColorMatrix::Bt709, VideoColorPrimaries::Bt709) => "BT709",
+        (VideoColorMatrix::Smpte240m, VideoColorPrimaries::Smpte240m) => "SMPTE240M",
+        (VideoColorMatrix::Bt2020, VideoColorPrimaries::Bt2020)
+            if transfer_characteristic == "SDR" =>
+        {
+            "BT2020"
+        }
+        (VideoColorMatrix::Bt2020, VideoColorPrimaries::Bt2020) => "BT2100",
+        _ => return None,
+    };
+    Some(FlowColorimetry {
+        colorspace,
+        transfer_characteristic,
+        component_range,
+    })
 }
 
 fn build_audio_body(
@@ -1329,7 +1397,9 @@ mod tests {
             v.get("interlace_mode").is_none(),
             "no caps field → no interlace_mode emitted"
         );
-        assert_eq!(v["colorspace"], "BT709", "BT709 default for v210");
+        assert_eq!(v["colorspace"], "BT709", "GStreamer default for HD");
+        assert_eq!(v["transfer_characteristic"], "SDR");
+        assert_eq!(v["component_range"], "NARROW");
         let components = v["components"].as_array().expect("components is an array");
         assert_eq!(components.len(), 3, "Y/Cb/Cr triple");
         assert_eq!(components[0]["name"], "Y");
@@ -1377,6 +1447,84 @@ mod tests {
         assert_eq!(components[3]["width"], 1920, "A is full-size");
         assert_eq!(components[3]["height"], 1080);
         assert_eq!(components[3]["bit_depth"], 10);
+    }
+
+    #[test]
+    fn build_video_colorimetry_from_caps() {
+        for (caps, colorspace, transfer_characteristic, component_range) in [
+            (
+                "width=1920,height=1080,colorimetry=bt709",
+                "BT709",
+                "SDR",
+                "NARROW",
+            ),
+            (
+                "width=1920,height=1080,colorimetry=bt601",
+                "BT601",
+                "SDR",
+                "NARROW",
+            ),
+            (
+                "width=3840,height=2160,colorimetry=bt2020-10",
+                "BT2020",
+                "SDR",
+                "NARROW",
+            ),
+            (
+                "width=3840,height=2160,colorimetry=bt2100-pq",
+                "BT2100",
+                "PQ",
+                "NARROW",
+            ),
+            (
+                "width=3840,height=2160,colorimetry=bt2100-hlg",
+                "BT2100",
+                "HLG",
+                "NARROW",
+            ),
+            // full range BT.709
+            (
+                "width=1920,height=1080,colorimetry=1:3:5:1",
+                "BT709",
+                "SDR",
+                "FULL",
+            ),
+            // GStreamer's default for SD frame sizes
+            ("width=720,height=576", "BT601", "SDR", "NARROW"),
+        ] {
+            for format in ["v210", "A422_10LE"] {
+                let caps = caps_from_str(&format!(
+                    "video/x-raw,format={format},{caps},framerate=25/1"
+                ));
+                let json = from_caps(&input(UUID_A, "cam-1", &concrete_domain(), &caps)).unwrap();
+                let v = parse(&json);
+                assert_eq!(v["colorspace"], colorspace, "{caps}");
+                assert_eq!(
+                    v["transfer_characteristic"], transfer_characteristic,
+                    "{caps}"
+                );
+                assert_eq!(v["component_range"], component_range, "{caps}");
+            }
+        }
+    }
+
+    #[test]
+    fn build_video_rejects_colorimetry_mxl_cannot_express() {
+        // BT.601 625-line primaries
+        let caps = caps_from_str(
+            "video/x-raw,format=v210,width=720,height=576,framerate=25/1,colorimetry=2:4:5:3",
+        );
+        let err = from_caps(&input(UUID_A, "cam-1", &concrete_domain(), &caps)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                FlowDefError::UnsupportedCapsValue {
+                    field: "colorimetry",
+                    ..
+                }
+            ),
+            "got: {err:?}"
+        );
     }
 
     #[test]
