@@ -585,12 +585,13 @@ impl BinImpl for NmosSrc {
             self.parent_handle_message(message);
             return;
         };
-        let from_current_chain = self
-            .ghost
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|ghost| inner::source_is_in_current_chain(ghost, &source));
+        let from_current_chain = self.ghost.lock().unwrap().as_ref().is_some_and(|ghost| {
+            let in_chain = inner::source_is_in_current_chain(ghost, &source);
+            if in_chain {
+                inner::drop_eos_from_current_chain(ghost);
+            }
+            in_chain
+        });
         if !from_current_chain {
             self.parent_handle_message(message);
             return;
@@ -612,10 +613,13 @@ impl BinImpl for NmosSrc {
                 match build_fake_src_for_settings(&settings).and_then(|fake| {
                     imp.swap_inner(src.upcast_ref(), &fake, inner::RebuildChainOpts::default())
                 }) {
-                    Ok(()) => gst::warning!(
-                        CAT,
-                        "nmossrc inner chain posted ERROR; restored fake chain: {glib_error}"
-                    ),
+                    Ok(()) => {
+                        gst::warning!(
+                            CAT,
+                            "nmossrc inner chain posted ERROR; restored fake chain: {glib_error}"
+                        );
+                        imp.set_connection_active(false, "inner-error");
+                    }
                     Err(restore_error) => gst::warning!(
                         CAT,
                         "nmossrc inner chain posted ERROR and fake-chain restore failed: \
@@ -1088,9 +1092,15 @@ impl NmosSrc {
                 self.set_connection_active(new_active, reason);
                 ActivationOutcome::Applied
             }
-            ActivationAck::Failure { reason } => ActivationOutcome::Failed {
-                reason: reason.clone(),
-            },
+            ActivationAck::Failure { reason } => {
+                // A scheduled activation has no HTTP response to carry the
+                // reason, so the bus warning is what an application sees.
+                self.set_connection_active(false, "activation-rejected");
+                gst::element_imp_warning!(self, gst::StreamError::Format, ("{reason}"));
+                ActivationOutcome::Failed {
+                    reason: reason.clone(),
+                }
+            }
         }
     }
 }
@@ -1686,6 +1696,7 @@ mod tests {
             .swap_inner(src.upcast_ref(), &real, inner::RebuildChainOpts::default())
             .expect("install real src");
         assert!(src.imp().current_chain_is_real());
+        src.imp().set_connection_active(true, "activate");
 
         real.post_message(
             gst::message::Error::builder(gst::CoreError::Failed, "test inner failure")
@@ -1706,5 +1717,125 @@ mod tests {
             "inner error escaped the bin: {message:?}",
         );
         assert!(!src.imp().current_chain_is_real());
+        assert!(!src.property::<bool>("active"));
+    }
+
+    /// A streaming inner chain that fails with a fatal flow return must not
+    /// end the pipeline with the EOS `GstBaseSrc` pushes after its ERROR.
+    /// The chain fails to negotiate against downstream caps it cannot
+    /// produce. nmossrc itself stays in NULL (no daemon); its anchor, the
+    /// chain and the downstream elements are run directly.
+    #[test]
+    fn inner_flow_error_does_not_send_eos_downstream() {
+        use std::str::FromStr;
+        init_gst();
+        let pipeline = gst::Pipeline::new();
+        let src = glib::Object::new::<crate::nmossrc::NmosSrc>();
+        let filter = gst::ElementFactory::make("capsfilter")
+            .property("caps", gst::Caps::from_str("audio/x-raw").expect("caps"))
+            .build()
+            .expect("capsfilter");
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("async", false)
+            .property("sync", false)
+            .build()
+            .expect("fakesink");
+        pipeline
+            .add_many([src.upcast_ref(), &filter, &sink])
+            .expect("add");
+        gst::Element::link_many([src.upcast_ref(), &filter, &sink]).expect("link");
+        let real = gst::ElementFactory::make("videotestsrc")
+            .name("test-real-src")
+            .build()
+            .expect("real src");
+        src.imp()
+            .swap_inner(src.upcast_ref(), &real, inner::RebuildChainOpts::default())
+            .expect("install real chain");
+
+        let (eos_tx, eos_rx) = std::sync::mpsc::channel();
+        sink.static_pad("sink").expect("fakesink pad").add_probe(
+            gst::PadProbeType::EVENT_DOWNSTREAM,
+            move |_, info| {
+                if info
+                    .event()
+                    .is_some_and(|e| e.type_() == gst::EventType::Eos)
+                {
+                    let _ = eos_tx.send(());
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+        let anchor = src.by_name("anchor").expect("nmossrc anchor");
+        for element in [&sink, &filter, &anchor, &real] {
+            element.set_state(gst::State::Playing).expect("PLAYING");
+        }
+
+        let bus = pipeline.bus().expect("pipeline bus");
+        let message = bus
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(5),
+                &[gst::MessageType::Error, gst::MessageType::Warning],
+            )
+            .expect("inner flow error must produce a warning");
+        assert!(
+            matches!(message.view(), gst::MessageView::Warning(_)),
+            "inner error escaped the bin: {message:?}",
+        );
+        let eos = eos_rx.recv_timeout(std::time::Duration::from_millis(500));
+        for element in [&anchor, &filter, &sink] {
+            element.set_state(gst::State::Null).expect("NULL");
+        }
+        assert!(eos.is_err(), "EOS from the failed chain reached downstream");
+        assert!(!src.imp().current_chain_is_real());
+    }
+
+    #[test]
+    fn rejected_activation_posts_warning_and_clears_active() {
+        use std::str::FromStr;
+        init_gst();
+        let pipeline = gst::Pipeline::new();
+        let caps =
+            gst::Caps::from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=25/1")
+                .expect("caps");
+        let src = glib::Object::builder::<crate::nmossrc::NmosSrc>()
+            .property("caps", caps)
+            .build();
+        pipeline.add(&src).expect("add nmossrc");
+        let real = gst::ElementFactory::make("fakesrc")
+            .build()
+            .expect("real src");
+        src.imp()
+            .swap_inner(src.upcast_ref(), &real, inner::RebuildChainOpts::default())
+            .expect("install real src");
+        src.imp().set_connection_active(true, "activate");
+
+        let plan = ActivationPlan {
+            inner: InnerConfig::Fake {
+                kind: crate::session::FakeKind::Misconfigured,
+                detail: "test rejection".into(),
+            },
+            ack: ActivationAck::Failure {
+                reason: "test rejection".into(),
+            },
+        };
+        let ActivationOutcome::Failed { reason } = src.imp().execute_activation_plan(&plan) else {
+            panic!("rejected activation was applied");
+        };
+        assert_eq!(reason, "test rejection");
+
+        let bus = pipeline.bus().expect("pipeline bus");
+        let message = bus
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(2),
+                &[gst::MessageType::Error, gst::MessageType::Warning],
+            )
+            .expect("rejected activation must post a warning");
+        let gst::MessageView::Warning(warning) = message.view() else {
+            panic!("expected a warning: {message:?}");
+        };
+        assert!(warning.error().matches(gst::StreamError::Format));
+        assert!(warning.error().to_string().contains("test rejection"));
+        assert!(!src.imp().current_chain_is_real());
+        assert!(!src.property::<bool>("active"));
     }
 }

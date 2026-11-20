@@ -750,6 +750,32 @@ pub(crate) fn source_is_in_current_chain(ghost: &gst::GhostPad, source: &gst::Ob
     })
 }
 
+/// Drop EOS leaving the current inner chain of a source bin, so a chain that
+/// is about to be replaced cannot end the stream downstream. After a fatal
+/// flow return, `GstBaseSrc` posts ERROR and then pushes EOS from the same
+/// streaming thread; called while handling that ERROR, this is in time.
+pub(crate) fn drop_eos_from_current_chain(ghost: &gst::GhostPad) {
+    if ghost.direction() != gst::PadDirection::Src {
+        return;
+    }
+    let Some(chain_pad) = ghost
+        .target()
+        .and_then(|anchor_pad| anchor_pad.parent_element())
+        .filter(|anchor| anchor.name() == ANCHOR_NAME)
+        .and_then(|anchor| anchor.static_pad("sink"))
+        .and_then(|anchor_sink| anchor_sink.peer())
+    else {
+        return;
+    };
+    chain_pad.add_probe(
+        gst::PadProbeType::EVENT_DOWNSTREAM,
+        |_pad, info| match info.event() {
+            Some(event) if event.type_() == gst::EventType::Eos => gst::PadProbeReturn::Drop,
+            _ => gst::PadProbeReturn::Ok,
+        },
+    );
+}
+
 /// True iff the bin's current inner chain is a *real* chain (a
 /// real transport element such as `mxlsink` / `mxlsrc`, identified
 /// by the absence of the `-fake` suffix on its element name) — as

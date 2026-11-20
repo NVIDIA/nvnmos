@@ -415,6 +415,34 @@ pub(super) fn resolve_activation_inner_mxl(
             }
         };
 
+    // A Receiver's activation transport file is its own flow_def with the
+    // active flow id spliced in, so it does not describe the Sender's flow.
+    // When that flow already exists in the Domain, its format must match.
+    // A flow that is absent or unreadable may still be being created;
+    // `mxlsrc` waits for it.
+    if settings.side == Side::Receiver && flow.format != FlowFormat::Unspecified {
+        if let Some(existing) = read_existing_flow_format(&settings.mxl_domain_path, &flow.id) {
+            if existing != flow.format {
+                let urn = |format: FlowFormat| format.as_format_urn().unwrap_or("unspecified");
+                return Err(Box::new(ActivationPlan {
+                    inner: InnerConfig::Fake {
+                        kind: FakeKind::Misconfigured,
+                        detail: "activated MXL flow has a different format".into(),
+                    },
+                    ack: ActivationAck::Failure {
+                        reason: format!(
+                            "{element}: activation rejected — MXL flow `{}` has format `{}`, \
+                             but this Receiver's format is `{}`",
+                            flow.id,
+                            urn(existing),
+                            urn(flow.format),
+                        ),
+                    },
+                }));
+            }
+        }
+    }
+
     // Build the real inner chain (or a fake one if the flow is still
     // incomplete) from the activation-resolved flow.
     Ok(decide_inner_config_mxl(
@@ -422,6 +450,19 @@ pub(super) fn resolve_activation_inner_mxl(
         &flow,
         Some(transport_file),
     ))
+}
+
+/// Format of the flow `flow_id` in the MXL Domain at `domain_path`, read
+/// from its `<flow_id>.mxl-flow/flow_def.json`. `None` when the flow id is
+/// not a UUID, or the file is missing, unreadable, or has no known format.
+fn read_existing_flow_format(domain_path: &str, flow_id: &str) -> Option<FlowFormat> {
+    Uuid::parse_str(flow_id).ok()?;
+    let path = std::path::Path::new(domain_path)
+        .join(format!("{flow_id}.mxl-flow"))
+        .join("flow_def.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let format = flow_def::read_flow_def_meta(&text).ok()?.format;
+    (format != FlowFormat::Unspecified).then_some(format)
 }
 
 #[cfg(test)]
@@ -698,6 +739,77 @@ mod tests {
             InnerConfig::Fake { kind, .. } => panic!("expected Real(Mxl), got Fake({kind})"),
         }
         assert!(matches!(plan.ack, ActivationAck::Success));
+    }
+
+    mod existing_flow_format {
+        use super::*;
+
+        fn domain_with_flow_def(flow_def: Option<&str>) -> tempfile::TempDir {
+            let domain = tempfile::tempdir().expect("temp MXL domain");
+            if let Some(flow_def) = flow_def {
+                let flow_dir = domain.path().join(format!("{FLOW_ID_A}.mxl-flow"));
+                std::fs::create_dir(&flow_dir).expect("flow directory");
+                std::fs::write(flow_dir.join("flow_def.json"), flow_def).expect("flow_def.json");
+            }
+            domain
+        }
+
+        fn activate_video_receiver(domain: &tempfile::TempDir) -> ActivationPlan {
+            let s = CommonSettings {
+                mxl_domain_path: domain.path().to_str().expect("UTF-8 path").to_owned(),
+                mxl_flow_id: FLOW_ID_A.to_owned(),
+                caps: Some(video_caps()),
+                ..settings(Side::Receiver)
+            };
+            make_activation_plan(
+                &cat(),
+                "nmossrc",
+                &s,
+                &req(Side::Receiver, Some(&video_flow_def(FLOW_ID_A))),
+            )
+        }
+
+        #[test]
+        fn activation_to_existing_flow_with_other_format_fails() {
+            let domain = domain_with_flow_def(Some(&format!(
+                r#"{{"id":"{FLOW_ID_A}","format":"urn:x-nmos:format:audio","media_type":"audio/float32"}}"#
+            )));
+            let plan = activate_video_receiver(&domain);
+            assert!(matches!(plan.inner, InnerConfig::Fake { .. }));
+            match plan.ack {
+                ActivationAck::Failure { reason } => assert!(
+                    reason.contains("urn:x-nmos:format:audio")
+                        && reason.contains("urn:x-nmos:format:video"),
+                    "reason must name both formats: {reason}"
+                ),
+                ActivationAck::Success => panic!("expected failure ack for an audio flow"),
+            }
+        }
+
+        #[test]
+        fn activation_to_existing_flow_with_same_format_succeeds() {
+            let domain = domain_with_flow_def(Some(&video_flow_def(FLOW_ID_A)));
+            let plan = activate_video_receiver(&domain);
+            assert!(matches!(
+                plan.inner,
+                InnerConfig::Real(TransportConfig::Mxl { .. })
+            ));
+            assert!(matches!(plan.ack, ActivationAck::Success));
+        }
+
+        #[test]
+        fn activation_to_absent_or_unreadable_flow_succeeds() {
+            for flow_def in [None, Some("not json")] {
+                let domain = domain_with_flow_def(flow_def);
+                let plan = activate_video_receiver(&domain);
+                assert!(
+                    matches!(plan.inner, InnerConfig::Real(TransportConfig::Mxl { .. })),
+                    "expected Real(Mxl) for flow_def {flow_def:?}, got {:?}",
+                    plan.inner
+                );
+                assert!(matches!(plan.ack, ActivationAck::Success));
+            }
+        }
     }
 
     /// IS-05 PATCHes legitimately replace the flow id the element
