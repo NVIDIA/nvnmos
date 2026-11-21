@@ -44,9 +44,9 @@ The nvnmos tree is taken from the build context (`COPY src/`, `COPY rust/` via t
 | `NVNMOS_VERSION_BUILD` | *(empty)* | Build metadata that the reported version ends with, such as `g0123abc`. The build has no Git checkout, so without this argument the version has no commit. Pass `--build-arg NVNMOS_VERSION_BUILD=g$(git rev-parse --short=7 HEAD)`. |
 | `NVNMOS_REVISION` | *(empty)* | Commit hash for the image's `org.opencontainers.image.revision` label. Pass `--build-arg NVNMOS_REVISION=$(git rev-parse HEAD)`. |
 | `MXL_REPO` | `https://github.com/dmf-mxl/mxl.git` | MXL source repository (`libmxl`, `gst-mxl-rs`). |
-| `MXL_REF` | `8f3f1096e804bfb822eb959cdf2fc23199a7d15d` | Pinned MXL commit (`8f3f109`, the `v1.1.0` release tag). Use a full 40-character SHA or a branch/tag name. |
+| `MXL_REF` | `a298f226f0189869f944b2d5a202af94645ac99c` | Pinned MXL commit (`a298f22`, on the `release/v1.1` branch after the `v1.1.0` release tag). Use a full 40-character SHA or a branch/tag name. |
 | `GST_PLUGINS_RS_REPO` | `https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git` | gst-plugins-rs source. |
-| `GST_PLUGINS_RS_REF` | `ab625ae567748b77d43c3939442011deecb2dabe` | Pinned gst-plugins-rs commit on `main` (`udpsrc2`, `udpsink2`, `rtpjxsv` pay/depay, `st2038combiner` skew, `rtpsmpte291depay` multi-ANC, and `st2038` ST 291 ADF parity fixes). Builds `gst-plugin-udp` + `gst-plugin-rtp` + `gst-plugin-closedcaption`. Use a full 40-character SHA or a branch/tag name. |
+| `GST_PLUGINS_RS_REF` | `da5fb84ba03ac94a6ed4a9672d5a6c8e0c13cbcd` | Pinned gst-plugins-rs commit on `main` (`udpsrc2`, `udpsink2`, `rtpjxsv` pay/depay, `st2038combiner` skew, `rtpsmpte291depay` multi-ANC and ANC PTS, and `st2038` ST 291 ADF parity fixes). Builds `gst-plugin-udp` + `gst-plugin-rtp` + `gst-plugin-closedcaption`. Use a full 40-character SHA or a branch/tag name. |
 | `NVNMOS_UID` | `10001` | Fixed runtime user UID (`nvnmos`). |
 | `NVNMOS_GID` | `10001` | Fixed runtime group GID (`nvnmos`). |
 | `EXTRA_APT_PACKAGES` | *(empty)* | Optional space-separated apt package names added in the final image stage (e.g. `gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly`). Installed to the default GStreamer plugin path. |

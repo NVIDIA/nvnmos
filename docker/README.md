@@ -17,7 +17,7 @@ Shared [`nvnmos/entrypoint-setup.sh`](nvnmos/entrypoint-setup.sh) starts user-mo
 **Toolchain pins (defaults)** — same in both images as CI and manual builds:
 
 - **Rust 1.92** — matches [`rust/rust-toolchain.toml`](../rust/rust-toolchain.toml) (workspace MSRV **1.87** in [`rust/Cargo.toml`](../rust/Cargo.toml))
-- **MXL** `8f3f1096e804bfb822eb959cdf2fc23199a7d15d` (`v1.1.0`)
+- **MXL** `a298f226f0189869f944b2d5a202af94645ac99c` (`release/v1.1` after `v1.1.0`)
 - **Conan lockfile** `src/conan.lock`
 - **Conan ~=2.2** / **CMake ~=3.17**
 
