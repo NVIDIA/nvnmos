@@ -7,6 +7,44 @@ SPDX-License-Identifier: Apache-2.0
 
 Each section lists the changes that applications need to make for a release, newest first.
 
+## Migrating to 0.2.0
+
+The C API and the gRPC API have not changed. The following changes in behaviour can affect an application or a pipeline.
+
+### Annotation Limits in nvnmosd
+
+nvnmosd refuses an IS-13 Annotation API PATCH, or an `UpdateAnnotation` call, that would store any of the following:
+
+- a label, description or tag value longer than `NVNMOSD_ANNOTATION_LENGTH_LIMIT` (default 1024 bytes)
+- a tag name longer than 256 bytes
+- more than `NVNMOSD_ANNOTATION_TAG_LIMIT` writable tags (default 5)
+- more than `NVNMOSD_ANNOTATION_VALUE_LIMIT` values in one tag (default 5)
+
+nvnmosd exits at start when the file named by `NVNMOSD_ANNOTATION_CHECKPOINT_FILE` holds an annotation over one of these limits. Before upgrading, raise the limit or remove that annotation from the checkpoint file.
+
+### Audio Channel Positions in gst-nmos-rs
+
+`nmossrc` no longer gives audio caps a sequential `channel-mask`, which claimed front left, front right, front centre and so on, whatever the stream's channel order. Mono and stereo caps now have no `channel-mask`, and caps with more channels have `channel-mask=0x0`, as `mxlsrc` gives. `nmosaudiochannelmap` also outputs `channel-mask=0x0`. A pipeline that relies on channel positions downstream of these elements must set them itself.
+
+`nmossink` now accepts audio caps with any `channel-mask`.
+
+### Activation Failures in gst-nmos-rs
+
+When `nmossrc` or `nmossink` rejects an IS-05 activation, it now sets `active` to false, which posts an `nmos-activation` element message, and posts a WARNING with the reason. It does the same when it restores its fake chain after an inner element posts an ERROR. Previously `active` could stay true while the element carried no media.
+
+An activation of an MXL `nmossrc` to a flow whose format (video, audio or data) differs from the Receiver's now fails, so an immediate activation returns HTTP 500. Previously the activation succeeded and the Receiver carried no media.
+
+### Video Colorimetry in gst-nmos-rs
+
+`nmossink` now takes the colorimetry in the SDP and in the MXL flow definition from the video caps:
+
+- The SDP always has `colorimetry`, `TCS` and `RANGE`. Previously full-range caps were described as narrow range, and caps with no colorimetry gave `BT709`.
+- The MXL flow definition has `colorspace`, `transfer_characteristic` and `component_range` from the caps. Previously it always had `"colorspace": "BT709"`.
+- Caps with no colorimetry use GStreamer's default for the frame size.
+- `nmossink` refuses caps whose colorimetry the SDP or the MXL flow definition cannot express.
+
+`nmossrc` now maps a received SDP's colorimetry as `rtpvrawdepay2` does. `BT2100` without `TCS` gives `bt2020-10`, since ST 2110-20 defaults `TCS` to `SDR`. `BT2020` with a bit depth below 12 gives `bt2020-10`. `RANGE=FULL` gives full-range caps.
+
 ## Migrating to 0.1.0
 
 NvNmos had no version number before 0.1.0. These changes apply to applications written for earlier versions.
