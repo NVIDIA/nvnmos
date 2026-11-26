@@ -1,7 +1,222 @@
 {
     "avsynctest": {
-        "description": "Aligned audio/video test sources for sync testing",
+        "description": "Aligned audio/video test sources and sync analyzer",
         "elements": {
+            "avsyncanalyzer": {
+                "author": "NVIDIA Corporation",
+                "description": "Measure A/V sync of received video bar, audio pip and captions",
+                "hierarchy": [
+                    "GstAvSyncAnalyzer",
+                    "GstBin",
+                    "GstElement",
+                    "GstObject",
+                    "GInitiallyUnowned",
+                    "GObject"
+                ],
+                "interfaces": [
+                    "GstChildProxy"
+                ],
+                "klass": "Sink/Analyzer",
+                "pad-templates": {
+                    "anc": {
+                        "caps": "meta/x-st-2038:\n",
+                        "direction": "sink",
+                        "presence": "request"
+                    },
+                    "audio": {
+                        "caps": "audio/x-raw:\n         format: { F32LE, S24BE, S16BE }\n         layout: interleaved\n",
+                        "direction": "sink",
+                        "presence": "request"
+                    },
+                    "caption": {
+                        "caps": "closedcaption/x-cea-708:\n         format: cdp\n",
+                        "direction": "sink",
+                        "presence": "request"
+                    },
+                    "video": {
+                        "caps": "video/x-raw:\n         format: { UYVP, v210, UYVY, YUY2, GRAY8 }\n",
+                        "direction": "sink",
+                        "presence": "request"
+                    }
+                },
+                "properties": {
+                    "audio-channel": {
+                        "blurb": "NULL",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "255",
+                        "min": "0",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    },
+                    "beep-frequency": {
+                        "blurb": "NULL",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "1000",
+                        "max": "96000",
+                        "min": "1",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gdouble",
+                        "writable": true
+                    },
+                    "history-events": {
+                        "blurb": "NULL",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "6000",
+                        "max": "1000000",
+                        "min": "3",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    },
+                    "interval-ms": {
+                        "blurb": "NULL",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "1000",
+                        "max": "1e+06",
+                        "min": "0.001",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gdouble",
+                        "writable": true
+                    },
+                    "max-offset-ms": {
+                        "blurb": "NULL",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "250",
+                        "max": "100000",
+                        "min": "0.001",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gdouble",
+                        "writable": true
+                    },
+                    "min-events": {
+                        "blurb": "NULL",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "3",
+                        "max": "-1",
+                        "min": "1",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    },
+                    "print-summary": {
+                        "blurb": "Print a human-readable summary to stdout when the report is produced",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "true",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gboolean",
+                        "writable": true
+                    },
+                    "report-cycles": {
+                        "blurb": "Also post an avsync-interim-summary every N video cycles (0 = only at the end)",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "-1",
+                        "min": "0",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    },
+                    "require-anc": {
+                        "blurb": "NULL",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "false",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gboolean",
+                        "writable": true
+                    },
+                    "scanline": {
+                        "blurb": "NULL",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "-1",
+                        "max": "100000",
+                        "min": "-1",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gint",
+                        "writable": true
+                    },
+                    "stats": {
+                        "blurb": "NULL",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "avsync-stats, buffers=(structure)\"buffers\\;\", bad_caption_cdps=(guint64)0;",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "GstStructure",
+                        "writable": false
+                    },
+                    "timestamp-mode": {
+                        "blurb": "NULL",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "running-time (0)",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "GstAvSyncTimestampMode",
+                        "writable": true
+                    },
+                    "tolerance-ms": {
+                        "blurb": "NULL",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "20",
+                        "max": "100000",
+                        "min": "0.001",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "gdouble",
+                        "writable": true
+                    }
+                },
+                "rank": "none"
+            },
             "avsyncaudiotestsrc": {
                 "author": "NVIDIA Corporation",
                 "description": "Emits tone pips phase-locked to avsyncvideotestsrc for A/V sync testing",
@@ -203,7 +418,23 @@
         },
         "filename": "gstavsynctest",
         "license": "Apache-2.0",
-        "other-types": {},
+        "other-types": {
+            "GstAvSyncTimestampMode": {
+                "kind": "enum",
+                "values": [
+                    {
+                        "desc": "Sample PTS mapped to running time",
+                        "name": "running-time",
+                        "value": "0"
+                    },
+                    {
+                        "desc": "GstReferenceTimestampMeta timestamp",
+                        "name": "reference",
+                        "value": "1"
+                    }
+                ]
+            }
+        },
         "package": "gst-avsynctest-rs",
         "source": "gst-avsynctest-rs",
         "tracers": {},

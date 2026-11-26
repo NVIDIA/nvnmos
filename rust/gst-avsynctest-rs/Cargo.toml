@@ -3,7 +3,7 @@
 
 [package]
 name = "gst-avsynctest-rs"
-description = "Aligned audio/video test sources for sync testing"
+description = "Aligned audio/video test sources and sync analyzer"
 repository.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -16,12 +16,10 @@ cdp-types = "0.3"
 cea708-types = "0.4.1"
 glib = "0.21.5"
 gstreamer = "0.24.4"
+gstreamer-app = "0.24.4"
 gstreamer-audio = "0.24.4"
 gstreamer-base = "0.24.4"
 gstreamer-video = { version = "0.24.5", features = ["v1_24"] }
-
-[dev-dependencies]
-gstreamer-app = "0.24.4"
 
 [lib]
 name = "gstavsynctest"
