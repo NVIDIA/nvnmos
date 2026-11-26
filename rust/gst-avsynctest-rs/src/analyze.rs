@@ -19,17 +19,50 @@ use crate::captions;
 /// Brightest-column centroid of the top row, decoded to `GRAY8`. `None` if the
 /// row has no bright pixels (should not happen for the always-present bar).
 pub fn bar_centroid(sample: &gst::Sample) -> Option<f64> {
+    bar_centroid_at(sample, 0, 128.0 / 255.0)
+}
+
+/// Recover the bright bar from one scanline of decoded 8/10-bit video. This
+/// generalises the original GRAY8 helper without depending on source packing
+/// functions or on the source's phase formula.
+pub fn bar_centroid_at(sample: &gst::Sample, row: u32, threshold: f64) -> Option<f64> {
     let caps = sample.caps()?;
     let info = gst_video::VideoInfo::from_caps(caps).ok()?;
     let buffer = sample.buffer()?;
     let frame = gst_video::VideoFrameRef::from_buffer_ref_readable(buffer, &info).ok()?;
-    let stride = frame.plane_stride()[0] as usize;
-    let row = &frame.plane_data(0).ok()?[..stride];
+    let stride = usize::try_from(frame.plane_stride()[0]).ok()?;
+    if row >= info.height() {
+        return None;
+    }
+    let data = frame
+        .plane_data(0)
+        .ok()?
+        .get((row as usize).checked_mul(stride)?..)?;
     let width = info.width() as usize;
     let mut sum = 0.0f64;
     let mut count = 0.0f64;
-    for (x, &v) in row.iter().take(width).enumerate() {
-        if v > 128 {
+    for x in 0..width {
+        let (v, max) = match info.format() {
+            gst_video::VideoFormat::Gray8 => (u16::from(*data.get(x)?), 255.),
+            gst_video::VideoFormat::Uyvy => (u16::from(*data.get(x * 2 + 1)?), 255.),
+            gst_video::VideoFormat::Yuy2 => (u16::from(*data.get(x * 2)?), 255.),
+            gst_video::VideoFormat::Uyvp => {
+                let bytes = data.get(x / 2 * 5..x / 2 * 5 + 5)?;
+                let packed = bytes.iter().fold(0u64, |a, b| (a << 8) | u64::from(*b));
+                (
+                    ((packed >> if x % 2 == 0 { 20 } else { 0 }) & 1023) as u16,
+                    1023.,
+                )
+            }
+            gst_video::VideoFormat::V210 => {
+                let (word, shift) = [(0, 10), (1, 0), (1, 20), (2, 10), (3, 0), (3, 20)][x % 6];
+                let offset = x / 6 * 16 + word * 4;
+                let packed = u32::from_le_bytes(data.get(offset..offset + 4)?.try_into().ok()?);
+                (((packed >> shift) & 1023) as u16, 1023.)
+            }
+            _ => return None,
+        };
+        if f64::from(v) > max * threshold {
             sum += x as f64;
             count += 1.0;
         }
@@ -59,6 +92,20 @@ pub fn f32le_samples(bytes: &[u8]) -> Result<&[f32], MisalignedF32leBytes> {
         Ok(body)
     } else {
         Err(MisalignedF32leBytes)
+    }
+}
+
+/// Like [`f32le_samples`], but copies when the buffer is not `f32`-aligned
+/// (valid GStreamer data, e.g. a sub-buffer at an odd offset). A trailing
+/// partial sample is dropped.
+pub fn f32le_samples_copied(bytes: &[u8]) -> std::borrow::Cow<'_, [f32]> {
+    match f32le_samples(bytes) {
+        Ok(samples) => samples.into(),
+        Err(_) => bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect::<Vec<_>>()
+            .into(),
     }
 }
 
@@ -152,11 +199,17 @@ pub fn decode_caption(
     let Some(packet) = parser.pop_packet() else {
         return Ok(None);
     };
+    Ok(caption_packet_text(&packet))
+}
+
+/// Extract the configured service text from an already assembled DTVCC packet.
+/// Shared by batch recovery tests and the streaming analyzer.
+pub(crate) fn caption_packet_text(packet: &cea708_types::DTVCCPacket) -> Option<String> {
     let mut text = String::new();
     for service in packet.services() {
         if service.number() == captions::CC_SERVICE_NO {
             text.extend(service.codes().iter().filter_map(|code| code.char()));
         }
     }
-    Ok((!text.is_empty()).then_some(text))
+    (!text.is_empty()).then_some(text)
 }

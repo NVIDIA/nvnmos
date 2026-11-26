@@ -16,6 +16,9 @@
 //!   phase-locked CEA-708 caption (alternating "TICK"/"TOCK" on each pip frame).
 //! - [`avsyncaudiotestsrc`](audiosrc): silence except a short tone pip centred on
 //!   each pip instant. Emits `audio/x-raw` (F32LE, S24BE or S16BE).
+//! - [`avsyncanalyzer`](analyzer): measures received video pixels, audio pips
+//!   and optional ancillary captions through independent sink pads, and reports
+//!   observed offsets through typed GStreamer bus messages.
 //!
 //! Eyeball/ear demo (bar crosses centre exactly on the beep):
 //!
@@ -31,6 +34,7 @@ use gst::glib;
 use gstreamer as gst;
 
 pub mod analyze;
+pub mod analyzer;
 pub mod ancillary;
 pub mod audiosrc;
 pub mod captions;
@@ -41,6 +45,7 @@ pub mod videosrc;
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     videosrc::register(plugin)?;
     audiosrc::register(plugin)?;
+    analyzer::register(plugin)?;
     Ok(())
 }
 
