@@ -740,8 +740,14 @@ typedef struct _NvNmosSenderConfig
  */
 typedef struct _NvNmosNetworkServicesConfig
 {
-    /** Holds the DNS domain. May be null in which case a domain is
-        determined automatically. Use "local" to force multicast DNS-SD. */
+    /** Holds the DNS domain. Use "local" to force multicast DNS-SD.
+        May be null in which case the domain of a fully-qualified
+        #NvNmosNodeConfig::host_name is used, or else a domain is
+        determined automatically.
+        A domain specified here or by the host name is browsed using only
+        unicast DNS-SD, or only multicast DNS-SD for "local".
+        A domain determined automatically is browsed using unicast DNS-SD
+        first, falling back to multicast DNS-SD if that is unsuccessful. */
     const char* domain;
 
     /** Holds the IP address or host name of a fixed IS-04 Registration

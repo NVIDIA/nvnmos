@@ -51,7 +51,7 @@ nvnmos-example nmos-api.local 8080 0
 ```
 
 The host name can be a .local name, in which case the Node will attempt to discover a Registry being advertised via multicast DNS-SD (mDNS).
-When a fully-qualified domain name is specified, e.g. "api.example.com", the NMOS Node will instead use unicast DNS-SD discovery in the relevant domain, e.g. "example.com".
+When a fully-qualified domain name is specified, e.g. "api.example.com", the NMOS Node will instead use unicast DNS-SD discovery in the relevant domain, e.g. "example.com", without falling back to mDNS.
 
 The port is used to serve the HTTP APIs.
 

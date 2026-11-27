@@ -1344,7 +1344,12 @@ impl MarshalledNetworkServicesConfig {
 /// `v1.0` for IS-09 System).
 #[derive(Debug, Clone, Default)]
 pub struct NetworkServicesConfig {
-    /// DNS domain, or `"local"` to force mDNS. Empty for automatic.
+    /// DNS domain, or `"local"` to force mDNS. Empty uses the domain of a
+    /// fully-qualified `host_name`, or else an automatic domain.
+    /// A domain specified here or by `host_name` is browsed using only
+    /// unicast DNS-SD, or only mDNS for `"local"`.
+    /// An automatic domain is browsed using unicast DNS-SD first, falling
+    /// back to mDNS if that is unsuccessful.
     pub domain: String,
     /// Host name or IP of a fixed IS-04 Registration API. Empty falls
     /// back to DNS-SD.
