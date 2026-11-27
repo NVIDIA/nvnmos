@@ -688,9 +688,16 @@ namespace nvnmos
 
         nmos::settings settings;
 
-        const auto host_name_domain = make_host_name_domain(config.host_name, 0 != config.network_services ? config.network_services->domain : 0);
+        const auto domain = 0 != config.network_services ? config.network_services->domain : 0;
+        const auto host_name_domain = make_host_name_domain(config.host_name, domain);
         web::json::insert(settings, std::make_pair(nmos::fields::host_name, host_name_domain.first));
         web::json::insert(settings, std::make_pair(nmos::fields::domain, host_name_domain.second));
+
+        // a domain specified explicitly, or by a configured fully-qualified host name, is browsed alone, so that a failure
+        // of unicast DNS-SD cannot lead to registration with a Registry found via mDNS; an automatic domain, including one
+        // from a fully-qualified system host name, is browsed via unicast DNS-SD with fallback to mDNS, per VSF TR-10-9 Section 15
+        const bool explicit_domain = 0 != domain || (0 != config.host_name && 0 != std::strchr(config.host_name, '.'));
+        web::json::insert(settings, std::make_pair(nmos::fields::dns_sd_browse_mode, explicit_domain ? 1 /* unicast */ : 0 /* both */));
 
         if (0 != config.label)
         {

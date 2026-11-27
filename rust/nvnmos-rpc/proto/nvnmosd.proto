@@ -255,7 +255,12 @@ message AssetConfig {
 
 // Overrides for NMOS discovery and fixed Registration or System APIs.
 message NetworkServicesConfig {
-  // DNS domain; use "local" to force mDNS. Empty for automatic.
+  // DNS domain; use "local" to force mDNS. Empty uses the domain of a
+  // fully-qualified `host_name`, or else an automatic domain.
+  // A domain specified here or by `host_name` is browsed using only
+  // unicast DNS-SD, or only mDNS for "local".
+  // An automatic domain is browsed using unicast DNS-SD first, falling
+  // back to mDNS if that is unsuccessful.
   string domain = 1;
 
   // Host name or IP of a fixed IS-04 Registration API. When set,
